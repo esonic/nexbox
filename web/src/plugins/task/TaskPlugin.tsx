@@ -1,0 +1,43 @@
+import { useState, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
+import { TasksPage } from "./TasksPanel";
+import { TaskDetail } from "./TaskDetail";
+
+export function TaskPlugin({ projectId }: { projectId: string }) {
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [initialCommentId, setInitialCommentId] = useState<string | undefined>(undefined);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  useEffect(() => {
+    const openTask = searchParams.get("open_task");
+    if (openTask) {
+      const commentId = searchParams.get("comment_id") || undefined;
+      setSelectedTaskId(openTask);
+      setInitialCommentId(commentId);
+      setSearchParams((prev) => {
+        prev.delete("open_task");
+        prev.delete("comment_id");
+        return prev;
+      }, { replace: true });
+    }
+  }, []);
+
+  return (
+    <>
+      <div className={selectedTaskId ? "hidden" : "contents"}>
+        <TasksPage
+          embedded
+          onSelectTask={(id) => { setSelectedTaskId(id); setInitialCommentId(undefined); }}
+          currentProjectId={projectId}
+        />
+      </div>
+      {selectedTaskId && (
+        <TaskDetail
+          taskId={selectedTaskId}
+          onBack={() => setSelectedTaskId(null)}
+          initialCommentId={initialCommentId}
+        />
+      )}
+    </>
+  );
+}

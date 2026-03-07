@@ -1,0 +1,230 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 7.8%;
+    --card: 0 0% 96.5%;
+    --card-foreground: 0 0% 7.8%;
+    --primary: 0 0% 0%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 0 0% 95.3%;
+    --secondary-foreground: 0 0% 7.8%;
+    --muted: 0 0% 95.3%;
+    --muted-foreground: 0 0% 45.1%;
+    --accent: 0 0% 95.3%;
+    --accent-foreground: 0 0% 7.8%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 7.8%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 92.2%;
+    --input: 0 0% 92.2%;
+    --ring: 0 0% 63.9%;
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 0 0% 5.1%;
+    --foreground: 0 0% 96.1%;
+    --card: 0 0% 9%;
+    --card-foreground: 0 0% 96.1%;
+    --primary: 0 0% 100%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 0 0% 14.9%;
+    --secondary-foreground: 0 0% 96.1%;
+    --muted: 0 0% 14.9%;
+    --muted-foreground: 0 0% 60%;
+    --accent: 0 0% 14.9%;
+    --accent-foreground: 0 0% 96.1%;
+    --popover: 0 0% 9%;
+    --popover-foreground: 0 0% 96.1%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 17.6%;
+    --input: 0 0% 17.6%;
+    --ring: 0 0% 40%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    font-size: 13px;
+    line-height: 1.45;
+    letter-spacing: -0.003em;
+  }
+  /* Smooth transitions on interactive elements */
+  button, a, input, textarea, select {
+    transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+    transition-duration: 0.15s;
+    transition-timing-function: ease;
+  }
+}
+
+/* Scrollbar - minimal */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.2);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.35);
+}
+
+/* Markdown content styling */
+.markdown-content h1 { @apply text-xl font-semibold mb-3 mt-5; }
+.markdown-content h2 { @apply text-lg font-semibold mb-2.5 mt-4; }
+.markdown-content h3 { @apply text-base font-semibold mb-2 mt-3; }
+.markdown-content p { @apply mb-2.5 leading-relaxed; }
+.markdown-content strong { @apply font-semibold; }
+.markdown-content em { @apply italic; }
+.markdown-content ul { @apply list-disc pl-5 mb-2.5; }
+.markdown-content ol { @apply list-decimal pl-5 mb-2.5; }
+.markdown-content li { @apply mb-0.5; }
+.markdown-content code { @apply bg-muted px-1.5 py-0.5 rounded text-[0.92em] font-mono; }
+.markdown-content pre { @apply bg-muted p-3.5 rounded-lg mb-3 overflow-x-auto text-[0.92em]; }
+.markdown-content pre code { @apply bg-transparent p-0; }
+.markdown-content blockquote { @apply border-l-2 border-border pl-3 text-muted-foreground mb-2.5; }
+.markdown-content table { @apply w-full border-collapse mb-3; }
+.markdown-content th { @apply border border-border px-3 py-1.5 bg-muted text-left text-sm font-medium; }
+.markdown-content td { @apply border border-border px-3 py-1.5 text-sm; }
+
+/* Syntax highlighting: dark mode overrides (github-dark theme colors) */
+.dark .hljs { color: #c9d1d9 }
+.dark .hljs-doctag,
+.dark .hljs-keyword,
+.dark .hljs-meta .hljs-keyword,
+.dark .hljs-template-tag,
+.dark .hljs-template-variable,
+.dark .hljs-type,
+.dark .hljs-variable.language_ { color: #ff7b72 }
+.dark .hljs-title,
+.dark .hljs-title.class_,
+.dark .hljs-title.class_.inherited__,
+.dark .hljs-title.function_ { color: #d2a8ff }
+.dark .hljs-attr,
+.dark .hljs-attribute,
+.dark .hljs-literal,
+.dark .hljs-meta,
+.dark .hljs-number,
+.dark .hljs-operator,
+.dark .hljs-variable,
+.dark .hljs-selector-attr,
+.dark .hljs-selector-class,
+.dark .hljs-selector-id { color: #79c0ff }
+.dark .hljs-regexp,
+.dark .hljs-string,
+.dark .hljs-meta .hljs-string { color: #a5d6ff }
+.dark .hljs-built_in,
+.dark .hljs-symbol { color: #ffa657 }
+.dark .hljs-comment,
+.dark .hljs-code,
+.dark .hljs-formula { color: #8b949e }
+.dark .hljs-name,
+.dark .hljs-quote,
+.dark .hljs-selector-tag,
+.dark .hljs-selector-pseudo { color: #7ee787 }
+.dark .hljs-subst { color: #c9d1d9 }
+.dark .hljs-section { color: #1f6feb; font-weight: bold }
+.dark .hljs-bullet { color: #f2cc60 }
+.dark .hljs-emphasis { color: #c9d1d9; font-style: italic }
+.dark .hljs-strong { color: #c9d1d9; font-weight: bold }
+.dark .hljs-addition { color: #aff5b4 }
+.dark .hljs-deletion { color: #ffdcd7 }
+
+/* Notification new-item entrance animation */
+@keyframes notification-in {
+  0%   { background-color: hsl(0 84% 60% / 0.14); }
+  60%  { background-color: hsl(0 84% 60% / 0.07); }
+  100% { background-color: transparent; }
+}
+.notification-new {
+  animation: notification-in 2s ease-out forwards;
+}
+
+/* Workflow editor field input */
+.field-input {
+  @apply w-full px-2 py-1.5 border border-border/40 rounded-md text-[11px] bg-background
+    outline-none focus:ring-1 focus:ring-ring/50 focus:border-ring/50 transition-colors;
+}
+
+/* ReactFlow theme overrides */
+.workflow-canvas .react-flow__background {
+  background-color: hsl(var(--background)) !important;
+}
+
+/* Edges — connected lines */
+.workflow-canvas .react-flow__edge-path {
+  stroke: hsl(var(--muted-foreground) / 0.35) !important;
+  stroke-width: 2 !important;
+}
+.workflow-canvas .react-flow__edge.selected .react-flow__edge-path,
+.workflow-canvas .react-flow__edge:hover .react-flow__edge-path {
+  stroke: hsl(var(--ring)) !important;
+  stroke-width: 2.5 !important;
+}
+/* Animated edge dashes */
+.workflow-canvas .react-flow__edge.animated path {
+  stroke-dasharray: 5;
+  animation: flowEdgeDash 0.5s linear infinite;
+}
+@keyframes flowEdgeDash {
+  to { stroke-dashoffset: -10; }
+}
+/* Connection line — the temporary line while dragging */
+.workflow-canvas .react-flow__connection-line {
+  stroke: hsl(var(--ring)) !important;
+  stroke-width: 2 !important;
+  stroke-dasharray: 6 3;
+}
+
+/* Controls */
+.workflow-controls .react-flow__controls {
+  border: 1px solid hsl(var(--border) / 0.5);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px hsl(var(--foreground) / 0.06);
+}
+.workflow-controls .react-flow__controls-button {
+  background: hsl(var(--card));
+  border-bottom-color: hsl(var(--border) / 0.4);
+  fill: hsl(var(--muted-foreground));
+  width: 28px;
+  height: 28px;
+}
+.workflow-controls .react-flow__controls-button:hover {
+  background: hsl(var(--accent));
+}
+
+/* MiniMap */
+.workflow-minimap.react-flow__minimap {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border) / 0.5);
+  border-radius: 8px;
+}
+
+/* Handle hover glow */
+.workflow-canvas .react-flow__handle {
+  transition: box-shadow 0.15s ease;
+}
+.workflow-canvas .react-flow__handle:hover {
+  box-shadow: 0 0 0 3px hsl(var(--ring) / 0.3);
+}
+

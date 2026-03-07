@@ -1,0 +1,847 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"gitlab.okg.com/sre_ai/nexbox/agent"
+	"gitlab.okg.com/sre_ai/nexbox/store"
+)
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
+// HandleGlobalWS is the single global WebSocket endpoint.
+// All sessions are multiplexed over this one connection via subscribe/unsubscribe.
+func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("[ws] WebSocket upgrade error: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	s.Hub.AddClient(conn)
+	defer s.Hub.RemoveClient(conn)
+
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				log.Printf("[ws] WebSocket read error: %v", err)
+			}
+			break
+		}
+
+		var chatReq ChatRequest
+		if err := json.Unmarshal(msg, &chatReq); err != nil {
+			s.Hub.SendDirect(conn, "", ChatEvent{Type: "error", Message: "invalid message format"})
+			continue
+		}
+
+		switch chatReq.Type {
+		case "subscribe":
+			continue
+
+		case "unsubscribe":
+			continue
+
+		case "user_message":
+			if chatReq.SessionID == "" {
+				s.Hub.SendDirect(conn, "", ChatEvent{Type: "error", Message: "missing session_id"})
+				continue
+			}
+			if chatReq.Content == "" && len(chatReq.Images) == 0 && len(chatReq.Parts) == 0 {
+				s.Hub.Emit(chatReq.SessionID, ChatEvent{Type: "error", Message: "empty message"})
+				continue
+			}
+			s.handleUserMessage(chatReq.SessionID, chatReq.Content, chatReq.Parts, chatReq.Images, chatReq.Features)
+
+		case "stop":
+			if chatReq.SessionID == "" {
+				s.Hub.SendDirect(conn, "", ChatEvent{Type: "error", Message: "stop: missing session_id"})
+				continue
+			}
+			s.SessionManager.Cancel(chatReq.SessionID)
+			s.CancelWorkflowBySession(chatReq.SessionID)
+
+		default:
+			s.Hub.SendDirect(conn, "", ChatEvent{Type: "error", Message: "unknown message type: " + chatReq.Type})
+		}
+	}
+}
+
+// handleUserMessage resolves context and starts the agent goroutine for a session.
+func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePart, imageFilenames []string, features []string) {
+	session, err := s.Store.GetSession(sessionID)
+	if err != nil || session == nil {
+		s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "session not found"})
+		return
+	}
+
+	// Resolve inline task/asset/workflow refs from this message's parts
+	var refTasks []agent.TaskRef
+	var refAssets []agent.AssetRef
+	var refWorkflows []agent.WorkflowRef
+	for _, p := range parts {
+		switch p.Type {
+		case "task_ref":
+			if p.TaskID != "" {
+				if info, err := store.GetTaskInfo(s.Store, p.TaskID); err == nil && info != nil {
+					refTasks = append(refTasks, agent.TaskRef{
+						ID: info.ID, Title: info.Title, Description: info.Description, Status: info.Status, Priority: info.Priority,
+					})
+				}
+			}
+		case "asset_ref":
+			if p.AssetID != "" {
+				if info, err := store.GetAssetInfo(s.Store, p.AssetID); err == nil && info != nil {
+					refAssets = append(refAssets, agent.AssetRef{
+						ID: info.ID, Type: info.Type, Title: info.Title, Status: info.Status,
+					})
+				}
+			}
+		case "workflow_ref":
+			if p.WorkflowID != "" {
+				if wf, err := s.Store.GetWorkflow(p.WorkflowID); err == nil && wf != nil {
+					var def store.WorkflowDefinition
+					nodeCount, edgeCount := 0, 0
+					if err := json.Unmarshal(wf.Definition, &def); err == nil {
+						nodeCount = len(def.Nodes)
+						edgeCount = len(def.Edges)
+					}
+					refWorkflows = append(refWorkflows, agent.WorkflowRef{
+						ID: wf.ID, Name: wf.Name, Status: wf.Status,
+						NodeCount: nodeCount, EdgeCount: edgeCount,
+					})
+				}
+			}
+		}
+	}
+
+	// If no project bound, bind to the system "Unassigned" project (local mode only).
+	// Cloud mode requires every session to have a project.
+	if session.ProjectID == "" {
+		if s.StoreMode == "remote" {
+			s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "session must be bound to a project in cloud mode"})
+			return
+		}
+		unassignedProject, err := s.getOrCreateUnassignedProject()
+		if err != nil {
+			log.Printf("[chat] Failed to get/create unassigned project: %v", err)
+			s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "failed to initialize project"})
+			return
+		}
+		pid := unassignedProject.ID
+		if _, err := s.Store.UpdateSession(sessionID, UpdateSessionRequest{ProjectID: &pid}); err != nil {
+			log.Printf("[chat] Failed to bind session to unassigned project: %v", err)
+		}
+		session.ProjectID = unassignedProject.ID
+		log.Printf("[chat] Bound session %s to unassigned project %s", sessionID, unassignedProject.ID)
+	}
+
+	// Get project (guaranteed to exist at this point)
+	project, err := s.getProjectWithLocalPath(session.ProjectID)
+	if err != nil || project == nil {
+		s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "project not found"})
+		return
+	}
+
+	projectWorkDir := project.GitRepoPath
+	if projectWorkDir == "" {
+		projectWorkDir = "."
+	}
+
+	// Create worktree on first message if requested (worktree_mode="worktree", path not yet set).
+	workDir := s.ensureWorktree(sessionID, session, projectWorkDir)
+	if workDir == "" {
+		workDir = projectWorkDir
+	}
+
+	// Build contexts
+	var staticContext string
+	isNewSession := session.AgentSessionID == ""
+	if isNewSession {
+		staticContext = agent.BuildStaticContext(agent.ProjectInfo{
+			ID:          project.ID,
+			Name:        project.Name,
+			Description: project.Description,
+			GitRepoPath: workDir,
+		}, sessionID)
+	}
+
+	dynamicContext := agent.BuildDynamicContext(&agent.ProjectInfo{
+		ID:          project.ID,
+		Name:        project.Name,
+		Description: project.Description,
+		GitRepoPath: workDir,
+	}, refTasks, refAssets, refWorkflows)
+
+	log.Printf("[chat] Agent request for session %s (project: %s, new: %v, refs: %d tasks, %d assets, %d workflows)",
+		sessionID, project.Name, isNewSession, len(refTasks), len(refAssets), len(refWorkflows))
+
+	if s.SessionManager.IsActive(sessionID) {
+		s.enqueueMessage(sessionID, message, imageFilenames)
+		return
+	}
+
+	s.SessionManager.SetActive(sessionID, true)
+	s.Hub.SetActive(sessionID)
+
+	// Persist user message
+	if len(parts) > 0 {
+		if _, err := s.Store.CreateMessage(sessionID, "user", parts, MessageMetadata{}); err != nil {
+			log.Printf("[chat] Failed to persist user message (with parts): %v", err)
+		}
+	} else {
+		if _, err := s.Store.CreateUserMessage(sessionID, message); err != nil {
+			log.Printf("[chat] Failed to persist user message: %v", err)
+		}
+	}
+	if s.MarketplaceStats != nil {
+		s.MarketplaceStats.RecordMessage()
+	}
+
+	// Notify browsers about new user message (needed for Lark-injected messages;
+	// harmless for UI-sent messages since the frontend already has them locally)
+	s.Hub.Emit(sessionID, ChatEvent{Type: "user_message", Content: message})
+
+	imagePaths := s.resolveImagePaths(sessionID, imageFilenames)
+
+	go func() {
+		released := false
+		defer func() {
+			if !released {
+				s.SessionManager.SetActive(sessionID, false)
+				s.Hub.ClearActive(sessionID)
+			}
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer func() {
+			if !released {
+				cancel()
+				s.SessionManager.RemoveCancel(sessionID)
+			}
+		}()
+		s.SessionManager.SetCancel(sessionID, cancel)
+
+		isRemote := s.StoreMode == "remote"
+
+		// For local stores, create an empty assistant message upfront so partial
+		// progress survives a process restart. Remote stores don't support
+		// message updates, so we only call CreateMessage once at the end.
+		var assistantMsgID string
+		if !isRemote {
+			assistantMsg, err := s.Store.CreateMessage(sessionID, "assistant", []MessagePart{}, MessageMetadata{})
+			if err != nil {
+				log.Printf("[chat] Failed to create assistant message: %v", err)
+				s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "failed to create message"})
+				return
+			}
+			assistantMsgID = assistantMsg.ID
+		}
+
+		var mu sync.Mutex
+		var msgParts []MessagePart
+		var metadata MessageMetadata
+		dirty := false
+
+		startTime := time.Now()
+		toolCallCount := 0
+
+		appendText := func(text string) {
+			mu.Lock()
+			defer mu.Unlock()
+			if len(msgParts) > 0 {
+				last := &msgParts[len(msgParts)-1]
+				if last.Type == "text" {
+					last.Content += text
+					dirty = true
+					return
+				}
+			}
+			msgParts = append(msgParts, MessagePart{
+				Type:    "text",
+				Content: text,
+			})
+			dirty = true
+		}
+
+		// Periodic flush: save accumulated parts to DB every 2 seconds (local mode only).
+		flushTicker := time.NewTicker(2 * time.Second)
+		flushStop := make(chan struct{})
+		flush := func() {
+			if assistantMsgID == "" {
+				return
+			}
+			mu.Lock()
+			if !dirty {
+				mu.Unlock()
+				return
+			}
+			partsCopy := make([]MessagePart, len(msgParts))
+			copy(partsCopy, msgParts)
+			metaCopy := metadata
+			dirty = false
+			mu.Unlock()
+
+			if err := s.Store.UpdateMessageParts(assistantMsgID, partsCopy, metaCopy); err != nil {
+				log.Printf("[chat] Flush failed: %v", err)
+			}
+		}
+		go func() {
+			for {
+				select {
+				case <-flushTicker.C:
+					flush()
+				case <-flushStop:
+					return
+				}
+			}
+		}()
+
+		sessionAgent, agentNameUsed := s.ResolveAgent(session)
+		log.Printf("[chat] Using agent: %s for session %s", agentNameUsed, sessionID)
+
+		// Merge session-level features with message features.
+		activeFeatures := s.mergeSessionFeatures(sessionID, features)
+
+		// E2E testing: ensure per-session Chrome MCP is started and agent supports it.
+		var chromeMCPURL string
+		var chromeMCPToolNames []string
+		if containsFeature(activeFeatures, "chrome_devtools") {
+			if agentNameUsed != "claude" && agentNameUsed != "codex" {
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:    "error",
+					Message: "E2E browser testing is currently only supported with the Claude and Codex agents. Please switch in Settings.",
+				})
+				return
+			}
+			if s.ChromeManager != nil {
+				chromeSrv := s.ChromeManager.GetOrCreate(sessionID)
+				if err := chromeSrv.EnsureStarted(ctx); err != nil {
+					log.Printf("[chat] Chrome MCP start failed for session %s: %v", sessionID, err)
+					s.Hub.Emit(sessionID, ChatEvent{
+						Type:    "error",
+						Message: "Failed to start Chrome browser: " + err.Error(),
+					})
+					return
+				}
+				chromeMCPURL = chromeSrv.URL()
+				chromeMCPToolNames = chromeSrv.ToolNames()
+			}
+		}
+
+		// Collect installed MCP servers and key→package map in a single store query.
+		// Pass session.ProjectID so project-specific MCPs take precedence over global ones.
+		extraMCPs, mcpKeyToPkg := s.resolveInstalledMCPsAndMap(session.ProjectID)
+		// toolIDToName maps tool_id → tool_name for EventToolStart events so that
+		// EventToolResult (which carries only tool_id) can look up the name.
+		toolIDToName := make(map[string]string)
+
+		eventHandler := func(event agent.StreamEvent) {
+			switch event.Type {
+			case agent.EventTextDelta:
+				appendText(event.Content)
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:    "text_delta",
+					Content: event.Content,
+				})
+
+			case agent.EventToolStart:
+				mu.Lock()
+				toolCallCount++
+				msgParts = append(msgParts, MessagePart{
+					Type:       "tool_use",
+					ToolCallID: event.ToolID,
+					ToolName:   event.ToolName,
+					Input:      event.Input,
+					State:      "running",
+				})
+				// Record tool_id → tool_name so EventToolResult can attribute the call
+				if event.ToolID != "" && event.ToolName != "" {
+					toolIDToName[event.ToolID] = event.ToolName
+				}
+				dirty = true
+				mu.Unlock()
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:   "tool_start",
+					Tool:   event.ToolName,
+					ToolID: event.ToolID,
+					Input:  event.Input,
+				})
+
+			case agent.EventToolResult:
+				mu.Lock()
+				for i := range msgParts {
+					if msgParts[i].Type == "tool_use" && msgParts[i].ToolCallID == event.ToolID {
+						msgParts[i].State = "complete"
+					}
+				}
+				msgParts = append(msgParts, MessagePart{
+					Type:       "tool_result",
+					ToolCallID: event.ToolID,
+					Output:     event.Output,
+					IsError:    event.IsError,
+				})
+				// Track MCP call stats: mcp__<key>__<tool_name> → package name
+				if !event.IsError && s.MarketplaceStats != nil && len(mcpKeyToPkg) > 0 {
+					if toolName, ok := toolIDToName[event.ToolID]; ok {
+						if strings.HasPrefix(toolName, "mcp__") {
+							parts := strings.SplitN(toolName, "__", 3)
+							if len(parts) >= 2 {
+								if pkgName, ok := mcpKeyToPkg[parts[1]]; ok {
+									s.MarketplaceStats.RecordCall(pkgName, "mcp")
+								}
+							}
+						}
+					}
+				}
+				dirty = true
+				mu.Unlock()
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:    "tool_result",
+					ToolID:  event.ToolID,
+					Output:  event.Output,
+					IsError: event.IsError,
+				})
+
+			case agent.EventThinking:
+				mu.Lock()
+				lastIdx := -1
+				for i := len(msgParts) - 1; i >= 0; i-- {
+					if msgParts[i].Type == "thinking" {
+						lastIdx = i
+						break
+					}
+					if msgParts[i].Type != "thinking" {
+						break
+					}
+				}
+				if lastIdx >= 0 {
+					msgParts[lastIdx].Content += event.Content
+				} else {
+					msgParts = append(msgParts, MessagePart{
+						Type:    "thinking",
+						Content: event.Content,
+					})
+				}
+				dirty = true
+				mu.Unlock()
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:    "thinking_delta",
+					Content: event.Content,
+				})
+
+			case agent.EventSystem:
+				log.Printf("[chat] System event: %s", event.Content)
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:    "system",
+					Content: event.Content,
+				})
+
+			case agent.EventError:
+				log.Printf("[chat] Error event: %s", event.Content)
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:    "error",
+					Message: event.Content,
+				})
+
+			case agent.EventDone:
+				mu.Lock()
+				metadata.SessionID = event.SessionID
+				if event.Metadata != nil {
+					if v, ok := event.Metadata["inputTokens"].(int); ok {
+						metadata.InputTokens = v
+					}
+					if v, ok := event.Metadata["outputTokens"].(int); ok {
+						metadata.OutputTokens = v
+					}
+					if v, ok := event.Metadata["totalCostUsd"].(float64); ok {
+						metadata.TotalCostUSD = v
+					}
+				}
+				dirty = true
+				mu.Unlock()
+			}
+		}
+
+		agentResult, agentErr := sessionAgent.SendMessage(
+			ctx,
+			agent.Request{
+				ConversationID:     sessionID,
+				SessionID:          session.AgentSessionID,
+				WorkDir:            workDir,
+				StaticContext:      staticContext,
+				DynamicContext:     dynamicContext,
+				Message:            message,
+				Images:             imagePaths,
+				Features:           activeFeatures,
+				ChromeMCPURL:       chromeMCPURL,
+				ChromeMCPToolNames: chromeMCPToolNames,
+				ExtraMCPServers:    extraMCPs,
+			},
+			eventHandler,
+		)
+
+		// Auto-retry with a fresh session when the stored agent session has expired
+		if errors.Is(agentErr, agent.ErrSessionExpired) && session.AgentSessionID != "" {
+			log.Printf("[chat] Agent session expired for %s, clearing and retrying as new session", sessionID)
+
+			if err := s.Store.UpdateSessionAgentID(sessionID, ""); err != nil {
+				log.Printf("[chat] Failed to clear agent session ID: %v", err)
+			}
+			session.AgentSessionID = ""
+
+			s.Hub.Emit(sessionID, ChatEvent{
+				Type:    "system",
+				Content: "Previous session expired. Retrying with a fresh one...",
+			})
+
+			newStaticContext := agent.BuildStaticContext(agent.ProjectInfo{
+				ID:          project.ID,
+				Name:        project.Name,
+				Description: project.Description,
+				GitRepoPath: workDir,
+			}, sessionID)
+
+			agentResult, agentErr = sessionAgent.SendMessage(
+				ctx,
+				agent.Request{
+					ConversationID:     sessionID,
+					SessionID:          "",
+					WorkDir:            workDir,
+					StaticContext:      newStaticContext,
+					DynamicContext:     dynamicContext,
+					Message:            message,
+					Images:             imagePaths,
+					Features:           activeFeatures,
+					ChromeMCPURL:       chromeMCPURL,
+					ChromeMCPToolNames: chromeMCPToolNames,
+					ExtraMCPServers:    extraMCPs,
+				},
+				eventHandler,
+			)
+		}
+
+		// Stop periodic flusher.
+		flushTicker.Stop()
+		close(flushStop)
+
+		durationMs := time.Since(startTime).Milliseconds()
+
+		if agentErr != nil {
+			if ctx.Err() != nil {
+				log.Printf("[chat] Agent stopped by user")
+				appendText("\n\n*[Stopped]*")
+			} else {
+				log.Printf("[chat] Agent error: %v", agentErr)
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:    "error",
+					Message: agentErr.Error(),
+				})
+				mu.Lock()
+				msgParts = append(msgParts, MessagePart{
+					Type:    "text",
+					Content: "Error: " + agentErr.Error(),
+				})
+				dirty = true
+				mu.Unlock()
+			}
+		}
+
+		newAgentSessionID := agentResult.SessionID
+		if newAgentSessionID != "" && newAgentSessionID != session.AgentSessionID {
+			if err := s.Store.UpdateSessionAgentID(sessionID, newAgentSessionID); err != nil {
+				log.Printf("[chat] Failed to update agent session ID: %v", err)
+			}
+			session.AgentSessionID = newAgentSessionID
+			mu.Lock()
+			metadata.SessionID = newAgentSessionID
+			dirty = true
+			mu.Unlock()
+		}
+
+		mu.Lock()
+		metadata.DurationMs = durationMs
+		metadata.ToolCalls = toolCallCount
+		finalParts := make([]MessagePart, len(msgParts))
+		copy(finalParts, msgParts)
+		finalMeta := metadata
+		mu.Unlock()
+
+		// Final persist: save full parts to the main message table.
+		// Always update the pre-created message (even if empty) so it is never
+		// left in an un-finalized state that shows as "Thinking" after reload.
+		if assistantMsgID != "" {
+			if err := s.Store.UpdateMessageParts(assistantMsgID, finalParts, finalMeta); err != nil {
+				log.Printf("[chat] Failed to persist final assistant message: %v", err)
+			}
+			if s.MarketplaceStats != nil && len(finalParts) > 0 {
+				s.MarketplaceStats.RecordMessage()
+			}
+		} else if len(finalParts) > 0 {
+			msg, err := s.Store.CreateMessage(sessionID, "assistant", finalParts, finalMeta)
+			if err != nil {
+				log.Printf("[chat] Failed to create final assistant message: %v", err)
+			} else {
+				assistantMsgID = msg.ID
+			}
+			if s.MarketplaceStats != nil {
+				s.MarketplaceStats.RecordMessage()
+			}
+		}
+
+		stats := &ExecutionStats{
+			DurationMs:   durationMs,
+			ToolCalls:    toolCallCount,
+			InputTokens:  metadata.InputTokens,
+			OutputTokens: metadata.OutputTokens,
+			TotalCostUSD: metadata.TotalCostUSD,
+		}
+
+		log.Printf("[chat] Completed: %.1fs, %d tool calls, %d in/%d out tokens, $%.4f",
+			float64(durationMs)/1000.0, toolCallCount,
+			metadata.InputTokens, metadata.OutputTokens, metadata.TotalCostUSD)
+
+		s.Hub.Emit(sessionID, ChatEvent{
+			Type:      "done",
+			SessionID: session.AgentSessionID,
+			Stats:     stats,
+		})
+
+		// Release active state before processing next queued item.
+		s.SessionManager.SetActive(sessionID, false)
+		s.Hub.ClearActive(sessionID)
+		s.SessionManager.RemoveCancel(sessionID)
+		cancel()
+		released = true
+
+		s.processNextQueued(sessionID)
+	}()
+}
+
+// resolveImagePaths converts image filenames to absolute paths, filtering out any that don't exist.
+func (s *Server) resolveImagePaths(sessionID string, filenames []string) []string {
+	var paths []string
+	for _, fname := range filenames {
+		p := filepath.Join(s.sessionImageDir(sessionID), fname)
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Stat(abs); err == nil {
+			paths = append(paths, abs)
+		}
+	}
+	return paths
+}
+
+// ---------------------------------------------------------------------------
+// Message Queue
+// ---------------------------------------------------------------------------
+
+// enqueueMessage auto-queues a message when the session is busy.
+func (s *Server) enqueueMessage(sessionID, message string, imageFilenames []string) {
+	req := store.CreateQueuedMessageRequest{Text: message}
+	for _, img := range imageFilenames {
+		req.Images = append(req.Images, store.QueuedMessageImage{Filename: img})
+	}
+	if _, err := s.Store.CreateQueuedMessage(sessionID, req); err != nil {
+		log.Printf("[queue] Failed to auto-queue message: %v", err)
+		s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "failed to queue message"})
+		return
+	}
+	log.Printf("[queue] Auto-queued message (session busy): %s", sessionID)
+	s.Hub.Emit(sessionID, ChatEvent{Type: "queue_updated"})
+}
+
+// processNextQueued pops and executes the next queued message for a session.
+func (s *Server) processNextQueued(sessionID string) {
+	if s.SessionManager.IsActive(sessionID) {
+		return
+	}
+	if item := s.popPriorityItem(sessionID); item != nil {
+		log.Printf("[queue] Priority-dequeue: session=%s", sessionID)
+		s.executeQueuedItem(sessionID, item)
+		return
+	}
+	queued, err := s.Store.PopQueuedMessage(sessionID)
+	if err != nil {
+		log.Printf("[queue] Failed to pop queued message: session=%s err=%v", sessionID, err)
+		return
+	}
+	if queued == nil {
+		return
+	}
+	log.Printf("[queue] Auto-dequeue: session=%s text_len=%d", sessionID, len(queued.Text))
+	s.executeQueuedItem(sessionID, queued)
+}
+
+func (s *Server) executeQueuedItem(sessionID string, item *store.QueuedMessage) {
+	s.Hub.Emit(sessionID, ChatEvent{Type: "queue_updated"})
+
+	var imageFilenames []string
+	for _, img := range item.Images {
+		if img.Filename != "" {
+			imageFilenames = append(imageFilenames, img.Filename)
+		}
+	}
+	s.handleUserMessage(sessionID, item.Text, nil, imageFilenames, nil)
+}
+
+// RunQueuedNow pops a specific queue item and triggers immediate execution.
+// If the session is busy, the item is stored as a priority item and the
+// current agent is stopped so processNextQueued picks it up.
+func (s *Server) RunQueuedNow(sessionID, queuedID string) error {
+	item, err := s.Store.PopQueuedMessageByID(sessionID, queuedID)
+	if err != nil {
+		return fmt.Errorf("pop queued message: %w", err)
+	}
+	if item == nil {
+		return fmt.Errorf("queued message %s not found", queuedID)
+	}
+	s.Hub.Emit(sessionID, ChatEvent{Type: "queue_updated"})
+
+	if s.SessionManager.IsActive(sessionID) {
+		s.setPriorityItem(sessionID, item)
+		s.SessionManager.Cancel(sessionID)
+	} else {
+		s.executeQueuedItem(sessionID, item)
+	}
+	return nil
+}
+
+// StartQueuePoller runs a background loop that processes pending queue items
+// for idle sessions.
+func (s *Server) StartQueuePoller(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.pollQueues()
+		}
+	}
+}
+
+func (s *Server) pollQueues() {
+	sessionIDs, err := s.Store.SessionsWithQueuedMessages()
+	if err != nil {
+		log.Printf("[queue] Poll error: %v", err)
+		return
+	}
+	for _, sid := range sessionIDs {
+		if !s.SessionManager.IsActive(sid) {
+			s.processNextQueued(sid)
+		}
+	}
+}
+
+// priority items — per-session in-memory override for RunQueuedNow
+var (
+	priorityMu    sync.Mutex
+	priorityItems = make(map[string]*store.QueuedMessage)
+)
+
+func (s *Server) setPriorityItem(sessionID string, item *store.QueuedMessage) {
+	priorityMu.Lock()
+	defer priorityMu.Unlock()
+	priorityItems[sessionID] = item
+}
+
+func (s *Server) popPriorityItem(sessionID string) *store.QueuedMessage {
+	priorityMu.Lock()
+	defer priorityMu.Unlock()
+	item := priorityItems[sessionID]
+	delete(priorityItems, sessionID)
+	return item
+}
+
+// getOrCreateUnassignedProject returns the system "Unassigned" project, creating it if needed.
+func (s *Server) getOrCreateUnassignedProject() (*Project, error) {
+	const unassignedProjectName = "(Unassigned)"
+
+	projects, err := s.Store.ListProjects()
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range projects {
+		if p.Name == unassignedProjectName {
+			return &p, nil
+		}
+	}
+
+	tmpDir := filepath.Join(s.DataDir, "nexbox-unassigned")
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return nil, err
+	}
+
+	return s.Store.CreateProject(CreateProjectRequest{
+		Name:        unassignedProjectName,
+		Description: "System project for sessions without a specific project",
+		GitRepoPath: tmpDir,
+	})
+}
+
+// mergeSessionFeatures merges new features from the current message with
+// features already persisted on the session row. The merged set is written
+// back to the DB so it survives server restarts.
+func (s *Server) mergeSessionFeatures(sessionID string, msgFeatures []string) []string {
+	sess, err := s.Store.GetSession(sessionID)
+	if err != nil || sess == nil {
+		return msgFeatures
+	}
+
+	merged := make(map[string]struct{})
+	if sess.Features != "" {
+		for _, f := range strings.Split(sess.Features, ",") {
+			if f = strings.TrimSpace(f); f != "" {
+				merged[f] = struct{}{}
+			}
+		}
+	}
+	for _, f := range msgFeatures {
+		if f != "" {
+			merged[f] = struct{}{}
+		}
+	}
+
+	result := make([]string, 0, len(merged))
+	for f := range merged {
+		result = append(result, f)
+	}
+
+	newVal := strings.Join(result, ",")
+	if newVal != sess.Features {
+		_ = s.Store.UpdateSessionFeatures(sessionID, newVal)
+	}
+	return result
+}
+
+func containsFeature(features []string, name string) bool {
+	for _, f := range features {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}

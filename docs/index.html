@@ -1,0 +1,1133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BeeHub — Next-Gen AI Dev Platform</title>
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --surface: #111118;
+      --border: rgba(255,255,255,0.07);
+      --text: #e8e8f0;
+      --muted: #6b6b80;
+      --accent: #7c6eff;
+      --accent2: #00d4aa;
+      --accent3: #ff6b6b;
+      --glow: rgba(124,110,255,0.15);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* Grid background */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(124,110,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(124,110,255,0.03) 1px, transparent 1px);
+      background-size: 60px 60px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── NAV ── */
+    nav {
+      position: fixed;
+      top: 0;
+      width: 100%;
+      z-index: 100;
+      padding: 0 40px;
+      height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      background: rgba(10,10,15,0.85);
+      backdrop-filter: blur(20px);
+    }
+
+    .nav-logo {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      color: var(--text);
+    }
+
+    .nav-logo span {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 32px;
+      list-style: none;
+    }
+
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+      transition: color 0.2s;
+    }
+
+    .nav-links a:hover { color: var(--text); }
+
+    .nav-cta {
+      padding: 8px 20px;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: opacity 0.2s;
+    }
+
+    .nav-cta:hover { opacity: 0.85; }
+
+    /* ── SECTIONS ── */
+    section { position: relative; z-index: 1; }
+
+    /* ── HERO ── */
+    .hero {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 120px 40px 80px;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      border-radius: 100px;
+      border: 1px solid rgba(124,110,255,0.3);
+      background: rgba(124,110,255,0.08);
+      font-size: 12px;
+      color: var(--accent);
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      margin-bottom: 32px;
+    }
+
+    .hero-badge::before {
+      content: '';
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent2);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    .hero h1 {
+      font-size: clamp(40px, 7vw, 80px);
+      font-weight: 800;
+      letter-spacing: -2px;
+      line-height: 1.05;
+      max-width: 900px;
+      margin-bottom: 24px;
+    }
+
+    .hero h1 .gradient {
+      background: linear-gradient(135deg, #fff 0%, var(--accent) 50%, var(--accent2) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero-sub {
+      font-size: 18px;
+      color: var(--muted);
+      max-width: 600px;
+      margin-bottom: 48px;
+      line-height: 1.7;
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .btn-primary {
+      padding: 14px 32px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), #5a4fd9);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: transform 0.2s, box-shadow 0.2s;
+      box-shadow: 0 0 32px var(--glow);
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 48px var(--glow);
+    }
+
+    .btn-ghost {
+      padding: 14px 32px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 15px;
+      font-weight: 500;
+      text-decoration: none;
+      transition: border-color 0.2s, background 0.2s;
+    }
+
+    .btn-ghost:hover {
+      border-color: rgba(255,255,255,0.2);
+      background: rgba(255,255,255,0.04);
+    }
+
+    /* hero terminal mockup */
+    .hero-visual {
+      margin-top: 80px;
+      width: 100%;
+      max-width: 860px;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      overflow: hidden;
+      background: var(--surface);
+      box-shadow: 0 40px 120px rgba(0,0,0,0.6), 0 0 80px var(--glow);
+    }
+
+    .terminal-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+    }
+
+    .dot { width: 12px; height: 12px; border-radius: 50%; }
+    .dot-r { background: #ff5f57; }
+    .dot-y { background: #ffbd2e; }
+    .dot-g { background: #28c840; }
+
+    .terminal-title {
+      flex: 1;
+      text-align: center;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .terminal-body {
+      padding: 24px;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 13px;
+      line-height: 1.9;
+      min-height: 280px;
+    }
+
+    .t-prompt { color: var(--accent2); }
+    .t-cmd { color: var(--text); }
+    .t-comment { color: var(--muted); }
+    .t-out { color: #a8e6cf; }
+    .t-ai { color: var(--accent); }
+    .t-dim { color: var(--muted); }
+    .t-warn { color: #ffbd2e; }
+    .t-success { color: var(--accent2); }
+
+    /* ── PHILOSOPHY ── */
+    .philosophy {
+      padding: 120px 40px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .section-label {
+      font-size: 12px;
+      color: var(--accent);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      font-size: clamp(28px, 4vw, 48px);
+      font-weight: 700;
+      letter-spacing: -1px;
+      margin-bottom: 16px;
+    }
+
+    .section-sub {
+      color: var(--muted);
+      font-size: 16px;
+      max-width: 560px;
+      line-height: 1.7;
+    }
+
+    .pillars {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+      margin-top: 64px;
+    }
+
+    .pillar {
+      padding: 36px;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      transition: border-color 0.3s, transform 0.3s;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .pillar::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      transition: opacity 0.3s;
+      border-radius: inherit;
+    }
+
+    .pillar:nth-child(1)::before { background: radial-gradient(circle at 0% 0%, rgba(124,110,255,0.08), transparent 60%); }
+    .pillar:nth-child(2)::before { background: radial-gradient(circle at 0% 0%, rgba(0,212,170,0.08), transparent 60%); }
+    .pillar:nth-child(3)::before { background: radial-gradient(circle at 0% 0%, rgba(255,107,107,0.08), transparent 60%); }
+
+    .pillar:hover { border-color: rgba(255,255,255,0.15); transform: translateY(-4px); }
+    .pillar:hover::before { opacity: 1; }
+
+    .pillar-icon {
+      font-size: 32px;
+      margin-bottom: 20px;
+    }
+
+    .pillar h3 {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      letter-spacing: -0.3px;
+    }
+
+    .pillar p {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.8;
+    }
+
+    /* ── FEATURES ── */
+    .features {
+      padding: 120px 40px;
+      background: linear-gradient(180deg, transparent, rgba(124,110,255,0.03) 50%, transparent);
+    }
+
+    .features-inner {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .features-header {
+      text-align: center;
+      margin-bottom: 80px;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 2px;
+      border-radius: 16px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+
+    .feature-card {
+      padding: 48px;
+      background: var(--surface);
+      transition: background 0.3s;
+      position: relative;
+    }
+
+    .feature-card:hover {
+      background: rgba(255,255,255,0.03);
+    }
+
+    .feature-card-wide {
+      grid-column: span 2;
+    }
+
+    .feature-number {
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 20px;
+      font-family: 'SF Mono', monospace;
+    }
+
+    .feature-card h3 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.4px;
+      margin-bottom: 12px;
+    }
+
+    .feature-card p {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.8;
+      max-width: 420px;
+    }
+
+    .feature-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 24px;
+    }
+
+    .tag {
+      padding: 4px 12px;
+      border-radius: 100px;
+      border: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--muted);
+      font-family: 'SF Mono', monospace;
+    }
+
+    /* wide card layout */
+    .feature-card-wide .feature-inner {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 48px;
+      align-items: center;
+    }
+
+    .context-diagram {
+      background: rgba(0,0,0,0.3);
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      padding: 24px;
+      font-family: 'SF Mono', monospace;
+      font-size: 12px;
+      line-height: 2;
+    }
+
+    .ctx-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 6px 0;
+    }
+
+    .ctx-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* ── INTEGRATIONS ── */
+    .integrations {
+      padding: 120px 40px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .integrations-header {
+      margin-bottom: 64px;
+    }
+
+    .integration-list {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+    }
+
+    .integration-item {
+      padding: 28px 24px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      transition: border-color 0.3s, transform 0.2s;
+    }
+
+    .integration-item:hover {
+      border-color: rgba(255,255,255,0.15);
+      transform: translateY(-2px);
+    }
+
+    .integration-icon {
+      font-size: 24px;
+      margin-bottom: 12px;
+    }
+
+    .integration-item h4 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .integration-item p {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    /* ── WORKFLOW ── */
+    .workflow-section {
+      padding: 120px 40px;
+      background: radial-gradient(ellipse 60% 40% at 50% 50%, rgba(124,110,255,0.05), transparent);
+    }
+
+    .workflow-inner {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .workflow-compare {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-top: 64px;
+    }
+
+    .compare-box {
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      overflow: hidden;
+    }
+
+    .compare-header {
+      padding: 16px 24px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .compare-box.before .compare-header {
+      background: rgba(255,107,107,0.08);
+      color: var(--accent3);
+    }
+
+    .compare-box.after .compare-header {
+      background: rgba(0,212,170,0.08);
+      color: var(--accent2);
+    }
+
+    .compare-body {
+      padding: 24px;
+      font-family: 'SF Mono', monospace;
+      font-size: 13px;
+      line-height: 2;
+    }
+
+    .flow-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 4px 0;
+    }
+
+    .flow-arrow {
+      color: var(--muted);
+      margin-top: 1px;
+    }
+
+    .flow-label {
+      color: var(--text);
+    }
+
+    .flow-who {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    /* ── STACK ── */
+    .stack-section {
+      padding: 80px 40px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .stack-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-top: 48px;
+    }
+
+    .stack-item {
+      padding: 20px 24px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .stack-badge {
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-family: 'SF Mono', monospace;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .stack-badge.go { background: rgba(0,173,216,0.15); color: #00add8; }
+    .stack-badge.react { background: rgba(97,218,251,0.15); color: #61dafb; }
+    .stack-badge.mcp { background: rgba(124,110,255,0.15); color: var(--accent); }
+    .stack-badge.ws { background: rgba(0,212,170,0.15); color: var(--accent2); }
+
+    .stack-info h5 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+
+    .stack-info p {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    /* ── CTA ── */
+    .cta-section {
+      padding: 160px 40px;
+      text-align: center;
+      position: relative;
+    }
+
+    .cta-section::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse 50% 60% at 50% 50%, rgba(124,110,255,0.08), transparent);
+      pointer-events: none;
+    }
+
+    .cta-inner { position: relative; z-index: 1; }
+
+    .cta-section h2 {
+      font-size: clamp(32px, 5vw, 64px);
+      font-weight: 800;
+      letter-spacing: -1.5px;
+      margin-bottom: 20px;
+    }
+
+    .cta-section p {
+      color: var(--muted);
+      font-size: 18px;
+      margin-bottom: 48px;
+    }
+
+    /* ── FOOTER ── */
+    footer {
+      padding: 40px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: relative;
+      z-index: 1;
+    }
+
+    .footer-logo {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .footer-logo span {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    footer p {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    /* ── RESPONSIVE ── */
+    @media (max-width: 900px) {
+      nav { padding: 0 20px; }
+      .nav-links { display: none; }
+      .pillars { grid-template-columns: 1fr; }
+      .feature-grid { grid-template-columns: 1fr; }
+      .feature-card-wide { grid-column: auto; }
+      .feature-card-wide .feature-inner { grid-template-columns: 1fr; }
+      .integration-list { grid-template-columns: repeat(2, 1fr); }
+      .workflow-compare { grid-template-columns: 1fr; }
+      .stack-grid { grid-template-columns: 1fr; }
+      footer { flex-direction: column; gap: 16px; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-logo">Nex<span>Box</span></div>
+  <ul class="nav-links">
+    <li><a href="#features">功能</a></li>
+    <li><a href="#integrations">集成</a></li>
+    <li><a href="#workflow">工作流</a></li>
+    <li><a href="#stack">技术栈</a></li>
+  </ul>
+  <a href="#" class="nav-cta">开始使用</a>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-badge">v2.0 · AI-Native Dev Platform</div>
+
+  <h1>
+    <span class="gradient">打破工具孤岛</span><br/>
+    重新定义研发协作
+  </h1>
+
+  <p class="hero-sub">
+    BeeHub 将 AI Agent、代码审查、任务管理、工作流编排融为一体，
+    团队共享完整上下文，告别碎片化的研发流程。
+  </p>
+
+  <div class="hero-actions">
+    <a href="#" class="btn-primary">立即体验</a>
+    <a href="#features" class="btn-ghost">了解更多 →</a>
+  </div>
+
+  <div class="hero-visual">
+    <div class="terminal-bar">
+      <span class="dot dot-r"></span>
+      <span class="dot dot-y"></span>
+      <span class="dot dot-g"></span>
+      <span class="terminal-title">nexbox — AI Session · project: nexbox</span>
+    </div>
+    <div class="terminal-body">
+      <div><span class="t-dim"># 从飞书发来的指令注入到当前 session</span></div>
+      <div><span class="t-warn">[lark]</span> <span class="t-cmd">用户 @eric.du: 帮我实现 TASK-142 的功能，参考设计文档</span></div>
+      <div>&nbsp;</div>
+      <div><span class="t-ai">AI</span> <span class="t-dim">›</span> <span class="t-cmd">正在读取任务上下文...</span></div>
+      <div><span class="t-dim">  ✓ TASK-142: 实现用户权限管理模块</span></div>
+      <div><span class="t-dim">  ✓ 关联资产: design_doc v3, requirement_doc v2</span></div>
+      <div><span class="t-dim">  ✓ 加载 Prism 代码规范规则组 #5</span></div>
+      <div><span class="t-dim">  ✓ 获取 GitLab MR !87 的 Review 意见 (12 条)</span></div>
+      <div>&nbsp;</div>
+      <div><span class="t-ai">AI</span> <span class="t-dim">›</span> <span class="t-cmd">开始生成代码...</span></div>
+      <div><span class="t-prompt">  tool_call</span> <span class="t-out">git_status</span> <span class="t-dim">→ clean, branch: feature/auth-module</span></div>
+      <div><span class="t-prompt">  tool_call</span> <span class="t-out">read_file</span> <span class="t-dim">→ internal/auth/handler.go</span></div>
+      <div><span class="t-prompt">  tool_call</span> <span class="t-out">run_in_terminal</span> <span class="t-dim">→ go test ./internal/auth/... ✓</span></div>
+      <div><span class="t-prompt">  tool_call</span> <span class="t-out">git_commit</span> <span class="t-dim">→ "feat(auth): add role-based permission module"</span></div>
+      <div><span class="t-prompt">  tool_call</span> <span class="t-out">create_mr</span> <span class="t-dim">→ gitlab.com/.../merge_requests/91</span></div>
+      <div>&nbsp;</div>
+      <div><span class="t-success">✓</span> <span class="t-cmd">完成。MR !91 已创建，关联 TASK-142，已同步至飞书。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- PHILOSOPHY -->
+<section class="philosophy" id="philosophy">
+  <p class="section-label">The Core</p>
+  <h2 class="section-title">三个词，一个哲学</h2>
+  <p class="section-sub">
+    NEX = Nexus（联结）× Next（未来）<br/>
+    Box = All-in-One，开箱即用的研发工具箱
+  </p>
+
+  <div class="pillars">
+    <div class="pillar">
+      <div class="pillar-icon">⚡</div>
+      <h3>Connectivity<br/>连接一切</h3>
+      <p>
+        需求、设计、编码、Code Review、MR、变更单，每个环节无缝衔接。
+        AI 随时拥有全链路上下文，不再是上下文断裂的单机工具。
+      </p>
+    </div>
+    <div class="pillar">
+      <div class="pillar-icon">🔧</div>
+      <h3>Flexibility<br/>灵活不绑架</h3>
+      <p>
+        Agent 可插拔（Claude / Codex / Cursor），无供应商锁定。
+        原子能力自由组合，支持本地模式、飞书远程模式，
+        人机协作比例由你掌控。
+      </p>
+    </div>
+    <div class="pillar">
+      <div class="pillar-icon">🤝</div>
+      <h3>Collaboration<br/>团队共享上下文</h3>
+      <p>
+        云端 Tasks、Assets、Workflows 实时同步，
+        多成员共同可见。告别"我这边可以，你那边不行"的协作困境。
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section class="features" id="features">
+  <div class="features-inner">
+    <div class="features-header">
+      <p class="section-label">Core Features</p>
+      <h2 class="section-title">不是功能堆砌，是范式重构</h2>
+    </div>
+
+    <div class="feature-grid">
+
+      <!-- AI Context -->
+      <div class="feature-card feature-card-wide">
+        <div class="feature-inner">
+          <div>
+            <div class="feature-number">01 / AI WITH FULL CONTEXT</div>
+            <h3>AI 拥有完整研发上下文</h3>
+            <p>
+              普通 AI 只知道你现在说的话。BeeHub 的 AI 知道任务背景、设计决策、历史 Review 意见、
+              代码规范规则，以及团队协作状态。
+              通过 MCP Server 暴露 20+ 工具，AI 不只是代码生成器，而是真正的研发伙伴。
+            </p>
+            <div class="feature-tags">
+              <span class="tag">MCP Server</span>
+              <span class="tag">20+ AI Tools</span>
+              <span class="tag">Context Injection</span>
+              <span class="tag">Session Resumption</span>
+            </div>
+          </div>
+          <div class="context-diagram">
+            <div class="ctx-item">
+              <div class="ctx-dot" style="background:#7c6eff"></div>
+              <span style="color:#7c6eff">Task</span>
+              <span style="color:#6b6b80; margin-left:auto">TASK-142 · 权限管理</span>
+            </div>
+            <div class="ctx-item">
+              <div class="ctx-dot" style="background:#00d4aa"></div>
+              <span style="color:#00d4aa">Design Doc</span>
+              <span style="color:#6b6b80; margin-left:auto">v3 · 2024-01</span>
+            </div>
+            <div class="ctx-item">
+              <div class="ctx-dot" style="background:#ffbd2e"></div>
+              <span style="color:#ffbd2e">Prism Rules</span>
+              <span style="color:#6b6b80; margin-left:auto">Group #5 · 14 rules</span>
+            </div>
+            <div class="ctx-item">
+              <div class="ctx-dot" style="background:#ff6b6b"></div>
+              <span style="color:#ff6b6b">MR Comments</span>
+              <span style="color:#6b6b80; margin-left:auto">!87 · 12 条意见</span>
+            </div>
+            <div class="ctx-item">
+              <div class="ctx-dot" style="background:#a8e6cf"></div>
+              <span style="color:#a8e6cf">Git History</span>
+              <span style="color:#6b6b80; margin-left:auto">feature/auth-module</span>
+            </div>
+            <div style="border-top: 1px solid rgba(255,255,255,0.06); margin-top:12px; padding-top:12px; color:#7c6eff; font-size:11px; text-align:center">
+              → AI Agent 获取全部以上上下文
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tasks & Assets -->
+      <div class="feature-card">
+        <div class="feature-number">02 / ASSET-CENTRIC</div>
+        <h3>研发资产版本化管理</h3>
+        <p>
+          需求文档、设计文档、代码变更、测试用例，全部作为有版本、有状态、
+          可审阅的资产管理。行级 Review 评论，状态流转追踪，端到端可追溯。
+        </p>
+        <div class="feature-tags">
+          <span class="tag">requirement_doc</span>
+          <span class="tag">design_doc</span>
+          <span class="tag">code_change</span>
+          <span class="tag">unit_test</span>
+          <span class="tag">test_case</span>
+        </div>
+      </div>
+
+      <!-- Workflow -->
+      <div class="feature-card">
+        <div class="feature-number">03 / WORKFLOW ENGINE</div>
+        <h3>可视化工作流，灵活编排</h3>
+        <p>
+          DAG 可视化编辑器，支持 AI 节点、Human 审批节点、Map/Reduce 并行节点。
+          既可全自动流水线，也可关键节点人工介入。流程由你定义，不被工具绑架。
+        </p>
+        <div class="feature-tags">
+          <span class="tag">DAG Engine</span>
+          <span class="tag">Parallel Exec</span>
+          <span class="tag">Human-in-Loop</span>
+        </div>
+      </div>
+
+      <!-- Lark -->
+      <div class="feature-card">
+        <div class="feature-number">04 / LARK REMOTE</div>
+        <h3>飞书远程控制 AI</h3>
+        <p>
+          离开电脑？用飞书机器人发条消息，指令自动注入到 BeeHub 当前 Session。
+          AI 执行完毕后，摘要和结果实时回复到飞书。随时随地，AI 不停工。
+        </p>
+        <div class="feature-tags">
+          <span class="tag">Lark Bot</span>
+          <span class="tag">Async AI</span>
+          <span class="tag">Smart Summary</span>
+        </div>
+      </div>
+
+      <!-- Multi-Agent -->
+      <div class="feature-card">
+        <div class="feature-number">05 / MULTI-AGENT</div>
+        <h3>多 Agent 后端，No Vendor Lock-in</h3>
+        <p>
+          Claude Code、OpenAI Codex、Cursor CLI 无缝切换，统一事件协议。
+          不依赖单一供应商，模型更新、策略调整，一键适配。
+        </p>
+        <div class="feature-tags">
+          <span class="tag">Claude Code</span>
+          <span class="tag">Codex CLI</span>
+          <span class="tag">Cursor CLI</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- INTEGRATIONS -->
+<section class="integrations" id="integrations">
+  <div class="integrations-header">
+    <p class="section-label">Integrations</p>
+    <h2 class="section-title">联通你已有的工具链</h2>
+    <p class="section-sub" style="margin-top:12px">不是替代，是智能枢纽</p>
+  </div>
+
+  <div class="integration-list">
+    <div class="integration-item">
+      <div class="integration-icon">🦊</div>
+      <h4>GitLab</h4>
+      <p>直接创建 MR，同步评论，查看 Diff，AI 感知代码审查全过程</p>
+    </div>
+    <div class="integration-item">
+      <div class="integration-icon">🔍</div>
+      <h4>Prism</h4>
+      <p>拉取 Code Review 规则组，AI 按团队规范自动检查代码质量</p>
+    </div>
+    <div class="integration-item">
+      <div class="integration-icon">📱</div>
+      <h4>Lark / 飞书</h4>
+      <p>机器人远程控制，AI 响应回传，移动端随时指挥研发任务</p>
+    </div>
+    <div class="integration-item">
+      <div class="integration-icon">📋</div>
+      <h4>OKOne</h4>
+      <p>变更单管理集成，AI 辅助填写上线流程，端到端闭环</p>
+    </div>
+  </div>
+</section>
+
+<!-- WORKFLOW COMPARE -->
+<section class="workflow-section" id="workflow">
+  <div class="workflow-inner">
+    <p class="section-label">Before & After</p>
+    <h2 class="section-title">同一个任务，两种范式</h2>
+
+    <div class="workflow-compare">
+      <div class="compare-box before">
+        <div class="compare-header">碎片化的现在</div>
+        <div class="compare-body">
+          <div class="flow-step">
+            <span class="flow-arrow">→</span>
+            <div>
+              <div class="flow-label">Confluence 写需求文档</div>
+              <div class="flow-who">工具 #1</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <span class="flow-arrow">→</span>
+            <div>
+              <div class="flow-label">Jira 创建任务</div>
+              <div class="flow-who">工具 #2</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <span class="flow-arrow">→</span>
+            <div>
+              <div class="flow-label">复制上下文给 Claude</div>
+              <div class="flow-who">手动操作 · 工具 #3</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <span class="flow-arrow">→</span>
+            <div>
+              <div class="flow-label">把代码粘回 IDE</div>
+              <div class="flow-who">工具 #4</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <span class="flow-arrow">→</span>
+            <div>
+              <div class="flow-label">手动开 GitLab MR</div>
+              <div class="flow-who">工具 #5</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <span class="flow-arrow">→</span>
+            <div>
+              <div class="flow-label">去 Prism 查规则后 Review</div>
+              <div class="flow-who">工具 #6</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <span class="flow-arrow">→</span>
+            <div>
+              <div class="flow-label">手动填变更单上线</div>
+              <div class="flow-who">工具 #7</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="compare-box after">
+        <div class="compare-header">BeeHub 的方式</div>
+        <div class="compare-body">
+          <div class="flow-step">
+            <span class="flow-arrow" style="color:#00d4aa">→</span>
+            <div>
+              <div class="flow-label">BeeHub 创建任务 + 关联资产</div>
+              <div class="flow-who" style="color:#00d4aa">统一平台</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <span class="flow-arrow" style="color:#00d4aa">→</span>
+            <div>
+              <div class="flow-label">AI 自动读取全量上下文</div>
+              <div class="flow-who" style="color:#00d4aa">任务 + 设计文档 + 规范</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <span class="flow-arrow" style="color:#00d4aa">→</span>
+            <div>
+              <div class="flow-label">AI 生成代码 + 运行测试</div>
+              <div class="flow-who" style="color:#00d4aa">自动化</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <span class="flow-arrow" style="color:#7c6eff">→</span>
+            <div>
+              <div class="flow-label">你审批关键节点</div>
+              <div class="flow-who" style="color:#7c6eff">Human-in-Loop</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <span class="flow-arrow" style="color:#00d4aa">→</span>
+            <div>
+              <div class="flow-label">AI 创建 MR + 同步 Review</div>
+              <div class="flow-who" style="color:#00d4aa">自动化</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <span class="flow-arrow" style="color:#00d4aa">→</span>
+            <div>
+              <div class="flow-label">飞书收到完成通知</div>
+              <div class="flow-who" style="color:#00d4aa">随时随地可见</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TECH STACK -->
+<section class="stack-section" id="stack">
+  <p class="section-label">Tech Stack</p>
+  <h2 class="section-title">现代化技术底座</h2>
+
+  <div class="stack-grid">
+    <div class="stack-item">
+      <span class="stack-badge go">Go 1.24</span>
+      <div class="stack-info">
+        <h5>高性能后端</h5>
+        <p>Chi 路由 · SQLite/MySQL · 单二进制分发</p>
+      </div>
+    </div>
+    <div class="stack-item">
+      <span class="stack-badge react">React 19</span>
+      <div class="stack-info">
+        <h5>现代化前端</h5>
+        <p>TypeScript · Tailwind · Zustand · ReactFlow</p>
+      </div>
+    </div>
+    <div class="stack-item">
+      <span class="stack-badge mcp">MCP</span>
+      <div class="stack-info">
+        <h5>AI 工具协议</h5>
+        <p>Model Context Protocol · 20+ Tools</p>
+      </div>
+    </div>
+    <div class="stack-item">
+      <span class="stack-badge ws">WebSocket</span>
+      <div class="stack-info">
+        <h5>实时通信</h5>
+        <p>流式 AI 响应 · Terminal PTY · 协作广播</p>
+      </div>
+    </div>
+    <div class="stack-item">
+      <span class="stack-badge go">DAG Engine</span>
+      <div class="stack-info">
+        <h5>工作流引擎</h5>
+        <p>自研 DAG · FSM 状态机 · RALPH 并发池</p>
+      </div>
+    </div>
+    <div class="stack-item">
+      <span class="stack-badge react">xterm.js</span>
+      <div class="stack-info">
+        <h5>集成终端</h5>
+        <p>浏览器内真实 TTY · 项目级隔离</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-section">
+  <div class="cta-inner">
+    <h2>准备好告别碎片化了吗？</h2>
+    <p>一个盒子，装下你的整个研发流程</p>
+    <div class="hero-actions" style="justify-content:center">
+      <a href="#" class="btn-primary">立即开始使用</a>
+      <a href="#" class="btn-ghost">查看文档</a>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-logo">Nex<span>Box</span></div>
+  <p>NEX = Nexus × Next &nbsp;·&nbsp; Box = All-in-One</p>
+  <p style="color:#6b6b80;font-size:13px">联结当下，创造未来</p>
+</footer>
+
+</body>
+</html>

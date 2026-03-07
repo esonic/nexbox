@@ -1,0 +1,39 @@
+# Go
+server/nexbox
+server/beehub
+server/logs/
+*.exe
+
+# Embedded web dist (built by build.sh, contains copy of web/dist)
+server/webdist/*
+!server/webdist/.gitkeep
+
+# Node
+**/node_modules/
+**/dist/
+**/.tsbuildinfo
+**/tsconfig.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+my_build.sh
+my_run.sh
+.cursor/mcp.json
+server/.cursor/mcp.json
+server/plugins/plugins.json
+server/config.json
+server/chrome/
