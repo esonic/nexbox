@@ -3,6 +3,7 @@ server/nexbox
 server/beehub
 server/logs/
 *.exe
+proxy/proxy
 
 # Embedded web dist (built by build.sh, contains copy of web/dist)
 server/webdist/*
