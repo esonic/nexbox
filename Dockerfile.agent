@@ -1,0 +1,33 @@
+# nexbox-agent — lightweight per-project isolation container
+#
+# Build:  docker build -f Dockerfile.agent -t nexbox-agent:latest .
+# Or use: scripts/build-agent-image.sh
+#
+# This image is NOT the server image. It is the sandbox container that
+# runs one instance per project when DockerEnabled=true in config.json.
+# The project's git repository is bind-mounted to /workspace at runtime.
+
+FROM alpine:latest
+
+# Runtime dependencies required by the Claude CLI (glibc-compat via libgcc/libstdc++)
+# and ripgrep for fast file search inside the agent sandbox.
+RUN apk add --no-cache \
+    libgcc \
+    libstdc++ \
+    ripgrep \
+    curl \
+    git \
+    bash
+
+# Install the official Claude CLI
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Verify the installation
+RUN claude --version
+
+# Default working directory — overridden at runtime via -w /workspace bind-mount
+WORKDIR /workspace
+
+# The container is kept alive by the ContainerManager using:
+#   docker run -d --rm -v <repoPath>:/workspace -w /workspace nexbox-agent:latest tail -f /dev/null
+# No ENTRYPOINT or CMD is needed here; the manager passes the command explicitly.

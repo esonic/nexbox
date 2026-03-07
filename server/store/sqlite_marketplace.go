@@ -2,8 +2,11 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // InstalledMCP holds the runtime config for a locally installed MCP package.
@@ -209,4 +212,79 @@ func scanInstalledSkill(s skillScanner) (*InstalledSkill, error) {
 	}
 	sk.InstalledAt = time.Unix(ts, 0)
 	return &sk, nil
+}
+
+// ── Installed Plugins (local marketplace) ────────────────────────────────────
+
+func (s *SQLiteStore) ListInstalledPlugins(userID string) ([]InstalledPlugin, error) {
+	rows, err := s.db.Query(
+		`SELECT id, user_id, plugin_id, config, installed_at FROM installed_plugins WHERE project_id = ? ORDER BY installed_at DESC`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []InstalledPlugin{}
+	for rows.Next() {
+		p, err := scanInstalledPlugin(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) InstallPlugin(userID, pluginID, config string) (*InstalledPlugin, error) {
+	if config == "" {
+		config = "{}"
+	}
+	ts := time.Now().Unix()
+	// Use user_id+plugin_id as the logical primary key, stored in the name+project_id columns
+	// for backward compatibility with the existing table schema.
+	_, err := s.db.Exec(
+		`INSERT INTO installed_plugins (name, project_id, id, user_id, plugin_id, config, installed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(name, project_id) DO UPDATE SET
+		   id=excluded.id, config=excluded.config, installed_at=excluded.installed_at`,
+		pluginID, userID, uuid.New().String(), userID, pluginID, config, ts)
+	if err != nil {
+		return nil, fmt.Errorf("install plugin: %w", err)
+	}
+	return s.GetInstalledPlugin(userID, pluginID)
+}
+
+func (s *SQLiteStore) UninstallPlugin(userID, pluginID string) error {
+	// name=pluginID, project_id=userID is the logical PK mapping used by InstallPlugin.
+	_, err := s.db.Exec(
+		`DELETE FROM installed_plugins WHERE name = ? AND project_id = ?`,
+		pluginID, userID)
+	return err
+}
+
+func (s *SQLiteStore) GetInstalledPlugin(userID, pluginID string) (*InstalledPlugin, error) {
+	row := s.db.QueryRow(
+		`SELECT id, user_id, plugin_id, config, installed_at FROM installed_plugins WHERE name = ? AND project_id = ?`,
+		pluginID, userID)
+	return scanInstalledPlugin(row)
+}
+
+type pluginScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanInstalledPlugin(s pluginScanner) (*InstalledPlugin, error) {
+	var p InstalledPlugin
+	var ts int64
+	if err := s.Scan(&p.ID, &p.UserID, &p.PluginID, &p.Config, &ts); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if p.Config == "" {
+		p.Config = "{}"
+	}
+	p.CreatedAt = time.Unix(ts, 0)
+	return &p, nil
 }

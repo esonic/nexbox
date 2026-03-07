@@ -240,7 +240,157 @@ func (s *Server) RegisterMarketplaceRoutes(r chi.Router) {
 		r.Get("/installed-skills", s.ListInstalledSkills)
 		r.Post("/installed-skills", s.InstallSkill)
 		r.Delete("/installed-skills/{name}", s.UninstallSkill)
+
+		// Local directory-based plugin registry
+		r.Get("/plugins", s.ListLocalPlugins)
+		r.Get("/plugins/{id}", s.GetLocalPlugin)
+		r.Get("/installed", s.ListInstalledPlugins)
+		r.Post("/installed", s.HandleInstallPlugin)
+		r.Delete("/installed/{id}", s.HandleUninstallPlugin)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Local directory-based plugin registry
+// ---------------------------------------------------------------------------
+
+// loadMarketplacePlugins scans dir for *.json files and parses each as a
+// MarketplacePlugin. Returns an empty slice (not an error) if dir is empty
+// or does not exist.
+func loadMarketplacePlugins(dir string) ([]store.MarketplacePlugin, error) {
+	if dir == "" {
+		return []store.MarketplacePlugin{}, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []store.MarketplacePlugin{}, nil
+		}
+		return nil, fmt.Errorf("read marketplace dir: %w", err)
+	}
+	var plugins []store.MarketplacePlugin
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		fPath := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(fPath)
+		if err != nil {
+			log.Printf("[marketplace] skip %s: read error: %v", entry.Name(), err)
+			continue
+		}
+		var p store.MarketplacePlugin
+		if err := json.Unmarshal(data, &p); err != nil {
+			log.Printf("[marketplace] skip %s: parse error: %v", entry.Name(), err)
+			continue
+		}
+		// Derive ID from filename if not set in the JSON.
+		if p.ID == "" {
+			p.ID = strings.TrimSuffix(entry.Name(), ".json")
+		}
+		plugins = append(plugins, p)
+	}
+	if plugins == nil {
+		plugins = []store.MarketplacePlugin{}
+	}
+	return plugins, nil
+}
+
+// ListLocalPlugins handles GET /api/marketplace/plugins
+func (s *Server) ListLocalPlugins(w http.ResponseWriter, r *http.Request) {
+	dir := ""
+	if s.Config != nil {
+		dir = s.Config.Get().MarketplaceDir
+	}
+	plugins, err := loadMarketplacePlugins(dir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, plugins)
+}
+
+// GetLocalPlugin handles GET /api/marketplace/plugins/{id}
+func (s *Server) GetLocalPlugin(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	dir := ""
+	if s.Config != nil {
+		dir = s.Config.Get().MarketplaceDir
+	}
+	plugins, err := loadMarketplacePlugins(dir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, p := range plugins {
+		if p.ID == id {
+			writeJSON(w, http.StatusOK, p)
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, "plugin not found")
+}
+
+// ListInstalledPlugins handles GET /api/marketplace/installed
+func (s *Server) ListInstalledPlugins(w http.ResponseWriter, r *http.Request) {
+	if s.LocalStore == nil {
+		writeJSON(w, http.StatusOK, []store.InstalledPlugin{})
+		return
+	}
+	user := GetUserID(r)
+	plugins, err := s.LocalStore.ListInstalledPlugins(user)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, plugins)
+}
+
+// HandleInstallPlugin handles POST /api/marketplace/installed
+func (s *Server) HandleInstallPlugin(w http.ResponseWriter, r *http.Request) {
+	if s.LocalStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "local store not available")
+		return
+	}
+	var req struct {
+		PluginID string `json:"plugin_id"`
+		Config   string `json:"config"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.PluginID == "" {
+		writeError(w, http.StatusBadRequest, "plugin_id is required")
+		return
+	}
+	user := GetUserID(r)
+	installed, err := s.LocalStore.InstallPlugin(user, req.PluginID, req.Config)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	log.Printf("[marketplace] user %s installed plugin %s", user, req.PluginID)
+	writeJSON(w, http.StatusCreated, installed)
+}
+
+// HandleUninstallPlugin handles DELETE /api/marketplace/installed/{id}
+func (s *Server) HandleUninstallPlugin(w http.ResponseWriter, r *http.Request) {
+	if s.LocalStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "local store not available")
+		return
+	}
+	pluginID := chi.URLParam(r, "id")
+	user := GetUserID(r)
+	if err := s.LocalStore.UninstallPlugin(user, pluginID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	log.Printf("[marketplace] user %s uninstalled plugin %s", user, pluginID)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---------------------------------------------------------------------------

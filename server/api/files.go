@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 )
+
+var errForbidden = errors.New("access denied")
 
 // FileEntry represents a file or directory in the project tree.
 type FileEntry struct {
@@ -40,16 +43,26 @@ func skipDir(name string) bool {
 
 // resolveFilesRoot resolves the root directory for file operations.
 // Prefers the session's worktree_path when session_id query param is provided.
+// Returns errForbidden when the caller does not own the resource.
 func (s *Server) resolveFilesRoot(r *http.Request, projectID string) (string, error) {
 	if sid := r.URL.Query().Get("session_id"); sid != "" {
 		sess, err := s.Store.GetSession(sid)
-		if err == nil && sess != nil && sess.WorktreeMode == "worktree" && sess.WorktreePath != "" {
+		if err != nil || sess == nil {
+			return "", fmt.Errorf("session not found")
+		}
+		if GetUserRole(r) != "admin" && sess.UserID != GetUserID(r) {
+			return "", errForbidden
+		}
+		if sess.WorktreeMode == "worktree" && sess.WorktreePath != "" {
 			return sess.WorktreePath, nil
 		}
 	}
 	project, err := s.getProjectWithLocalPath(projectID)
 	if err != nil || project == nil {
 		return "", fmt.Errorf("project not found")
+	}
+	if GetUserRole(r) != "admin" && project.OwnerID != GetUserID(r) {
+		return "", errForbidden
 	}
 	if project.GitRepoPath == "" {
 		return "", fmt.Errorf("project has no working directory")
@@ -63,7 +76,11 @@ func (s *Server) ListProjectFiles(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	root, err := s.resolveFilesRoot(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -150,7 +167,11 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	root, err := s.resolveFilesRoot(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -169,10 +190,17 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request) {
 
 	fullPath := filepath.Join(root, cleanPath)
 
-	// Verify the resolved path is still within the root directory
-	absProject, _ := filepath.Abs(root)
-	absFile, _ := filepath.Abs(fullPath)
-	if !strings.HasPrefix(absFile, absProject) {
+	// Verify the resolved path is still within the root directory (resolve symlinks)
+	absProject, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		absProject, _ = filepath.Abs(root)
+	}
+	// For the file path: use EvalSymlinks if the file exists, otherwise use Abs
+	absFile, evalErr := filepath.EvalSymlinks(fullPath)
+	if evalErr != nil {
+		absFile, _ = filepath.Abs(fullPath)
+	}
+	if !strings.HasPrefix(absFile, absProject+string(filepath.Separator)) && absFile != absProject {
 		writeError(w, http.StatusBadRequest, "path outside project directory")
 		return
 	}
@@ -231,7 +259,11 @@ func (s *Server) SearchProjectFiles(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	root, err := s.resolveFilesRoot(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 

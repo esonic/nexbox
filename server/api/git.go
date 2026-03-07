@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -106,11 +107,14 @@ type GenerateCommitMessageRequest struct {
 
 // --- Helpers ---
 
-// resolveWorkDir resolves the working directory from a project ID.
-func (s *Server) resolveWorkDir(projectID string) (string, error) {
+// resolveWorkDir resolves the working directory from a project ID, checking ownership.
+func (s *Server) resolveWorkDir(r *http.Request, projectID string) (string, error) {
 	project, err := s.getProjectWithLocalPath(projectID)
 	if err != nil || project == nil {
 		return "", fmt.Errorf("project not found")
+	}
+	if GetUserRole(r) != "admin" && project.OwnerID != GetUserID(r) {
+		return "", errForbidden
 	}
 	if project.GitRepoPath == "" {
 		return "", fmt.Errorf("project has no git repo path configured")
@@ -118,17 +122,23 @@ func (s *Server) resolveWorkDir(projectID string) (string, error) {
 	return project.GitRepoPath, nil
 }
 
-// resolveRequestWorkDir resolves the working directory for a request.
+// resolveRequestWorkDir resolves the working directory for a request, checking ownership.
 // If the request has a ?session_id= query parameter and the session is in worktree mode
 // with a created worktree, the worktree path is used instead of the project path.
 func (s *Server) resolveRequestWorkDir(r *http.Request, projectID string) (string, error) {
 	if sid := r.URL.Query().Get("session_id"); sid != "" {
 		sess, err := s.Store.GetSession(sid)
-		if err == nil && sess != nil && sess.WorktreeMode == "worktree" && sess.WorktreePath != "" {
+		if err != nil || sess == nil {
+			return "", fmt.Errorf("session not found")
+		}
+		if GetUserRole(r) != "admin" && sess.UserID != GetUserID(r) {
+			return "", errForbidden
+		}
+		if sess.WorktreeMode == "worktree" && sess.WorktreePath != "" {
 			return sess.WorktreePath, nil
 		}
 	}
-	return s.resolveWorkDir(projectID)
+	return s.resolveWorkDir(r, projectID)
 }
 
 // --- Handlers ---
@@ -138,7 +148,11 @@ func (s *Server) GetGitStatus(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -157,7 +171,11 @@ func (s *Server) GitCommit(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -215,7 +233,11 @@ func (s *Server) GitDiscard(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -268,7 +290,11 @@ func (s *Server) GitLog(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -305,7 +331,11 @@ func (s *Server) GitCommitFiles(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -329,7 +359,11 @@ func (s *Server) GitCommitDiff(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -355,7 +389,11 @@ func (s *Server) GenerateCommitMessage(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -385,7 +423,11 @@ func (s *Server) GetGitBranches(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -404,7 +446,11 @@ func (s *Server) GitCheckout(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -439,7 +485,11 @@ func (s *Server) GitStage(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -468,7 +518,11 @@ func (s *Server) GitUnstage(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -497,7 +551,11 @@ func (s *Server) GitPush(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 
@@ -539,7 +597,11 @@ func (s *Server) GitPull(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	workDir, err := s.resolveRequestWorkDir(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 

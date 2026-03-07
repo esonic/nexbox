@@ -15,12 +15,12 @@ import (
 // Projects
 // ---------------------------------------------------------------------------
 
-const projectColumns = `id, namespace_id, name, description, git_repo_path, gitlab_repo_url, gitlab_token, extra, created_by, version, created_at, updated_at`
+const projectColumns = `id, namespace_id, name, description, git_repo_path, gitlab_repo_url, gitlab_token, extra, created_by, owner_id, version, created_at, updated_at`
 
 func scanProject(row interface{ Scan(...interface{}) error }) (*Project, error) {
 	var p Project
 	var ignoredToken, ignoredExtra string
-	err := row.Scan(&p.ID, &p.NamespaceID, &p.Name, &p.Description, &p.GitRepoPath, &p.GitLabRepoURL, &ignoredToken, &ignoredExtra, &p.CreatedBy, &p.Version, &p.CreatedAt, &p.UpdatedAt)
+	err := row.Scan(&p.ID, &p.NamespaceID, &p.Name, &p.Description, &p.GitRepoPath, &p.GitLabRepoURL, &ignoredToken, &ignoredExtra, &p.CreatedBy, &p.OwnerID, &p.Version, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -37,15 +37,16 @@ func (s *SQLiteStore) CreateProject(req CreateProjectRequest) (*Project, error) 
 		GitRepoPath:   req.GitRepoPath,
 		GitLabRepoURL: req.GitLabRepoURL,
 		CreatedBy:     "local",
+		OwnerID:       req.OwnerID,
 		Version:       1,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO projects (id, namespace_id, name, description, git_repo_path, gitlab_repo_url, created_by, version, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.NamespaceID, p.Name, p.Description, p.GitRepoPath, p.GitLabRepoURL, p.CreatedBy, p.Version, p.CreatedAt, p.UpdatedAt,
+		`INSERT INTO projects (id, namespace_id, name, description, git_repo_path, gitlab_repo_url, created_by, owner_id, version, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.NamespaceID, p.Name, p.Description, p.GitRepoPath, p.GitLabRepoURL, p.CreatedBy, p.OwnerID, p.Version, p.CreatedAt, p.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert project: %w", err)
@@ -183,14 +184,15 @@ func (s *SQLiteStore) CreateSession(req CreateSessionRequest) (*Session, error) 
 		ProjectID:   req.ProjectID,
 		Agent:       req.Agent,
 		CreatedBy:   "local",
+		UserID:      req.UserID,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO sessions (id, namespace_id, name, project_id, agent, agent_session_id, stream_id, features, created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?, ?)`,
-		sess.ID, sess.NamespaceID, sess.Name, sess.ProjectID, sess.Agent, sess.CreatedBy, sess.CreatedAt, sess.UpdatedAt,
+		`INSERT INTO sessions (id, namespace_id, name, project_id, agent, agent_session_id, stream_id, features, created_by, user_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?, ?, ?)`,
+		sess.ID, sess.NamespaceID, sess.Name, sess.ProjectID, sess.Agent, sess.CreatedBy, sess.UserID, sess.CreatedAt, sess.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
@@ -204,7 +206,7 @@ func scanSession(row interface{ Scan(...interface{}) error }) (*Session, error) 
 	if err := row.Scan(&sess.ID, &sess.NamespaceID, &sess.Name, &sess.ProjectID, &sess.Agent,
 		&sess.AgentSessionID, &sess.StreamID, &sess.SortOrder, &sess.Features,
 		&sess.WorktreeMode, &sess.WorktreePath,
-		&sess.CreatedBy, &sess.CreatedAt, &sess.UpdatedAt, &deletedAt); err != nil {
+		&sess.CreatedBy, &sess.UserID, &sess.CreatedAt, &sess.UpdatedAt, &deletedAt); err != nil {
 		return nil, err
 	}
 	if sess.WorktreeMode == "" {
@@ -218,7 +220,7 @@ func scanSession(row interface{ Scan(...interface{}) error }) (*Session, error) 
 
 func (s *SQLiteStore) ListSessions() ([]Session, error) {
 	rows, err := s.db.Query(
-		`SELECT id, namespace_id, name, project_id, agent, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, created_at, updated_at, deleted_at
+		`SELECT id, namespace_id, name, project_id, agent, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, user_id, created_at, updated_at, deleted_at
 		 FROM sessions WHERE deleted_at IS NULL ORDER BY sort_order ASC, created_at DESC`,
 	)
 	if err != nil {
@@ -242,7 +244,7 @@ func (s *SQLiteStore) ListSessions() ([]Session, error) {
 
 func (s *SQLiteStore) ListTrashedSessions() ([]Session, error) {
 	rows, err := s.db.Query(
-		`SELECT id, namespace_id, name, project_id, agent, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, created_at, updated_at, deleted_at
+		`SELECT id, namespace_id, name, project_id, agent, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, user_id, created_at, updated_at, deleted_at
 		 FROM sessions WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`,
 	)
 	if err != nil {
@@ -266,7 +268,7 @@ func (s *SQLiteStore) ListTrashedSessions() ([]Session, error) {
 
 func (s *SQLiteStore) GetSession(id string) (*Session, error) {
 	row := s.db.QueryRow(
-		`SELECT id, namespace_id, name, project_id, agent, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, created_at, updated_at, deleted_at
+		`SELECT id, namespace_id, name, project_id, agent, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, user_id, created_at, updated_at, deleted_at
 		 FROM sessions WHERE id = ?`, id,
 	)
 	sess, err := scanSession(row)

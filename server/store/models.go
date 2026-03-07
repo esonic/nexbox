@@ -20,6 +20,7 @@ type Project struct {
 	GitLabRepoURL string              `json:"gitlab_repo_url,omitempty"`
 	OKOne         *config.OKOneConfig `json:"okone,omitempty"` // transient: injected from config.json, not stored
 	CreatedBy     string              `json:"created_by"`
+	OwnerID       string              `json:"owner_id"`
 	Version       int                 `json:"version"`
 	CreatedAt     time.Time           `json:"created_at"`
 	UpdatedAt     time.Time           `json:"updated_at"`
@@ -32,6 +33,7 @@ type CreateProjectRequest struct {
 	Description   string `json:"description"`
 	GitRepoPath   string `json:"git_repo_path"`
 	GitLabRepoURL string `json:"gitlab_repo_url"`
+	OwnerID       string `json:"owner_id,omitempty"` // set by API layer
 }
 
 type UpdateProjectRequest struct {
@@ -165,6 +167,7 @@ type Session struct {
 	WorktreeMode   string     `json:"worktree_mode"`   // "local" | "worktree"
 	WorktreePath   string     `json:"worktree_path"`   // empty until worktree is created
 	CreatedBy      string     `json:"created_by"`
+	UserID         string     `json:"user_id"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
 	DeletedAt      *time.Time `json:"deleted_at,omitempty"`
@@ -174,6 +177,7 @@ type CreateSessionRequest struct {
 	Name      string `json:"name"`
 	ProjectID string `json:"project_id"`
 	Agent     string `json:"agent"`
+	UserID    string `json:"user_id,omitempty"` // set by API layer
 }
 
 type UpdateSessionRequest struct {
@@ -493,4 +497,88 @@ type UpdateWorkflowRequest struct {
 
 type ExecuteWorkflowRequest struct {
 	Input map[string]interface{} `json:"input,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// User
+// ---------------------------------------------------------------------------
+
+// Feature flag bitmask constants for User.Features field.
+const (
+	FeatureTask     int64 = 1 << 0 // can see Task management
+	FeatureAsset    int64 = 1 << 1 // can see Asset management
+	FeatureWorkflow int64 = 1 << 2 // can see Workflow management
+	FeatureTerminal int64 = 1 << 3 // can see Terminal
+)
+
+type User struct {
+	ID           string    `json:"id"`
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"-"`
+	Email        string    `json:"email,omitempty"`
+	Role         string    `json:"role"` // "admin" | "user"
+	Features     int64     `json:"features"` // bitmask of Feature* constants
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type CreateUserRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"` // plain text, caller must hash before passing to store
+	Email    string `json:"email,omitempty"`
+	Role     string `json:"role"` // default "user"
+}
+
+// ---------------------------------------------------------------------------
+// Billing
+// ---------------------------------------------------------------------------
+
+type UserBalance struct {
+	UserID         string    `json:"user_id"`
+	BalanceTokens  int64     `json:"balance_tokens"`
+	ReservedTokens int64     `json:"reserved_tokens"`
+	TotalRecharged int64     `json:"total_recharged"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type TokenTransaction struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"user_id"`
+	SessionID string    `json:"session_id,omitempty"`
+	Delta     int64     `json:"delta"`   // positive = recharge, negative = consume
+	Reason    string    `json:"reason"`  // "recharge" | "reserve" | "settle"
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ---------------------------------------------------------------------------
+// Marketplace Plugin (local directory listing)
+// ---------------------------------------------------------------------------
+
+// MarketplacePlugin represents a plugin available in the admin-maintained
+// marketplace directory. Each plugin is stored as a JSON file named
+// <MarketplaceDir>/<plugin-id>.json.
+type MarketplacePlugin struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Type        string   `json:"type"`              // "mcp" or "skill"
+	Version     string   `json:"version"`
+	Command     string   `json:"command,omitempty"` // for mcp servers
+	Args        []string `json:"args,omitempty"`
+	EnvVars     []string `json:"env_vars,omitempty"` // required env var names
+	IconURL     string   `json:"icon_url,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Installed Plugin (Marketplace)
+// ---------------------------------------------------------------------------
+
+// InstalledPlugin represents a plugin installed by a user from the local
+// marketplace directory.
+type InstalledPlugin struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"user_id"`
+	PluginID  string    `json:"plugin_id"`
+	Config    string    `json:"config"` // JSON: env var values filled in by user
+	CreatedAt time.Time `json:"created_at"`
 }

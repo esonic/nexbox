@@ -37,3 +37,4 @@ server/.cursor/mcp.json
 server/plugins/plugins.json
 server/config.json
 server/chrome/
+temp

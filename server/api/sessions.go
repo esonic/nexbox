@@ -19,6 +19,18 @@ func (s *Server) ListSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = []Session{}
 	}
 
+	// Filter by owner unless admin
+	if GetUserRole(r) != "admin" {
+		userID := GetUserID(r)
+		filtered := sessions[:0]
+		for _, sess := range sessions {
+			if sess.UserID == userID {
+				filtered = append(filtered, sess)
+			}
+		}
+		sessions = filtered
+	}
+
 	allActiveIDs := s.Hub.ActiveSessionIDs()
 	sessionIDSet := make(map[string]bool, len(sessions))
 	for _, sess := range sessions {
@@ -44,6 +56,9 @@ func (s *Server) CreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+
+	// Set owner from authenticated user
+	req.UserID = GetUserID(r)
 
 	// If no agent specified, use the persisted default from settings
 	if req.Agent == "" {
@@ -75,6 +90,10 @@ func (s *Server) GetSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	if GetUserRole(r) != "admin" && sess.UserID != GetUserID(r) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
 	// Fill in default agent if empty
 	if sess.Agent == "" {
 		sess.Agent = s.AgentName
@@ -89,6 +108,21 @@ func (s *Server) UpdateSession(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
+	}
+	// Ownership check
+	if GetUserRole(r) != "admin" {
+		existing, err := s.Store.GetSession(id)
+		if writeStoreError(w, err, "UpdateSession/GetSession", "failed to get session") {
+			return
+		}
+		if existing == nil {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if existing.UserID != GetUserID(r) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
 	}
 	sess, err := s.Store.UpdateSession(id, req)
 	if writeStoreError(w, err, "UpdateSession", "failed to update session") {
@@ -122,6 +156,21 @@ func (s *Server) ReorderSessions(w http.ResponseWriter, r *http.Request) {
 // DeleteSession soft-deletes a session (moves to trash).
 func (s *Server) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "sessionId")
+	// Ownership check
+	if GetUserRole(r) != "admin" {
+		existing, err := s.Store.GetSession(id)
+		if writeStoreError(w, err, "DeleteSession/GetSession", "failed to get session") {
+			return
+		}
+		if existing == nil {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if existing.UserID != GetUserID(r) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
+	}
 	if err := s.Store.DeleteSession(id); err != nil {
 		log.Printf("[sessions] Failed to trash session %s: %v", id, err)
 		writeError(w, http.StatusInternalServerError, "failed to delete session")
@@ -140,6 +189,17 @@ func (s *Server) ListTrashedSessions(w http.ResponseWriter, r *http.Request) {
 	if sessions == nil {
 		sessions = []Session{}
 	}
+	// Filter by owner unless admin
+	if GetUserRole(r) != "admin" {
+		userID := GetUserID(r)
+		filtered := sessions[:0]
+		for _, sess := range sessions {
+			if sess.UserID == userID {
+				filtered = append(filtered, sess)
+			}
+		}
+		sessions = filtered
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"sessions": sessions,
 	})
@@ -148,6 +208,21 @@ func (s *Server) ListTrashedSessions(w http.ResponseWriter, r *http.Request) {
 // RestoreSession restores a session from the trash.
 func (s *Server) RestoreSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "sessionId")
+	// Ownership check
+	if GetUserRole(r) != "admin" {
+		existing, err := s.Store.GetSession(id)
+		if writeStoreError(w, err, "RestoreSession/GetSession", "failed to get session") {
+			return
+		}
+		if existing == nil {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if existing.UserID != GetUserID(r) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
+	}
 	if err := s.Store.RestoreSession(id); err != nil {
 		log.Printf("[sessions] Failed to restore session %s: %v", id, err)
 		writeError(w, http.StatusInternalServerError, "failed to restore session")

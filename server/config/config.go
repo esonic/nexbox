@@ -30,6 +30,29 @@ type Config struct {
 	GitLabToken  string           `json:"gitlab_token,omitempty"`
 	DisableCloud bool             `json:"disable_cloud"`
 	Projects     []ProjectMapping `json:"projects,omitempty"`
+
+	// Cloud server settings (used when running as a multi-tenant cloud service)
+	StoreType   string `json:"store_type,omitempty"`   // "sqlite" (default) | "mysql"
+	MySQLDSN    string `json:"mysql_dsn,omitempty"`    // e.g. "user:pass@tcp(host:3306)/dbname?parseTime=true"
+
+	JWTSecret  string `json:"jwt_secret,omitempty"`  // required for cloud mode
+	JWTExpDays int    `json:"jwt_exp_days,omitempty"` // token expiry in days, default 7
+
+	MarketplaceDir string `json:"marketplace_dir,omitempty"` // default "/marketplace"
+
+	AnthropicKey string `json:"anthropic_key,omitempty"` // platform-level Anthropic API key
+
+	// Per-user limits
+	DiskQuotaBytes     int64 `json:"disk_quota_bytes,omitempty"`     // default 10GB
+	MaxConcurrentTasks int   `json:"max_concurrent_tasks,omitempty"` // default 3
+	MaxSessionsPerUser int   `json:"max_sessions_per_user,omitempty"` // default 20
+
+	// Billing
+	TokenPricePerMillion float64 `json:"token_price_per_million,omitempty"` // currency per 1M tokens
+
+	// Docker container isolation
+	DockerEnabled bool   `json:"docker_enabled,omitempty"` // enable per-project Docker isolation
+	DockerImage   string `json:"docker_image,omitempty"`   // container image (default: "nexbox-agent:latest")
 }
 
 // ProjectMapping links a remote project to a local Git repository path,

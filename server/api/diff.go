@@ -56,6 +56,10 @@ func (s *Server) GetProjectDiff(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
+	if GetUserRole(r) != "admin" && project.OwnerID != GetUserID(r) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
 
 	workDir := s.resolveDiffWorkDir(r, projectID)
 	if workDir == "" {
@@ -105,6 +109,10 @@ func (s *Server) GetProjectDiffStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
+	if GetUserRole(r) != "admin" && project.OwnerID != GetUserID(r) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
 
 	workDir := s.resolveDiffWorkDir(r, projectID)
 	if workDir == "" || !isGitRepo(workDir) {
@@ -144,6 +152,10 @@ func (s *Server) GetProjectFileDiff(w http.ResponseWriter, r *http.Request) {
 	project, err := s.getProjectWithLocalPath(projectID)
 	if err != nil || project == nil {
 		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if GetUserRole(r) != "admin" && project.OwnerID != GetUserID(r) {
+		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
 

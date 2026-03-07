@@ -25,6 +25,8 @@ type Store interface {
 	ReviewCommentStore
 	ChangeStore
 	WorkflowStore
+	UserStore
+	BalanceStore
 }
 
 type ProjectStore interface {
@@ -156,4 +158,35 @@ type WorkflowStore interface {
 	// given execution to the provided terminal status. Used as a safety net when
 	// finishExecution is called to prevent nodes being stuck in "running" forever.
 	FailStaleNodeLogs(executionID, status string) error
+}
+
+type UserStore interface {
+	CreateUser(req CreateUserRequest) (*User, error)
+	GetUser(id string) (*User, error)
+	GetUserByUsername(username string) (*User, error)
+	ListUsers(limit, offset int) ([]User, error)
+	UpdateUserFeatures(id string, features int64) error
+	UpdateUserPassword(id string, passwordHash string) error
+}
+
+type BalanceStore interface {
+	GetBalance(userID string) (*UserBalance, error)
+	// RechargeBalance adds tokens to the user's balance (admin operation).
+	RechargeBalance(userID string, tokens int64, adminID string) error
+	// ReserveTokens atomically moves `estimated` tokens from balance to reserved.
+	// Returns error if balance is insufficient.
+	ReserveTokens(userID string, estimated int64) error
+	// SettleTokens finalizes a task: releases the reservation and charges actual usage.
+	// If actual > estimated, additional tokens are deducted from balance.
+	// If actual < estimated, the difference is returned to balance.
+	SettleTokens(userID string, sessionID string, estimated, actual int64) error
+	ListTransactions(userID string, limit, offset int) ([]TokenTransaction, error)
+}
+
+// MarketplaceStore manages user-installed plugins from the local marketplace directory.
+type MarketplaceStore interface {
+	ListInstalledPlugins(userID string) ([]InstalledPlugin, error)
+	InstallPlugin(userID, pluginID, config string) (*InstalledPlugin, error)
+	UninstallPlugin(userID, pluginID string) error
+	GetInstalledPlugin(userID, pluginID string) (*InstalledPlugin, error)
 }

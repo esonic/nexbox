@@ -15,9 +15,11 @@ import (
 
 // ClaudeClient wraps the Claude CLI for programmatic use
 type ClaudeClient struct {
-	CLIPath string            // Path to claude CLI (default: "claude")
-	Env     map[string]string // Additional environment variables
-	Verbose bool              // Enable verbose logging
+	CLIPath      string            // Path to claude CLI (default: "claude")
+	Env          map[string]string // Additional environment variables
+	Verbose      bool              // Enable verbose logging
+	ContainerMgr *ContainerManager // Optional: run inside Docker container
+	ContainerID  string            // Container name/ID (set when ContainerMgr is active)
 }
 
 // NewClaudeClient creates a new Claude CLI client
@@ -111,17 +113,39 @@ func (c *ClaudeClient) Query(
 		log.Printf("[claude] Prompt: %s", prompt)
 	}
 
-	// Use exec.Command (not CommandContext) so we can control process group killing ourselves
-	cmd := exec.Command(c.CLIPath, args...)
-	cmd.Dir = opts.WorkDir
+	// Build the command — either directly on the host or inside a Docker container.
+	var cmd *exec.Cmd
+	if c.ContainerMgr != nil && c.ContainerID != "" {
+		// Collect env overrides as KEY=VALUE strings for docker exec -e flags.
+		var envSlice []string
+		for k, v := range c.Env {
+			envSlice = append(envSlice, k+"="+v)
+		}
+		// Pass the work directory as the in-container working dir.
+		// When using a container the host WorkDir is mounted as /workspace;
+		// we use the container's default /workspace (set at run time).
+		containerWorkDir := ""
+		if opts.WorkDir != "" {
+			containerWorkDir = "/workspace"
+		}
+		cliCmd := append([]string{c.CLIPath}, args...)
+		cmd = c.ContainerMgr.ExecInContainer(c.ContainerID, cliCmd, envSlice, containerWorkDir)
+		// Use exec.Command (not CommandContext) so we can control process group killing ourselves
+	} else {
+		// Use exec.Command (not CommandContext) so we can control process group killing ourselves
+		cmd = exec.Command(c.CLIPath, args...)
+		cmd.Dir = opts.WorkDir
+	}
 
 	// Create a new process group so we can kill all child processes
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	// Set environment
-	cmd.Env = os.Environ()
-	for k, v := range c.Env {
-		cmd.Env = append(cmd.Env, k+"="+v)
+	// Set environment (host-only path; container env is passed via -e flags above)
+	if c.ContainerMgr == nil || c.ContainerID == "" {
+		cmd.Env = os.Environ()
+		for k, v := range c.Env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
 	}
 
 	stdin, err := cmd.StdinPipe()

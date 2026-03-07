@@ -37,6 +37,7 @@ type Server struct {
 	Version          string                    // build-time version string
 	ChromeManager    *chromemcp.ChromeManager   // Per-session Chrome DevTools MCP manager for E2E testing
 	MarketplaceStats *MarketplaceStatsBuffer    // In-memory stats accumulator; flushed by pollChanges
+	ContainerMgr     *agent.ContainerManager    // Optional: Docker container isolation per project
 
 	// OnCloudActivated is called by ActivateCloud to start cloud-mode goroutines
 	// (e.g. pollChanges). Set by main during startup.
@@ -83,174 +84,174 @@ func NewRouter(s *Server) *chi.Mux {
 	r.Use(middleware.RequestID)
 
 	r.Route("/api", func(r chi.Router) {
-		// Sessions
-		r.Route("/sessions", func(r chi.Router) {
-			r.Get("/", s.ListSessions)
-			r.Post("/", s.CreateSession)
-			r.Put("/reorder", s.ReorderSessions)
-			r.Get("/trash", s.ListTrashedSessions)
-			r.Route("/{sessionId}", func(r chi.Router) {
-				r.Get("/", s.GetSession)
-				r.Put("/", s.UpdateSession)
-				r.Delete("/", s.DeleteSession)
-				r.Post("/restore", s.RestoreSession)
-				r.Get("/messages", s.ListSessionMessages)
-				r.Post("/upload-image", s.UploadImage)
-				r.Get("/image/{filename}", s.ServeImage)
+		// ── Public routes (no auth required) ──
+		r.Post("/auth/register", s.HandleRegister)
+		r.Post("/auth/login", s.HandleLogin)
 
-				// Worktree
-				r.Put("/worktree-mode", s.SetWorktreeMode)
-				r.Get("/worktree-status", s.GetWorktreeStatus)
+		// ── All routes requiring authentication ──
+		r.Group(func(r chi.Router) {
+			r.Use(s.AuthMiddleware)
 
-				// Message queue
-				r.Get("/queue", s.ListQueuedMessages)
-				r.Post("/queue", s.CreateQueuedMessage)
-				r.Put("/queue/{queueId}", s.UpdateQueuedMessage)
-				r.Delete("/queue/{queueId}", s.DeleteQueuedMessage)
-				r.Post("/queue/{queueId}/run", s.HandleRunQueuedMessage)
+			// Auth
+			r.Get("/auth/me", s.HandleMe)
+			r.Post("/auth/logout", s.HandleAuthLogout)
+
+			// Balance
+			r.Get("/balance", s.HandleGetBalance)
+
+			// Admin only
+			r.Group(func(r chi.Router) {
+				r.Use(AdminMiddleware)
+				r.Get("/admin/users", s.HandleAdminListUsers)
+				r.Patch("/admin/users/{userID}/features", s.HandleAdminUpdateUserFeatures)
+				r.Post("/admin/recharge", s.HandleAdminRecharge)
 			})
-		})
 
-		// Projects
-		r.Route("/projects", func(r chi.Router) {
-			r.Get("/", s.ListProjects)
-			r.Post("/", s.CreateProject)
-			r.Get("/lookup-by-dir", s.LookupProjectByDir)
-			r.Get("/by-git-dir", s.CheckProjectByGitDir)
-			r.Route("/{projectId}", func(r chi.Router) {
-				r.Get("/", s.GetProject)
-				r.Put("/", s.UpdateProject)
-				r.Delete("/", s.DeleteProject)
+			// Sessions
+			r.Route("/sessions", func(r chi.Router) {
+				r.Get("/", s.ListSessions)
+				r.Post("/", s.CreateSession)
+				r.Put("/reorder", s.ReorderSessions)
+				r.Get("/trash", s.ListTrashedSessions)
+				r.Route("/{sessionId}", func(r chi.Router) {
+					r.Get("/", s.GetSession)
+					r.Put("/", s.UpdateSession)
+					r.Delete("/", s.DeleteSession)
+					r.Post("/restore", s.RestoreSession)
+					r.Get("/messages", s.ListSessionMessages)
+					r.Post("/upload-image", s.UploadImage)
+					r.Get("/image/{filename}", s.ServeImage)
 
-				// Git operations (project-level)
-				r.Get("/git-status", s.GetGitStatus)
-				r.Post("/git-commit", s.GitCommit)
-				r.Post("/git-discard", s.GitDiscard)
-				r.Get("/git-log", s.GitLog)
-				r.Get("/git-commit-files", s.GitCommitFiles)
-				r.Get("/git-commit-diff", s.GitCommitDiff)
-				r.Post("/generate-commit-message", s.GenerateCommitMessage)
-				r.Get("/git-branches", s.GetGitBranches)
-				r.Post("/git-checkout", s.GitCheckout)
-				r.Post("/git-stage", s.GitStage)
-				r.Post("/git-unstage", s.GitUnstage)
-				r.Post("/git-push", s.GitPush)
-				r.Post("/git-pull", s.GitPull)
-				r.Get("/diff", s.GetProjectDiff)
-				r.Get("/diff-stats", s.GetProjectDiffStats)
-				r.Get("/file-diff", s.GetProjectFileDiff)
+					// Worktree
+					r.Put("/worktree-mode", s.SetWorktreeMode)
+					r.Get("/worktree-status", s.GetWorktreeStatus)
 
-				// File browser
-				r.Get("/files", s.ListProjectFiles)
-				r.Get("/file-content", s.ReadProjectFile)
-				r.Get("/file-search", s.SearchProjectFiles)
-
-				// GitLab
-				r.Post("/create-mr", s.CreateMR)
-
-				// Members
-				r.Get("/members", s.ListProjectMembers)
-				r.Post("/members", s.AddProjectMember)
-				r.Delete("/members/me", s.LeaveProject)
-				r.Delete("/members/{userName}", s.RemoveProjectMember)
-
-				// Labels (project-scoped)
-				r.Get("/labels", s.ListLabels)
-				r.Post("/labels", s.CreateLabel)
-				r.Delete("/labels/{labelId}", s.DeleteLabel)
-			})
-		})
-
-		// Tasks
-		r.Route("/tasks", func(r chi.Router) {
-			r.Get("/", s.ListTasks)
-			r.Post("/", s.CreateTask)
-			r.Route("/{taskId}", func(r chi.Router) {
-				r.Get("/", s.GetTask)
-				r.Put("/", s.UpdateTask)
-				r.Delete("/", s.DeleteTask)
-				r.Post("/ref-count", s.IncrementTaskRefCount)
-				r.Route("/assets", func(r chi.Router) {
-					r.Get("/", s.ListTaskAssets)
-					r.Post("/", s.LinkTaskAsset)
-					r.Delete("/{assetId}", s.UnlinkTaskAsset)
+					// Message queue
+					r.Get("/queue", s.ListQueuedMessages)
+					r.Post("/queue", s.CreateQueuedMessage)
+					r.Put("/queue/{queueId}", s.UpdateQueuedMessage)
+					r.Delete("/queue/{queueId}", s.DeleteQueuedMessage)
+					r.Post("/queue/{queueId}/run", s.HandleRunQueuedMessage)
 				})
+			})
+
+			// Projects
+			r.Route("/projects", func(r chi.Router) {
+				r.Get("/", s.ListProjects)
+				r.Post("/", s.CreateProject)
+				r.Get("/lookup-by-dir", s.LookupProjectByDir)
+				r.Get("/by-git-dir", s.CheckProjectByGitDir)
+				r.Route("/{projectId}", func(r chi.Router) {
+					r.Get("/", s.GetProject)
+					r.Put("/", s.UpdateProject)
+					r.Delete("/", s.DeleteProject)
+
+					// Git operations (project-level)
+					r.Get("/git-status", s.GetGitStatus)
+					r.Post("/git-commit", s.GitCommit)
+					r.Post("/git-discard", s.GitDiscard)
+					r.Get("/git-log", s.GitLog)
+					r.Get("/git-commit-files", s.GitCommitFiles)
+					r.Get("/git-commit-diff", s.GitCommitDiff)
+					r.Post("/generate-commit-message", s.GenerateCommitMessage)
+					r.Get("/git-branches", s.GetGitBranches)
+					r.Post("/git-checkout", s.GitCheckout)
+					r.Post("/git-stage", s.GitStage)
+					r.Post("/git-unstage", s.GitUnstage)
+					r.Post("/git-push", s.GitPush)
+					r.Post("/git-pull", s.GitPull)
+					r.Get("/diff", s.GetProjectDiff)
+					r.Get("/diff-stats", s.GetProjectDiffStats)
+					r.Get("/file-diff", s.GetProjectFileDiff)
+
+					// File browser
+					r.Get("/files", s.ListProjectFiles)
+					r.Get("/file-content", s.ReadProjectFile)
+					r.Get("/file-search", s.SearchProjectFiles)
+
+					// Labels (project-scoped)
+					r.Get("/labels", s.ListLabels)
+					r.Post("/labels", s.CreateLabel)
+					r.Delete("/labels/{labelId}", s.DeleteLabel)
+
+					// Assets under project
+					r.Route("/assets", func(r chi.Router) {
+						r.Get("/", s.ListAssets)
+						r.Post("/", s.CreateAsset)
+					})
+				})
+			})
+
+			// Tasks
+			r.Route("/tasks", func(r chi.Router) {
+				r.Get("/", s.ListTasks)
+				r.Post("/", s.CreateTask)
+				r.Route("/{taskId}", func(r chi.Router) {
+					r.Get("/", s.GetTask)
+					r.Put("/", s.UpdateTask)
+					r.Delete("/", s.DeleteTask)
+					r.Post("/ref-count", s.IncrementTaskRefCount)
+					r.Route("/assets", func(r chi.Router) {
+						r.Get("/", s.ListTaskAssets)
+						r.Post("/", s.LinkTaskAsset)
+						r.Delete("/{assetId}", s.UnlinkTaskAsset)
+					})
+					r.Route("/comments", func(r chi.Router) {
+						r.Get("/", s.ListTaskComments)
+						r.Post("/", s.CreateTaskComment)
+					})
+					r.Route("/labels", func(r chi.Router) {
+						r.Post("/", s.AddLabelToTask)
+						r.Delete("/{labelName}", s.RemoveLabelFromTask)
+					})
+				})
+			})
+			r.Put("/task-comments/{commentId}", s.UpdateTaskComment)
+			r.Delete("/task-comments/{commentId}", s.DeleteTaskComment)
+
+			// Reactions (generic: task, task_comment)
+			r.Route("/reactions/{targetType}/{targetId}", func(r chi.Router) {
+				r.Get("/", s.GetReactions)
+				r.Post("/", s.AddReaction)
+				r.Delete("/", s.RemoveReaction)
+			})
+
+			// Assets direct access by ID
+			r.Route("/assets/{assetId}", func(r chi.Router) {
+				r.Get("/", s.GetAsset)
+				r.Put("/", s.UpdateAsset)
+				r.Delete("/", s.DeleteAsset)
+				r.Get("/versions", s.ListAssetVersions)
+				r.Get("/diff", s.DiffAssetVersions)
 				r.Route("/comments", func(r chi.Router) {
-					r.Get("/", s.ListTaskComments)
-					r.Post("/", s.CreateTaskComment)
-				})
-				r.Route("/labels", func(r chi.Router) {
-					r.Post("/", s.AddLabelToTask)
-					r.Delete("/{labelName}", s.RemoveLabelFromTask)
+					r.Get("/", s.ListReviewComments)
+					r.Post("/", s.CreateReviewComment)
 				})
 			})
+			r.Put("/comments/{commentId}", s.UpdateReviewComment)
+			r.Delete("/comments/{commentId}", s.DeleteReviewComment)
+
+			// Message part details (lazy loading)
+			r.Get("/messages/{messageId}/details", s.GetMessageDetails)
+
+			// Changes (audit trail)
+			r.Get("/changes", s.ListChanges)
+
+			// Utility
+			r.Post("/validate-path", s.ValidatePath)
+			r.Get("/browse-dir", s.BrowseDir)
+			r.Get("/info", s.GetServerInfo)
+			r.Get("/available-agents", s.ListAvailableAgents)
+			r.Put("/default-agent", s.SetDefaultAgent)
+			r.Get("/settings", s.GetSettings)
+			r.Put("/settings", s.UpdateSettings)
+
+			// Workflows
+			s.RegisterWorkflowRoutes(r)
+
+			// Marketplace (MCP & Skill registry)
+			s.RegisterMarketplaceRoutes(r)
 		})
-		r.Put("/task-comments/{commentId}", s.UpdateTaskComment)
-		r.Delete("/task-comments/{commentId}", s.DeleteTaskComment)
-
-		// Reactions (generic: task, task_comment)
-		r.Route("/reactions/{targetType}/{targetId}", func(r chi.Router) {
-			r.Get("/", s.GetReactions)
-			r.Post("/", s.AddReaction)
-			r.Delete("/", s.RemoveReaction)
-		})
-
-		// Assets under project + direct access by ID
-		r.Route("/projects/{projectId}/assets", func(r chi.Router) {
-			r.Get("/", s.ListAssets)
-			r.Post("/", s.CreateAsset)
-		})
-		r.Route("/assets/{assetId}", func(r chi.Router) {
-			r.Get("/", s.GetAsset)
-			r.Put("/", s.UpdateAsset)
-			r.Delete("/", s.DeleteAsset)
-			r.Get("/versions", s.ListAssetVersions)
-			r.Get("/diff", s.DiffAssetVersions)
-			r.Route("/comments", func(r chi.Router) {
-				r.Get("/", s.ListReviewComments)
-				r.Post("/", s.CreateReviewComment)
-			})
-		})
-		r.Put("/comments/{commentId}", s.UpdateReviewComment)
-		r.Delete("/comments/{commentId}", s.DeleteReviewComment)
-
-
-
-		// Message part details (lazy loading)
-		r.Get("/messages/{messageId}/details", s.GetMessageDetails)
-
-		// Changes (audit trail)
-		r.Get("/changes", s.ListChanges)
-
-		// Members search (namespace-level fuzzy search)
-		r.Get("/members", s.SearchMembers)
-
-		// Utility
-		r.Post("/validate-path", s.ValidatePath)
-		r.Get("/browse-dir", s.BrowseDir)
-		r.Get("/info", s.GetServerInfo)
-		r.Get("/available-agents", s.ListAvailableAgents)
-		r.Put("/default-agent", s.SetDefaultAgent)
-		r.Get("/settings", s.GetSettings)
-		r.Put("/settings", s.UpdateSettings)
-
-		// Self-update
-		r.Get("/update/status", s.GetUpdateStatus)
-		r.Post("/update/restart", s.TriggerRestart)
-
-		// Auth (cloud login/logout)
-		r.Get("/auth/login-url", s.GetAuthLoginURL)
-		r.Get("/auth/callback", s.HandleAuthCallback)
-		r.Post("/auth/logout", s.HandleAuthLogout)
-
-		// Workflows
-		s.RegisterWorkflowRoutes(r)
-
-		// RALPH (parallel task pool)
-		s.RegisterRalphRoutes(r)
-
-		// Marketplace (MCP & Skill registry)
-		s.RegisterMarketplaceRoutes(r)
 	})
 
 	// pprof – goroutine dumps, heap profiles, etc. for debugging hangs.

@@ -334,6 +334,47 @@ func (db *DB) migrate() error {
 			installed_at INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (name, project_id)
 		)`,
+
+		// Users
+		`CREATE TABLE IF NOT EXISTS users (
+			id          TEXT PRIMARY KEY,
+			username    TEXT NOT NULL UNIQUE,
+			password_hash TEXT NOT NULL,
+			email       TEXT NOT NULL DEFAULT '',
+			role        TEXT NOT NULL DEFAULT 'user',
+			features    INTEGER NOT NULL DEFAULT 0,
+			created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		// User balances (one row per user)
+		`CREATE TABLE IF NOT EXISTS user_balances (
+			user_id         TEXT PRIMARY KEY,
+			balance_tokens  INTEGER NOT NULL DEFAULT 0,
+			reserved_tokens INTEGER NOT NULL DEFAULT 0,
+			total_recharged INTEGER NOT NULL DEFAULT 0,
+			updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		// Token transaction log
+		`CREATE TABLE IF NOT EXISTS token_transactions (
+			id         TEXT PRIMARY KEY,
+			user_id    TEXT NOT NULL,
+			session_id TEXT NOT NULL DEFAULT '',
+			delta      INTEGER NOT NULL,
+			reason     TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_token_tx_user ON token_transactions(user_id, created_at DESC)`,
+
+		// Marketplace: locally installed plugins
+		`CREATE TABLE IF NOT EXISTS installed_plugins (
+			name         TEXT NOT NULL,
+			project_id   TEXT NOT NULL DEFAULT '',
+			install_path TEXT NOT NULL DEFAULT '',
+			installed_at INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (name, project_id)
+		)`,
 	}
 
 	for _, m := range migrations {
@@ -345,6 +386,23 @@ func (db *DB) migrate() error {
 	// Additive column migrations (idempotent: skip if column already exists).
 	type colMigration struct{ check, alter string }
 	colMigrations := []colMigration{
+		// installed_plugins: new user-centric columns (Phase 6 marketplace)
+		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('installed_plugins') WHERE name='id'`,
+			alter: `ALTER TABLE installed_plugins ADD COLUMN id TEXT NOT NULL DEFAULT ''`,
+		},
+		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('installed_plugins') WHERE name='user_id'`,
+			alter: `ALTER TABLE installed_plugins ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`,
+		},
+		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('installed_plugins') WHERE name='plugin_id'`,
+			alter: `ALTER TABLE installed_plugins ADD COLUMN plugin_id TEXT NOT NULL DEFAULT ''`,
+		},
+		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('installed_plugins') WHERE name='config'`,
+			alter: `ALTER TABLE installed_plugins ADD COLUMN config TEXT NOT NULL DEFAULT '{}'`,
+		},
 		{
 			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='worktree_mode'`,
 			alter: `ALTER TABLE sessions ADD COLUMN worktree_mode TEXT NOT NULL DEFAULT 'local'`,
@@ -352,6 +410,16 @@ func (db *DB) migrate() error {
 		{
 			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='worktree_path'`,
 			alter: `ALTER TABLE sessions ADD COLUMN worktree_path TEXT NOT NULL DEFAULT ''`,
+		},
+		// owner_id on projects (for multi-user isolation)
+		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='owner_id'`,
+			alter: `ALTER TABLE projects ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''`,
+		},
+		// user_id on sessions (for multi-user isolation)
+		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='user_id'`,
+			alter: `ALTER TABLE sessions ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`,
 		},
 	}
 	for _, cm := range colMigrations {

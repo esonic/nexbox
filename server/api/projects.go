@@ -35,6 +35,18 @@ func (s *Server) ListProjects(w http.ResponseWriter, r *http.Request) {
 		projects = []Project{}
 	}
 
+	// Filter by owner unless admin
+	if GetUserRole(r) != "admin" {
+		userID := GetUserID(r)
+		filtered := projects[:0]
+		for _, p := range projects {
+			if p.OwnerID == userID {
+				filtered = append(filtered, p)
+			}
+		}
+		projects = filtered
+	}
+
 	// Patch local git paths from config (cloud mode only)
 	if s.StoreMode == "remote" {
 		pathMap := make(map[string]string)
@@ -70,6 +82,9 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// Set owner from authenticated user
+	req.OwnerID = GetUserID(r)
 
 	localPath := req.GitRepoPath
 	req.GitRepoPath = "" // local path is never sent to the remote
@@ -132,6 +147,10 @@ func (s *Server) GetProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
+	if GetUserRole(r) != "admin" && project.OwnerID != GetUserID(r) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
 
 	s.injectProjectOKOne(project)
 	writeJSON(w, http.StatusOK, project)
@@ -192,9 +211,30 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "project not found")
 			return
 		}
+		if GetUserRole(r) != "admin" && project.OwnerID != GetUserID(r) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
 		s.injectProjectOKOne(project)
 		writeJSON(w, http.StatusOK, project)
 		return
+	}
+
+	// Ownership check before update
+	if GetUserRole(r) != "admin" {
+		existing, err := s.Store.GetProject(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if existing == nil {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		if existing.OwnerID != GetUserID(r) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
 	}
 
 	project, err := s.Store.UpdateProject(id, req)
@@ -228,6 +268,23 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request) {
 func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "projectId")
 
+	// Ownership check before delete
+	if GetUserRole(r) != "admin" {
+		existing, err := s.Store.GetProject(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if existing == nil {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		if existing.OwnerID != GetUserID(r) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
+	}
+
 	// Always remove local git path mapping when present
 	_ = s.Config.Update(func(cfg *config.Config) {
 		filtered := cfg.Projects[:0]
@@ -250,6 +307,13 @@ func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Stop the per-project Docker container if Docker isolation is enabled.
+	if s.ContainerMgr != nil {
+		if err := s.ContainerMgr.StopContainer(id); err != nil {
+			log.Printf("[projects] failed to stop container for project %s: %v", id, err)
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)

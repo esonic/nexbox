@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -13,7 +12,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -23,9 +21,7 @@ import (
 	"gitlab.okg.com/sre_ai/nexbox/config"
 	nexmcp "gitlab.okg.com/sre_ai/nexbox/mcp"
 	chromemcp "gitlab.okg.com/sre_ai/nexbox/mcp/chrome"
-	"gitlab.okg.com/sre_ai/nexbox/plugins/okone"
 	"gitlab.okg.com/sre_ai/nexbox/store"
-	"gitlab.okg.com/sre_ai/nexbox/updater"
 )
 
 // Version is injected at build time via -ldflags "-X main.Version=<timestamp>".
@@ -147,41 +143,39 @@ func main() {
 	// Reset any stale workflow executions left over from a previous run
 	// (done after store init below — see resetStaleExecutions call)
 
-	// Always create local SQLite DB (used for detail cache in both modes)
-	db, err := store.New(*dataDir)
-	if err != nil {
-		startupLog.Fatalf("Failed to initialize database: %v", err)
-	}
-	defer db.Close()
-	detailCache := store.NewDetailCache(db.DB)
-
-	// Initialize the Store: use remote if token is configured, otherwise SQLite.
-	// In remote (cloud) mode, sessions and messages are kept local for privacy;
-	// only projects/tasks/assets/etc. go to the remote server.
-	var dataStore store.Store
-	var remoteStore *store.RemoteStore
+	// Initialize store based on config.
 	cfg := cfgMgr.Get()
-	storeMode := "sqlite"
-	localStore := store.NewSQLiteStore(db.DB)
+	var dataStore store.Store
+	var localStore *store.SQLiteStore
+	var detailCache *store.DetailCache
 
-	if cfg.DisableCloud {
-		dataStore = localStore
-		startupLog.Printf("  Store: sqlite (cloud disabled via config)")
-	} else if cfg.ServerURL == "" {
-		startupLog.Fatalf("server_url is required when disable_cloud is false.\nSet server_url in config or set disable_cloud=true to use local mode.")
-	} else if cfg.Token != "" {
-		storeMode = "remote"
-		remoteStore = store.NewRemoteStore(cfg.ServerURL, cfg.Token)
-		if err := remoteStore.Ping(); err != nil {
-			startupLog.Fatalf("Failed to connect to cloud store (%s): %v\nSet disable_cloud=true in config to use local mode.", cfg.ServerURL, err)
+	if cfg.StoreType == "mysql" && cfg.MySQLDSN != "" {
+		mysqlStore, err := store.NewMySQLStore(cfg.MySQLDSN)
+		if err != nil {
+			startupLog.Fatalf("Failed to connect to MySQL: %v", err)
 		}
-		dataStore = store.NewCompositeStore(remoteStore, localStore)
-		log.Printf("  Store: remote (%s)", cfg.ServerURL)
+		defer mysqlStore.Close()
+		dataStore = mysqlStore
+		startupLog.Printf("  Store: mysql")
+
+		// SQLite still needed for DetailCache (local message part caching).
+		db, err := store.New(*dataDir)
+		if err != nil {
+			startupLog.Fatalf("Failed to initialize local SQLite (for cache): %v", err)
+		}
+		defer db.Close()
+		detailCache = store.NewDetailCache(db.DB)
+		localStore = store.NewSQLiteStore(db.DB)
 	} else {
-		// No token yet — frontend will show login UI; sessions/messages go local,
-		// project/task/asset ops are unreachable until ActivateCloud() is called after login.
-		dataStore = store.NewCompositeStore(localStore, localStore)
-		log.Printf("  Store: composite/local (not logged in, awaiting login)")
+		db, err := store.New(*dataDir)
+		if err != nil {
+			startupLog.Fatalf("Failed to initialize database: %v", err)
+		}
+		defer db.Close()
+		detailCache = store.NewDetailCache(db.DB)
+		localStore = store.NewSQLiteStore(db.DB)
+		dataStore = localStore
+		startupLog.Printf("  Store: sqlite")
 	}
 
 	// Start MCP server for AI asset tools (auto-assign port with :0)
@@ -243,16 +237,6 @@ func main() {
 
 	// SessionOrchestrator is set after api.Server creation (see below)
 
-	// Start self-updater; notifies clients via WebSocket when a new binary is ready.
-	upd := updater.New(Version, *dataDir, func(remoteVersion string) {
-		data, _ := json.Marshal(map[string]interface{}{
-			"type":    "update:available",
-			"version": remoteVersion,
-		})
-		hub.BroadcastRaw(data)
-	})
-	upd.Start()
-	defer upd.Stop()
 	startupLog.Printf("  Version: %s", Version)
 
 	// Create API server
@@ -266,15 +250,24 @@ func main() {
 		SessionManager:   sessionManager,
 		MCPServerURL:     mcpServer.URL(),
 		Hub:              hub,
-		StoreMode:        storeMode,
 		TerminalMgr:      termMgr,
 		DetailCache:      detailCache,
-		Cloud:            remoteStore,
 		DataDir:          *dataDir,
-		Updater:          upd,
 		Version:          Version,
 		ChromeManager:    chromeManager,
 		MarketplaceStats: api.NewMarketplaceStatsBuffer(),
+	}
+
+	// Wire up Docker container isolation if enabled.
+	if cfg.DockerEnabled {
+		dockerImage := cfg.DockerImage
+		if dockerImage == "" {
+			dockerImage = "nexbox-agent:latest"
+		}
+		containerMgr := agent.NewContainerManager(cfg.DockerImage)
+		srv.ContainerMgr = containerMgr
+		ca.ContainerMgr = containerMgr
+		log.Printf("  Docker isolation enabled (image: %s)", dockerImage)
 	}
 
 	// Wire up SessionOrchestrator so MCP execute_workflow can create sessions
@@ -384,16 +377,6 @@ func main() {
 	// Create router with all API routes
 	router := api.NewRouter(srv)
 
-	// OKOne change order routes
-	// Use srv.Cloud so the username stays correct after a mid-session login.
-	getUserName := func() string {
-		if srv.Cloud != nil {
-			return srv.Cloud.Info.UserName
-		}
-		return ""
-	}
-	router.Mount("/api/okone", okone.NewRouter(func() store.Store { return srv.Store }, cfgMgr, getUserName))
-
 	// Serve embedded frontend static files as fallback (SPA support)
 	if hasEmbeddedWeb() {
 		log.Printf("  Serving embedded frontend")
@@ -431,59 +414,10 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	// Cloud-mode poll goroutine management.
-	// startCloudMode / stopCloudMode are safe to call concurrently and are
-	// idempotent: startCloudMode does nothing if a poll loop is already running,
-	// stopCloudMode does nothing if one is not.
-	var (
-		cloudMu        sync.Mutex
-		activePollStop chan struct{} // nil means not running
-	)
-
-	startCloudMode := func() {
-		cloudMu.Lock()
-		defer cloudMu.Unlock()
-		if activePollStop != nil {
-			return // already running
-		}
-		// Sync MCP server to the updated cloud store so that tool calls
-		// (get_asset_content, etc.) use the remote store after login.
-		mcpServer.SetStore(srv.Store)
-		stop := make(chan struct{})
-		larkCh := make(chan store.Change, 8)
-		activePollStop = stop
-		go pollChanges(srv, larkCh, stop)
-		go larkChatWorker(srv, larkCh)
-		log.Printf("[cloud] poll goroutines started")
-	}
-
-	stopCloudMode := func() {
-		cloudMu.Lock()
-		defer cloudMu.Unlock()
-		if activePollStop != nil {
-			// Revert MCP server to local store after logout.
-			mcpServer.SetStore(localStore)
-			close(activePollStop)
-			activePollStop = nil
-			// larkChatCh is closed by pollChanges via defer, which stops larkChatWorker
-			log.Printf("[cloud] poll goroutines stopping")
-		}
-	}
-
-	// Wire up callbacks so ActivateCloud / DeactivateCloud manage the goroutines.
-	srv.OnCloudActivated = startCloudMode
-	srv.OnCloudDeactivated = stopCloudMode
-
-	// If already authenticated at startup, start immediately.
-	if storeMode == "remote" {
-		startCloudMode()
-	}
-
 	go func() {
 		<-quit
 		log.Printf("Shutting down...")
 		queueCancel()
-		stopCloudMode()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(ctx); err != nil {
@@ -512,108 +446,3 @@ func main() {
 	log.Printf("Server stopped.")
 }
 
-// pollChanges periodically fetches change records from the remote store
-// and broadcasts them to connected browsers via the ChatHub.
-// Uses adaptive polling: short interval (3s) when active, backs off to 30s when idle.
-// Also polls for lark_chat messages in the same loop.
-func pollChanges(srv *api.Server, larkChatCh chan<- store.Change, stop chan struct{}) {
-	defer close(larkChatCh) // sender closes the channel so larkChatWorker can exit
-	const (
-		minInterval = 3 * time.Second
-		maxInterval = 30 * time.Second
-	)
-
-	s := srv.Store
-	hub := srv.Hub
-	rs := srv.Cloud
-	var lastID int64
-	var lastLarkChatID int64
-	interval := minInterval
-
-	for {
-		select {
-		case <-stop:
-			return
-		case <-time.After(interval):
-		}
-
-		gotActivity := false
-
-		// Poll normal changes
-		changes, err := s.ListChanges(lastID, 100, "asc")
-		if err != nil {
-			if ae, ok := err.(*store.ApiError); ok && ae.StatusCode == http.StatusGone {
-				log.Printf("[poll] cursor invalidated, resetting to 0")
-				lastID = 0
-				interval = minInterval
-				continue
-			}
-			log.Printf("[poll] error fetching changes: %v", err)
-			interval = maxInterval
-			continue
-		}
-
-		if len(changes) > 0 {
-			gotActivity = true
-			for _, ch := range changes {
-				if ch.ID > lastID {
-					lastID = ch.ID
-				}
-				msg := map[string]interface{}{
-					"type":           "change",
-					"entity_type":    ch.EntityType,
-					"entity_id":      ch.EntityID,
-					"action":         ch.Action,
-					"user_name":      ch.UserName,
-					"entity_version": ch.EntityVersion,
-				}
-				if ch.Recipient != "" {
-					msg["recipient"] = ch.Recipient
-					msg["id"] = ch.ID
-				}
-				data, _ := json.Marshal(msg)
-				hub.BroadcastRaw(data)
-			}
-		}
-
-		// Poll lark_chat messages
-		if rs != nil {
-			larkMsgs, err := rs.ListLarkChat(lastLarkChatID, 10)
-			if err != nil {
-				log.Printf("[poll] error fetching lark_chat: %v", err)
-			} else {
-				for _, msg := range larkMsgs {
-					if msg.ID > lastLarkChatID {
-						lastLarkChatID = msg.ID
-					}
-					if time.Since(msg.CreatedAt) > 1*time.Minute {
-						continue
-					}
-					gotActivity = true
-					select {
-					case larkChatCh <- msg:
-					default:
-						log.Printf("[lark-chat] queue full, dropping message id=%d", msg.ID)
-						_ = rs.SendLarkReply(rs.Info.UserName, fmt.Sprintf("Queue full (%d messages pending), please wait and retry.", cap(larkChatCh)))
-					}
-				}
-			}
-		}
-
-		// Flush marketplace stats piggyback on each poll cycle
-		srv.FlushMarketplaceStats()
-
-		if gotActivity {
-			interval = minInterval
-		} else {
-			interval = min(interval*2, maxInterval)
-		}
-	}
-}
-
-// larkChatWorker is a single persistent goroutine that processes lark_chat messages sequentially.
-func larkChatWorker(srv *api.Server, ch <-chan store.Change) {
-	for msg := range ch {
-		srv.HandleLarkChat(msg)
-	}
-}

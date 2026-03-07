@@ -13,11 +13,12 @@ import (
 // ClaudeAgent implements the Agent interface using the Claude Code CLI.
 // It spawns a claude subprocess with stream-json I/O for each message exchange.
 type ClaudeAgent struct {
-	CLIPath      string   // Path to claude CLI binary (default: "claude")
-	MCPServerURL string   // Optional: URL of the NexBox MCP server
-	MCPToolNames []string // MCP tool names (e.g. "mcp__nexbox__save_asset"); populated from mcp.Server.ToolNames()
-	DataDir      string   // For isolated session storage
-	Verbose      bool     // Enable verbose logging
+	CLIPath      string            // Path to claude CLI binary (default: "claude")
+	MCPServerURL string            // Optional: URL of the NexBox MCP server
+	MCPToolNames []string          // MCP tool names (e.g. "mcp__nexbox__save_asset"); populated from mcp.Server.ToolNames()
+	DataDir      string            // For isolated session storage
+	Verbose      bool              // Enable verbose logging
+	ContainerMgr *ContainerManager // Optional: run inside Docker container per project
 }
 
 // NewClaudeAgent creates a new Claude Code agent with default settings.
@@ -59,6 +60,20 @@ func (a *ClaudeAgent) SendMessage(
 	// Create Claude CLI client
 	client := NewClaudeClient()
 	client.Verbose = a.Verbose
+
+	// If Docker isolation is enabled, ensure a container is running for this project
+	// and wire it into the client so commands execute inside the container.
+	if a.ContainerMgr != nil && req.WorkDir != "" {
+		// Derive a project key from the work directory to identify the container.
+		// req.WorkDir is typically the project's git repo path.
+		containerID, err := a.ContainerMgr.EnsureContainer(req.WorkDir, req.WorkDir)
+		if err != nil {
+			log.Printf("[claude-agent] failed to ensure container for %s: %v; falling back to host execution", req.WorkDir, err)
+		} else {
+			client.ContainerMgr = a.ContainerMgr
+			client.ContainerID = containerID
+		}
+	}
 
 	// Build query options (no SystemPrompt - we use BuildPrompt for all context)
 	opts := QueryOptions{
