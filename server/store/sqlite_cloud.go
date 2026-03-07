@@ -28,7 +28,12 @@ func (s *SQLiteStore) CreateUser(req CreateUserRequest) (*User, error) {
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	_, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("create user begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(
 		`INSERT INTO users (id, username, password_hash, email, role, features, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		u.ID, u.Username, u.PasswordHash, u.Email, u.Role, u.Features, u.CreatedAt, u.UpdatedAt,
@@ -37,13 +42,16 @@ func (s *SQLiteStore) CreateUser(req CreateUserRequest) (*User, error) {
 		return nil, fmt.Errorf("create user: %w", err)
 	}
 	// Create an empty balance row for the new user.
-	_, err = s.db.Exec(
+	_, err = tx.Exec(
 		`INSERT INTO user_balances (user_id, balance_tokens, reserved_tokens, total_recharged, updated_at)
          VALUES (?, 0, 0, 0, ?)`,
 		u.ID, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create user balance: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("create user commit tx: %w", err)
 	}
 	return u, nil
 }
@@ -111,6 +119,14 @@ func (s *SQLiteStore) UpdateUserPassword(id string, passwordHash string) error {
 	_, err := s.db.Exec(
 		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`,
 		passwordHash, time.Now(), id,
+	)
+	return err
+}
+
+func (s *SQLiteStore) UpdateUserRole(id string, role string) error {
+	_, err := s.db.Exec(
+		`UPDATE users SET role = ?, updated_at = ? WHERE id = ?`,
+		role, time.Now(), id,
 	)
 	return err
 }
@@ -183,7 +199,7 @@ func (s *SQLiteStore) SettleTokens(userID string, sessionID string, estimated, a
 	now := time.Now()
 	_, err := s.db.Exec(`
         UPDATE user_balances
-        SET balance_tokens  = balance_tokens - ?,
+        SET balance_tokens  = MAX(0, balance_tokens - ?),
             reserved_tokens = reserved_tokens - ?,
             updated_at      = ?
         WHERE user_id = ?`,

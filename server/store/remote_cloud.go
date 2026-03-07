@@ -30,6 +30,10 @@ func (r *RemoteStore) UpdateUserPassword(id string, passwordHash string) error {
 	return fmt.Errorf("UpdateUserPassword: not yet implemented")
 }
 
+func (r *RemoteStore) UpdateUserRole(id string, role string) error {
+	return fmt.Errorf("UpdateUserRole: not yet implemented")
+}
+
 // ---------------------------------------------------------------------------
 // BalanceStore – stub implementations for RemoteStore (real implementation in Phase 1B)
 // ---------------------------------------------------------------------------

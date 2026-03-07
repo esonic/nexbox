@@ -218,7 +218,7 @@ func scanInstalledSkill(s skillScanner) (*InstalledSkill, error) {
 
 func (s *SQLiteStore) ListInstalledPlugins(userID string) ([]InstalledPlugin, error) {
 	rows, err := s.db.Query(
-		`SELECT id, user_id, plugin_id, config, installed_at FROM installed_plugins WHERE project_id = ? ORDER BY installed_at DESC`,
+		`SELECT id, user_id, plugin_id, config, installed_at FROM installed_plugins WHERE user_id = ? ORDER BY installed_at DESC`,
 		userID)
 	if err != nil {
 		return nil, err

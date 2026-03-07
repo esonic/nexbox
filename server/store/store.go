@@ -167,6 +167,7 @@ type UserStore interface {
 	ListUsers(limit, offset int) ([]User, error)
 	UpdateUserFeatures(id string, features int64) error
 	UpdateUserPassword(id string, passwordHash string) error
+	UpdateUserRole(id string, role string) error
 }
 
 type BalanceStore interface {

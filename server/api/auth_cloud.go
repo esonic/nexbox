@@ -114,6 +114,16 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If this is the first user ever registered, promote them to admin
+	// automatically so no manual SQL is required after first deploy.
+	allUsers, err := s.Store.ListUsers(2, 0)
+	if err == nil && len(allUsers) == 1 {
+		// Only one user exists — must be the one we just created.
+		if roleErr := s.Store.UpdateUserRole(u.ID, "admin"); roleErr == nil {
+			u.Role = "admin"
+		}
+	}
+
 	token, err := s.generateToken(u)
 	if err != nil {
 		http.Error(w, "failed to generate token", http.StatusInternalServerError)

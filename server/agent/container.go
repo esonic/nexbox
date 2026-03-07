@@ -58,7 +58,7 @@ func (m *ContainerManager) EnsureContainer(projectID, repoPath string) (string, 
 	// Check if a container with this name is already running.
 	out, err := exec.Command(
 		"docker", "ps",
-		"--filter", "name="+name,
+		"--filter", "name=^/"+name+"$",
 		"--format", "{{.ID}}",
 	).Output()
 	if err != nil {

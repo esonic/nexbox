@@ -53,6 +53,10 @@ type Config struct {
 	// Docker container isolation
 	DockerEnabled bool   `json:"docker_enabled,omitempty"` // enable per-project Docker isolation
 	DockerImage   string `json:"docker_image,omitempty"`   // container image (default: "nexbox-agent:latest")
+
+	// CORS allowed origins (e.g. ["http://localhost:5173"]). Falls back to
+	// built-in dev defaults when empty.
+	CORSOrigins []string `json:"cors_origins,omitempty"`
 }
 
 // ProjectMapping links a remote project to a local Git repository path,

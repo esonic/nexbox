@@ -300,9 +300,9 @@ func main() {
 			cutoff := time.Now().Add(-trashTTL)
 
 			// Collect worktree paths before purging so we can clean them up.
-			worktreePaths, _ := localStore.GetExpiredSessionWorktrees(cutoff)
+			worktreePaths, _ := dataStore.GetExpiredSessionWorktrees(cutoff)
 
-			ids, err := localStore.PurgeExpiredSessions(cutoff)
+			ids, err := dataStore.PurgeExpiredSessions(cutoff)
 			if err != nil {
 				log.Printf("[trash] Failed to purge expired sessions: %v", err)
 				return
@@ -397,9 +397,10 @@ func main() {
 		}))
 	}
 
-	// CORS for development
+	// CORS — allowed origins are read from config (cors_origins); falls back
+	// to built-in dev defaults when the config field is empty.
 	c := cors.New(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"},
+		AllowedOrigins:   srv.CORSOrigins(),
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Content-Type", "Authorization"},
 		AllowCredentials: true,

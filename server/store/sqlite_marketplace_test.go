@@ -2,20 +2,14 @@ package store
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 // testTempDir creates a temporary directory that works in the sandbox environment.
-// It uses the system temp dir if available, otherwise the allowed sandbox path.
 func testTempDir(t *testing.T) string {
 	t.Helper()
-	base := os.Getenv("TMPDIR")
-	if base == "" {
-		base = "/Users/ericdu/meili/eric.du_dacs_at_okg.com/114/.claude-tmp/claude-502"
-	}
-	dir, err := os.MkdirTemp(base, "nexbox-test-*")
+	dir, err := os.MkdirTemp("", "nexbox-test-*")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
@@ -33,8 +27,6 @@ func newTestDB(t *testing.T) *SQLiteStore {
 	t.Cleanup(func() { db.Close() })
 	return NewSQLiteStore(db.DB)
 }
-
-var _ = filepath.Join // keep import for testTempDir
 
 // ---------------------------------------------------------------------------
 // InstalledMCP tests
@@ -238,8 +230,10 @@ func TestListInstalledSkills_ByProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListInstalledSkills: %v", err)
 	}
-	if len(p1Skills) != 2 {
-		t.Errorf("p1 skills = %d, want 2", len(p1Skills))
+	// ListInstalledSkills for a project returns project-specific + global skills.
+	// s1, s2 (p1) + s4 (global) = 3
+	if len(p1Skills) != 3 {
+		t.Errorf("p1 skills = %d, want 3", len(p1Skills))
 	}
 
 	// All

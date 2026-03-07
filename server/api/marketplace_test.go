@@ -13,11 +13,7 @@ import (
 // testTempDir creates a temporary directory that works in the sandbox environment.
 func testTempDir(t *testing.T) string {
 	t.Helper()
-	base := os.Getenv("TMPDIR")
-	if base == "" {
-		base = "/Users/ericdu/meili/eric.du_dacs_at_okg.com/114/.claude-tmp/claude-502"
-	}
-	dir, err := os.MkdirTemp(base, "nexbox-test-*")
+	dir, err := os.MkdirTemp("", "nexbox-test-*")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}

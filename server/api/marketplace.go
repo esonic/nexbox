@@ -1209,8 +1209,8 @@ func isSubPath(parent, child string) bool {
 	if err != nil {
 		return false
 	}
-	// Reject "." (parent == child), "..", "../anything"
-	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	// Accept "." (parent == child) and any relative path that doesn't escape parent
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // copyGlobalSkillsToProject copies all globally installed skills into a project on creation.

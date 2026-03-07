@@ -104,7 +104,14 @@ func (s *Server) HandleAdminRecharge(w http.ResponseWriter, r *http.Request) {
 	// Return updated balance
 	bal, err := s.Store.GetBalance(req.UserID)
 	if err != nil || bal == nil {
-		w.WriteHeader(http.StatusNoContent)
+		// Recharge succeeded but we cannot fetch the fresh balance; return a
+		// partial success response instead of the opaque 204 No Content.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":      true,
+			"message": "recharged but balance fetch failed",
+		})
 		return
 	}
 

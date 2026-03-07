@@ -16,6 +16,100 @@ import (
 	"gitlab.okg.com/sre_ai/nexbox/updater"
 )
 
+// ---------------------------------------------------------------------------
+// IP-based rate limiter (stdlib only, no external dependencies)
+// ---------------------------------------------------------------------------
+
+// ipRateLimiter tracks per-IP request counts within a sliding window.
+type ipRateLimiter struct {
+	mu      sync.Mutex
+	buckets map[string]*rateBucket
+	limit   int           // max requests per window
+	window  time.Duration // window duration
+}
+
+type rateBucket struct {
+	count    int
+	windowAt time.Time // start of current window
+}
+
+func newIPRateLimiter(limit int, window time.Duration) *ipRateLimiter {
+	rl := &ipRateLimiter{
+		buckets: make(map[string]*rateBucket),
+		limit:   limit,
+		window:  window,
+	}
+	// Periodically clean up stale buckets to avoid unbounded memory growth.
+	go func() {
+		ticker := time.NewTicker(window * 10)
+		defer ticker.Stop()
+		for range ticker.C {
+			rl.mu.Lock()
+			cutoff := time.Now().Add(-rl.window)
+			for ip, b := range rl.buckets {
+				if b.windowAt.Before(cutoff) {
+					delete(rl.buckets, ip)
+				}
+			}
+			rl.mu.Unlock()
+		}
+	}()
+	return rl
+}
+
+// allow returns true if the request from ip is within the rate limit.
+func (rl *ipRateLimiter) allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	b, ok := rl.buckets[ip]
+	if !ok || now.Sub(b.windowAt) >= rl.window {
+		rl.buckets[ip] = &rateBucket{count: 1, windowAt: now}
+		return true
+	}
+	if b.count >= rl.limit {
+		return false
+	}
+	b.count++
+	return true
+}
+
+// registerRateLimit returns a middleware that enforces the given rate limiter,
+// extracting the client IP from RemoteAddr (best-effort; no proxy headers).
+func registerRateLimit(rl *ipRateLimiter) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := r.RemoteAddr
+			// Strip port if present.
+			if h, _, err := splitHostPort(ip); err == nil {
+				ip = h
+			}
+			if !rl.allow(ip) {
+				http.Error(w, "rate limit exceeded, try again later", http.StatusTooManyRequests)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// splitHostPort is a minimal host:port splitter to avoid importing "net" for
+// a trivial operation (net is already an indirect dep via stdlib, so this is
+// fine; we just inline the split to keep imports clean).
+func splitHostPort(addr string) (host, port string, err error) {
+	// Walk backwards to find the last colon.
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == ':' {
+			return addr[:i], addr[i+1:], nil
+		}
+	}
+	return "", "", &net_addrErr{addr}
+}
+
+type net_addrErr struct{ addr string }
+
+func (e *net_addrErr) Error() string { return "missing port in address: " + e.addr }
+
 
 // Server holds all API dependencies
 type Server struct {
@@ -83,9 +177,12 @@ func NewRouter(s *Server) *chi.Mux {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 
+	// Rate limiter for the registration endpoint: max 5 requests per IP per minute.
+	registerRL := newIPRateLimiter(5, time.Minute)
+
 	r.Route("/api", func(r chi.Router) {
 		// ── Public routes (no auth required) ──
-		r.Post("/auth/register", s.HandleRegister)
+		r.With(registerRateLimit(registerRL)).Post("/auth/register", s.HandleRegister)
 		r.Post("/auth/login", s.HandleLogin)
 
 		// ── All routes requiring authentication ──
@@ -106,6 +203,7 @@ func NewRouter(s *Server) *chi.Mux {
 				r.Patch("/admin/users/{userID}/features", s.HandleAdminUpdateUserFeatures)
 				r.Post("/admin/recharge", s.HandleAdminRecharge)
 			})
+
 
 			// Sessions
 			r.Route("/sessions", func(r chi.Router) {
@@ -254,17 +352,42 @@ func NewRouter(s *Server) *chi.Mux {
 		})
 	})
 
-	// pprof – goroutine dumps, heap profiles, etc. for debugging hangs.
-	// Usage: curl http://localhost:9040/debug/pprof/goroutine?debug=1
-	r.Mount("/debug", http.DefaultServeMux)
+	// pprof – goroutine dumps, heap profiles, etc.
+	// Protected: admin role required.
+	// Usage: curl -H "Authorization: Bearer <admin-token>" http://localhost:9040/debug/pprof/goroutine?debug=1
+	r.Group(func(r chi.Router) {
+		r.Use(s.AuthMiddleware)
+		r.Use(AdminMiddleware)
+		r.Mount("/debug", http.DefaultServeMux)
+	})
 
-	// Global multiplexed WebSocket
-	r.Get("/ws", s.HandleGlobalWS)
+	// WebSocket routes — authenticated via JWT in Authorization header or
+	// ?token=<jwt> query parameter (browsers cannot set headers on WS upgrades).
+	r.Group(func(r chi.Router) {
+		r.Use(s.WSAuthMiddleware)
 
-	// Terminal PTY WebSocket (session-scoped; must be registered before the legacy project route)
-	r.Get("/ws/terminal/sessions/{sessionId}", s.HandleTerminalSessionWS)
-	// Legacy project-scoped terminal (kept for backward compatibility)
-	r.Get("/ws/terminal/{projectId}", s.HandleTerminalWS)
+		// Global multiplexed WebSocket
+		r.Get("/ws", s.HandleGlobalWS)
+
+		// Terminal PTY WebSocket (session-scoped; must be registered before the legacy project route)
+		r.Get("/ws/terminal/sessions/{sessionId}", s.HandleTerminalSessionWS)
+		// Legacy project-scoped terminal (kept for backward compatibility)
+		r.Get("/ws/terminal/{projectId}", s.HandleTerminalWS)
+	})
 
 	return r
+}
+
+// CORSOrigins returns the list of allowed CORS origins from config, falling
+// back to local-dev defaults when the config field is empty.
+func (s *Server) CORSOrigins() []string {
+	origins := s.Config.Get().CORSOrigins
+	if len(origins) == 0 {
+		return []string{
+			"http://localhost:5173",
+			"http://localhost:3000",
+			"http://127.0.0.1:5173",
+		}
+	}
+	return origins
 }
