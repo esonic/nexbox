@@ -23,30 +23,18 @@ func (s *Server) getDefaultAgent() string {
 }
 
 // GetServerInfo returns basic server configuration info.
-// GET /api/info → {"agent": "claude", "mode": "local"|"cloud"|"needs_login"}
+// GET /api/info → {"agent": "claude", "mode": "local"|"needs_login"}
 func (s *Server) GetServerInfo(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Config.Get()
-
 	mode := "local"
-	if s.StoreMode == "remote" {
-		mode = "cloud"
-	} else if !cfg.DisableCloud && cfg.Token == "" {
-		// Cloud is the default but no token yet — prompt the user to log in
+	if cfg.JWTSecret != "" {
 		mode = "needs_login"
 	}
-
-	info := map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"agent":   s.getDefaultAgent(),
 		"mode":    mode,
 		"version": s.Version,
-	}
-	if s.StoreMode == "remote" {
-		info["server_url"] = cfg.ServerURL
-		if s.Cloud != nil {
-			info["user_name"] = s.Cloud.Info.UserName
-		}
-	}
-	writeJSON(w, http.StatusOK, info)
+	})
 }
 
 // ListAvailableAgents returns all registered agent backends.

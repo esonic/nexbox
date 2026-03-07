@@ -1,4 +1,5 @@
 import type { ChatEvent, MessagePart } from "../types";
+import { getToken } from "@/lib/api";
 
 const WS_BASE = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
 
@@ -46,7 +47,8 @@ class GlobalWebSocket {
       return;
     }
 
-    const wsUrl = `${WS_BASE}/ws`;
+    const token = getToken();
+    const wsUrl = token ? `${WS_BASE}/ws?token=${encodeURIComponent(token)}` : `${WS_BASE}/ws`;
     const ws = new WebSocket(wsUrl);
     this.ws = ws;
 

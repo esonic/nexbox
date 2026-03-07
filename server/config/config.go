@@ -38,6 +38,10 @@ type Config struct {
 	JWTSecret  string `json:"jwt_secret,omitempty"`  // required for cloud mode
 	JWTExpDays int    `json:"jwt_exp_days,omitempty"` // token expiry in days, default 7
 
+	// Email — used for sending verification codes via Resend (resend.com)
+	ResendAPIKey string `json:"resend_api_key,omitempty"` // e.g. "re_xxxx"
+	ResendFrom   string `json:"resend_from,omitempty"`    // e.g. "BeeHub <noreply@yourdomain.com>"
+
 	MarketplaceDir string `json:"marketplace_dir,omitempty"` // default "/marketplace"
 
 	AnthropicKey string `json:"anthropic_key,omitempty"` // platform-level Anthropic API key
@@ -128,7 +132,10 @@ func (m *Manager) save() error {
 	}
 	data = append(data, '\n')
 
-	tmp, err := os.CreateTemp(filepath.Dir(m.path), ".config-*.json")
+	tmp, err := os.OpenFile(
+		filepath.Join(filepath.Dir(m.path), ".config-tmp.json"),
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600,
+	)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -145,5 +152,7 @@ func (m *Manager) save() error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename config: %w", err)
 	}
+	// Ensure restrictive permissions even if file already existed before this run.
+	_ = os.Chmod(m.path, 0600)
 	return nil
 }

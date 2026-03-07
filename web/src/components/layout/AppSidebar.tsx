@@ -21,7 +21,7 @@ import {
   Store,
 } from "lucide-react";
 import { toast } from "sonner";
-import { sessionsApi, projectsApi, serverApi, marketplaceApi } from "@/lib/api";
+import { sessionsApi, projectsApi, serverApi, marketplaceApi, authCloudApi, clearToken } from "@/lib/api";
 import type { CloudInfo } from "@/lib/api";
 import { globalWS } from "@/lib/ws";
 import { cn, formatRelativeDate } from "@/lib/utils";
@@ -142,6 +142,7 @@ export function AppSidebar() {
     connectStatus, setConnectStatus,
     projects, setProjects,
     marketplaceUpdateCount, setMarketplaceUpdateCount,
+    currentUser,
   } = useAppStore();
   const {
     sidebarCollapsed: collapsed, setSidebarCollapsed: setCollapsed,
@@ -589,6 +590,13 @@ export function AppSidebar() {
     }
   };
 
+  // ── Logout ──
+  async function handleLogout() {
+    try { await authCloudApi.logout(); } catch {}
+    clearToken();
+    window.location.reload();
+  }
+
   // ── Server mode detection ──
   useEffect(() => {
     serverApi.info()
@@ -945,35 +953,37 @@ export function AppSidebar() {
           )}
         </div>
 
-        {/* ── Cloud / Local ── */}
-        <div className="px-2 pb-1 shrink-0">
-          <button
-            onClick={() => navigate("/connect")}
-            className={cn(
-              "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors",
-              location.pathname === "/connect"
-                ? "bg-accent text-foreground font-medium"
-                : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
-            )}
-          >
-            <div className="relative shrink-0">
-              {connectStatus === "connected" ? (
-                <Cloud className="h-4 w-4 text-green-500" />
-              ) : (
-                <CloudOff className="h-4 w-4" />
+        {/* ── Cloud / Local — hidden in JWT auth mode ── */}
+        {!currentUser && (
+          <div className="px-2 pb-1 shrink-0">
+            <button
+              onClick={() => navigate("/connect")}
+              className={cn(
+                "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors",
+                location.pathname === "/connect"
+                  ? "bg-accent text-foreground font-medium"
+                  : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
               )}
-              {notificationUnread && connectStatus === "connected" && (
-                <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-red-500" />
+            >
+              <div className="relative shrink-0">
+                {connectStatus === "connected" ? (
+                  <Cloud className="h-4 w-4 text-green-500" />
+                ) : (
+                  <CloudOff className="h-4 w-4" />
+                )}
+                {notificationUnread && connectStatus === "connected" && (
+                  <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-red-500" />
+                )}
+              </div>
+              <span>{connectStatus === "connected" ? "Cloud" : "Local"}</span>
+              {connectStatus === "connected" && cloudInfo?.user_name && (
+                <span className="ml-auto text-[11px] text-muted-foreground/50 truncate max-w-[50%]">
+                  {cloudInfo.user_name}
+                </span>
               )}
-            </div>
-            <span>{connectStatus === "connected" ? "Cloud" : "Local"}</span>
-            {connectStatus === "connected" && cloudInfo?.user_name && (
-              <span className="ml-auto text-[11px] text-muted-foreground/50 truncate max-w-[50%]">
-                {cloudInfo.user_name}
-              </span>
-            )}
-          </button>
-        </div>
+            </button>
+          </div>
+        )}
 
         {/* ── Bottom nav ── */}
         <div className="px-2 pb-3 pt-1 shrink-0 space-y-0.5 border-t border-border/40 mt-1">
@@ -1023,6 +1033,15 @@ export function AppSidebar() {
             <Settings className="h-4 w-4 shrink-0" />
             <span>Settings</span>
           </button>
+          {currentUser && (
+            <button
+              onClick={handleLogout}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-muted-foreground hover:text-foreground hover:bg-accent/50"
+            >
+              <LogOut className="h-4 w-4 shrink-0" />
+              <span>退出登录</span>
+            </button>
+          )}
         </div>
       </div>
 

@@ -6,14 +6,25 @@ import type {
 
 const API_BASE = "/api";
 
+const TOKEN_KEY = "beehub_jwt";
+export function getToken(): string | null { return localStorage.getItem(TOKEN_KEY); }
+export function setToken(t: string): void  { localStorage.setItem(TOKEN_KEY, t); }
+export function clearToken(): void         { localStorage.removeItem(TOKEN_KEY); }
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const token = getToken();
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options?.headers,
     },
   });
+  if (res.status === 401) {
+    clearToken();
+    window.dispatchEvent(new Event("beehub:logout"));
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || res.statusText);
@@ -775,4 +786,37 @@ export const marketplaceApi = {
 
   deleteComment: (id: string, commentId: string) =>
     request<void>(`/marketplace/packages/${id}/reviews/${commentId}`, { method: "DELETE" }),
+};
+
+// JWT-based auth (cloud/SaaS mode)
+export interface AuthUser {
+  id: string;
+  username: string;
+  email?: string;
+  role: string;
+  features: number;
+}
+export interface AuthResponse {
+  token: string;
+  user: AuthUser;
+}
+export const authCloudApi = {
+  register: (email: string, password: string, code: string) =>
+    request<AuthResponse>("/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ email, password, code }),
+    }),
+  login: (email: string, password: string) =>
+    request<AuthResponse>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    }),
+  sendVerification: (email: string) =>
+    request<{ ok: boolean }>("/auth/send-verification", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  logout: () =>
+    request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
+  me: () => request<AuthUser>("/auth/me"),
 };

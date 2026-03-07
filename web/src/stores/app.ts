@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { DiffResponse } from "@/lib/api";
+import type { DiffResponse, AuthUser } from "@/lib/api";
 import type { Project, Session, ChatMessage, MessagePart, Task, AssetType, ExecutionStats } from "../types";
 
 export interface PickedAsset {
@@ -115,6 +115,10 @@ interface AppState {
   // Marketplace update badge (packages with newer version available)
   marketplaceUpdateCount: number;
   setMarketplaceUpdateCount: (count: number) => void;
+
+  // Authenticated user (JWT cloud mode)
+  currentUser: AuthUser | null;
+  setCurrentUser: (user: AuthUser | null) => void;
 }
 
 /** Replace a session's message array. Reduces boilerplate around chatMessages spread. */
@@ -452,6 +456,9 @@ export const useAppStore = create<AppState>()(
 
   marketplaceUpdateCount: 0,
   setMarketplaceUpdateCount: (count) => set({ marketplaceUpdateCount: count }),
+
+  currentUser: null,
+  setCurrentUser: (user) => set({ currentUser: user }),
 }),
     {
       name: "nexbox-app",

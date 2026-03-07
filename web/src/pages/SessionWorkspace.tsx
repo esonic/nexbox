@@ -320,7 +320,9 @@ export function SessionWorkspace() {
     sessions, setSessions, activeSessionId,
     setCurrentSession, setCurrentProject, sessionTotalDuration,
     projects, setProjects, setGitDiffStats,
+    currentUser,
   } = useAppStore();
+  const userFeatures = currentUser?.features ?? 0xffff;
   const {
     rightPanel, setRightPanel, panelWidth, setPanelWidth,
     terminalHeight, setTerminalHeight,
@@ -571,35 +573,41 @@ export function SessionWorkspace() {
         </div>
 
         {/* Tasks & Assets panel buttons */}
-        <Button
-          variant={rightPanel === "task" ? "secondary" : "ghost"}
-          size="sm"
-          className="h-7 text-xs gap-1"
-          onClick={() => setRightPanel(rightPanel === "task" ? null : "task")}
-        >
-          <ListTodo className="h-3.5 w-3.5" />
-          Task
-        </Button>
-        <Button
-          variant={rightPanel === "asset" ? "secondary" : "ghost"}
-          size="sm"
-          className="h-7 text-xs gap-1"
-          onClick={() => setRightPanel(rightPanel === "asset" ? null : "asset")}
-        >
-          <FileText className="h-3.5 w-3.5" />
-          Asset
-        </Button>
+        {!!(userFeatures & 1) && (
+          <Button
+            variant={rightPanel === "task" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 text-xs gap-1"
+            onClick={() => setRightPanel(rightPanel === "task" ? null : "task")}
+          >
+            <ListTodo className="h-3.5 w-3.5" />
+            Task
+          </Button>
+        )}
+        {!!(userFeatures & 2) && (
+          <Button
+            variant={rightPanel === "asset" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 text-xs gap-1"
+            onClick={() => setRightPanel(rightPanel === "asset" ? null : "asset")}
+          >
+            <FileText className="h-3.5 w-3.5" />
+            Asset
+          </Button>
+        )}
 
         {/* Workflows button */}
-        <Button
-          variant={rightPanel === "workflow" ? "secondary" : "ghost"}
-          size="sm"
-          className="h-7 text-xs gap-1"
-          onClick={() => setRightPanel(rightPanel === "workflow" ? null : "workflow")}
-        >
-          <Workflow className="h-3.5 w-3.5" />
-          Workflow
-        </Button>
+        {!!(userFeatures & 4) && (
+          <Button
+            variant={rightPanel === "workflow" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 text-xs gap-1"
+            onClick={() => setRightPanel(rightPanel === "workflow" ? null : "workflow")}
+          >
+            <Workflow className="h-3.5 w-3.5" />
+            Workflow
+          </Button>
+        )}
 
       </div>
 
@@ -779,16 +787,18 @@ export function SessionWorkspace() {
                   <FolderCode className="h-4 w-4" />
                 </button>
               )}
-              <button
-                onClick={() => activeSessionId && setTerminalShow(activeSessionId, !showTerminal)}
-                className={cn(
-                  "p-1.5 rounded transition-colors",
-                  showTerminal ? "bg-accent text-accent-foreground" : "text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent/50"
-                )}
-                title="Terminal"
-              >
-                <TerminalSquare className="h-4 w-4" />
-              </button>
+              {!!(userFeatures & 8) && (
+                <button
+                  onClick={() => activeSessionId && setTerminalShow(activeSessionId, !showTerminal)}
+                  className={cn(
+                    "p-1.5 rounded transition-colors",
+                    showTerminal ? "bg-accent text-accent-foreground" : "text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent/50"
+                  )}
+                  title="Terminal"
+                >
+                  <TerminalSquare className="h-4 w-4" />
+                </button>
+              )}
               {boundProject?.git_repo_path && (
                 <button
                   onClick={() => rightPanel === "git" ? setRightPanel(null) : handleOpenGit()}

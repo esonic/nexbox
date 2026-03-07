@@ -73,10 +73,7 @@ config.StoreType == "mysql" && config.MySQLDSN != ""  →  MySQLStore
   /api/admin/...     需要 AdminMiddleware（role == "admin"）
 ```
 
-**注意**：目前没有"首个注册用户自动成为 admin"的逻辑。部署后首个管理员需手动改库：
-```sql
-UPDATE users SET role='admin' WHERE username='yourname';
-```
+**注意**：首个注册用户自动成为 admin（HandleRegister 判断 users 表只有 1 条记录时升级 role）。
 
 ### Phase 3 — 多用户数据隔离
 
@@ -248,10 +245,7 @@ go build -o beehub .
   "marketplace_dir": "/opt/nexbox/marketplace"
 }
 ```
-3. 启动后手动将首个用户设为 admin：
-```sql
-UPDATE users SET role='admin' WHERE username='yourname';
-```
+3. 启动后第一个注册的邮箱自动成为 admin，无需手动改库
 
 ### 启用 Docker 容器隔离
 

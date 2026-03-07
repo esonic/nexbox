@@ -14,6 +14,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/looplab/fsm v1.0.3
 	github.com/mark3labs/mcp-go v0.43.2
+	github.com/resend/resend-go/v3 v3.1.1
 	github.com/rs/cors v1.11.1
 	github.com/sergi/go-diff v1.4.0
 	github.com/syndtr/goleveldb v1.0.0

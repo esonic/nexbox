@@ -1,4 +1,6 @@
-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
+CLAUDE_CODE_OAUTH_TOKEN=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
+resend api key   re_dL3tx2gy_FmEE6B5FHU2hecM63sL22pPU
+spaceship domain box-nex.top
 
 # AI Agent Web 平台需求文档
 ## 1. 文档目标

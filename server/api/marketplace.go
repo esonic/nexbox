@@ -399,7 +399,7 @@ func (s *Server) HandleUninstallPlugin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) ListMarketplacePackages(w http.ResponseWriter, r *http.Request) {
 	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
+		writeJSON(w, http.StatusOK, []interface{}{})
 		return
 	}
 	pkgType := r.URL.Query().Get("type")

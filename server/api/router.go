@@ -182,8 +182,10 @@ func NewRouter(s *Server) *chi.Mux {
 
 	r.Route("/api", func(r chi.Router) {
 		// ── Public routes (no auth required) ──
+		r.Get("/info", s.GetServerInfo)
 		r.With(registerRateLimit(registerRL)).Post("/auth/register", s.HandleRegister)
 		r.Post("/auth/login", s.HandleLogin)
+		r.Post("/auth/send-verification", s.HandleSendVerification)
 
 		// ── All routes requiring authentication ──
 		r.Group(func(r chi.Router) {
@@ -338,7 +340,6 @@ func NewRouter(s *Server) *chi.Mux {
 			// Utility
 			r.Post("/validate-path", s.ValidatePath)
 			r.Get("/browse-dir", s.BrowseDir)
-			r.Get("/info", s.GetServerInfo)
 			r.Get("/available-agents", s.ListAvailableAgents)
 			r.Put("/default-agent", s.SetDefaultAgent)
 			r.Get("/settings", s.GetSettings)
