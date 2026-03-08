@@ -30,7 +30,7 @@ type Config struct {
 	MarketplaceDir string `json:"marketplace_dir,omitempty"` // default "/marketplace"
 
 	// Per-user limits
-	DiskQuotaBytes     int64 `json:"disk_quota_bytes,omitempty"`      // default 10GB
+	DiskQuotaBytes     int64 `json:"disk_quota_bytes,omitempty"`      // default 1GB
 	MaxConcurrentTasks int   `json:"max_concurrent_tasks,omitempty"`  // default 3
 	MaxSessionsPerUser int   `json:"max_sessions_per_user,omitempty"` // default 20
 

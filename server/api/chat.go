@@ -181,6 +181,12 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		projectWorkDir = "."
 	}
 
+	// Check disk quota before invoking Claude
+	if _, _, qErr := s.checkDiskQuota(projectWorkDir); qErr != nil {
+		s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "disk_quota_exceeded: " + qErr.Error()})
+		return
+	}
+
 	// Create worktree on first message if requested (worktree_mode="worktree", path not yet set).
 	workDir := s.ensureWorktree(sessionID, session, projectWorkDir)
 	if workDir == "" {

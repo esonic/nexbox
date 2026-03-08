@@ -13,6 +13,7 @@ import {
   FileCode,
   Upload,
   Download,
+  Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -316,6 +317,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
 
   const handleSelectFile = useCallback(async (path: string) => {
     setSelectedPath(path);
+    setShowDeleteConfirm(false);
     setLoadingFile(true);
     try {
       const data = await filesApi.content(projectId, path, sessionId);
@@ -390,6 +392,39 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     const url = filesApi.downloadUrl(projectId, selectedPath, sessionId);
     window.open(url, "_blank");
   }, [projectId, sessionId, selectedPath]);
+
+  // Delete file
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // Dismiss delete confirmation on click outside
+  useEffect(() => {
+    if (!showDeleteConfirm) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest("[data-delete-confirm]")) return;
+      setShowDeleteConfirm(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showDeleteConfirm]);
+
+  const handleDelete = useCallback(async () => {
+    if (!selectedPath) return;
+    setDeleting(true);
+    try {
+      await filesApi.delete(projectId, selectedPath, sessionId);
+      toast.success("File deleted");
+      setSelectedPath(null);
+      setFileContent(null);
+      setShowDeleteConfirm(false);
+      loadTree();
+    } catch (e: any) {
+      toast.error("Delete failed", { description: e.message });
+    } finally {
+      setDeleting(false);
+    }
+  }, [projectId, sessionId, selectedPath, setSelectedPath, loadTree]);
 
   return (
     <div className="flex h-full">
@@ -532,6 +567,33 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                 >
                   <Download className="h-3.5 w-3.5" />
                 </button>
+                <div className="relative">
+                  <button
+                    onClick={() => setShowDeleteConfirm(true)}
+                    className="p-0.5 rounded text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-colors"
+                    title="Delete file"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                  {showDeleteConfirm && (
+                    <div data-delete-confirm className="absolute right-0 top-full mt-1 z-50 bg-popover border rounded-md shadow-md p-2 flex items-center gap-1.5 whitespace-nowrap">
+                      <span className="text-xs text-muted-foreground">Delete?</span>
+                      <button
+                        onClick={handleDelete}
+                        disabled={deleting}
+                        className="px-2 py-0.5 text-xs bg-destructive text-destructive-foreground rounded hover:bg-destructive/90"
+                      >
+                        {deleting ? "..." : "Delete"}
+                      </button>
+                      <button
+                        onClick={() => setShowDeleteConfirm(false)}
+                        className="px-2 py-0.5 text-xs bg-muted text-muted-foreground rounded hover:bg-accent"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 

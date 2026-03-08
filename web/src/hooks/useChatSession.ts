@@ -354,6 +354,9 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         break;
       case "error":
         setPendingUserInput(null);
+        if (event.message?.startsWith("disk_quota_exceeded:")) {
+          toast.error("Disk quota exceeded", { description: event.message.replace("disk_quota_exceeded: ", "") });
+        }
         if (event.message) { ensureStreaming(); gs().appendTextDelta(sid, `\n\n**Error:** ${event.message}`); }
         gs().setStreamingSession(sid, false);
         gs().finishStreaming(sid);

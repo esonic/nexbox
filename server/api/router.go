@@ -256,6 +256,7 @@ func NewRouter(s *Server) *chi.Mux {
 					r.Get("/file-search", s.SearchProjectFiles)
 					r.Post("/files/upload", s.UploadProjectFile)
 					r.Get("/files/download", s.DownloadProjectFile)
+					r.Delete("/files/delete", s.DeleteProjectFile)
 
 					// Labels (project-scoped)
 					r.Get("/labels", s.ListLabels)

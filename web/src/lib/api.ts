@@ -417,6 +417,8 @@ export const filesApi = {
   },
   downloadUrl: (projectId: string, path: string, sessionId?: string): string =>
     `${API_BASE}/projects/${projectId}/files/download?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,
+  delete: (projectId: string, path: string, sessionId?: string) =>
+    request<{ deleted: string }>(`/projects/${projectId}/files/delete?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`, { method: "DELETE" }),
 };
 
 export const diffApi = {

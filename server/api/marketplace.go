@@ -155,6 +155,11 @@ func loadMarketplacePlugins(dir string) ([]store.MarketplacePlugin, error) {
 	if dir == "" {
 		return []store.MarketplacePlugin{}, nil
 	}
+	// Resolve symlinks so filepath.Walk can traverse the directory.
+	// filepath.Walk uses os.Lstat internally and won't follow a symlinked root.
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return []store.MarketplacePlugin{}, nil
 	}

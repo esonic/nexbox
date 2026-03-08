@@ -16,6 +16,45 @@ import (
 
 var errForbidden = errors.New("access denied")
 
+const defaultDiskQuota int64 = 1 << 30 // 1 GB
+
+// dirSize walks a directory tree and returns the total size in bytes.
+func dirSize(root string) (int64, error) {
+	var total int64
+	err := filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip inaccessible entries
+		}
+		if !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
+}
+
+// diskQuotaBytes returns the configured disk quota, falling back to defaultDiskQuota.
+func (s *Server) diskQuotaBytes() int64 {
+	if q := s.Config.Get().DiskQuotaBytes; q > 0 {
+		return q
+	}
+	return defaultDiskQuota
+}
+
+// checkDiskQuota checks if the project directory exceeds the disk quota.
+// Returns (currentSize, quotaBytes, error). Error is non-nil when over quota.
+func (s *Server) checkDiskQuota(root string) (int64, int64, error) {
+	quota := s.diskQuotaBytes()
+	used, err := dirSize(root)
+	if err != nil {
+		return 0, quota, err
+	}
+	if used >= quota {
+		return used, quota, fmt.Errorf("disk quota exceeded: used %dMB / %dMB", used>>20, quota>>20)
+	}
+	return used, quota, nil
+}
+
 // FileEntry represents a file or directory in the project tree.
 type FileEntry struct {
 	Name     string      `json:"name"`
@@ -423,8 +462,14 @@ func (s *Server) UploadProjectFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 32 MB max upload
-	const maxUpload = 32 << 20
+	// Check disk quota before accepting upload
+	if _, _, qErr := s.checkDiskQuota(root); qErr != nil {
+		writeError(w, http.StatusForbidden, qErr.Error())
+		return
+	}
+
+	// 10 MB max upload
+	const maxUpload = 10 << 20
 	if err := r.ParseMultipartForm(maxUpload); err != nil {
 		writeError(w, http.StatusBadRequest, "failed to parse form: "+err.Error())
 		return
@@ -523,6 +568,13 @@ func (s *Server) DownloadProjectFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 50 MB max download
+	const maxDownload = 50 << 20
+	if info.Size() > maxDownload {
+		writeError(w, http.StatusBadRequest, "file too large for download (max 50MB)")
+		return
+	}
+
 	// Touch container activity so idle reaper knows the user is active.
 	if s.ContainerMgr != nil {
 		s.ContainerMgr.TouchActivity(projectID)
@@ -530,4 +582,59 @@ func (s *Server) DownloadProjectFile(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(fullPath)))
 	http.ServeFile(w, r, fullPath)
+}
+
+// DeleteProjectFile deletes a file from the project directory.
+// DELETE /api/projects/{projectId}/files/delete?path=relative/path/to/file[&session_id=xxx]
+func (s *Server) DeleteProjectFile(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectId")
+	root, err := s.resolveFilesRoot(r, projectID)
+	if err != nil {
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+
+	relPath := r.URL.Query().Get("path")
+	if relPath == "" {
+		writeError(w, http.StatusBadRequest, "path parameter is required")
+		return
+	}
+
+	fullPath, err := resolveSecurePath(root, relPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, "file not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if info.IsDir() {
+		writeError(w, http.StatusBadRequest, "path is a directory, not a file")
+		return
+	}
+
+	if err := os.Remove(fullPath); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete file: "+err.Error())
+		return
+	}
+
+	log.Printf("[api] DeleteProjectFile(%s) deleted %s", projectID, relPath)
+
+	// Touch container activity so idle reaper knows the user is active.
+	if s.ContainerMgr != nil {
+		s.ContainerMgr.TouchActivity(projectID)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"deleted": relPath})
 }
