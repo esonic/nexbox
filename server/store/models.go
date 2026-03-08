@@ -157,6 +157,7 @@ type Session struct {
 	Name           string     `json:"name"`
 	ProjectID      string     `json:"project_id"`
 	Agent          string     `json:"agent"`
+	Model          string     `json:"model"`
 	AgentSessionID string     `json:"agent_session_id"`
 	StreamID       string     `json:"stream_id"`
 	SortOrder      int        `json:"sort_order"`
@@ -174,6 +175,7 @@ type CreateSessionRequest struct {
 	Name      string `json:"name"`
 	ProjectID string `json:"project_id"`
 	Agent     string `json:"agent"`
+	Model     string `json:"model"`
 	UserID    string `json:"user_id,omitempty"` // set by API layer
 }
 
@@ -181,6 +183,7 @@ type UpdateSessionRequest struct {
 	Name      *string `json:"name,omitempty"`
 	ProjectID *string `json:"project_id,omitempty"`
 	Agent     *string `json:"agent,omitempty"`
+	Model     *string `json:"model,omitempty"`
 }
 
 type ReorderSessionsRequest struct {

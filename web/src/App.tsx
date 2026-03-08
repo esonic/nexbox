@@ -10,9 +10,6 @@ import { WorkflowsPage } from "@/pages/WorkflowsPage";
 import { WorkflowEditorPage } from "@/pages/WorkflowEditorPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { MarketplacePage } from "@/pages/MarketplacePage";
-import { PublishPage } from "@/pages/marketplace/PublishPage";
-import { PackageDetailPage } from "@/pages/marketplace/PackageDetailPage";
-import { PublishVersionPage } from "@/pages/marketplace/PublishVersionPage";
 import { UpdateBanner } from "@/components/ui/UpdateBanner";
 import LoginModal from "@/components/ui/LoginModal";
 import { serverApi, authCloudApi, getToken, clearToken } from "@/lib/api";
@@ -89,9 +86,6 @@ function AppLayout() {
           <Route path="/workflows" element={<WorkflowsPage />} />
           <Route path="/workflows/:id" element={<WorkflowEditorPage />} />
           <Route path="/marketplace" element={<MarketplacePage />} />
-          <Route path="/marketplace/publish" element={<PublishPage />} />
-          <Route path="/marketplace/publish/:packageId" element={<PublishVersionPage />} />
-          <Route path="/marketplace/:packageId" element={<PackageDetailPage />} />
         </Routes>
       </main>
     </div>

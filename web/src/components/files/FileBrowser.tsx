@@ -11,7 +11,10 @@ import {
   X,
   FileText,
   FileCode,
+  Upload,
+  Download,
 } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { filesApi, type FileEntry, type FileContentResponse, type FileSearchResult } from "@/lib/api";
 import { getLangFromPath, ensureLangRegistered, highlightCode } from "@/lib/highlight";
@@ -357,6 +360,37 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     setSearchResults([]);
   }, []);
 
+  // Upload
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+
+  const handleUpload = useCallback(async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    try {
+      for (const file of Array.from(files)) {
+        // Upload to the currently selected directory, or root
+        const dir = selectedPath
+          ? (tree.some((e) => e.path === selectedPath && e.is_dir) ? selectedPath : selectedPath.includes("/") ? selectedPath.substring(0, selectedPath.lastIndexOf("/")) : ".")
+          : ".";
+        await filesApi.upload(projectId, file, dir, sessionId);
+      }
+      toast.success(`Uploaded ${files.length} file${files.length > 1 ? "s" : ""}`);
+      loadTree();
+    } catch (e: any) {
+      toast.error("Upload failed", { description: e.message });
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }, [projectId, sessionId, selectedPath, tree, loadTree]);
+
+  const handleDownload = useCallback(() => {
+    if (!selectedPath) return;
+    const url = filesApi.downloadUrl(projectId, selectedPath, sessionId);
+    window.open(url, "_blank");
+  }, [projectId, sessionId, selectedPath]);
+
   return (
     <div className="flex h-full">
       {/* File tree sidebar */}
@@ -374,6 +408,21 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
             >
               <Search className="h-3.5 w-3.5" />
             </button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              className="p-1 rounded hover:bg-accent text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+              title="Upload file"
+            >
+              {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => handleUpload(e.target.files)}
+            />
             <button
               onClick={loadTree}
               className="p-1 rounded hover:bg-accent text-muted-foreground/50 hover:text-muted-foreground transition-colors"
@@ -470,11 +519,20 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
             <div className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 text-xs">
               <File className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
               <span className="font-mono truncate text-muted-foreground">{selectedPath}</span>
-              {fileContent && !fileContent.binary && (
-                <span className="ml-auto text-muted-foreground/40 shrink-0">
-                  {formatSize(fileContent.size)}
-                </span>
-              )}
+              <div className="ml-auto flex items-center gap-1.5 shrink-0">
+                {fileContent && (
+                  <span className="text-muted-foreground/40">
+                    {formatSize(fileContent.size)}
+                  </span>
+                )}
+                <button
+                  onClick={handleDownload}
+                  className="p-0.5 rounded hover:bg-accent text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+                  title="Download file"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
 
             {loadingFile ? (

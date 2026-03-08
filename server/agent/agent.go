@@ -37,6 +37,7 @@ type Request struct {
 	ConversationID string   // Unique conversation identifier
 	SessionID      string   // Session ID for resuming previous sessions (empty for new)
 	WorkDir        string   // Working directory (typically the git repo root)
+	Model          string   // Model to use (e.g. "claude-sonnet-4-6", "claude-haiku-4-5")
 	StaticContext  string   // Fixed context (project info, guidelines) - only for new sessions
 	DynamicContext string   // Variable context (session refs) - every message
 	Message        string   // The user's message

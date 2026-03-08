@@ -74,6 +74,7 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
     hasMore,
     pendingQuestion,
     agentName,
+    modelName,
     availableAgents,
     pickedTasks,
     pickedAssets,
@@ -85,6 +86,7 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
     sendMessage,
     handleStop,
     handleChangeAgent,
+    handleChangeModel,
     sendQueuedNow,
     removeQueued,
     editQueued,
@@ -284,6 +286,7 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
         isConnected={isConnected}
         isStreaming={isStreaming}
         agentName={agentName}
+        modelName={modelName}
         availableAgents={availableAgents}
         sessionHasMessages={sessionHasMessages}
         pickedTasks={pickedTasks}
@@ -294,6 +297,7 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
         onSend={handleSendMessage}
         onStop={handleStop}
         onChangeAgent={handleChangeAgent}
+        onChangeModel={handleChangeModel}
         onRemovePickedTask={removePickedTask}
         onAddPickedTask={addPickedTask}
         onRemovePickedAsset={removePickedAsset}

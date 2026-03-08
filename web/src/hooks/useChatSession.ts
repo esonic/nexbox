@@ -516,6 +516,18 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     }
   }, [session.id, sessionHasMessages]);
 
+  const handleChangeModel = useCallback(async (newModel: string) => {
+    if (sessionHasMessages) return;
+    try {
+      const updated = await sessionsApi.update(session.id, { model: newModel });
+      const { sessions, setSessions } = useAppStore.getState();
+      setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
+    } catch (e) {
+      console.error("Failed to update session model:", e);
+      toast.error("Failed to change model", { description: String(e) });
+    }
+  }, [session.id, sessionHasMessages]);
+
   const addPickedTask = useCallback((task: Task) => {
     storeAddPickedTask(sessionId, task);
   }, [sessionId, storeAddPickedTask]);
@@ -612,6 +624,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     hasMore,
     pendingQuestion,
     agentName,
+    modelName: session.model || "",
     availableAgents,
     pickedTasks,
     pickedAssets,
@@ -623,6 +636,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     sendMessage,
     handleStop,
     handleChangeAgent,
+    handleChangeModel,
     sendQueuedNow,
     removeQueued,
     editQueued,

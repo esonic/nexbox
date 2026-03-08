@@ -190,12 +190,12 @@ export const sessionsApi = {
     request<{ sessions: Session[] }>("/sessions/trash"),
   get: (id: string) =>
     request<Session>(`/sessions/${id}`),
-  create: (data: { name?: string; project_id?: string; agent?: string }) =>
+  create: (data: { name?: string; project_id?: string; agent?: string; model?: string }) =>
     request<Session>("/sessions", {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  update: (id: string, data: Partial<{ name: string; project_id: string; agent: string }>) =>
+  update: (id: string, data: Partial<{ name: string; project_id: string; agent: string; model: string }>) =>
     request<Session>(`/sessions/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
@@ -398,6 +398,25 @@ export const filesApi = {
     request<FileContentResponse>(`/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`),
   search: (projectId: string, query: string, type: "name" | "content" = "name", sessionId?: string) =>
     request<FileSearchResult[]>(`/projects/${projectId}/file-search?q=${encodeURIComponent(query)}&type=${type}${sessionId ? `&session_id=${sessionId}` : ""}`),
+  upload: async (projectId: string, file: File, path: string, sessionId?: string): Promise<{ path: string; size: number }> => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("path", path);
+    const url = `${API_BASE}/projects/${projectId}/files/upload${sessionId ? `?session_id=${sessionId}` : ""}`;
+    const token = getToken();
+    const res = await fetch(url, {
+      method: "POST",
+      body: form,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || res.statusText);
+    }
+    return res.json();
+  },
+  downloadUrl: (projectId: string, path: string, sessionId?: string): string =>
+    `${API_BASE}/projects/${projectId}/files/download?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,
 };
 
 export const diffApi = {
@@ -564,6 +583,18 @@ export interface CloudInfo extends ServerInfo {
   user_name?: string;
 }
 
+export interface BalanceInfo {
+  user_id: string;
+  balance_tokens: number;
+  reserved_tokens: number;
+  total_recharged: number;
+  balance_cny: number;
+}
+
+export const balanceApi = {
+  get: () => request<BalanceInfo>("/balance"),
+};
+
 export const updateApi = {
   status: () => request<{ state: string; remote_version?: string }>("/update/status"),
   restart: () => request<{ restarting: boolean }>("/update/restart", { method: "POST" }),
@@ -590,73 +621,27 @@ export const membersApi = {
 // Marketplace
 // ---------------------------------------------------------------------------
 
-// Predefined package categories (分类). Values are canonical tag strings stored in `tags[0]`.
-// Kept here so both the publish form and the filter bar share the same list.
-export const PACKAGE_CATEGORIES = [
-  { value: "dev",           label: "Dev",           description: "Code, CI/CD, testing" },
-  { value: "data",          label: "Data",          description: "Databases, analytics, ETL" },
-  { value: "ops",           label: "Ops",           description: "Monitoring, deployment, infrastructure" },
-  { value: "productivity",  label: "Productivity",  description: "Automation, scheduling, task management" },
-  { value: "communication", label: "Communication", description: "IM, email, notifications" },
-  { value: "security",      label: "Security",      description: "Auth, scanning, compliance" },
-  { value: "ai",            label: "AI",            description: "Models, embeddings, knowledge bases" },
-] as const;
-
-export type PackageCategoryValue = typeof PACKAGE_CATEGORIES[number]["value"];
-
-export interface MarketplacePackage {
+// Local plugin (admin-managed, from marketplace_dir JSON files)
+export interface LocalPlugin {
   id: string;
   name: string;
-  type: "mcp" | "skill";
-  title: string;
   description: string;
-  author_id: string;
-  latest_version: string;
-  tags: string[]; // currently at most one element (the category value)
-  install_count: number;
-  star_count: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface MarketplacePackageVersion {
-  id: string;
-  package_id: string;
+  type: string;       // "mcp" or "skill"
   version: string;
-  manifest: string; // JSON string
-  oss_key: string;
-  changelog: string;
-  published_by: string;
-  created_at: string;
-}
-
-export interface MarketplacePackageDetail {
-  package: MarketplacePackage;
-  versions: MarketplacePackageVersion[];
-}
-
-export interface PackageStarStatus {
-  starred: boolean;
-  star_count: number;
-}
-
-export interface PackageReview {
-  id: string;
-  package_id: string;
-  user_name: string;
-  body: string;
-  created_at: string;
-  updated_at: string;
+  command?: string;
+  args?: string[];
+  env_vars?: string[];
+  icon_url?: string;
 }
 
 export interface InstalledMCP {
   name: string;
-  project_id: string;   // "" = global, else project-scoped
-  package_id: string;   // remote marketplace package ID (for update checks)
-  version: string;      // installed version string
+  project_id: string;
+  package_id: string;
+  version: string;
   mcp_key: string;
   manifest: string;
-  env_values: string;   // JSON: user-provided env secrets
+  env_values: string;
   installed_at: number;
 }
 
@@ -666,65 +651,16 @@ export interface InstalledSkill {
   version: string;
   install_path: string;
   installed_at: number;
-  missing: boolean;     // true if install_path no longer exists on disk
+  missing: boolean;
 }
 
 export const marketplaceApi = {
-  listPackages: (params?: { type?: string; q?: string; tag?: string; sort?: string; limit?: number; offset?: number }) => {
-    const qs = new URLSearchParams();
-    if (params?.type) qs.set("type", params.type);
-    if (params?.q) qs.set("q", params.q);
-    if (params?.tag) qs.set("tag", params.tag);
-    if (params?.sort) qs.set("sort", params.sort);
-    if (params?.limit != null) qs.set("limit", String(params.limit));
-    if (params?.offset != null) qs.set("offset", String(params.offset));
-    const s = qs.toString();
-    return request<MarketplacePackage[]>(`/marketplace/packages${s ? "?" + s : ""}`);
-  },
+  // Local plugins (admin-managed directory)
+  listPlugins: () => request<LocalPlugin[]>("/marketplace/plugins"),
 
-  getPackage: (id: string) =>
-    request<MarketplacePackageDetail>(`/marketplace/packages/${id}`),
+  getPlugin: (id: string) => request<LocalPlugin>(`/marketplace/plugins/${id}`),
 
-  publishPackage: (body: {
-    name: string;
-    type: "mcp" | "skill";
-    title: string;
-    description: string;
-    version: string;
-    manifest: object;
-    changelog?: string;
-    tags?: string[];
-  }) =>
-    request<MarketplacePackageDetail>("/marketplace/packages", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  updatePackage: (id: string, body: { title?: string; description?: string; tags?: string[] }) =>
-    request<MarketplacePackage>(`/marketplace/packages/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
-
-  deletePackage: (id: string) =>
-    request<void>(`/marketplace/packages/${id}`, { method: "DELETE" }),
-
-  publishVersion: (
-    id: string,
-    body: { version: string; manifest: object; changelog?: string; oss_key?: string }
-  ) =>
-    request<MarketplacePackageVersion>(`/marketplace/packages/${id}/versions`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  // Send a local directory path; Go reads the filesystem, validates, packs into tar.gz, and uploads.
-  uploadSkillDir: (id: string, dirPath: string) =>
-    request<{ oss_key: string; skill_md: string }>(`/marketplace/packages/${id}/skill-dir-upload`, {
-      method: "POST",
-      body: JSON.stringify({ dir: dirPath }),
-    }),
-
+  // Installed MCPs
   listInstalledMCPs: (projectId?: string) => {
     const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
     return request<InstalledMCP[]>(`/marketplace/installed-mcps${qs}`);
@@ -733,7 +669,6 @@ export const marketplaceApi = {
   installMCP: (body: { name: string; package_id?: string; version?: string; mcp_key: string; manifest: object; env?: Record<string, string>; project_id?: string }) =>
     request<InstalledMCP>("/marketplace/installed-mcps", {
       method: "POST",
-      // Server stores manifest as a JSON string; pre-serialize the object here
       body: JSON.stringify({ ...body, manifest: JSON.stringify(body.manifest) }),
     }),
 
@@ -744,6 +679,7 @@ export const marketplaceApi = {
     });
   },
 
+  // Installed Skills
   listInstalledSkills: (projectId?: string) => {
     const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
     return request<InstalledSkill[]>(`/marketplace/installed-skills${qs}`);
@@ -762,29 +698,6 @@ export const marketplaceApi = {
       { method: "DELETE" }
     );
   },
-
-  // Stars
-  getStarStatus: (id: string) =>
-    request<PackageStarStatus>(`/marketplace/packages/${id}/star`),
-
-  starPackage: (id: string) =>
-    request<PackageStarStatus>(`/marketplace/packages/${id}/star`, { method: "POST" }),
-
-  unstarPackage: (id: string) =>
-    request<PackageStarStatus>(`/marketplace/packages/${id}/star`, { method: "DELETE" }),
-
-  // Comments
-  listComments: (id: string) =>
-    request<PackageReview[]>(`/marketplace/packages/${id}/reviews`),
-
-  addComment: (id: string, body: { body: string }) =>
-    request<PackageReview>(`/marketplace/packages/${id}/reviews`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  deleteComment: (id: string, commentId: string) =>
-    request<void>(`/marketplace/packages/${id}/reviews/${commentId}`, { method: "DELETE" }),
 };
 
 // JWT-based auth (cloud/SaaS mode)

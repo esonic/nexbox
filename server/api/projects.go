@@ -6,6 +6,8 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/go-chi/chi/v5"
 	"gitlab.okg.com/sre_ai/nexbox/config"
@@ -61,19 +63,23 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := validateGitRepoPath(req.GitRepoPath); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
 	// Set owner from authenticated user
 	req.OwnerID = GetUserID(r)
+
+	// If no git_repo_path provided, auto-create workspace directory
+	if req.GitRepoPath == "" && s.DataDir != "" {
+		// Will be set after project creation (need project ID for directory name)
+	} else if req.GitRepoPath != "" {
+		if err := validateGitRepoPath(req.GitRepoPath); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	localPath := req.GitRepoPath
 	req.GitRepoPath = "" // local path is never sent to the remote
 
 	if s.StoreMode == "remote" && localPath != "" {
-		// Best-effort: try to extract GitLab URL from the local repo
 		if gitlabURL, err := extractGitLabURL(localPath); err == nil {
 			req.GitLabRepoURL = gitlabURL
 		}
@@ -93,12 +99,34 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Auto-create workspace directory if none was provided
+	if localPath == "" && s.DataDir != "" {
+		shortID := project.ID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		wsDir := filepath.Join(s.DataDir, "workspaces", shortID)
+		if err := os.MkdirAll(wsDir, 0755); err != nil {
+			log.Printf("[projects] failed to create workspace dir %s: %v", wsDir, err)
+		} else {
+			localPath = wsDir
+			// Update project with the workspace path
+			gitPath := wsDir
+			if _, err := s.Store.UpdateProject(project.ID, store.UpdateProjectRequest{
+				GitRepoPath: &gitPath,
+			}); err != nil {
+				log.Printf("[projects] failed to update project git_repo_path: %v", err)
+			}
+			project.GitRepoPath = wsDir
+		}
+	}
+
 	// Save local git path mapping when in cloud mode
 	if s.StoreMode == "remote" && localPath != "" {
 		if err := s.Config.Update(func(cfg *config.Config) {
 			for _, m := range cfg.Projects {
 				if m.RemoteID == project.ID && m.GitRepoPath == localPath {
-					return // already mapped
+					return
 				}
 			}
 			cfg.Projects = append(cfg.Projects, config.ProjectMapping{

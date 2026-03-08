@@ -56,6 +56,7 @@ export interface Session {
   name: string;
   project_id: string;
   agent: string; // claude | codex | cursor (empty = server default)
+  model: string; // claude-sonnet-4-6 | claude-haiku-4-5 (empty = server default)
   agent_session_id: string;
   stream_id: string;
   sort_order: number;

@@ -98,6 +98,10 @@ func (c *CompositeStore) CreateUserMessage(sessionID, content string) (*ChatMess
 	return c.local.CreateUserMessage(sessionID, content)
 }
 
+func (c *CompositeStore) TrimSessionMessages(sessionID string, keepCount int) (int64, error) {
+	return c.local.TrimSessionMessages(sessionID, keepCount)
+}
+
 // --- QueueStore → local ---
 
 func (c *CompositeStore) ListQueuedMessages(sessionID string) ([]QueuedMessage, error) {

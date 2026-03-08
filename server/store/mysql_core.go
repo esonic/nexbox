@@ -188,6 +188,7 @@ func (s *MySQLStore) CreateSession(req CreateSessionRequest) (*Session, error) {
 		Name:        req.Name,
 		ProjectID:   req.ProjectID,
 		Agent:       req.Agent,
+		Model:       req.Model,
 		CreatedBy:   "local",
 		UserID:      req.UserID,
 		CreatedAt:   now,
@@ -195,9 +196,9 @@ func (s *MySQLStore) CreateSession(req CreateSessionRequest) (*Session, error) {
 	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO sessions (id, namespace_id, name, project_id, agent, agent_session_id, stream_id, features, created_by, user_id, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?, ?, ?)`,
-		sess.ID, sess.NamespaceID, sess.Name, sess.ProjectID, sess.Agent, sess.CreatedBy, sess.UserID, sess.CreatedAt, sess.UpdatedAt,
+		`INSERT INTO sessions (id, namespace_id, name, project_id, agent, model, agent_session_id, stream_id, features, created_by, user_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, '', '', '', ?, ?, ?, ?)`,
+		sess.ID, sess.NamespaceID, sess.Name, sess.ProjectID, sess.Agent, sess.Model, sess.CreatedBy, sess.UserID, sess.CreatedAt, sess.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
@@ -207,7 +208,7 @@ func (s *MySQLStore) CreateSession(req CreateSessionRequest) (*Session, error) {
 
 func (s *MySQLStore) ListSessions() ([]Session, error) {
 	rows, err := s.db.Query(
-		`SELECT id, namespace_id, name, project_id, agent, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, user_id, created_at, updated_at, deleted_at
+		`SELECT id, namespace_id, name, project_id, agent, model, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, user_id, created_at, updated_at, deleted_at
 		 FROM sessions WHERE deleted_at IS NULL ORDER BY sort_order ASC, created_at DESC`,
 	)
 	if err != nil {
@@ -228,7 +229,7 @@ func (s *MySQLStore) ListSessions() ([]Session, error) {
 
 func (s *MySQLStore) ListTrashedSessions() ([]Session, error) {
 	rows, err := s.db.Query(
-		`SELECT id, namespace_id, name, project_id, agent, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, user_id, created_at, updated_at, deleted_at
+		`SELECT id, namespace_id, name, project_id, agent, model, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, user_id, created_at, updated_at, deleted_at
 		 FROM sessions WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`,
 	)
 	if err != nil {
@@ -249,7 +250,7 @@ func (s *MySQLStore) ListTrashedSessions() ([]Session, error) {
 
 func (s *MySQLStore) GetSession(id string) (*Session, error) {
 	row := s.db.QueryRow(
-		`SELECT id, namespace_id, name, project_id, agent, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, user_id, created_at, updated_at, deleted_at
+		`SELECT id, namespace_id, name, project_id, agent, model, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, user_id, created_at, updated_at, deleted_at
 		 FROM sessions WHERE id = ?`, id,
 	)
 	sess, err := mysqlScanSession(row)
@@ -277,11 +278,14 @@ func (s *MySQLStore) UpdateSession(id string, req UpdateSessionRequest) (*Sessio
 	if req.Agent != nil {
 		sess.Agent = *req.Agent
 	}
+	if req.Model != nil {
+		sess.Model = *req.Model
+	}
 	sess.UpdatedAt = time.Now()
 
 	_, err = s.db.Exec(
-		`UPDATE sessions SET name = ?, project_id = ?, agent = ?, updated_at = ? WHERE id = ?`,
-		sess.Name, sess.ProjectID, sess.Agent, sess.UpdatedAt, sess.ID,
+		`UPDATE sessions SET name = ?, project_id = ?, agent = ?, model = ?, updated_at = ? WHERE id = ?`,
+		sess.Name, sess.ProjectID, sess.Agent, sess.Model, sess.UpdatedAt, sess.ID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update session: %w", err)
@@ -441,7 +445,7 @@ func (s *MySQLStore) ReorderSessions(sessionIDs []string) error {
 func mysqlScanSession(row interface{ Scan(...interface{}) error }) (*Session, error) {
 	var sess Session
 	var deletedAt sql.NullTime
-	if err := row.Scan(&sess.ID, &sess.NamespaceID, &sess.Name, &sess.ProjectID, &sess.Agent,
+	if err := row.Scan(&sess.ID, &sess.NamespaceID, &sess.Name, &sess.ProjectID, &sess.Agent, &sess.Model,
 		&sess.AgentSessionID, &sess.StreamID, &sess.SortOrder, &sess.Features,
 		&sess.WorktreeMode, &sess.WorktreePath,
 		&sess.CreatedBy, &sess.UserID, &sess.CreatedAt, &sess.UpdatedAt, &deletedAt); err != nil {
@@ -585,6 +589,18 @@ func (s *MySQLStore) UpdateMessageParts(messageID string, parts []MessagePart, m
 func (s *MySQLStore) DeleteMessagesBySession(sessionID string) error {
 	_, err := s.db.Exec(`DELETE FROM chat_messages WHERE session_id = ?`, sessionID)
 	return err
+}
+
+// TrimSessionMessages keeps only the latest keepCount messages for a session, deleting older ones.
+func (s *MySQLStore) TrimSessionMessages(sessionID string, keepCount int) (int64, error) {
+	res, err := s.db.Exec(
+		`DELETE FROM chat_messages WHERE session_id = ? AND id NOT IN (
+			SELECT id FROM (SELECT id FROM chat_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?) AS keep
+		)`, sessionID, sessionID, keepCount)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *MySQLStore) CreateUserMessage(sessionID, content string) (*ChatMessage, error) {

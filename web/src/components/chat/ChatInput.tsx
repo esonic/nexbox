@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { toast } from "sonner";
-import { Send, StopCircle, Command, AtSign, ListTodo, FileText, ChevronDown, Check, X, GitBranch, UserPen, UserCheck, ImagePlus, Play, Pencil, Workflow, MessageSquare } from "lucide-react";
+import { Send, StopCircle, FileText, ChevronDown, Check, X, GitBranch, ImagePlus, Play, Pencil, Workflow, MessageSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { INPUT_HEIGHT_MIN, INPUT_HEIGHT_MAX } from "@/lib/constants";
 import { Button } from "@/components/ui/button";
@@ -11,13 +11,12 @@ import {
   formatAnswersMessage,
   type QuestionAnswer,
 } from "@/components/chat/QuestionCard";
-import { projectsApi, tasksApi, assetsApi, imageApi, type DiffResponse } from "@/lib/api";
-import { workflowApi } from "@/lib/workflowApi";
+import { imageApi, type DiffResponse } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
 import { STATUS_ICONS } from "@/plugins/task/task-icons";
 import { normalizeStatus, shortId, STATUS_MAP } from "@/plugins/task/task-config";
 import { formatRelativeDate } from "@/lib/utils";
-import type { Task, AssetType } from "@/types";
+import type { Task } from "@/types";
 import type { PickedAsset, PickedWorkflow, InlineComment, RichQueuedMessage } from "@/stores/app";
 import type { QueuedMessage } from "@/hooks/useChatSession";
 
@@ -35,52 +34,15 @@ const AGENT_LABELS: Record<string, string> = {
   codex: "Codex",
 };
 
-export const SLASH_COMMANDS = [
-  {
-    name: "design",
-    label: "Write Design Doc",
-    description: "Generate a design document for the project",
-    prompt: "Based on the project context, write a detailed design document. If anything is ambiguous, use the ask_question tool to clarify with user before proceeding. Save the final document using the save_asset tool when done.",
-  },
-  {
-    name: "revise",
-    label: "Address Comments",
-    description: "Revise documents based on review comments",
-    prompt: "If session references include assets, use list_asset_comments on those assets, address the feedback, and save via save_asset. If no assets are referenced, call list_assets to get recent ones, then use ask_question to ask the user which asset to revise before proceeding.",
-  },
-  {
-    name: "code",
-    label: "Implement Code",
-    description: "Write code based on design doc or task",
-    prompt: "If session references include assets or tasks, use get_asset_content or get_task as the spec and implement the code. If nothing is referenced, call list_tasks to get recent ones, then use ask_question to ask the user which task to implement before proceeding.",
-  },
-  {
-    name: "review",
-    label: "Code Review",
-    description: "Review code or git diff using Prism rules",
-    prompt: "Review the code based on the user's request. " +
-      "If the user specifies rule group(s), call get_code_review_rules with those IDs to fetch the rules. " +
-      "If no rule group is specified, proceed with general best practices. " +
-      "Get the code via git diff, git show, or file read as appropriate. " +
-      "Report issues grouped by severity (error → warning → info) with file, line, rule name, and suggestion.",
-    needsInput: true,
-    inputHint: "What to review (e.g. 'git diff', 'git diff HEAD~1 using rule group 5')...",
-  },
-  {
-    name: "e2e_test",
-    label: "E2E Browser Test",
-    description: "Run end-to-end tests with Chrome browser",
-    prompt: "You now have Chrome DevTools MCP tools available for end-to-end browser testing. " +
-      "Use take_snapshot to see the page structure (accessibility tree with UIDs), then interact with elements using their UIDs. " +
-      "Typical workflow: navigate_page -> take_snapshot -> click/fill/type_text -> take_screenshot to verify. " +
-      "Always call take_snapshot before interacting to get fresh UIDs.",
-    features: ["chrome_devtools"],
-    needsInput: true,
-    inputHint: "Describe what to test (e.g. URL, flow, expected behavior)...",
-  },
-] as const;
+const MODEL_OPTIONS: { value: string; label: string }[] = [
+  { value: "claude-sonnet-4-6", label: "Sonnet" },
+  { value: "claude-haiku-4-5", label: "Haiku" },
+];
 
-type SlashCommand = typeof SLASH_COMMANDS[number];
+const MODEL_LABELS: Record<string, string> = {
+  "claude-sonnet-4-6": "Sonnet",
+  "claude-haiku-4-5": "Haiku",
+};
 
 const ASSET_TYPE_COLORS: Record<string, string> = {
   requirement_doc: "text-blue-400",
@@ -89,101 +51,6 @@ const ASSET_TYPE_COLORS: Record<string, string> = {
   unit_test: "text-amber-400",
   test_case: "text-rose-400",
 };
-
-const AT_ASSET_TYPE_LABELS: Record<string, string> = {
-  requirement_doc: "Requirement", design_doc: "Design", code_change: "Code Change",
-  unit_test: "Unit Test", test_case: "Test Case",
-};
-const AT_ASSET_TYPE_BADGE: Record<string, string> = {
-  requirement_doc: "bg-blue-500/15 text-blue-400", design_doc: "bg-violet-500/15 text-violet-400",
-  code_change: "bg-emerald-500/15 text-emerald-400", unit_test: "bg-amber-500/15 text-amber-400",
-  test_case: "bg-rose-500/15 text-rose-400",
-};
-const AT_ASSET_TYPE_ICON_COLOR: Record<string, string> = {
-  requirement_doc: "text-blue-400", design_doc: "text-violet-400", code_change: "text-emerald-400",
-  unit_test: "text-amber-400", test_case: "text-rose-400",
-};
-
-type AtItem = {
-  id: string; type: "task" | "asset" | "workflow"; name: string;
-  status?: string; priority?: string; createdBy?: string; assigner?: string; updatedAt?: string;
-  projectName?: string; assetType?: string; projectId?: string;
-};
-
-function AtPickerTaskRow({ item }: { item: AtItem }) {
-  const st = normalizeStatus(item.status || "open");
-  const StIcon = STATUS_ICONS[st];
-  const sc = STATUS_MAP.get(st);
-  return (
-    <>
-      <ListTodo className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50" />
-      <span className="shrink-0 text-[10px] text-muted-foreground font-mono tabular-nums">{shortId(item.id)}</span>
-      <StIcon className={cn("h-3.5 w-3.5 shrink-0", sc?.color)} />
-      <span className="text-[13px] truncate">{item.name}</span>
-      {item.projectName && (
-        <span className="shrink-0 text-[10px] text-violet-500/80 bg-violet-500/10 px-1.5 py-0.5 rounded font-medium truncate max-w-[100px]">{item.projectName}</span>
-      )}
-      <div className="flex items-center gap-1.5 ml-auto shrink-0">
-        {item.createdBy && item.createdBy !== "local" && (
-          <span className="flex items-center gap-0.5 text-[10px] text-blue-400" title={`Creator: ${item.createdBy}`}>
-            <UserPen className="h-2.5 w-2.5" /><span className="max-w-[50px] truncate">{item.createdBy}</span>
-          </span>
-        )}
-        {item.assigner && (
-          <span className="flex items-center gap-0.5 text-[10px] text-amber-500" title={`Assignee: ${item.assigner}`}>
-            <UserCheck className="h-2.5 w-2.5" /><span className="max-w-[50px] truncate">{item.assigner}</span>
-          </span>
-        )}
-        {item.updatedAt && (
-          <span className="text-[10px] text-muted-foreground/60 tabular-nums">{formatRelativeDate(item.updatedAt)}</span>
-        )}
-      </div>
-    </>
-  );
-}
-
-function AtPickerAssetRow({ item }: { item: AtItem }) {
-  const iconColor = AT_ASSET_TYPE_ICON_COLOR[item.assetType || ""] || "text-muted-foreground";
-  const badgeColor = AT_ASSET_TYPE_BADGE[item.assetType || ""] || "bg-muted text-muted-foreground";
-  const typeLabel = AT_ASSET_TYPE_LABELS[item.assetType || ""] || item.assetType || "";
-  return (
-    <>
-      <FileText className={cn("h-3.5 w-3.5 shrink-0", iconColor)} />
-      <span className="shrink-0 text-[10px] text-muted-foreground font-mono tabular-nums">{shortId(item.id)}</span>
-      <span className="text-[13px] truncate">{item.name}</span>
-      {typeLabel && (
-        <span className={cn("shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded", badgeColor)}>{typeLabel}</span>
-      )}
-      {item.projectName && (
-        <span className="shrink-0 text-[10px] text-violet-500/80 bg-violet-500/10 px-1.5 py-0.5 rounded font-medium truncate max-w-[100px]">{item.projectName}</span>
-      )}
-      <div className="flex items-center gap-1.5 ml-auto shrink-0">
-        {item.createdBy && item.createdBy !== "local" && (
-          <span className="flex items-center gap-0.5 text-[10px] text-blue-400" title={`Creator: ${item.createdBy}`}>
-            <UserPen className="h-2.5 w-2.5" /><span className="max-w-[50px] truncate">{item.createdBy}</span>
-          </span>
-        )}
-        {item.updatedAt && (
-          <span className="text-[10px] text-muted-foreground/60 tabular-nums">{formatRelativeDate(item.updatedAt)}</span>
-        )}
-      </div>
-    </>
-  );
-}
-
-function AtPickerWorkflowRow({ item }: { item: AtItem }) {
-  return (
-    <>
-      <Workflow className="h-3.5 w-3.5 shrink-0 text-purple-400" />
-      <Play className="h-3 w-3 shrink-0 text-purple-400/60" />
-      <span className="text-[13px] truncate">{item.name}</span>
-      <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400">workflow</span>
-      {item.projectName && (
-        <span className="shrink-0 text-[10px] text-violet-500/80 bg-violet-500/10 px-1.5 py-0.5 rounded font-medium truncate max-w-[100px]">{item.projectName}</span>
-      )}
-    </>
-  );
-}
 
 function QueuedItem({
   item,
@@ -368,6 +235,7 @@ interface ChatInputProps {
   isConnected: boolean;
   isStreaming: boolean;
   agentName: string;
+  modelName: string;
   availableAgents: string[];
   sessionHasMessages: boolean;
   pickedTasks: Task[];
@@ -379,6 +247,7 @@ interface ChatInputProps {
   onSend: (message: string, images?: AttachedImage[], features?: string[]) => void;
   onStop: () => void;
   onChangeAgent: (agent: string) => void;
+  onChangeModel: (model: string) => void;
   onRemovePickedTask: (taskId: string) => void;
   onAddPickedTask: (task: Task) => void;
   onRemovePickedAsset: (assetId: string) => void;
@@ -402,6 +271,7 @@ export function ChatInput({
   isConnected,
   isStreaming,
   agentName,
+  modelName,
   availableAgents,
   sessionHasMessages,
   pickedTasks,
@@ -413,6 +283,7 @@ export function ChatInput({
   onSend,
   onStop,
   onChangeAgent,
+  onChangeModel,
   onRemovePickedTask,
   onAddPickedTask,
   onRemovePickedAsset,
@@ -434,12 +305,10 @@ export function ChatInput({
     try { return localStorage.getItem(DRAFT_KEY_PREFIX + sessionId) || ""; }
     catch { return ""; }
   });
-  const [showSlashMenu, setShowSlashMenu] = useState(false);
-  const [slashFilter, setSlashFilter] = useState("");
-  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
-  const [activeCommand, setActiveCommand] = useState<SlashCommand | null>(null);
   const [showAgentMenu, setShowAgentMenu] = useState(false);
   const agentMenuRef = useRef<HTMLDivElement>(null);
+  const [showModelMenu, setShowModelMenu] = useState(false);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
 
   // Image attachment state
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
@@ -492,21 +361,7 @@ export function ChatInput({
     catch { setInput(""); }
   }, [sessionId]);
 
-  // @ mention state
-  const [showAtMenu, setShowAtMenu] = useState(false);
-  const [atQuery, setAtQuery] = useState("");
-  const [atResults, setAtResults] = useState<Array<{
-    id: string; type: "task" | "asset" | "workflow"; name: string;
-    status?: string; priority?: string; createdBy?: string; assigner?: string; updatedAt?: string;
-    projectName?: string; assetType?: string; projectId?: string;
-  }>>([]);
-  const [selectedAtIndex, setSelectedAtIndex] = useState(0);
-  const [atCursorPos, setAtCursorPos] = useState(0);
-  const atSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const atMenuRef = useRef<HTMLDivElement>(null);
-  const slashMenuRef = useRef<HTMLDivElement>(null);
 
   // Input area resize
   const [inputHeight, setInputHeight] = useState(100);
@@ -534,39 +389,28 @@ export function ChatInput({
     document.addEventListener("mouseup", onMouseUp);
   }, [inputHeight]);
 
-  const filteredCommands = SLASH_COMMANDS.filter((cmd) =>
-    cmd.name.toLowerCase().includes(slashFilter.toLowerCase()) ||
-    cmd.label.toLowerCase().includes(slashFilter.toLowerCase())
-  );
-
-  // Close agent menu on outside click
+  // Close agent/model menu on outside click
   useEffect(() => {
-    if (!showAgentMenu) return;
+    if (!showAgentMenu && !showModelMenu) return;
     const handler = (e: MouseEvent) => {
-      if (agentMenuRef.current && !agentMenuRef.current.contains(e.target as Node)) {
+      if (showAgentMenu && agentMenuRef.current && !agentMenuRef.current.contains(e.target as Node)) {
         setShowAgentMenu(false);
+      }
+      if (showModelMenu && modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
+        setShowModelMenu(false);
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [showAgentMenu]);
+  }, [showAgentMenu, showModelMenu]);
 
   const handleSend = () => {
-    const hasContent = input.trim() || attachedImages.length > 0 || pickedTasks.length > 0 || pickedAssets.length > 0 || pickedWorkflows.length > 0 || pickedComments.length > 0 || activeCommand;
+    const hasContent = input.trim() || attachedImages.length > 0 || pickedTasks.length > 0 || pickedAssets.length > 0 || pickedWorkflows.length > 0 || pickedComments.length > 0;
     if (!hasContent) return;
     if (attachedImages.length > 0 && !attachedImages.every(i => i.filename)) return;
 
     let message = input;
-    let features: string[] | undefined;
-
-    if (activeCommand) {
-      const userInput = input.trim();
-      message = userInput
-        ? `${activeCommand.prompt}\n\nUser request: ${userInput}`
-        : activeCommand.prompt;
-      features = "features" in activeCommand ? ([...activeCommand.features] as string[]) : undefined;
-      setActiveCommand(null);
-    }
+    const features: string[] | undefined = undefined;
 
     onSend(message, attachedImages.length > 0 ? attachedImages : undefined, features);
     setInput("");
@@ -579,233 +423,16 @@ export function ChatInput({
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
-    const cursorPos = e.target.selectionStart || 0;
     setInput(value);
     saveDraft(value);
-
-    // Slash command detection
-    if (value.startsWith("/")) {
-      setShowSlashMenu(true);
-      setSlashFilter(value.slice(1));
-      setSelectedCommandIndex(0);
-      setShowAtMenu(false);
-    } else {
-      setShowSlashMenu(false);
-      setSlashFilter("");
-    }
-
-    // @ mention detection
-    const textBeforeCursor = value.slice(0, cursorPos);
-    const lastAtIdx = textBeforeCursor.lastIndexOf("@");
-    if (lastAtIdx >= 0) {
-      const afterAt = textBeforeCursor.slice(lastAtIdx + 1);
-      if (!afterAt.includes("\n") && afterAt.length < 40) {
-        setShowAtMenu(true);
-        setAtQuery(afterAt);
-        setAtCursorPos(cursorPos);
-        return;
-      }
-    }
-    setShowAtMenu(false);
-    setAtQuery("");
   };
 
-  const executeSlashCommand = (cmd: SlashCommand) => {
-    setShowSlashMenu(false);
-    setSlashFilter("");
-    setInput("");
 
-    if ("needsInput" in cmd && cmd.needsInput) {
-      setActiveCommand(cmd);
-      setTimeout(() => textareaRef.current?.focus(), 0);
-      return;
-    }
 
-    const features = "features" in cmd ? ([...cmd.features] as string[]) : undefined;
-    onSend(cmd.prompt, undefined, features);
-  };
-
-  // @ mention search
-  const currentProjectId = useAppStore((s) => s.currentSession?.project_id);
-  useEffect(() => {
-    if (!showAtMenu) return;
-    if (atSearchTimer.current) clearTimeout(atSearchTimer.current);
-    atSearchTimer.current = setTimeout(async () => {
-      const q = atQuery.toLowerCase();
-      const taskResults: typeof atResults = [];
-      const assetResults: typeof atResults = [];
-      const TOTAL_LIMIT = 20;
-      const BASE_LIMIT = 10;
-      // When searching, use a larger fetch limit so server-side q filter can scan more records
-      const fetchLimit = q ? 200 : TOTAL_LIMIT;
-      try {
-        const [projs, projTasksRaw, globalTasksRaw] = await Promise.all([
-          projectsApi.list(),
-          currentProjectId ? tasksApi.list(fetchLimit, 0, currentProjectId, q || undefined) : Promise.resolve(null),
-          tasksApi.list(fetchLimit, 0, undefined, q || undefined),
-        ]);
-        const projMap = new Map((projs || []).map((p) => [p.id, p.name]));
-
-        const pushTask = (t: Task, projName: string | undefined) => {
-          taskResults.push({
-            id: t.id, type: "task", name: t.title,
-            status: t.status, priority: t.priority,
-            createdBy: t.created_by, assigner: t.assigner,
-            updatedAt: t.updated_at,
-            projectName: projName,
-          });
-        };
-
-        // Current project tasks first (same order as list page)
-        for (const t of projTasksRaw || []) {
-          if (t.status === "done" || t.status === "closed") continue;
-          if (q && !t.title.toLowerCase().includes(q)) continue;
-          pushTask(t, projMap.get(currentProjectId!));
-        }
-        // Fill with global tasks if fewer than BASE_LIMIT from current project
-        if (taskResults.length < BASE_LIMIT || !currentProjectId) {
-          const seenIds = new Set(taskResults.map((t) => t.id));
-          for (const t of globalTasksRaw || []) {
-            if (seenIds.has(t.id)) continue;
-            if (t.status === "done" || t.status === "closed") continue;
-            if (q && !t.title.toLowerCase().includes(q)) continue;
-            pushTask(t, t.project_id ? projMap.get(t.project_id) : undefined);
-          }
-        }
-
-        const sortedProjs = [...(projs || [])];
-        if (currentProjectId) {
-          sortedProjs.sort((a, b) =>
-            (a.id === currentProjectId ? 0 : 1) - (b.id === currentProjectId ? 0 : 1)
-          );
-        }
-
-        const assetArrays = await Promise.all(
-          sortedProjs.map((p) => assetsApi.list(p.id, fetchLimit, 0, undefined, q || undefined))
-        );
-
-        for (let i = 0; i < sortedProjs.length; i++) {
-          const p = sortedProjs[i];
-          for (const a of assetArrays[i] || []) {
-            if (q && !a.title.toLowerCase().includes(q)) continue;
-            assetResults.push({
-              id: a.id, type: "asset", name: a.title,
-              assetType: a.type, projectName: p.name, createdBy: a.created_by, updatedAt: a.updated_at,
-            });
-          }
-        }
-      } catch (e) {
-        console.error("@ search failed:", e);
-        toast.error("Search failed", { description: String(e) });
-      }
-      const taskLimit = Math.min(taskResults.length, Math.max(BASE_LIMIT, TOTAL_LIMIT - assetResults.length));
-      const assetLimit = Math.min(assetResults.length, Math.max(5, TOTAL_LIMIT - taskLimit));
-      setAtResults([...taskResults.slice(0, taskLimit), ...assetResults.slice(0, assetLimit)]);
-      setSelectedAtIndex(0);
-    }, 150);
-    return () => { if (atSearchTimer.current) clearTimeout(atSearchTimer.current); };
-  }, [showAtMenu, atQuery, currentProjectId]);
-
-  useEffect(() => {
-    if (!showSlashMenu || filteredCommands.length === 0) return;
-    const container = slashMenuRef.current;
-    if (!container) return;
-    const item = container.querySelector(`[data-cmd-index="${selectedCommandIndex}"]`);
-    if (item) item.scrollIntoView({ block: "nearest" });
-  }, [selectedCommandIndex, showSlashMenu, filteredCommands.length]);
-
-  useEffect(() => {
-    if (!showAtMenu || atResults.length === 0) return;
-    const container = atMenuRef.current;
-    if (!container) return;
-    const item = container.querySelector(`[data-at-index="${selectedAtIndex}"]`);
-    if (item) item.scrollIntoView({ block: "nearest" });
-  }, [selectedAtIndex, showAtMenu, atResults.length]);
-
-  const handleAtSelect = async (item: typeof atResults[0]) => {
-    const before = input.slice(0, atCursorPos);
-    const atStart = before.lastIndexOf("@");
-    const after = input.slice(textareaRef.current?.selectionStart || input.length);
-
-    if (item.type === "task") {
-      const newInput = before.slice(0, atStart) + after;
-      setInput(newInput.trimEnd() ? newInput : newInput.trim());
-      setShowAtMenu(false);
-      setAtQuery("");
-
-      try {
-        const fullTask = await tasksApi.get(item.id);
-        onAddPickedTask(fullTask);
-      } catch {
-        onAddPickedTask({
-          id: item.id,
-          parent_id: "",
-          title: item.name,
-          description: "",
-          status: (item.status as Task["status"]) || "open",
-          priority: (item.priority as Task["priority"]) || "medium",
-          ref_count: 0,
-          comment_count: 0,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        });
-      }
-    } else if (item.type === "workflow") {
-      const newInput = before.slice(0, atStart) + after;
-      setInput(newInput.trimEnd() ? newInput : newInput.trim());
-      setShowAtMenu(false);
-      setAtQuery("");
-      onAddPickedWorkflow({ id: item.id, name: item.name, projectId: item.projectId || "" });
-    } else {
-      const newInput = before.slice(0, atStart) + after;
-      setInput(newInput.trimEnd() ? newInput : newInput.trim());
-      setShowAtMenu(false);
-      setAtQuery("");
-      onAddPickedAsset({ id: item.id, title: item.name, assetType: (item.assetType || "design_doc") as AssetType });
-    }
-
-    textareaRef.current?.focus();
-  };
-
-  /** Generic handler for popup-menu keyboard navigation (ArrowUp/Down, Enter/Tab, Escape). */
-  const navigateMenu = (
-    e: React.KeyboardEvent,
-    count: number,
-    selectedIndex: number,
-    setIndex: React.Dispatch<React.SetStateAction<number>>,
-    onSelect: () => void,
-    onDismiss: () => void,
-  ): boolean => {
-    switch (e.key) {
-      case "ArrowDown": e.preventDefault(); setIndex(selectedIndex < count - 1 ? selectedIndex + 1 : 0); return true;
-      case "ArrowUp":   e.preventDefault(); setIndex(selectedIndex > 0 ? selectedIndex - 1 : count - 1); return true;
-      case "Enter":
-      case "Tab":        e.preventDefault(); onSelect(); return true;
-      case "Escape":     e.preventDefault(); onDismiss(); return true;
-      default: return false;
-    }
-  };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.nativeEvent.isComposing) return;
 
-    if (showSlashMenu && filteredCommands.length > 0) {
-      if (navigateMenu(e, filteredCommands.length, selectedCommandIndex, setSelectedCommandIndex,
-        () => executeSlashCommand(filteredCommands[selectedCommandIndex]),
-        () => { setShowSlashMenu(false); setInput(""); },
-      )) return;
-    }
-    if (showAtMenu && atResults.length > 0) {
-      if (navigateMenu(e, atResults.length, selectedAtIndex, setSelectedAtIndex,
-        () => handleAtSelect(atResults[selectedAtIndex]),
-        () => setShowAtMenu(false),
-      )) return;
-    }
-    if (e.key === "Escape" && activeCommand && !showSlashMenu && !showAtMenu) {
-      e.preventDefault();
-      setActiveCommand(null);
-      return;
-    }
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSend();
@@ -816,6 +443,13 @@ export function ChatInput({
     setShowAgentMenu(false);
     onChangeAgent(agent);
   };
+
+  const handleModelChange = (model: string) => {
+    setShowModelMenu(false);
+    onChangeModel(model);
+  };
+
+  const currentModelLabel = MODEL_LABELS[modelName] || MODEL_LABELS["claude-sonnet-4-6"];
 
   return (
     <div className="shrink-0">
@@ -896,81 +530,8 @@ export function ChatInput({
               ))}
             </div>
           )}
-          {/* Slash command menu */}
-          {showSlashMenu && filteredCommands.length > 0 && (
-            <div ref={slashMenuRef} className="absolute bottom-full left-0 right-0 mb-2 bg-background border rounded-lg shadow-lg overflow-hidden z-10 max-h-64 overflow-y-auto">
-              <div className="p-2 text-xs text-muted-foreground border-b">
-                <Command className="inline h-3 w-3 mr-1" />
-                Commands
-              </div>
-              {filteredCommands.map((cmd, index) => (
-                <button
-                  key={cmd.name}
-                  data-cmd-index={index}
-                  onClick={() => executeSlashCommand(cmd)}
-                  className={`w-full text-left px-3 py-2 flex items-start gap-3 hover:bg-accent transition-colors ${
-                    index === selectedCommandIndex ? "bg-accent" : ""
-                  }`}
-                >
-                  <span className="font-mono text-sm text-primary w-24 shrink-0">/{cmd.name}</span>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium">{cmd.label}</div>
-                    <div className="text-xs text-muted-foreground truncate">{cmd.description}</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
-          {/* @ mention menu */}
-          {showAtMenu && atResults.length > 0 && (
-            <div ref={atMenuRef} className="absolute bottom-full left-0 right-0 mb-2 bg-background border rounded-lg shadow-lg overflow-hidden z-10 max-h-64 overflow-y-auto">
-              <div className="p-2 text-xs text-muted-foreground border-b">
-                <AtSign className="inline h-3 w-3 mr-1" />
-                Reference — add context to this session
-              </div>
-              {atResults.map((item, index) => (
-                <button
-                  key={`${item.type}-${item.id}`}
-                  data-at-index={index}
-                  onClick={() => handleAtSelect(item)}
-                  className={cn(
-                    "w-full text-left px-3 py-1.5 flex items-center gap-1.5 hover:bg-accent transition-colors",
-                    index === selectedAtIndex && "bg-accent"
-                  )}
-                >
-                  {item.type === "task" ? (
-                    <AtPickerTaskRow item={item} />
-                  ) : item.type === "workflow" ? (
-                    <AtPickerWorkflowRow item={item} />
-                  ) : (
-                    <AtPickerAssetRow item={item} />
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
 
-          {/* Active command chip */}
-          {activeCommand && (
-            <div className="flex items-center gap-1.5 px-3 pt-2">
-              <span
-                className={cn(
-                  "inline-flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded-md text-xs font-medium transition-colors",
-                  "bg-primary/10 border border-primary/25 text-primary"
-                )}
-              >
-                <Command className="h-3 w-3 shrink-0" />
-                <span className="font-mono">/{activeCommand.name}</span>
-                <span className="text-muted-foreground font-normal">{activeCommand.label}</span>
-                <button
-                  onClick={() => setActiveCommand(null)}
-                  className="ml-0.5 p-0.5 rounded hover:bg-primary/15 text-primary/50 hover:text-primary transition-colors"
-                >
-                  <X className="h-2.5 w-2.5" />
-                </button>
-              </span>
-            </div>
-          )}
+
 
           {/* Picked task, asset & workflow badges */}
           {(pickedTasks.length > 0 || pickedAssets.length > 0 || pickedWorkflows.length > 0 || pickedComments.length > 0) && (
@@ -1114,7 +675,7 @@ export function ChatInput({
                 addImageFiles(imageFiles);
               }
             }}
-            placeholder={!isConnected ? "Connecting..." : activeCommand && "inputHint" in activeCommand ? activeCommand.inputHint : "Type a message, / for commands, @ for references..."}
+            placeholder={!isConnected ? "Connecting..." : "Type a message..."}
             disabled={!isConnected}
             className="resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
             style={{ height: inputHeight }}
@@ -1169,6 +730,49 @@ export function ChatInput({
                   </div>
                 </>
               )}
+              {/* Model selector */}
+              {agentName === "claude" && (
+                <>
+                  <span className="text-muted-foreground/40 text-xs">·</span>
+                  <div className="relative" ref={modelMenuRef}>
+                    <button
+                      onClick={() => {
+                        if (!sessionHasMessages) setShowModelMenu((v) => !v);
+                      }}
+                      className={cn(
+                        "text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 transition-colors",
+                        sessionHasMessages
+                          ? "bg-violet-500/15 text-violet-400 cursor-default"
+                          : "bg-violet-500/15 text-violet-400 hover:bg-violet-500/25 cursor-pointer"
+                      )}
+                      title={sessionHasMessages ? "Model locked after first message" : "Click to change model"}
+                    >
+                      {currentModelLabel}
+                      {!sessionHasMessages && (
+                        <ChevronDown className="h-2.5 w-2.5" />
+                      )}
+                    </button>
+
+                    {showModelMenu && (
+                      <div className="absolute left-0 bottom-full z-50 mb-1 w-36 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
+                        {MODEL_OPTIONS.map((opt) => (
+                          <button
+                            key={opt.value}
+                            onClick={() => handleModelChange(opt.value)}
+                            className={cn(
+                              "w-full flex items-center justify-between px-3 py-1.5 text-xs hover:bg-accent transition-colors",
+                              (modelName || "claude-sonnet-4-6") === opt.value && "bg-accent/50 font-medium"
+                            )}
+                          >
+                            <span>{opt.label}</span>
+                            {(modelName || "claude-sonnet-4-6") === opt.value && <Check className="h-3 w-3 text-primary" />}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
             <div className="flex items-center gap-1">
               <Button
@@ -1194,7 +798,7 @@ export function ChatInput({
               )}
               <Button
                 onClick={handleSend}
-                disabled={!isConnected || uploading || (!input.trim() && !activeCommand && pickedTasks.length === 0 && pickedAssets.length === 0 && pickedWorkflows.length === 0 && pickedComments.length === 0 && attachedImages.length === 0)}
+                disabled={!isConnected || uploading || (!input.trim() && pickedTasks.length === 0 && pickedAssets.length === 0 && pickedWorkflows.length === 0 && pickedComments.length === 0 && attachedImages.length === 0)}
                 size="icon"
                 className="h-7 w-7 rounded-md shrink-0"
                 title={isStreaming ? "Queue message" : "Send message"}

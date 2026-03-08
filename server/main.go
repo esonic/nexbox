@@ -284,7 +284,7 @@ func main() {
 
 	// Periodic cleanup: hard-delete trashed sessions (runs hourly).
 	// TRASH_TTL_HOURS controls retention; defaults to 168h (7 days) if unset.
-	trashTTL := 7 * 24 * time.Hour
+	trashTTL := 24 * time.Hour
 	if v := os.Getenv("NEX_TRASH_TTL_HOURS"); v != "" {
 		if h, err := strconv.ParseFloat(v, 64); err == nil && h > 0 {
 			trashTTL = time.Duration(h * float64(time.Hour))
@@ -346,31 +346,37 @@ func main() {
 	defer queueCancel()
 	go srv.StartQueuePoller(queueCtx)
 
-	// Periodic cleanup of stale message part details (keep recent 50 sessions, every hour)
+	// Periodic message trimming: keep only the latest 100 messages per session (runs hourly).
 	go func() {
-		runCleanup := func() {
+		const maxMessagesPerSession = 100
+		trimMessages := func() {
 			sessions, err := dataStore.ListSessions()
 			if err != nil {
-				log.Printf("[detail-cache] Failed to list sessions for cleanup: %v", err)
+				log.Printf("[trim] Failed to list sessions: %v", err)
 				return
 			}
-			const keepRecent = 50
-			keep := make([]string, 0, keepRecent)
-			for i, s := range sessions {
-				if i >= keepRecent {
-					break
+			var totalDeleted int64
+			for _, sess := range sessions {
+				n, err := dataStore.TrimSessionMessages(sess.ID, maxMessagesPerSession)
+				if err != nil {
+					log.Printf("[trim] Failed to trim session %s: %v", sess.ID, err)
+					continue
 				}
-				keep = append(keep, s.ID)
+				totalDeleted += n
 			}
-			if err := detailCache.Cleanup(keep); err != nil {
-				log.Printf("[detail-cache] Cleanup error: %v", err)
+			if totalDeleted > 0 {
+				log.Printf("[trim] Removed %d old messages across %d sessions.", totalDeleted, len(sessions))
 			}
 		}
-
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
-			runCleanup()
+		for {
+			select {
+			case <-ticker.C:
+				trimMessages()
+			case <-trashCtx.Done():
+				return
+			}
 		}
 	}()
 

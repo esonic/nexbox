@@ -421,6 +421,11 @@ func (db *DB) migrate() error {
 			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='user_id'`,
 			alter: `ALTER TABLE sessions ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`,
 		},
+		// model on sessions (for model selection)
+		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='model'`,
+			alter: `ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
+		},
 	}
 	for _, cm := range colMigrations {
 		var count int

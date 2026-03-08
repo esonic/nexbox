@@ -10,6 +10,7 @@ import {
   ChevronDown,
   Plus,
   FolderOpen,
+  FolderPlus,
   Settings,
   Cloud,
   CloudOff,
@@ -19,9 +20,10 @@ import {
   History,
   RotateCcw,
   Store,
+  Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { sessionsApi, projectsApi, serverApi, marketplaceApi, authCloudApi, clearToken } from "@/lib/api";
+import { sessionsApi, projectsApi, serverApi, marketplaceApi, authCloudApi, balanceApi, clearToken } from "@/lib/api";
 import type { CloudInfo } from "@/lib/api";
 import { globalWS } from "@/lib/ws";
 import { cn, formatRelativeDate } from "@/lib/utils";
@@ -143,6 +145,7 @@ export function AppSidebar() {
     projects, setProjects,
     marketplaceUpdateCount, setMarketplaceUpdateCount,
     currentUser,
+    balanceTokens, balanceCny, setBalance,
   } = useAppStore();
   const {
     sidebarCollapsed: collapsed, setSidebarCollapsed: setCollapsed,
@@ -225,35 +228,25 @@ export function AppSidebar() {
   }, []);
 
   const checkMarketplaceUpdates = useCallback(async () => {
-    try {
-      const [mcpPkgs, skillPkgs, installedMCPs, installedSkills] = await Promise.all([
-        marketplaceApi.listPackages({ type: "mcp", limit: 200 }),
-        marketplaceApi.listPackages({ type: "skill", limit: 200 }),
-        marketplaceApi.listInstalledMCPs(),
-        marketplaceApi.listInstalledSkills(),
-      ]);
-      const allPkgs = [...(mcpPkgs || []), ...(skillPkgs || [])];
-      const pkgById = new Map(allPkgs.map((p) => [p.id, p]));
-      let count = 0;
-      for (const m of (installedMCPs || [])) {
-        if (!m.package_id || !m.version) continue;
-        const pkg = pkgById.get(m.package_id);
-        if (pkg && pkg.latest_version && pkg.latest_version !== m.version) count++;
-      }
-      for (const sk of (installedSkills || [])) {
-        const pkg = allPkgs.find((p) => p.type === "skill" && p.name === sk.name);
-        if (pkg && pkg.latest_version && sk.version && pkg.latest_version !== sk.version) count++;
-      }
-      setMarketplaceUpdateCount(count);
-    } catch {
-      // silent background check
-    }
+    // Local-only marketplace: no cloud update checking needed
+    setMarketplaceUpdateCount(0);
   }, [setMarketplaceUpdateCount]);
+
+  const loadBalance = useCallback(async () => {
+    if (!currentUser) return;
+    try {
+      const data = await balanceApi.get();
+      setBalance(data.balance_tokens, data.balance_cny);
+    } catch {
+      // balance endpoint may not be available in local mode
+    }
+  }, [currentUser, setBalance]);
 
   useEffect(() => {
     loadSessions();
     loadProjects();
-  }, [loadSessions, loadProjects]);
+    loadBalance();
+  }, [loadSessions, loadProjects, loadBalance]);
 
   useEffect(() => {
     const timer = setTimeout(checkMarketplaceUpdates, 60 * 1000);
@@ -276,6 +269,10 @@ export function AppSidebar() {
     return globalWS.subscribeGlobal((event) => {
       if (event.type === "change" && event.entity_type === "session") {
         loadSessions();
+      }
+      // Refresh balance when agent execution finishes
+      if (event.type === "settle") {
+        loadBalance();
       }
       if (event.type === "change" && event.entity_type === "notification") {
         const me = cloudUserRef.current;
@@ -725,17 +722,10 @@ export function AppSidebar() {
           <button
             onClick={() => {
               const realProjects = projects.filter((p) => p.name !== UNASSIGNED_PROJECT);
-              const localProjects = realProjects.filter((p) => p.git_repo_path);
-              if (realProjects.length === 0 && connectStatus === "connected") {
-                toast.info("Create a project first", {
-                  description: "Cloud mode requires a project to start a session.",
-                });
-                return;
-              }
               if (realProjects.length === 0) {
                 handleNewSession();
-              } else if (localProjects.length === 1) {
-                handleNewSession(localProjects[0].id);
+              } else if (realProjects.length === 1) {
+                handleNewSession(realProjects[0].id);
               } else {
                 setShowNewSessionMenu((v) => !v);
               }
@@ -752,7 +742,7 @@ export function AppSidebar() {
               <div className="px-3 py-2 text-xs font-medium text-muted-foreground border-b border-border bg-muted/30">
                 Select Project
               </div>
-              {projects.filter((p) => p.name !== UNASSIGNED_PROJECT && p.git_repo_path).map((p) => (
+              {projects.filter((p) => p.name !== UNASSIGNED_PROJECT).map((p) => (
                 <button
                   key={p.id}
                   onClick={() => { setShowNewSessionMenu(false); handleNewSession(p.id); }}
@@ -764,7 +754,7 @@ export function AppSidebar() {
               ))}
               {connectStatus !== "connected" && (
                 <>
-                  {projects.filter((p) => p.name !== UNASSIGNED_PROJECT && p.git_repo_path).length > 0 && <div className="border-t border-border/50" />}
+                  {projects.filter((p) => p.name !== UNASSIGNED_PROJECT).length > 0 && <div className="border-t border-border/50" />}
                   <button
                     onClick={() => { setShowNewSessionMenu(false); handleNewSession(); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
@@ -781,13 +771,22 @@ export function AppSidebar() {
         {/* ── Sessions section header ── */}
         <div className="flex items-center justify-between pl-4 pr-3 pt-2 pb-1.5 relative" ref={trashRef}>
           <span className="text-[13px] font-medium text-muted-foreground/60">Sessions</span>
-          <button
-            onClick={handleOpenTrash}
-            className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-            title="Recently deleted"
-          >
-            <History className="h-3.5 w-3.5" />
-          </button>
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={() => setProjectDialogOpen(true)}
+              className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+              title="New project"
+            >
+              <FolderPlus className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={handleOpenTrash}
+              className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+              title="Recently deleted"
+            >
+              <History className="h-3.5 w-3.5" />
+            </button>
+          </div>
           {/* Trash popover */}
           {showTrash && (
             <div className="absolute left-0 right-0 top-full z-50 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
@@ -805,7 +804,7 @@ export function AppSidebar() {
               </div>
               <div className="px-3 py-1.5 border-b border-border/50">
                 <p className="text-[11px] text-muted-foreground/60">
-                  Sessions are permanently deleted after 7 days.
+                  Sessions are permanently deleted after 1 day.
                 </p>
               </div>
               <div className="max-h-64 overflow-y-auto">
@@ -901,11 +900,11 @@ export function AppSidebar() {
                             Settings
                           </button>
                           <button
-                            onClick={(e) => { e.stopPropagation(); handleRemoveFromSidebar(group.project!); }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors text-muted-foreground"
+                            onClick={(e) => { e.stopPropagation(); setProjectMenuId(null); handleOpenEditProject(group.project!); }}
+                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors text-destructive"
                           >
-                            <LogOut className="h-3 w-3" />
-                            Unlink Local
+                            <Trash2 className="h-3 w-3" />
+                            Delete Project
                           </button>
                         </div>
                       )}
@@ -987,18 +986,17 @@ export function AppSidebar() {
 
         {/* ── Bottom nav ── */}
         <div className="px-2 pb-3 pt-1 shrink-0 space-y-0.5 border-t border-border/40 mt-1">
-          <button
-            onClick={() => navigate("/projects")}
-            className={cn(
-              "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors mt-1",
-              location.pathname === "/projects"
-                ? "bg-accent text-foreground font-medium"
-                : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
-            )}
-          >
-            <LayoutGrid className="h-4 w-4 shrink-0" />
-            <span>Projects</span>
-          </button>
+          {currentUser && balanceTokens > 0 && (
+            <div className="px-3 py-1.5 text-xs text-muted-foreground/70">
+              <span className="tabular-nums">{balanceTokens.toLocaleString()}</span>
+              <span className="ml-1">tokens</span>
+              {balanceCny > 0 && (
+                <span className="ml-1.5 text-muted-foreground/50">
+                  ≈ ¥{balanceCny.toFixed(2)}
+                </span>
+              )}
+            </div>
+          )}
           <button
             onClick={() => navigate("/marketplace")}
             className={cn(

@@ -119,6 +119,11 @@ interface AppState {
   // Authenticated user (JWT cloud mode)
   currentUser: AuthUser | null;
   setCurrentUser: (user: AuthUser | null) => void;
+
+  // Token balance
+  balanceTokens: number;
+  balanceCny: number;
+  setBalance: (tokens: number, cny: number) => void;
 }
 
 /** Replace a session's message array. Reduces boilerplate around chatMessages spread. */
@@ -459,6 +464,10 @@ export const useAppStore = create<AppState>()(
 
   currentUser: null,
   setCurrentUser: (user) => set({ currentUser: user }),
+
+  balanceTokens: 0,
+  balanceCny: 0,
+  setBalance: (tokens, cny) => set({ balanceTokens: tokens, balanceCny: cny }),
 }),
     {
       name: "nexbox-app",

@@ -206,9 +206,11 @@ GET  /api/projects/{projectId}/files/download?path=src/main.go
 - Trash 中的恢复按钮也不可用（active 数 ≥ 20 时），同样提示已达上限
 - 有了 session 数量限制，message part detail 的"保留最近 50 session"清理逻辑**可以移除**
 
-**T9.3 上传文件清理**（T7 实现后）：project 删除时清理上传目录。
+**T9.3 消息数量上限**：每个 session 最多保留最近 **100 条**消息（含用户和 AI 消息）。每小时定期清理超出部分。
 
-**T9.4 SQLite 维护**：定期 `PRAGMA wal_checkpoint` + `VACUUM`。
+**T9.4 上传文件清理**（T7 实现后）：project 删除时清理上传目录。
+
+**T9.5 SQLite 维护**：定期 `PRAGMA wal_checkpoint` + `VACUUM`。
 
 ---
 
@@ -298,6 +300,26 @@ GET  /api/projects/{projectId}/files/download?path=src/main.go
 | 🟢 低 | T2 OAuth Connector | 后期功能 |
 | 🟢 低 | T5 工具可见性精细控制 | 当前基本可用 |
 | 🟢 低 | T13 阶段二：/ @ 透传 Claude | 后续实现 |
+| 🟢 低 | T14 Claude CLI 交互式响应支持 | 需研究协议 |
+
+---
+
+## T14 — Claude CLI 交互式响应支持
+
+### 现状
+
+Claude CLI 通过 `ask_question` 工具可以向用户展示交互式选择界面（多选项 + 自由输入 + "Chat about this"）。当前 BeeHub 的 `ToolCallCard.tsx` 已有 `ask_question` 的渲染实现。
+
+但通过命令行（`claude -p` 或 JSON streaming）调用时，这种交互式工具调用在 JSON 返回中的具体格式尚未研究清楚：
+- tool_use block 的 input schema 是什么样的（选项列表、描述、允许自由输入等字段）
+- 用户选择后如何通过 tool_result 返回给 CLI
+- 是否有超时/默认行为
+
+### 还需做什么
+
+1. 研究 Claude CLI `--output-format stream-json` 模式下 `ask_question` 的 JSON 格式
+2. 确认当前 `ToolCallCard.tsx` 的渲染逻辑是否已完整覆盖所有交互类型
+3. 确保 WebSocket 协议能正确中继交互式 tool_use → 前端渲染 → 用户选择 → tool_result 回传
 
 ---
 

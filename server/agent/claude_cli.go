@@ -332,6 +332,8 @@ func (c *ClaudeClient) buildArgs(opts QueryOptions) []string {
 		args = append(args, opts.AllowedTools...)
 	}
 
+	args = append(args, "--tools", "default")
+
 	if opts.PermissionMode != "" {
 		args = append(args, "--permission-mode", opts.PermissionMode)
 	}

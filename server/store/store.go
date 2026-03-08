@@ -108,6 +108,7 @@ type MessageStore interface {
 	ListMessagesPaginated(sessionID string, limit int, beforeID string) ([]ChatMessage, bool, error)
 	DeleteMessagesBySession(sessionID string) error
 	CreateUserMessage(sessionID, content string) (*ChatMessage, error)
+	TrimSessionMessages(sessionID string, keepCount int) (int64, error)
 }
 
 type QueueStore interface {

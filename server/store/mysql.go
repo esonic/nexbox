@@ -82,6 +82,7 @@ func (s *MySQLStore) migrate() error {
 			name             TEXT DEFAULT '',
 			project_id       VARCHAR(36) DEFAULT '',
 			agent            VARCHAR(100) DEFAULT '',
+			model            VARCHAR(100) DEFAULT '',
 			agent_session_id VARCHAR(255) DEFAULT '',
 			stream_id        VARCHAR(255) DEFAULT '',
 			sort_order       INT DEFAULT 0,

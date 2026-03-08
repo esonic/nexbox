@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -383,3 +384,140 @@ func searchFileContents(root, current, query string, maxResults int) []contentMa
 }
 
 // isBinaryFile is defined in diff.go
+
+// resolveSecurePath validates a relative path and returns the full path within root.
+// Returns an error if the path is invalid or escapes the root directory.
+func resolveSecurePath(root, relPath string) (string, error) {
+	cleanPath := filepath.Clean(relPath)
+	if strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
+		return "", fmt.Errorf("invalid path")
+	}
+	fullPath := filepath.Join(root, cleanPath)
+
+	absProject, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		absProject, _ = filepath.Abs(root)
+	}
+	absFile, evalErr := filepath.EvalSymlinks(fullPath)
+	if evalErr != nil {
+		absFile, _ = filepath.Abs(fullPath)
+	}
+	if !strings.HasPrefix(absFile, absProject+string(filepath.Separator)) && absFile != absProject {
+		return "", fmt.Errorf("path outside project directory")
+	}
+	return fullPath, nil
+}
+
+// UploadProjectFile uploads a file into the project directory.
+// POST /api/projects/{projectId}/files/upload
+// multipart/form-data with fields: file (the file), path (relative directory)
+func (s *Server) UploadProjectFile(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectId")
+	root, err := s.resolveFilesRoot(r, projectID)
+	if err != nil {
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+
+	// 32 MB max upload
+	const maxUpload = 32 << 20
+	if err := r.ParseMultipartForm(maxUpload); err != nil {
+		writeError(w, http.StatusBadRequest, "failed to parse form: "+err.Error())
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "file field is required")
+		return
+	}
+	defer file.Close()
+
+	// Destination relative path
+	destDir := r.FormValue("path")
+	if destDir == "" {
+		destDir = "."
+	}
+
+	destRelPath := filepath.Join(destDir, header.Filename)
+	fullPath, err := resolveSecurePath(root, destRelPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Create parent directories if needed
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create directory")
+		return
+	}
+
+	dst, err := os.Create(fullPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create file: "+err.Error())
+		return
+	}
+	defer dst.Close()
+
+	written, err := io.Copy(dst, file)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to write file: "+err.Error())
+		return
+	}
+
+	rel, _ := filepath.Rel(root, fullPath)
+	log.Printf("[api] UploadProjectFile(%s) wrote %s (%d bytes)", projectID, rel, written)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"path": rel,
+		"size": written,
+	})
+}
+
+// DownloadProjectFile serves a file from the project directory as a download.
+// GET /api/projects/{projectId}/files/download?path=relative/path/to/file[&session_id=xxx]
+func (s *Server) DownloadProjectFile(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectId")
+	root, err := s.resolveFilesRoot(r, projectID)
+	if err != nil {
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+
+	relPath := r.URL.Query().Get("path")
+	if relPath == "" {
+		writeError(w, http.StatusBadRequest, "path parameter is required")
+		return
+	}
+
+	fullPath, err := resolveSecurePath(root, relPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, "file not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if info.IsDir() {
+		writeError(w, http.StatusBadRequest, "path is a directory")
+		return
+	}
+
+	_ = projectID // used for logging context only
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(fullPath)))
+	http.ServeFile(w, r, fullPath)
+}

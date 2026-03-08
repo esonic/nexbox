@@ -217,21 +217,6 @@ func (s *Server) FlushMarketplaceStats() {
 
 func (s *Server) RegisterMarketplaceRoutes(r chi.Router) {
 	r.Route("/marketplace", func(r chi.Router) {
-		// Remote package registry (proxied from cloud)
-		r.Get("/packages", s.ListMarketplacePackages)
-		r.Post("/packages", s.PublishPackage)
-		r.Get("/packages/{packageId}", s.GetMarketplacePackage)
-		r.Patch("/packages/{packageId}", s.UpdateMarketplacePackage)
-		r.Delete("/packages/{packageId}", s.DeleteMarketplacePackage)
-		r.Post("/packages/{packageId}/versions", s.PublishPackageVersion)
-		r.Post("/packages/{packageId}/skill-dir-upload", s.UploadSkillDir)
-		r.Get("/packages/{packageId}/star", s.GetPackageStarStatus)
-		r.Post("/packages/{packageId}/star", s.StarPackage)
-		r.Delete("/packages/{packageId}/star", s.UnstarPackage)
-		r.Get("/packages/{packageId}/reviews", s.ListPackageReviews)
-		r.Post("/packages/{packageId}/reviews", s.AddPackageReview)
-		r.Delete("/packages/{packageId}/reviews/{reviewId}", s.DeletePackageReview)
-
 		// Local install/uninstall
 		r.Get("/installed-mcps", s.ListInstalledMCPs)
 		r.Post("/installed-mcps", s.InstallMCP)

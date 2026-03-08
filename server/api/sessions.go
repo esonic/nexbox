@@ -49,6 +49,23 @@ func (s *Server) ListSessions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+const maxActiveSessionsPerProject = 20
+
+// countActiveSessionsForUser counts non-deleted sessions for a user in a given project.
+func (s *Server) countActiveSessionsForUser(userID, projectID string) (int, error) {
+	sessions, err := s.Store.ListSessions()
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, sess := range sessions {
+		if sess.UserID == userID && sess.ProjectID == projectID {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // CreateSession creates a new session.
 func (s *Server) CreateSession(w http.ResponseWriter, r *http.Request) {
 	var req CreateSessionRequest
@@ -59,6 +76,20 @@ func (s *Server) CreateSession(w http.ResponseWriter, r *http.Request) {
 
 	// Set owner from authenticated user
 	req.UserID = GetUserID(r)
+
+	// Enforce session limit per project
+	if req.ProjectID != "" {
+		count, err := s.countActiveSessionsForUser(req.UserID, req.ProjectID)
+		if err != nil {
+			log.Printf("[sessions] Failed to count sessions: %v", err)
+			writeError(w, http.StatusInternalServerError, "failed to check session limit")
+			return
+		}
+		if count >= maxActiveSessionsPerProject {
+			writeError(w, http.StatusConflict, "session limit reached: maximum "+strconv.Itoa(maxActiveSessionsPerProject)+" active sessions per project")
+			return
+		}
+	}
 
 	// If no agent specified, use the persisted default from settings
 	if req.Agent == "" {
@@ -208,18 +239,29 @@ func (s *Server) ListTrashedSessions(w http.ResponseWriter, r *http.Request) {
 // RestoreSession restores a session from the trash.
 func (s *Server) RestoreSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "sessionId")
-	// Ownership check
-	if GetUserRole(r) != "admin" {
-		existing, err := s.Store.GetSession(id)
-		if writeStoreError(w, err, "RestoreSession/GetSession", "failed to get session") {
+	// Ownership check + session limit check
+	existing, err := s.Store.GetSession(id)
+	if writeStoreError(w, err, "RestoreSession/GetSession", "failed to get session") {
+		return
+	}
+	if existing == nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if GetUserRole(r) != "admin" && existing.UserID != GetUserID(r) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	// Enforce session limit on restore
+	if existing.ProjectID != "" {
+		count, err := s.countActiveSessionsForUser(existing.UserID, existing.ProjectID)
+		if err != nil {
+			log.Printf("[sessions] Failed to count sessions for restore: %v", err)
+			writeError(w, http.StatusInternalServerError, "failed to check session limit")
 			return
 		}
-		if existing == nil {
-			writeError(w, http.StatusNotFound, "session not found")
-			return
-		}
-		if existing.UserID != GetUserID(r) {
-			writeError(w, http.StatusForbidden, "access denied")
+		if count >= maxActiveSessionsPerProject {
+			writeError(w, http.StatusConflict, "session limit reached: maximum "+strconv.Itoa(maxActiveSessionsPerProject)+" active sessions per project")
 			return
 		}
 	}

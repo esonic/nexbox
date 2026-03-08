@@ -78,19 +78,20 @@ func (a *ClaudeAgent) SendMessage(
 	// Build query options (no SystemPrompt - we use BuildPrompt for all context)
 	opts := QueryOptions{
 		WorkDir: req.WorkDir,
+		Model:   req.Model,
 	}
 
 	// Full capabilities - all tools available
-	opts.AllowedTools = []string{
-		// Core development tools
-		"Bash", "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
-		// Agent & task management
-		"Task", "TaskOutput", "TaskStop",
-		// Planning & organization
-		"TodoWrite", "EnterPlanMode", "ExitPlanMode",
-		// Web resources
-		"WebSearch", "WebFetch",
-	}
+	// opts.AllowedTools = []string{
+	// 	// Core development tools
+	// 	"Bash", "Read", "Write", "Edit", "Glob", "Grep",
+	// 	// Planning & organization
+	// 	"EnterPlanMode", "ExitPlanMode",
+	// 	// Web resources
+	// 	"WebSearch", "WebFetch",
+	// 	// task
+	// 	"AskUserQuestion", "Agent", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "TaskOutput",
+	// }
 	opts.PermissionMode = "bypassPermissions"
 
 	// Generate MCP config if MCPServerURL is set

@@ -863,6 +863,11 @@ func (r *RemoteStore) DeleteMessagesBySession(sessionID string) error {
 	return err
 }
 
+func (r *RemoteStore) TrimSessionMessages(sessionID string, keepCount int) (int64, error) {
+	// Not supported on remote store; trimming is handled locally.
+	return 0, nil
+}
+
 func (r *RemoteStore) UpdateMessageParts(messageID string, parts []MessagePart, metadata MessageMetadata) error {
 	// Remote Java server does not expose a message-update endpoint.
 	// Progressive saves are handled via CreateMessage at the end instead.
