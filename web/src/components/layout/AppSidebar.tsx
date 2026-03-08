@@ -199,6 +199,12 @@ export function AppSidebar() {
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
 
+  // Delete project confirmation
+  const [deleteProjectDialogOpen, setDeleteProjectDialogOpen] = useState(false);
+  const [deletingProject, setDeletingProject] = useState<Project | null>(null);
+  const [deleteConfirmInput, setDeleteConfirmInput] = useState("");
+  const [deleteProjectLoading, setDeleteProjectLoading] = useState(false);
+
   // Project ... menu
   const [projectMenuId, setProjectMenuId] = useState<string | null>(null);
   const projectMenuRef = useRef<HTMLDivElement>(null);
@@ -570,6 +576,27 @@ export function AppSidebar() {
     setProjectDialogOpen(true);
   };
 
+  const handleOpenDeleteProject = (project: Project) => {
+    setDeletingProject(project);
+    setDeleteConfirmInput("");
+    setDeleteProjectDialogOpen(true);
+  };
+
+  const handleConfirmDeleteProject = async () => {
+    if (!deletingProject) return;
+    setDeleteProjectLoading(true);
+    try {
+      await projectsApi.delete(deletingProject.id);
+      handleProjectDeleted(deletingProject.id);
+      setDeleteProjectDialogOpen(false);
+    } catch (e) {
+      console.error("Failed to delete project:", e);
+      toast.error("Failed to delete project", { description: String(e) });
+    } finally {
+      setDeleteProjectLoading(false);
+    }
+  };
+
   const handleProjectSaved = (project: Project) => {
     if (editingProject) {
       setProjects(projects.map((p) => (p.id === project.id ? project : p)));
@@ -866,11 +893,9 @@ export function AppSidebar() {
                       : <ChevronDown className="h-3 w-3 text-muted-foreground/50 shrink-0" />}
                     <FolderOpen className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
                     <span className="text-[13px] text-muted-foreground truncate">
-                      {group.project?.name === UNASSIGNED_PROJECT ? t("sidebar.unassigned") : (
-                        group.project?.namespace_id
-                          ? `${group.project.namespace_id}/${group.project.name}`
-                          : (group.project?.name || t("sidebar.unassigned"))
-                      )}
+                      {group.project?.name === UNASSIGNED_PROJECT
+                        ? t("sidebar.unassigned")
+                        : (group.project?.name || t("sidebar.unassigned"))}
                     </span>
                     <span className="text-[11px] text-muted-foreground/30 tabular-nums ml-1.5 shrink-0">
                       {group.sessions.length}
@@ -908,7 +933,7 @@ export function AppSidebar() {
                             {t("sidebar.settings")}
                           </button>
                           <button
-                            onClick={(e) => { e.stopPropagation(); setProjectMenuId(null); handleOpenEditProject(group.project!); }}
+                            onClick={(e) => { e.stopPropagation(); setProjectMenuId(null); handleOpenDeleteProject(group.project!); }}
                             className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors text-destructive"
                           >
                             <Trash2 className="h-3 w-3" />
@@ -1021,7 +1046,7 @@ export function AppSidebar() {
         </div>
       </div>
 
-      {/* Project Dialog (edit-only from sidebar; delete is in Projects page) */}
+      {/* Project Dialog (edit only) */}
       <ProjectDialog
         open={projectDialogOpen}
         onOpenChange={setProjectDialogOpen}
@@ -1030,6 +1055,51 @@ export function AppSidebar() {
         onDelete={handleProjectDeleted}
         hideDelete
       />
+
+      {/* Delete Project Confirmation Dialog */}
+      {deleteProjectDialogOpen && deletingProject && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/50" onClick={() => setDeleteProjectDialogOpen(false)} />
+          <div className="relative bg-popover border rounded-lg shadow-lg p-5 w-[340px] space-y-4">
+            <h3 className="text-sm font-semibold">Delete Project</h3>
+            <p className="text-xs text-muted-foreground">
+              This will permanently delete project <span className="font-medium text-foreground">{deletingProject.name}</span> and all its sessions. This action cannot be undone.
+            </p>
+            <div className="space-y-1.5">
+              <label className="text-xs text-muted-foreground">
+                Type <span className="font-medium text-foreground">{deletingProject.name}</span> to confirm:
+              </label>
+              <input
+                value={deleteConfirmInput}
+                onChange={(e) => setDeleteConfirmInput(e.target.value)}
+                placeholder={deletingProject.name}
+                className="w-full h-8 px-2 text-sm border rounded-md bg-background outline-none focus:ring-1 focus:ring-ring"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.nativeEvent.isComposing && deleteConfirmInput.trim() === deletingProject.name) {
+                    handleConfirmDeleteProject();
+                  }
+                }}
+              />
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => setDeleteProjectDialogOpen(false)}
+                className="px-3 py-1.5 text-xs rounded-md hover:bg-accent transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmDeleteProject}
+                disabled={deleteProjectLoading || deleteConfirmInput.trim() !== deletingProject.name}
+                className="px-3 py-1.5 text-xs rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {deleteProjectLoading ? "Deleting..." : "Delete Project"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Resize handle */}
       <div

@@ -277,7 +277,7 @@ export function SessionWorkspace() {
     projects, setProjects, setGitDiffStats,
     currentUser,
   } = useAppStore();
-  const userFeatures = currentUser?.features ?? 0xffff;
+  const userFeatures = currentUser?.features ?? 0;
   const {
     rightPanel, setRightPanel, panelWidth, setPanelWidth,
     terminalHeight, setTerminalHeight,

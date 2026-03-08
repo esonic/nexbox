@@ -179,9 +179,17 @@ func (s *Server) GetProjectFileDiff(w http.ResponseWriter, r *http.Request) {
 // --- Helper functions (unchanged) ---
 
 func isGitRepo(dir string) bool {
-	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	cmd.Dir = dir
-	return cmd.Run() == nil
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	toplevel := strings.TrimSpace(out.String())
+	// Ensure dir is the actual git root, not just a subdirectory of another repo
+	cleanDir := filepath.Clean(dir)
+	return toplevel == cleanDir
 }
 
 func getFileDiff(dir string, filePath string, fullContext bool) (string, error) {

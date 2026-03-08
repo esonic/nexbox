@@ -23,6 +23,7 @@ interface ProjectDialogProps {
   onSuccess?: (project: Project) => void;
   onDelete?: (projectId: string) => void;
   hideDelete?: boolean;
+  initialShowDelete?: boolean; // Open with delete confirmation visible
 }
 
 export function ProjectDialog({
@@ -32,6 +33,7 @@ export function ProjectDialog({
   onSuccess,
   onDelete,
   hideDelete = false,
+  initialShowDelete = false,
 }: ProjectDialogProps) {
   const isEdit = !!project;
 
@@ -55,7 +57,7 @@ export function ProjectDialog({
         setDescription("");
       }
       setSubmitError("");
-      setShowDeleteConfirm(false);
+      setShowDeleteConfirm(initialShowDelete);
       setConfirmDeleteInput("");
     }
   }, [open, project]);
