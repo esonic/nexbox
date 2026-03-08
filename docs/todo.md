@@ -8,16 +8,14 @@
 
 ### 现状
 
-后端存在**两套并行**的 marketplace 系统，前端只用了其中一套：
+后端存在两套并行的 marketplace 系统，**决定只保留本地系统**，移除云端 packages 系统（review/star/version 不需要）。
 
-| 系统 | 后端路由 | 前端使用 | 说明 |
-|------|---------|---------|------|
-| **本地插件系统**（旧） | `/api/marketplace/plugins`<br>`/api/marketplace/installed` | ❌ 前端未使用 | 管理员在 `marketplace_dir` 放 JSON 文件，用户安装 |
-| **云端 packages 系统**（新） | `/api/marketplace/packages`<br>`/api/marketplace/installed-mcps`<br>`/api/marketplace/installed-skills` | ✅ 前端 MarketplacePage.tsx 使用 | 完整远端仓库（review/star/version），无云存储时返回空列表 |
+| 系统 | 后端路由 | 状态 | 说明 |
+|------|---------|------|------|
+| **本地插件系统** | `/api/marketplace/plugins`<br>`/api/marketplace/installed` | **保留，需前端对接** | 管理员 clone 仓库或放 JSON，用户浏览安装 |
+| ~~云端 packages 系统~~ | `/api/marketplace/packages` 等 | **删除** | review/star/version 不需要 |
 
-**核心问题**：前端使用云端系统，本地部署时永远为空。本地插件系统有数据但前端不展示。
-
-**权限模型**：用户不能自己上传/发布 package，只能浏览和安装。所有 skill/plugin/MCP 均由管理员在后台配置（clone 仓库或放置 JSON 文件）。
+**权限模型**：用户不能自己上传/发布，只能浏览和安装。所有 skill/plugin/MCP 均由管理员在后台配置（clone 仓库或放置 JSON 文件）。
 
 本地插件 JSON 格式：
 ```json
@@ -33,7 +31,7 @@ Anthropic 官方 skill/plugin 仓库格式待研究，需要适配目录结构�
 
 ### 还需做什么
 
-**T1.1 整合两套系统**：本地模式下，`/api/marketplace/packages` fallback 读本地插件目录，或前端 MarketplacePage 增加 fallback 调用 `/api/marketplace/plugins`。
+**T1.1 移除云端 packages 系统**：删除后端 `/api/marketplace/packages` 相关路由和 handler，删除前端 `marketplaceApi.listPackages` 等调用。前端 MarketplacePage 改为调用本地 `/api/marketplace/plugins` 接口。
 
 **T1.2 适配 Anthropic 官方仓库格式**
 - 官方 skill 仓库：https://github.com/anthropics/skills（每个 skill 是子目录）
@@ -83,19 +81,25 @@ data/marketplace/
 
 ### 还需做什么
 
-**T3.1 容器资源限制**（中优先级，生产必要）
+**T3.1 容器资源限制**（高优先级，生产必要）
 
 在 `agent/container.go` 的 `docker run` 加：
 ```go
-"--memory", "2g",
+"--memory", "4g",
 "--cpus", "1.0",
 "--pids-limit", "200",
+"--storage-opt", "size=1g",   // 容器层磁盘限 1G（需 overlay2）
 ```
-磁盘限制：用宿主机 quota 控制 bind-mount 目录，或 `--storage-opt size=10g`（需 overlay2）。
 
-**T3.2 容器 TTL / 空闲回收**：定期检查容器最后活跃时间，超 24h 无 agent 执行则 `docker stop`。
+**T3.2 网络白名单**：容器只允许访问 Claude API 及特定域名，其他地址（含 localhost 其他端口）一律禁止。实现方式：
+- 创建自定义 Docker network（`--network=beehub-isolated`）
+- 容器内 iptables 规则或宿主机 iptables OUTPUT chain 限制目标 IP
+- 白名单域名列表通过 config 配置，定期 DNS 解析更新 iptables 规则
+- 或使用 HTTP 代理（squid/tinyproxy）作为容器唯一出口，代理层做域名白名单
 
-**T3.3 超大文件**：Project 删除时同步 `os.RemoveAll` 宿主机目录；磁盘 quota 参考 T9。
+**T3.3 容器 TTL / 空闲回收**：定期检查容器最后活跃时间，超 1h 无 agent 执行则 `docker stop`。
+
+**T3.4 超大文件**：Project 删除时同步 `os.RemoveAll` 宿主机目录。
 
 ---
 
@@ -109,7 +113,7 @@ data/marketplace/
 
 ### 还需做什么
 
-**T4.1 后端**：`CreateProject` 不再要求 `git_repo_path`，自动在 `data-dir/projects/<proj-id[:8]>/` 创建目录并 `git init`，存为 `git_repo_path`。
+**T4.1 后端**：`CreateProject` 不再要求 `git_repo_path`。Project 的工作目录就是容器内的 `/workspace`（bind-mount 到宿主机），无需额外在 datadir 建目录。后端只需记录 project 元数据（name, desc），容器启动时自动 bind-mount 对应宿主机目录到 `/workspace`。
 
 **T4.2 前端**：
 - 创建 project 弹窗只需 Name + Description（去掉路径输入）
@@ -177,9 +181,9 @@ GET  /api/projects/{projectId}/files/download?path=src/main.go
 
 ### 还需做什么
 
-**T8.1 网络隔离**：加 `--network=bridge`（默认已是），进一步考虑 iptables 规则阻止访问宿主机内网 IP。长期可用 gVisor (runsc) 作为容器运行时。
+**T8.1** 网络隔离已合并到 T3.2。
 
-**T8.2** 同 T3.1、T3.2、T3.3。
+**T8.2** 长期可用 gVisor (runsc) 作为容器运行时，进一步隔离系统调用。
 
 ---
 
@@ -188,20 +192,23 @@ GET  /api/projects/{projectId}/files/download?path=src/main.go
 ### 现状
 
 已有：
-- 每小时清理 30 天前软删除的 session + worktree
-- 每小时清理旧 message part detail（保留最近 50 session）
+- 每小时清理 30 天前软删除的 session + worktree（**改为 1 天**）
+- 每小时清理旧 message part detail（保留最近 50 session）（**不再需要，见下**）
 
 缺失：上传文件、项目磁盘、DB 无限增长的治理。
 
 ### 还需做什么
 
-**T9.1 Project 目录磁盘 quota**：定期统计各 project 目录大小，超 `disk_quota_bytes` 时拒绝 agent 执行。
+**T9.1 软删除清理周期**：改为清理 **1 天前**（而非 30 天）软删除的 session 和 worktree。前端 Trash 列表的提示文字也改为"1 天后自动删除"。
 
-**T9.2 Message 数量限制**：每 session 超 N 条时截断或归档旧消息，或提供"清理历史"API。
+**T9.2 Session 数量上限**：每个 project 最多 **20 个** active session。超过时：
+- 禁止创建新 session，前端提示"已达上限，请删除旧 session"
+- Trash 中的恢复按钮也不可用（active 数 ≥ 20 时），同样提示已达上限
+- 有了 session 数量限制，message part detail 的"保留最近 50 session"清理逻辑**可以移除**
 
 **T9.3 上传文件清理**（T7 实现后）：project 删除时清理上传目录。
 
-**T9.4 SQLite 维护**：定期 `PRAGMA wal_checkpoint` + `VACUUM`，管理员界面显示 DB 大小。
+**T9.4 SQLite 维护**：定期 `PRAGMA wal_checkpoint` + `VACUUM`。
 
 ---
 
@@ -262,17 +269,15 @@ GET  /api/projects/{projectId}/files/download?path=src/main.go
 
 ### 现状
 
-`ChatInput.tsx` 有 slash command 菜单，但当前是 BeeHub 自定义命令（触发 task/asset 工作流），不是 Claude 原生 `/` 命令。Claude CLI 支持 `/compact`、`/clear`、`/model` 等命令，部分需要交互式选择。
+`ChatInput.tsx` 有 slash command 菜单（`/design`、`/revise`、`/code`、`/review`、`/e2e_test`）和 `@` mention（task/asset/workflow），都是 BeeHub 自定义功能。
 
 ### 还需做什么
 
-**T13.1** 移除或 feature-flag 化当前 BeeHub 自定义 `/` 命令。
+**阶段一（当前）**：直接移除 `/` 和 `@` 的特殊交互。用户输入 `/` 或 `@` 不触发任何菜单/补全，作为普通文本发送。
 
-**T13.2 `/` 透传给 Claude**：用户输入 `/compact` → 直接发送，不拦截。
-
-**T13.3 Claude `/` 命令交互**：研究 Claude CLI WS 协议，识别交互式 `/` 命令响应格式（选择列表），渲染为 UI 选择器。
-
-**T13.4 `@` 文件补全**：输入 `@` 弹出文件树搜索，选择后插入路径；透传给 Claude CLI 自行处理文件内容注入。
+**阶段二（后续）**：
+- 研究 Claude CLI 的 `/` 命令协议（`/compact`、`/clear`、`/model` 等），实现透传和交互式响应渲染
+- `@` 文件补全：输入 `@` 弹出容器内文件树搜索，选择后插入路径，透传给 Claude CLI
 
 ---
 
@@ -283,15 +288,16 @@ GET  /api/projects/{projectId}/files/download?path=src/main.go
 | 🔴 高 | T4 Project 创建简化 | 核心使用流程 |
 | 🔴 高 | T11 余额显示 | 计费功能完整性 |
 | 🔴 高 | T12 模型选择 | 用户需要选 sonnet/haiku |
-| 🔴 高 | T3.1 容器资源限制 | 生产安全必要 |
-| 🟡 中 | T1 Marketplace 整合 | 管理员配置 skill/plugin 基础 |
+| 🔴 高 | T3.1-3.2 容器资源+网络限制 | 生产安全必要 |
+| 🔴 高 | T9.1-9.2 清理周期+session上限 | 数据治理基础 |
+| 🔴 高 | T13 阶段一：移除 /@ 特殊交互 | 简单改动，立即生效 |
+| 🟡 中 | T1 Marketplace 整合（仅本地） | 管理员配置 skill/plugin 基础 |
 | 🟡 中 | T6 按钮位置调整 | UI 一致性 |
 | 🟡 中 | T7 文件上传下载 | 基础能力 |
-| 🟡 中 | T9 数据清理 | 长期运营稳定 |
-| 🟡 中 | T13 /@ 命令 | 用户体验 |
 | 🟢 低 | T10 i18n | 工作量大 |
 | 🟢 低 | T2 OAuth Connector | 后期功能 |
 | 🟢 低 | T5 工具可见性精细控制 | 当前基本可用 |
+| 🟢 低 | T13 阶段二：/ @ 透传 Claude | 后续实现 |
 
 ---
 
