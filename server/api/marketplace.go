@@ -266,7 +266,7 @@ func loadMarketplacePlugins(dir string) ([]store.MarketplacePlugin, error) {
 			return filepath.SkipDir
 		}
 
-		// --- Format 1: .claude-plugin/plugin.json (Anthropic plugins/connectors) ---
+		// --- Format 1a: .claude-plugin/plugin.json (Anthropic plugins/connectors) ---
 		// Check this BEFORE generic *.json to avoid treating plugin.json as custom JSON.
 		if !info.IsDir() && info.Name() == "plugin.json" {
 			parentDir := filepath.Dir(path)
@@ -282,6 +282,29 @@ func loadMarketplacePlugins(dir string) ([]store.MarketplacePlugin, error) {
 			if !seen[p.ID] {
 				seen[p.ID] = true
 				plugins = append(plugins, *p)
+			}
+			return nil
+		}
+
+		// --- Format 1b: .claude-plugin/marketplace.json (third-party plugin registries) ---
+		// Some third-party repos use marketplace.json instead of plugin.json, with a
+		// "plugins" array listing multiple plugins in a single file.
+		if !info.IsDir() && info.Name() == "marketplace.json" {
+			parentDir := filepath.Dir(path)
+			if filepath.Base(parentDir) != ".claude-plugin" {
+				return nil
+			}
+			pluginRoot := filepath.Dir(parentDir)
+			items, err := loadMarketplaceJSON(pluginRoot, path)
+			if err != nil {
+				log.Printf("[marketplace] skip marketplace.json %s: %v", path, err)
+				return nil
+			}
+			for _, p := range items {
+				if !seen[p.ID] {
+					seen[p.ID] = true
+					plugins = append(plugins, p)
+				}
 			}
 			return nil
 		}
@@ -468,6 +491,69 @@ func loadClaudePlugin(pluginRoot, pluginJSONPath string) (*store.MarketplacePlug
 	return p, nil
 }
 
+// marketplaceJSONFile is the schema for .claude-plugin/marketplace.json used by
+// third-party plugin repositories.
+type marketplaceJSONFile struct {
+	Name  string `json:"name"`
+	Owner struct {
+		Name string `json:"name"`
+	} `json:"owner"`
+	Metadata struct {
+		Description string `json:"description"`
+		Version     string `json:"version"`
+	} `json:"metadata"`
+	Plugins []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Version     string `json:"version"`
+		Source      string `json:"source"` // relative path to command/skill file
+		Author      struct {
+			Name string `json:"name"`
+		} `json:"author"`
+		Tags []string `json:"tags"`
+	} `json:"plugins"`
+}
+
+// loadMarketplaceJSON parses a .claude-plugin/marketplace.json (third-party format).
+// Returns one MarketplacePlugin per entry in the "plugins" array.
+func loadMarketplaceJSON(pluginRoot, path string) ([]store.MarketplacePlugin, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	var mf marketplaceJSONFile
+	if err := json.Unmarshal(data, &mf); err != nil {
+		return nil, fmt.Errorf("parse: %w", err)
+	}
+	if len(mf.Plugins) == 0 {
+		return nil, nil
+	}
+
+	repoName := filepath.Base(pluginRoot)
+	var result []store.MarketplacePlugin
+	for _, entry := range mf.Plugins {
+		name := entry.Name
+		if name == "" {
+			continue
+		}
+		author := entry.Author.Name
+		if author == "" {
+			author = mf.Owner.Name
+		}
+		p := store.MarketplacePlugin{
+			ID:          repoName + "-" + name,
+			Name:        name,
+			Description: entry.Description,
+			Version:     entry.Version,
+			Author:      author,
+			Type:        "plugin",
+			Source:      "plugin",
+		}
+		result = append(result, p)
+	}
+	return result, nil
+}
+
 // parseMCPConfig parses a .mcp.json file and extracts:
 //   - env_vars: template variable names from ${VAR_NAME} patterns in URLs and headers
 //   - authType: "oauth" if oauth config is present, "apikey" if env vars required, "none" otherwise
@@ -503,12 +589,22 @@ func parseMCPConfig(data []byte) (envVars []string, authType string) {
 }
 
 // ListLocalPlugins handles GET /api/marketplace/plugins
-func (s *Server) ListLocalPlugins(w http.ResponseWriter, r *http.Request) {
-	dir := ""
+// marketplaceDir returns the configured marketplace directory, falling back
+// to {DataDir}/marketplace if not explicitly set.
+func (s *Server) marketplaceDir() string {
 	if s.Config != nil {
-		dir = s.Config.Get().MarketplaceDir
+		if dir := s.Config.Get().MarketplaceDir; dir != "" {
+			return dir
+		}
 	}
-	plugins, err := loadMarketplacePlugins(dir)
+	if s.DataDir != "" {
+		return filepath.Join(s.DataDir, "marketplace")
+	}
+	return ""
+}
+
+func (s *Server) ListLocalPlugins(w http.ResponseWriter, r *http.Request) {
+	plugins, err := loadMarketplacePlugins(s.marketplaceDir())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -519,10 +615,7 @@ func (s *Server) ListLocalPlugins(w http.ResponseWriter, r *http.Request) {
 // GetLocalPlugin handles GET /api/marketplace/plugins/{id}
 func (s *Server) GetLocalPlugin(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	dir := ""
-	if s.Config != nil {
-		dir = s.Config.Get().MarketplaceDir
-	}
+	dir := s.marketplaceDir()
 	plugins, err := loadMarketplacePlugins(dir)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

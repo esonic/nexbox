@@ -150,7 +150,7 @@ server/beehub --data-dir server/data --port 9040
 | `token_price_per_million` | float | `0` | 每百万 token 计费金额（用于余额折算显示） |
 | `resend_api_key` | string | — | Resend API Key，生产发邮件必填；空则验证码打到日志 |
 | `resend_from` | string | `BeeHub <noreply@box-nex.top>` | 发件人地址（需在 Resend 控制台验证域名） |
-| `marketplace_dir` | string | — | 本地插件目录路径，支持三种格式（见下方 Marketplace 章节） |
+| `marketplace_dir` | string | `{datadir}/marketplace` | 本地插件目录路径，支持多种格式（见下方 Marketplace 章节） |
 | `docker_enabled` | bool | `false` | 是否启用 Docker 容器隔离 |
 | `docker_image` | string | `"nexbox-agent:latest"` | 容器镜像名 |
 | `cors_origins` | []string | — | 允许的 CORS 源，空则使用内置开发默认值 |
@@ -164,13 +164,16 @@ server/beehub --data-dir server/data --port 9040
 
 `marketplace_dir` 指向一个本地目录，后端会**递归扫描**其中的插件/技能/连接器。每次用户访问 Marketplace 页面时实时扫描，无需重启服务。
 
-支持三种格式（可混合使用）：
+默认值为 `{datadir}/marketplace`，即不配置也会自动使用数据目录下的 `marketplace/` 子目录。如需自定义可在 config.json 中指定绝对路径。
+
+支持四种格式（可混合使用）：
 
 | 格式 | 识别方式 | 说明 |
 |------|---------|------|
 | 自定义 JSON | `*.json` 文件 | 原有格式，兼容保留 |
 | Anthropic Skills | 目录包含 `SKILL.md`（YAML frontmatter） | 来自 `anthropics/skills` 仓库 |
 | Anthropic Plugins/Connectors | 目录包含 `.claude-plugin/plugin.json` | 来自 `anthropics/claude-plugins-official` 仓库 |
+| 第三方插件注册表 | 目录包含 `.claude-plugin/marketplace.json` | 第三方仓库，`plugins` 数组定义多个插件 |
 
 推荐目录结构：
 
@@ -178,12 +181,13 @@ server/beehub --data-dir server/data --port 9040
 data/marketplace/
   skills/                      ← git clone https://github.com/anthropics/skills
   claude-plugins-official/     ← git clone https://github.com/anthropics/claude-plugins-official
-  other-repo/                  ← 第三方仓库，管理员自行 clone
+  claude-equity-research/      ← 第三方仓库（marketplace.json 格式）
+  other-repo/                  ← 其他三方仓库，管理员自行 clone
   custom/
     my-mcp.json                ← 自定义 JSON 插件
 ```
 
-配置示例：
+如需覆盖默认路径，在 config.json 中配置：
 
 ```json
 {

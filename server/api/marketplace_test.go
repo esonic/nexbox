@@ -379,6 +379,39 @@ func TestParseSkillFrontmatter(t *testing.T) {
 	}
 }
 
+func TestLoadMarketplacePlugins_MarketplaceJSON(t *testing.T) {
+	dir := testTempDir(t)
+	repoDir := filepath.Join(dir, "my-third-party", ".claude-plugin")
+	os.MkdirAll(repoDir, 0755)
+	content := `{
+		"name": "my-registry",
+		"owner": {"name": "some-author"},
+		"metadata": {"description": "test", "version": "1.0.0"},
+		"plugins": [
+			{"name": "tool-a", "description": "Tool A desc", "version": "1.0.0", "author": {"name": "Author A"}},
+			{"name": "tool-b", "description": "Tool B desc", "version": "2.0.0"}
+		]
+	}`
+	os.WriteFile(filepath.Join(repoDir, "marketplace.json"), []byte(content), 0644)
+
+	plugins, err := loadMarketplacePlugins(dir)
+	if err != nil {
+		t.Fatalf("loadMarketplacePlugins: %v", err)
+	}
+	if len(plugins) != 2 {
+		t.Fatalf("got %d plugins, want 2", len(plugins))
+	}
+	// tool-a should have its own author, tool-b should inherit owner
+	for _, p := range plugins {
+		if p.Name == "tool-a" && p.Author != "Author A" {
+			t.Errorf("tool-a author=%q, want 'Author A'", p.Author)
+		}
+		if p.Name == "tool-b" && p.Author != "some-author" {
+			t.Errorf("tool-b author=%q, want 'some-author' (inherited from owner)", p.Author)
+		}
+	}
+}
+
 func TestParseMCPConfig(t *testing.T) {
 	data := []byte(`{"github":{"type":"http","url":"https://api.github.com/mcp/","headers":{"Authorization":"Bearer ${GITHUB_TOKEN}","X-Custom":"${CUSTOM_HEADER}"}}}`)
 	vars, authType := parseMCPConfig(data)

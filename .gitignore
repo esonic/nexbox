@@ -5,6 +5,7 @@ server/logs/
 *.exe
 proxy/proxy
 stable/
+marketplace/
 
 # Embedded web dist (built by build.sh, contains copy of web/dist)
 server/webdist/*
