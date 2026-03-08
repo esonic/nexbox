@@ -351,19 +351,25 @@ function PluginCard({ plugin, installed, installing, onInstall, onUninstall }: P
             </span>
           )}
           {!plugin.command && <span />}
-          <button
-            onClick={installed ? onUninstall : onInstall}
-            disabled={installing}
-            className={cn(
-              "text-xs px-3 py-1 rounded-md font-medium transition-colors",
-              installed
-                ? "bg-red-500/10 text-red-600 hover:bg-red-500/20"
-                : "bg-primary/10 text-primary hover:bg-primary/20",
-              installing && "opacity-50 cursor-not-allowed"
-            )}
-          >
-            {installing ? "..." : installed ? "Uninstall" : "Install"}
-          </button>
+          {!installed && plugin.auth_type === "oauth" ? (
+            <span className="text-[10px] text-muted-foreground/60 italic">
+              OAuth not supported
+            </span>
+          ) : (
+            <button
+              onClick={installed ? onUninstall : onInstall}
+              disabled={installing}
+              className={cn(
+                "text-xs px-3 py-1 rounded-md font-medium transition-colors",
+                installed
+                  ? "bg-red-500/10 text-red-600 hover:bg-red-500/20"
+                  : "bg-primary/10 text-primary hover:bg-primary/20",
+                installing && "opacity-50 cursor-not-allowed"
+              )}
+            >
+              {installing ? "..." : installed ? "Uninstall" : "Install"}
+            </button>
+          )}
         </div>
       </div>
     </div>
