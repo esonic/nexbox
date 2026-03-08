@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
+import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
 
 import {
@@ -271,6 +272,7 @@ function GitPanelContent({
 }
 
 export function SessionWorkspace() {
+  const { t } = useTranslation();
   const {
     sessions, setSessions, activeSessionId,
     setCurrentSession, setCurrentProject, sessionTotalDuration,
@@ -522,7 +524,7 @@ export function SessionWorkspace() {
         <div className="flex-1 min-w-0">
           {activeSession && (
             <span className="text-sm font-medium text-foreground/80 truncate block max-w-[50%]">
-              {activeSession.name || "New Session"}
+              {activeSession.name || t("workspace.new_session")}
             </span>
           )}
         </div>
@@ -536,7 +538,7 @@ export function SessionWorkspace() {
             onClick={() => setRightPanel(rightPanel === "task" ? null : "task")}
           >
             <ListTodo className="h-3.5 w-3.5" />
-            Task
+            {t("workspace.task")}
           </Button>
         )}
         {!!(userFeatures & 2) && (
@@ -547,7 +549,7 @@ export function SessionWorkspace() {
             onClick={() => setRightPanel(rightPanel === "asset" ? null : "asset")}
           >
             <FileText className="h-3.5 w-3.5" />
-            Asset
+            {t("workspace.asset")}
           </Button>
         )}
 
@@ -560,7 +562,7 @@ export function SessionWorkspace() {
             onClick={() => setRightPanel(rightPanel === "workflow" ? null : "workflow")}
           >
             <Workflow className="h-3.5 w-3.5" />
-            Workflow
+            {t("workspace.workflow")}
           </Button>
         )}
 
@@ -573,7 +575,7 @@ export function SessionWorkspace() {
             onClick={() => setRightPanel(rightPanel === "files" ? null : "files")}
           >
             <FolderCode className="h-3.5 w-3.5" />
-            Files
+            {t("workspace.files")}
           </Button>
         )}
         {isRealProject && !!(userFeatures & 8) && (
@@ -584,7 +586,7 @@ export function SessionWorkspace() {
             onClick={() => activeSessionId && setTerminalShow(activeSessionId, !showTerminal)}
           >
             <TerminalSquare className="h-3.5 w-3.5" />
-            Terminal
+            {t("workspace.terminal")}
           </Button>
         )}
         {isRealProject && !!(userFeatures & 16) && boundProject?.git_repo_path && (
@@ -709,7 +711,7 @@ export function SessionWorkspace() {
                           <PanelRightClose className="h-4 w-4" />
                         </Button>
                         <h3 className="font-medium text-sm">
-                          {rightPanel === "git" ? "Git" : rightPanel === "files" ? "Files" : rightPanel === "task" ? "Tasks" : rightPanel === "asset" ? "Assets" : rightPanel === "workflow" ? "Workflows" : rightPanel === "ralph" ? "RALPH" : rightPanel}
+                          {rightPanel === "git" ? t("workspace.git") : rightPanel === "files" ? t("workspace.files") : rightPanel === "task" ? t("workspace.task") : rightPanel === "asset" ? t("workspace.asset") : rightPanel === "workflow" ? t("workspace.workflow") : rightPanel === "ralph" ? "RALPH" : rightPanel}
                         </h3>
                       </>
                     )}
@@ -738,7 +740,7 @@ export function SessionWorkspace() {
                 )}
                 {(rightPanel === "task" || rightPanel === "asset" || rightPanel === "workflow" || rightPanel === "ralph" || rightPanel === "files" || rightPanel === "git") && !boundProject && (
                   <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-                    Bind a project to this session first
+                    {t("workspace.bind_project_hint")}
                   </div>
                 )}
                 {rightPanel === "task" && boundProject && (

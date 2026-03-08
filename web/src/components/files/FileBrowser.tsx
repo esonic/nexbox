@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import {
   ChevronRight,
   ChevronDown,
@@ -141,6 +142,7 @@ function SearchResults({
   searchType: "name" | "content";
   onSelect: (path: string) => void;
 }) {
+  const { t } = useTranslation();
   if (loading) {
     return (
       <div className="flex items-center justify-center py-8">
@@ -151,7 +153,7 @@ function SearchResults({
   if (results.length === 0) {
     return (
       <div className="text-xs text-muted-foreground text-center py-6">
-        No results
+        {t("files.no_results")}
       </div>
     );
   }
@@ -268,6 +270,7 @@ interface FileBrowserProps {
 }
 
 export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
+  const { t } = useTranslation();
   const [tree, setTree] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [fileContent, setFileContent] = useState<FileContentResponse | null>(null);
@@ -431,7 +434,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
       {/* File tree sidebar */}
       <div className="w-56 shrink-0 border-r flex flex-col">
         <div className="flex items-center justify-between px-3 py-1.5 border-b shrink-0">
-          <span className="text-xs text-muted-foreground font-medium">Files</span>
+          <span className="text-xs text-muted-foreground font-medium">{t("files.title")}</span>
           <div className="flex items-center gap-0.5">
             <button
               onClick={handleToggleSearch}
@@ -439,7 +442,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                 "p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors",
                 showSearch && "bg-accent text-foreground"
               )}
-              title="Search files (Ctrl+F)"
+              title={t("files.search")}
             >
               <Search className="h-3.5 w-3.5" />
             </button>
@@ -447,7 +450,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               onClick={() => fileInputRef.current?.click()}
               disabled={uploading}
               className="p-1 rounded hover:bg-accent text-muted-foreground/50 hover:text-muted-foreground transition-colors"
-              title="Upload file"
+              title={t("files.upload")}
             >
               {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
             </button>
@@ -461,7 +464,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
             <button
               onClick={loadTree}
               className="p-1 rounded hover:bg-accent text-muted-foreground/50 hover:text-muted-foreground transition-colors"
-              title="Refresh"
+              title={t("files.refresh")}
             >
               <RefreshCw className="h-3 w-3" />
             </button>
@@ -478,7 +481,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Escape") handleToggleSearch(); }}
-                placeholder={searchType === "name" ? "File name..." : "Search in files..."}
+                placeholder={searchType === "name" ? t("files.search_name_placeholder") : t("files.search_content_placeholder")}
                 className="flex-1 bg-transparent text-xs py-1 outline-none placeholder:text-muted-foreground/40"
               />
               {searchQuery && (
@@ -497,7 +500,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                     : "text-muted-foreground/60 hover:text-muted-foreground"
                 )}
               >
-                Name
+                {t("files.search_name")}
               </button>
               <button
                 onClick={() => setSearchType("content")}
@@ -508,7 +511,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                     : "text-muted-foreground/60 hover:text-muted-foreground"
                 )}
               >
-                Content
+                {t("files.search_content")}
               </button>
             </div>
           </div>
@@ -529,7 +532,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
             </div>
           ) : tree.length === 0 ? (
             <div className="text-xs text-muted-foreground text-center py-8">
-              No files found
+              {t("files.no_files")}
             </div>
           ) : (
             compactedTree.map((entry) => (
@@ -563,7 +566,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                 <button
                   onClick={handleDownload}
                   className="p-0.5 rounded hover:bg-accent text-muted-foreground/50 hover:text-muted-foreground transition-colors"
-                  title="Download file"
+                  title={t("files.download")}
                 >
                   <Download className="h-3.5 w-3.5" />
                 </button>
@@ -571,25 +574,25 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                   <button
                     onClick={() => setShowDeleteConfirm(true)}
                     className="p-0.5 rounded text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-colors"
-                    title="Delete file"
+                    title={t("files.delete")}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
                   {showDeleteConfirm && (
                     <div data-delete-confirm className="absolute right-0 top-full mt-1 z-50 bg-popover border rounded-md shadow-md p-2 flex items-center gap-1.5 whitespace-nowrap">
-                      <span className="text-xs text-muted-foreground">Delete?</span>
+                      <span className="text-xs text-muted-foreground">{t("files.delete_confirm")}</span>
                       <button
                         onClick={handleDelete}
                         disabled={deleting}
                         className="px-2 py-0.5 text-xs bg-destructive text-destructive-foreground rounded hover:bg-destructive/90"
                       >
-                        {deleting ? "..." : "Delete"}
+                        {deleting ? "..." : t("files.delete_btn")}
                       </button>
                       <button
                         onClick={() => setShowDeleteConfirm(false)}
                         className="px-2 py-0.5 text-xs bg-muted text-muted-foreground rounded hover:bg-accent"
                       >
-                        Cancel
+                        {t("files.cancel")}
                       </button>
                     </div>
                   )}
@@ -603,7 +606,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               </div>
             ) : fileContent?.binary ? (
               <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-                Binary file ({formatSize(fileContent.size)})
+                {t("files.binary_file", { size: formatSize(fileContent.size) })}
               </div>
             ) : fileContent ? (
               <div className="flex-1 min-h-0">
@@ -611,13 +614,13 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               </div>
             ) : (
               <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-                Failed to load file
+                {t("files.load_failed")}
               </div>
             )}
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-            Select a file to view
+            {t("files.select_file")}
           </div>
         )}
       </div>

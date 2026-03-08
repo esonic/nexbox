@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
-import { useTranslation } from "react-i18next";
+import { useTranslation, Trans } from "react-i18next";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
   PanelLeftClose,
@@ -1061,13 +1061,21 @@ export function AppSidebar() {
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="fixed inset-0 bg-black/50" onClick={() => setDeleteProjectDialogOpen(false)} />
           <div className="relative bg-popover border rounded-lg shadow-lg p-5 w-[340px] space-y-4">
-            <h3 className="text-sm font-semibold">Delete Project</h3>
+            <h3 className="text-sm font-semibold">{t("sidebar.delete_project_title")}</h3>
             <p className="text-xs text-muted-foreground">
-              This will permanently delete project <span className="font-medium text-foreground">{deletingProject.name}</span> and all its sessions. This action cannot be undone.
+              <Trans
+                i18nKey="sidebar.delete_project_desc"
+                values={{ name: deletingProject.name }}
+                components={{ name: <span className="font-medium text-foreground" /> }}
+              />
             </p>
             <div className="space-y-1.5">
               <label className="text-xs text-muted-foreground">
-                Type <span className="font-medium text-foreground">{deletingProject.name}</span> to confirm:
+                <Trans
+                  i18nKey="sidebar.delete_project_confirm_label"
+                  values={{ name: deletingProject.name }}
+                  components={{ name: <span className="font-medium text-foreground" /> }}
+                />
               </label>
               <input
                 value={deleteConfirmInput}
@@ -1087,14 +1095,14 @@ export function AppSidebar() {
                 onClick={() => setDeleteProjectDialogOpen(false)}
                 className="px-3 py-1.5 text-xs rounded-md hover:bg-accent transition-colors"
               >
-                Cancel
+                {t("sidebar.cancel")}
               </button>
               <button
                 onClick={handleConfirmDeleteProject}
                 disabled={deleteProjectLoading || deleteConfirmInput.trim() !== deletingProject.name}
                 className="px-3 py-1.5 text-xs rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
-                {deleteProjectLoading ? "Deleting..." : "Delete Project"}
+                {deleteProjectLoading ? t("sidebar.deleting") : t("sidebar.delete_project")}
               </button>
             </div>
           </div>

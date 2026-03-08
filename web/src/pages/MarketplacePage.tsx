@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import {
   Search,
   Package,
@@ -19,6 +20,7 @@ import {
 type TabType = "connector" | "skill" | "plugin";
 
 export function MarketplacePage() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<TabType>("connector");
   const [search, setSearch] = useState("");
   const [plugins, setPlugins] = useState<LocalPlugin[]>([]);
@@ -69,13 +71,11 @@ export function MarketplacePage() {
     setInstalling(plugin.id);
     try {
       if (plugin.type === "mcp") {
-        // Parse MCP config to build manifest
         const mcpConfig = plugin.mcp_config ? JSON.parse(plugin.mcp_config) : {};
         const manifest: Record<string, unknown> = {};
         if (mcpConfig.mcpServers) {
           manifest.mcpServers = mcpConfig.mcpServers;
         } else {
-          // Build from plugin fields
           const entry: Record<string, unknown> = {};
           if (plugin.command) {
             entry.command = plugin.command;
@@ -134,16 +134,13 @@ export function MarketplacePage() {
     }
   };
 
-  const matchesTab = (p: LocalPlugin, t: TabType) => {
-    switch (t) {
+  const matchesTab = (p: LocalPlugin, currentTab: TabType) => {
+    switch (currentTab) {
       case "connector":
-        // Connectors: anything with MCP config (type=mcp), regardless of source
         return p.type === "mcp";
       case "skill":
-        // Skills: SKILL.md format
         return p.type === "skill";
       case "plugin":
-        // Plugins: .claude-plugin format without MCP
         return p.type === "plugin";
       default:
         return false;
@@ -164,28 +161,28 @@ export function MarketplacePage() {
 
   const tabConfig = {
     connector: {
-      label: "Connectors",
-      subtitle: "Browse and install MCP connectors",
-      placeholder: "Search connectors...",
+      label: t("customize.connectors"),
+      subtitle: t("customize.connectors_subtitle"),
+      placeholder: t("customize.connectors_search"),
     },
     skill: {
-      label: "Skills",
-      subtitle: "Browse and install agent skills",
-      placeholder: "Search skills...",
+      label: t("customize.skills"),
+      subtitle: t("customize.skills_subtitle"),
+      placeholder: t("customize.skills_search"),
     },
     plugin: {
-      label: "Plugins",
-      subtitle: "Browse and install plugins",
-      placeholder: "Search plugins...",
+      label: t("customize.plugins"),
+      subtitle: t("customize.plugins_subtitle"),
+      placeholder: t("customize.plugins_search"),
     },
-  } as const;
+  };
 
   return (
     <div className="h-full overflow-y-auto">
       {/* Header */}
       <div className="bg-card">
         <div className="max-w-3xl mx-auto px-6 pt-6 pb-5">
-          <h1 className="text-xl font-bold">Marketplace</h1>
+          <h1 className="text-xl font-bold">{t("customize.title")}</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
             {tabConfig[tab].subtitle}
           </p>
@@ -197,18 +194,18 @@ export function MarketplacePage() {
         {/* Tab bar */}
         <div className="border-b border-t">
           <div className="max-w-3xl mx-auto px-6 flex">
-            {(["connector", "skill", "plugin"] as TabType[]).map((t) => (
+            {(["connector", "skill", "plugin"] as TabType[]).map((tabKey) => (
               <button
-                key={t}
-                onClick={() => setTab(t)}
+                key={tabKey}
+                onClick={() => setTab(tabKey)}
                 className={cn(
                   "px-4 py-2.5 text-sm font-medium transition-colors relative",
-                  tab === t
+                  tab === tabKey
                     ? "text-foreground after:absolute after:bottom-0 after:left-0 after:right-0 after:h-0.5 after:bg-primary"
                     : "text-muted-foreground hover:text-foreground"
                 )}
               >
-                {tabConfig[t].label}
+                {tabConfig[tabKey].label}
               </button>
             ))}
           </div>
@@ -227,13 +224,13 @@ export function MarketplacePage() {
               />
             </div>
             <span className="text-sm text-muted-foreground shrink-0">
-              {loading ? "..." : `${filteredPlugins.length} available`}
+              {loading ? "..." : t("customize.available_count", { count: filteredPlugins.length })}
             </span>
             <button
               onClick={loadPlugins}
               disabled={loading}
               className="p-1.5 rounded hover:bg-accent transition-colors text-muted-foreground hover:text-foreground"
-              title="Refresh"
+              title={t("customize.refresh")}
             >
               <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
             </button>
@@ -246,14 +243,14 @@ export function MarketplacePage() {
         {loading ? (
           <div className="flex items-center justify-center h-40 text-muted-foreground gap-2">
             <RefreshCw className="h-5 w-5 animate-spin" />
-            Loading...
+            {t("customize.loading")}
           </div>
         ) : filteredPlugins.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-40 text-muted-foreground gap-2">
             <Package className="h-10 w-10 opacity-30" />
-            <p className="text-sm">No plugins found</p>
+            <p className="text-sm">{t("customize.no_plugins")}</p>
             <p className="text-xs text-muted-foreground/60">
-              Admin can add plugins by placing JSON files in the marketplace directory
+              {t("customize.no_plugins_hint")}
             </p>
           </div>
         ) : (
@@ -292,8 +289,8 @@ const typeStyles: Record<string, { bg: string; text: string; icon: "wrench" | "p
 };
 
 function PluginCard({ plugin, installed, installing, onInstall, onUninstall }: PluginCardProps) {
+  const { t } = useTranslation();
   const style = typeStyles[plugin.type] || typeStyles.plugin;
-  // In the Connectors tab, all items are MCP — show "connector" label for external ones
   const displayLabel = plugin.source === "connector" ? "connector" : plugin.type;
 
   return (
@@ -316,7 +313,9 @@ function PluginCard({ plugin, installed, installing, onInstall, onUninstall }: P
               <span className="text-[11px] text-muted-foreground/60 ml-2">v{plugin.version}</span>
             )}
             {plugin.author && (
-              <span className="text-[11px] text-muted-foreground/60 ml-2">by {plugin.author}</span>
+              <span className="text-[11px] text-muted-foreground/60 ml-2">
+                {t("customize.by_author", { author: plugin.author })}
+              </span>
             )}
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
@@ -341,7 +340,7 @@ function PluginCard({ plugin, installed, installing, onInstall, onUninstall }: P
         </div>
 
         <p className="text-[12px] text-muted-foreground line-clamp-2 mb-2">
-          {plugin.description || "No description"}
+          {plugin.description || t("customize.no_description")}
         </p>
 
         <div className="flex items-center justify-between">
@@ -353,7 +352,7 @@ function PluginCard({ plugin, installed, installing, onInstall, onUninstall }: P
           {!plugin.command && <span />}
           {!installed && plugin.auth_type === "oauth" ? (
             <span className="text-[10px] text-muted-foreground/60 italic">
-              OAuth not supported
+              {t("customize.oauth_not_supported")}
             </span>
           ) : (
             <button
@@ -367,7 +366,7 @@ function PluginCard({ plugin, installed, installing, onInstall, onUninstall }: P
                 installing && "opacity-50 cursor-not-allowed"
               )}
             >
-              {installing ? "..." : installed ? "Uninstall" : "Install"}
+              {installing ? "..." : installed ? t("customize.uninstall") : t("customize.install")}
             </button>
           )}
         </div>

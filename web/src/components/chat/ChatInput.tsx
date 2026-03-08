@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Send, StopCircle, FileText, ChevronDown, Check, X, GitBranch, ImagePlus, Play, Pencil, Workflow, MessageSquare, CircleHelp } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -480,6 +481,7 @@ export function ChatInput({
   pickedComments,
   onClearPickedComments,
 }: ChatInputProps) {
+  const { t } = useTranslation();
   const [input, setInput] = useState(() => {
     try { return localStorage.getItem(DRAFT_KEY_PREFIX + sessionId) || ""; }
     catch { return ""; }
@@ -853,7 +855,7 @@ export function ChatInput({
                 addImageFiles(imageFiles);
               }
             }}
-            placeholder={!isConnected ? "Connecting..." : "Type a message..."}
+            placeholder={!isConnected ? t("chat.connecting") : t("chat.placeholder")}
             disabled={!isConnected}
             className="resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
             style={{ height: inputHeight }}

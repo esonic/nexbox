@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import {
   Dialog,
   DialogContent,
@@ -35,6 +36,7 @@ export function ProjectDialog({
   hideDelete = false,
   initialShowDelete = false,
 }: ProjectDialogProps) {
+  const { t } = useTranslation();
   const isEdit = !!project;
 
   const [name, setName] = useState("");
@@ -111,20 +113,20 @@ export function ProjectDialog({
         onInteractOutside={(e) => e.preventDefault()}
       >
         <DialogHeader>
-          <DialogTitle>{isEdit ? "Edit Project" : "New Project"}</DialogTitle>
+          <DialogTitle>{isEdit ? t("project_dialog.edit_project") : t("project_dialog.new_project")}</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4 py-2 min-w-0">
           {/* Name */}
           <div className="space-y-1.5">
             <label htmlFor="project-name" className="text-xs text-muted-foreground">
-              Name <span className="text-destructive">*</span>
+              {t("project_dialog.name")} <span className="text-destructive">*</span>
             </label>
             <Input
               id="project-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="My Project"
+              placeholder={t("project_dialog.name_placeholder")}
               className="h-8 text-sm"
               maxLength={20}
               autoFocus
@@ -141,13 +143,13 @@ export function ProjectDialog({
           {/* Description */}
           <div className="space-y-1.5">
             <label htmlFor="project-desc" className="text-xs text-muted-foreground">
-              Description
+              {t("project_dialog.description")}
             </label>
             <Textarea
               id="project-desc"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Optional description..."
+              placeholder={t("project_dialog.description_placeholder")}
               className="text-sm min-h-[60px] resize-none"
               maxLength={100}
             />
@@ -163,7 +165,7 @@ export function ProjectDialog({
         {isEdit && showDeleteConfirm && (
           <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 space-y-2">
             <p className="text-xs text-destructive font-medium">
-              Type the project name to confirm deletion:
+              {t("project_dialog.delete_confirm_hint")}
             </p>
             <Input
               value={confirmDeleteInput}
@@ -178,7 +180,7 @@ export function ProjectDialog({
                 onClick={() => { setShowDeleteConfirm(false); setConfirmDeleteInput(""); }}
                 className="h-6 text-xs"
               >
-                Cancel
+                {t("project_dialog.cancel")}
               </Button>
               <Button
                 variant="destructive"
@@ -188,7 +190,7 @@ export function ProjectDialog({
                 className="h-6 text-xs"
               >
                 {deleting && <Loader2 className="h-3 w-3 animate-spin mr-1" />}
-                Delete Project
+                {t("project_dialog.delete_project")}
               </Button>
             </div>
           </div>
@@ -204,7 +206,7 @@ export function ProjectDialog({
               className="h-7 text-xs text-destructive hover:text-destructive"
             >
               <Trash2 className="h-3 w-3 mr-1" />
-              Delete Project
+              {t("project_dialog.delete_project")}
             </Button>
           ) : (
             <div />
@@ -216,7 +218,7 @@ export function ProjectDialog({
               onClick={() => onOpenChange(false)}
               className="h-7 text-xs"
             >
-              Cancel
+              {t("project_dialog.cancel")}
             </Button>
             <Button
               size="sm"
@@ -225,7 +227,7 @@ export function ProjectDialog({
               className="h-7 text-xs"
             >
               {submitting && <Loader2 className="h-3 w-3 animate-spin mr-1" />}
-              {isEdit ? "Save" : "Create"}
+              {isEdit ? t("project_dialog.save") : t("project_dialog.create")}
             </Button>
           </div>
         </div>
