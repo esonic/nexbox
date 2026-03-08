@@ -119,7 +119,7 @@ func (a *ClaudeAgent) SendMessage(
 			},
 		}
 
-		opts.AllowedTools = append(opts.AllowedTools, a.MCPToolNames...)
+		opts.AllowedTools = append(opts.AllowedTools, filterMCPTools(a.MCPToolNames, req.UserFeatures)...)
 
 		if hasFeature(req.Features, "chrome_devtools") && req.ChromeMCPURL != "" {
 			servers["chrome"] = map[string]interface{}{
@@ -504,6 +504,52 @@ func isBenignToolError(output string) bool {
 		}
 	}
 	return false
+}
+
+// deprecatedMCPTools lists MCP tool suffixes that should never be passed to the CLI.
+var deprecatedMCPTools = map[string]bool{
+	"ask_question":            true,
+	"run_in_terminal":         true,
+	"get_gitlab_mr_comments":  true,
+	"create_gitlab_mr":        true,
+	"enable_browser_control":  true,
+}
+
+// mcpToolFeatureMap maps MCP tool name suffixes to the feature bit required.
+// Tools not in this map (and not deprecated) are always included.
+var mcpToolFeatureMap = map[string]int64{
+	"save_asset":          1 << 1, // FeatureAsset
+	"get_asset_content":   1 << 1,
+	"list_assets":         1 << 1,
+	"list_asset_comments": 1 << 1,
+	"create_task":         1 << 0, // FeatureTask
+	"get_task":            1 << 0,
+	"list_tasks":          1 << 0,
+	"update_task":         1 << 0,
+	"list_workflows":      1 << 2, // FeatureWorkflow
+	"get_workflow":        1 << 2,
+	"execute_workflow":    1 << 2,
+}
+
+// filterMCPTools removes deprecated tools and tools whose feature bit is not
+// enabled in userFeatures.
+func filterMCPTools(allTools []string, userFeatures int64) []string {
+	var filtered []string
+	for _, tool := range allTools {
+		// Extract the tool suffix after the last "__"
+		suffix := tool
+		if idx := strings.LastIndex(tool, "__"); idx >= 0 {
+			suffix = tool[idx+2:]
+		}
+		if deprecatedMCPTools[suffix] {
+			continue
+		}
+		requiredBit, guarded := mcpToolFeatureMap[suffix]
+		if !guarded || (userFeatures&requiredBit) != 0 {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
 }
 
 // buildErrorMessage produces a user-friendly error string from a result message.

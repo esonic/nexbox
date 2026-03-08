@@ -174,7 +174,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   const [pendingUserInput, setPendingUserInput] = useState<{
     toolUseId: string;
     toolName: string;
-    question: string;
+    input: string;
   } | null>(null);
 
   // Fetch server default agent and available agents
@@ -330,7 +330,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
           setPendingUserInput({
             toolUseId: event.tool_id,
             toolName: event.tool,
-            question: event.content || "",
+            input: event.input || "",
           });
         }
         break;
@@ -542,7 +542,6 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   }, [session.id, sessionHasMessages]);
 
   const handleChangeModel = useCallback(async (newModel: string) => {
-    if (sessionHasMessages) return;
     try {
       const updated = await sessionsApi.update(session.id, { model: newModel });
       const { sessions, setSessions } = useAppStore.getState();
@@ -551,7 +550,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       console.error("Failed to update session model:", e);
       toast.error("Failed to change model", { description: String(e) });
     }
-  }, [session.id, sessionHasMessages]);
+  }, [session.id]);
 
   const addPickedTask = useCallback((task: Task) => {
     storeAddPickedTask(sessionId, task);

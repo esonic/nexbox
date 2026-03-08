@@ -509,6 +509,7 @@ const (
 	FeatureAsset    int64 = 1 << 1 // can see Asset management
 	FeatureWorkflow int64 = 1 << 2 // can see Workflow management
 	FeatureTerminal int64 = 1 << 3 // can see Terminal
+	FeatureGit      int64 = 1 << 4 // can see Git / Files panels
 )
 
 type User struct {

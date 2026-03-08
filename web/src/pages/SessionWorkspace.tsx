@@ -587,7 +587,7 @@ export function SessionWorkspace() {
             Terminal
           </Button>
         )}
-        {isRealProject && boundProject?.git_repo_path && (
+        {isRealProject && !!(userFeatures & 16) && boundProject?.git_repo_path && (
           <Button
             variant={rightPanel === "git" ? "secondary" : "ghost"}
             size="sm"
@@ -769,7 +769,7 @@ export function SessionWorkspace() {
 
         {/* Session info */}
         <div className="flex items-center gap-3 px-4 py-1 shrink-0">
-          {isRealProject && (
+          {isRealProject && !!(userFeatures & 16) && boundProject?.git_repo_path && (
             <WorktreeSelector
               sessionId={activeSession.id}
               mode={activeSession.worktree_mode || "local"}
@@ -784,15 +784,6 @@ export function SessionWorkspace() {
               <FolderGit2 className="h-3 w-3 text-muted-foreground/60 shrink-0" />
               <span className="text-[11px] text-muted-foreground/70 truncate">
                 {boundProject?.name || "Loading..."}
-                {(activeSession.worktree_mode === "worktree" && activeSession.worktree_path
-                  ? activeSession.worktree_path
-                  : boundProject?.git_repo_path) && (
-                  <span className="text-muted-foreground/50 ml-1">
-                    ({activeSession.worktree_mode === "worktree" && activeSession.worktree_path
-                      ? activeSession.worktree_path
-                      : boundProject?.git_repo_path})
-                  </span>
-                )}
               </span>
             </div>
           )}

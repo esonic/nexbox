@@ -326,6 +326,14 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		// Merge session-level features with message features.
 		activeFeatures := s.mergeSessionFeatures(sessionID, features)
 
+		// Look up user feature bits to filter MCP tools.
+		var userFeatures int64
+		if session.UserID != "" {
+			if u, err := s.Store.GetUser(session.UserID); err == nil && u != nil {
+				userFeatures = u.Features
+			}
+		}
+
 		// E2E testing: ensure per-session Chrome MCP is started and agent supports it.
 		var chromeMCPURL string
 		var chromeMCPToolNames []string
@@ -530,6 +538,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				ExtraMCPServers:    extraMCPs,
 				PluginDirs:         pluginDirs,
 				UserInputHandler:   userInputHandler,
+				UserFeatures:       userFeatures,
 			},
 			eventHandler,
 		)
@@ -572,6 +581,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					ExtraMCPServers:    extraMCPs,
 					PluginDirs:         pluginDirs,
 					UserInputHandler:   userInputHandler,
+					UserFeatures:       userFeatures,
 				},
 				eventHandler,
 			)

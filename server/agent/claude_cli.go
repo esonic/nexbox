@@ -240,10 +240,13 @@ func (c *ClaudeClient) Query(
 		_, wErr := stdin.Write(data)
 		return wErr
 	}
+	var stdinOnce sync.Once
 	closeStdin := func() {
-		stdinMu.Lock()
-		defer stdinMu.Unlock()
-		stdin.Close()
+		stdinOnce.Do(func() {
+			stdinMu.Lock()
+			defer stdinMu.Unlock()
+			stdin.Close()
+		})
 	}
 
 	// Send user message
@@ -343,6 +346,12 @@ func (c *ClaudeClient) Query(
 		return sessionID, fmt.Errorf("read stdout: %w", err)
 	}
 
+	// Close stdin now that we've received the result. This signals the CLI
+	// process to exit, which in turn closes stderr. Without this, the stderr
+	// reader (io.ReadAll) would block forever waiting for EOF, deadlocking
+	// against the deferred closeStdin.
+	closeStdin()
+
 	// Wait for stderr reader
 	wg.Wait()
 
@@ -430,12 +439,30 @@ func (c *ClaudeClient) handleCanUseTool(
 			return
 		}
 
-		// Return allow with updatedInput containing the user's answer
+		// Build updatedInput with original questions + structured answers map.
+		// The Claude CLI AskUserQuestion tool expects:
+		//   { "questions": [...original...], "answers": { "question text": "selected label" } }
 		updatedInput := make(map[string]interface{})
 		for k, v := range req.Input {
 			updatedInput[k] = v
 		}
-		updatedInput["answer"] = response
+
+		// Try to parse structured answers from frontend (JSON with "answers" map)
+		var structured struct {
+			Answers map[string]string `json:"answers"`
+		}
+		if err := json.Unmarshal([]byte(response), &structured); err == nil && structured.Answers != nil {
+			updatedInput["answers"] = structured.Answers
+		} else {
+			// Fallback: use raw text response as answer for first question
+			if questions, ok := req.Input["questions"].([]interface{}); ok && len(questions) > 0 {
+				if q, ok := questions[0].(map[string]interface{}); ok {
+					if qText, ok := q["question"].(string); ok {
+						updatedInput["answers"] = map[string]string{qText: response}
+					}
+				}
+			}
+		}
 
 		c.sendControlSuccess(writeStdin, requestID, map[string]interface{}{
 			"behavior":     "allow",
@@ -517,6 +544,15 @@ func (c *ClaudeClient) buildArgs(opts QueryOptions) []string {
 
 	if opts.PermissionMode != "" {
 		args = append(args, "--permission-mode", opts.PermissionMode)
+	}
+
+	// When a UserInputHandler is set, route tool permission prompts through
+	// the stdio control protocol so AskUserQuestion (and similar interactive
+	// tools) send can_use_tool control_requests instead of trying to prompt
+	// on the terminal. This mirrors the Python SDK's behavior of automatically
+	// setting --permission-prompt-tool stdio when can_use_tool is provided.
+	if opts.UserInputHandler != nil {
+		args = append(args, "--permission-prompt-tool", "stdio")
 	}
 
 	// MCP configuration

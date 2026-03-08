@@ -206,19 +206,40 @@ export function StandaloneTodoList({ todos, isPending }: { todos: TodoItem[]; is
 
 interface AskQuestion { id: string; prompt: string; options: { id: string; label: string }[]; allow_multiple?: boolean }
 
+function normalizeQuestion(raw: Record<string, unknown>): AskQuestion | null {
+  // Our MCP format: {id, prompt, options: [{id, label}], allow_multiple}
+  // Claude CLI AskUserQuestion format: {header, multiSelect, options: [{description, label}]}
+  const prompt = (raw.prompt as string) || (raw.header as string) || "";
+  const allowMultiple = (raw.allow_multiple as boolean) ?? (raw.multiSelect as boolean) ?? false;
+  const rawOptions = Array.isArray(raw.options) ? raw.options : [];
+  if (!prompt && rawOptions.length === 0) return null;
+  const options = rawOptions.map((o: Record<string, unknown>, i: number) => ({
+    id: (o.id as string) || `opt_${i}`,
+    label: (o.label as string) || (o.description as string) || `Option ${i + 1}`,
+  }));
+  return {
+    id: (raw.id as string) || "",
+    prompt,
+    options,
+    allow_multiple: allowMultiple,
+  };
+}
+
 function parseQuestions(input: string): { title?: string; questions: AskQuestion[] } | null {
   try {
     const parsed = parseJSON(input);
-    const title = parsed.title as string | undefined;
-    let questions: AskQuestion[];
+    const title = (parsed.title as string) || (parsed.question as string) || undefined;
+    let rawQuestions: Record<string, unknown>[];
     if (typeof parsed.questions === "string") {
-      questions = JSON.parse(parsed.questions as string);
+      rawQuestions = JSON.parse(parsed.questions as string);
     } else if (Array.isArray(parsed.questions)) {
-      questions = parsed.questions as AskQuestion[];
+      rawQuestions = parsed.questions as Record<string, unknown>[];
     } else {
       return null;
     }
-    if (!Array.isArray(questions) || questions.length === 0) return null;
+    if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) return null;
+    const questions = rawQuestions.map(normalizeQuestion).filter((q): q is AskQuestion => q !== null);
+    if (questions.length === 0) return null;
     return { title, questions };
   } catch { return null; }
 }
@@ -374,16 +395,7 @@ const toolRegistry: Record<string, ToolMeta> = {
       const p = parseJSON(i);
       return truncate((p.question as string) || (p.title as string) || "", 60);
     },
-    renderInput: (i) => {
-      const p = parseJSON(i);
-      const question = (p.question as string) || "";
-      if (!question) return <RawJSON input={i} />;
-      return (
-        <div className="text-[11px] text-muted-foreground bg-muted/30 rounded px-2 py-1.5 whitespace-pre-wrap">
-          {question}
-        </div>
-      );
-    },
+    renderInput: (i) => <QuestionPreview input={i} />,
   },
 
   // ── Codex file changes ──

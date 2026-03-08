@@ -48,6 +48,7 @@ type Request struct {
 	ExtraMCPServers    []MCPServerEntry // Extra MCP servers from installed marketplace packages
 	PluginDirs         []string          // Directories to pass via --plugin-dir to Claude CLI
 	UserInputHandler   UserInputHandler  // Optional: handle interactive tool calls (e.g., AskUserQuestion)
+	UserFeatures       int64             // Bitmask of enabled features (store.Feature* constants)
 }
 
 // Result contains the outcome of an agent message exchange.
