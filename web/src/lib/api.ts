@@ -148,7 +148,6 @@ export const projectsApi = {
     }),
   update: (id: string, data: Partial<{
     name: string; description: string; git_repo_path: string;
-    okone: Project["okone"];
   }>) =>
     request<Project>(`/projects/${id}`, {
       method: "PUT",

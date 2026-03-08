@@ -12,19 +12,6 @@ import (
 	"gitlab.okg.com/sre_ai/nexbox/store"
 )
 
-// injectProjectOKOne injects the okone config from config.json into the project (transient field).
-func (s *Server) injectProjectOKOne(p *store.Project) {
-	if p == nil {
-		return
-	}
-	for _, m := range s.Config.Get().Projects {
-		if m.RemoteID == p.ID {
-			p.OKOne = m.OKOne
-			return
-		}
-	}
-}
-
 func (s *Server) ListProjects(w http.ResponseWriter, r *http.Request) {
 	projects, err := s.Store.ListProjects()
 	if err != nil {
@@ -58,10 +45,6 @@ func (s *Server) ListProjects(w http.ResponseWriter, r *http.Request) {
 				projects[i].GitRepoPath = lp
 			}
 		}
-	}
-
-	for i := range projects {
-		s.injectProjectOKOne(&projects[i])
 	}
 
 	writeJSON(w, http.StatusOK, projects)
@@ -152,7 +135,6 @@ func (s *Server) GetProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.injectProjectOKOne(project)
 	writeJSON(w, http.StatusOK, project)
 }
 
@@ -215,7 +197,6 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "access denied")
 			return
 		}
-		s.injectProjectOKOne(project)
 		writeJSON(w, http.StatusOK, project)
 		return
 	}
@@ -261,7 +242,6 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.injectProjectOKOne(project)
 	writeJSON(w, http.StatusOK, project)
 }
 

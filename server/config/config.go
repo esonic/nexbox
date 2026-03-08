@@ -10,18 +10,6 @@ import (
 
 const DefaultServerURL = "https://sre-admin.okg.com/rca/api/v1/nexbox"
 
-// OKOneConfig holds per-project OKOne change-order integration settings.
-// Stored under "project_okone" in config.json, keyed by project ID.
-type OKOneConfig struct {
-	BaseURL        string `json:"base_url,omitempty"`
-	ApplicationID  int    `json:"application_id,omitempty"`
-	ServiceID      int    `json:"service_id,omitempty"`
-	Service        string `json:"service,omitempty"`
-	ServiceEnvID   int    `json:"service_env_id,omitempty"`
-	ServiceEnvName string `json:"service_env_name,omitempty"`
-	Owner          string `json:"owner,omitempty"`
-}
-
 // Config holds all local-only configuration persisted to ~/.nexbox/config.json.
 type Config struct {
 	DefaultAgent string           `json:"default_agent"`
@@ -63,12 +51,10 @@ type Config struct {
 	CORSOrigins []string `json:"cors_origins,omitempty"`
 }
 
-// ProjectMapping links a remote project to a local Git repository path,
-// and optionally holds per-project settings like OKOne integration.
+// ProjectMapping links a remote project to a local Git repository path.
 type ProjectMapping struct {
-	RemoteID    string       `json:"remote_id"`
-	GitRepoPath string       `json:"git_repo_path"`
-	OKOne       *OKOneConfig `json:"okone,omitempty"`
+	RemoteID    string `json:"remote_id"`
+	GitRepoPath string `json:"git_repo_path"`
 }
 
 // Manager provides thread-safe load/save operations for Config.

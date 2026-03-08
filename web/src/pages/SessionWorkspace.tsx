@@ -29,8 +29,6 @@ import { TaskPlugin } from "@/plugins/task/TaskPlugin";
 import { AssetPanel } from "@/plugins/asset/AssetPanel";
 import { WorkflowPanel } from "@/components/workflow/WorkflowPanel";
 import { RalphPanel } from "@/components/ralph/RalphPanel";
-import { ChangeOrderMenuItem } from "@/plugins/okone/ChangeOrderMenuItem";
-import { ChangeOrderResult } from "@/plugins/okone/ChangeOrderResult";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { DiffView } from "@/components/diff/DiffView";
 const FileBrowser = lazy(() => import("@/components/files/FileBrowser").then(m => ({ default: m.FileBrowser })));
@@ -189,21 +187,8 @@ function GitPanelContent({
   headerPortalTarget: HTMLDivElement | null;
 }) {
   const projects = useAppStore((s) => s.projects);
-  const currentProject = projects.find((p) => p.id === projectId);
-  const okoneEnabled = !!(currentProject?.okone?.application_id);
   const [mrLoading, setMrLoading] = useState(false);
   const [mrResult, setMrResult] = useState<{ success: boolean; data?: CreateMRResponse; error?: string } | null>(null);
-  const [showMrMenu, setShowMrMenu] = useState(false);
-
-  // Close MR menu on outside click
-  useEffect(() => {
-    if (!showMrMenu) return;
-    const handler = (e: MouseEvent) => {
-      if (!(e.target as HTMLElement).closest("[data-mr-menu]")) setShowMrMenu(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [showMrMenu]);
 
   const handleCreateMR = useCallback(async () => {
     if (mrLoading) return;
@@ -220,44 +205,15 @@ function GitPanelContent({
   }, [projectId, mrLoading]);
 
   const mrButton = gitRepoPath ? (
-    <div className="relative" data-mr-menu>
-      <div className="flex items-center">
-        <Button
-          size="sm"
-          onClick={handleCreateMR}
-          disabled={mrLoading}
-          className={cn(
-            "h-6 text-xs bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700",
-            okoneEnabled && "rounded-r-none border-r border-r-blue-500/40",
-          )}
-        >
-          {mrLoading ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <GitMerge className="mr-1 h-3 w-3" />}
-          Create MR
-        </Button>
-        {okoneEnabled && (
-          <Button
-            size="sm"
-            disabled={mrLoading}
-            onClick={() => setShowMrMenu(!showMrMenu)}
-            className="h-6 px-1 bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700 rounded-l-none"
-          >
-            <ChevronDown className="h-3 w-3" />
-          </Button>
-        )}
-      </div>
-      {showMrMenu && okoneEnabled && (
-        <div className="absolute top-full right-0 mt-1 w-44 bg-popover border rounded-md shadow-lg overflow-hidden z-10">
-          <button
-            onClick={() => { setShowMrMenu(false); handleCreateMR(); }}
-            className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-accent transition-colors"
-          >
-            <GitMerge className="h-3.5 w-3.5" />
-            Create MR
-          </button>
-          <ChangeOrderMenuItem projectId={projectId} onClose={() => setShowMrMenu(false)} />
-        </div>
-      )}
-    </div>
+    <Button
+      size="sm"
+      onClick={handleCreateMR}
+      disabled={mrLoading}
+      className="h-6 text-xs bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700"
+    >
+      {mrLoading ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <GitMerge className="mr-1 h-3 w-3" />}
+      Create MR
+    </Button>
   ) : null;
 
   return (
@@ -265,7 +221,7 @@ function GitPanelContent({
       {/* Portal MR button into panel header */}
       {headerPortalTarget && mrButton && createPortal(mrButton, headerPortalTarget)}
 
-      {/* MR result + plugin slots */}
+      {/* MR result */}
       <div className="px-4 py-2 border-b space-y-2 empty:hidden">
         {mrResult && (
           <div className={cn("rounded-lg border p-3 text-sm", mrResult.success ? "border-green-500/30" : "border-destructive/30")}>
@@ -293,7 +249,6 @@ function GitPanelContent({
             </div>
           </div>
         )}
-        <ChangeOrderResult projectId={projectId} />
       </div>
 
       {/* Diff view */}

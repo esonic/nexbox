@@ -3,8 +3,6 @@ package store
 import (
 	"encoding/json"
 	"time"
-
-	"gitlab.okg.com/sre_ai/nexbox/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -12,18 +10,17 @@ import (
 // ---------------------------------------------------------------------------
 
 type Project struct {
-	ID            string              `json:"id"`
-	NamespaceID   string              `json:"namespace_id"`
-	Name          string              `json:"name"`
-	Description   string              `json:"description"`
-	GitRepoPath   string              `json:"git_repo_path"`
-	GitLabRepoURL string              `json:"gitlab_repo_url,omitempty"`
-	OKOne         *config.OKOneConfig `json:"okone,omitempty"` // transient: injected from config.json, not stored
-	CreatedBy     string              `json:"created_by"`
-	OwnerID       string              `json:"owner_id"`
-	Version       int                 `json:"version"`
-	CreatedAt     time.Time           `json:"created_at"`
-	UpdatedAt     time.Time           `json:"updated_at"`
+	ID            string    `json:"id"`
+	NamespaceID   string    `json:"namespace_id"`
+	Name          string    `json:"name"`
+	Description   string    `json:"description"`
+	GitRepoPath   string    `json:"git_repo_path"`
+	GitLabRepoURL string    `json:"gitlab_repo_url,omitempty"`
+	CreatedBy     string    `json:"created_by"`
+	OwnerID       string    `json:"owner_id"`
+	Version       int       `json:"version"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 
