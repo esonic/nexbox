@@ -515,15 +515,23 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				Input:  input,
 			})
 
-			// Create response channel and wait for user response
+			// Create response channel and wait for user response.
+			// Use a 5-minute timeout so that if the user disconnects (e.g. page refresh)
+			// without sending a response, we don't block forever.
 			responseCh := make(chan string, 1)
 			setToolResponseChan(sessionID, responseCh)
 			defer removeToolResponseChan(sessionID)
+
+			inputTimeout := time.NewTimer(5 * time.Minute)
+			defer inputTimeout.Stop()
 
 			select {
 			case response := <-responseCh:
 				log.Printf("[chat] Got user response for tool %s: %d bytes", requestID, len(response))
 				return response, nil
+			case <-inputTimeout.C:
+				log.Printf("[chat] User input timeout for tool %s in session %s", requestID, sessionID)
+				return "", fmt.Errorf("user input timeout after 5 minutes")
 			case <-ctx.Done():
 				return "", ctx.Err()
 			}

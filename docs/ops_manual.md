@@ -150,13 +150,62 @@ server/beehub --data-dir server/data --port 9040
 | `token_price_per_million` | float | `0` | 每百万 token 计费金额（用于余额折算显示） |
 | `resend_api_key` | string | — | Resend API Key，生产发邮件必填；空则验证码打到日志 |
 | `resend_from` | string | `BeeHub <noreply@box-nex.top>` | 发件人地址（需在 Resend 控制台验证域名） |
-| `marketplace_dir` | string | — | 本地插件目录路径，存放 `*.json` 插件定义文件 |
+| `marketplace_dir` | string | — | 本地插件目录路径，支持三种格式（见下方 Marketplace 章节） |
 | `docker_enabled` | bool | `false` | 是否启用 Docker 容器隔离 |
 | `docker_image` | string | `"nexbox-agent:latest"` | 容器镜像名 |
 | `cors_origins` | []string | — | 允许的 CORS 源，空则使用内置开发默认值 |
 | `disk_quota_bytes` | int | `0`（不限） | 用户磁盘配额 |
 | `max_concurrent_tasks` | int | `0`（不限） | 用户最大并发任务数 |
 | `max_sessions_per_user` | int | `0`（不限） | 用户最大 session 数 |
+
+---
+
+## 4.1 Marketplace 配置
+
+`marketplace_dir` 指向一个本地目录，后端会**递归扫描**其中的插件/技能/连接器。每次用户访问 Marketplace 页面时实时扫描，无需重启服务。
+
+支持三种格式（可混合使用）：
+
+| 格式 | 识别方式 | 说明 |
+|------|---------|------|
+| 自定义 JSON | `*.json` 文件 | 原有格式，兼容保留 |
+| Anthropic Skills | 目录包含 `SKILL.md`（YAML frontmatter） | 来自 `anthropics/skills` 仓库 |
+| Anthropic Plugins/Connectors | 目录包含 `.claude-plugin/plugin.json` | 来自 `anthropics/claude-plugins-official` 仓库 |
+
+推荐目录结构：
+
+```
+data/marketplace/
+  skills/                      ← git clone https://github.com/anthropics/skills
+  claude-plugins-official/     ← git clone https://github.com/anthropics/claude-plugins-official
+  other-repo/                  ← 第三方仓库，管理员自行 clone
+  custom/
+    my-mcp.json                ← 自定义 JSON 插件
+```
+
+配置示例：
+
+```json
+{
+  "marketplace_dir": "/opt/beehub/server/data/marketplace"
+}
+```
+
+初始化和更新：
+
+```bash
+# 首次设置
+mkdir -p /opt/beehub/server/data/marketplace
+cd /opt/beehub/server/data/marketplace
+git clone https://github.com/anthropics/skills
+git clone https://github.com/anthropics/claude-plugins-official
+
+# 后续更新（无需重启服务，刷新页面即可生效）
+cd /opt/beehub/server/data/marketplace/skills && git pull
+cd /opt/beehub/server/data/marketplace/claude-plugins-official && git pull
+```
+
+Connector（外部服务连接器，如 GitHub、Slack 等）位于 `claude-plugins-official/external_plugins/` 下，会自动识别并归类到 Marketplace 的 Connectors 标签页。OAuth 类型的 Connector（如 Slack）当前标注为需要 OAuth，暂不支持安装。
 
 ---
 
