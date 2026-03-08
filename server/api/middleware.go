@@ -9,9 +9,21 @@ import (
 )
 
 // AuthMiddleware validates the Bearer token and injects user claims into context.
-// Returns 401 if the token is missing or invalid.
+// In local mode (no JWTSecret configured), all requests pass through with
+// default local-user context so that the app works without authentication.
 func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Local mode: no JWT secret configured → skip auth, inject default user.
+		if s.Config.Get().JWTSecret == "" {
+			ctx := r.Context()
+			ctx = context.WithValue(ctx, ContextKeyUserID, "local")
+			ctx = context.WithValue(ctx, ContextKeyUsername, "local")
+			ctx = context.WithValue(ctx, ContextKeyRole, "admin")
+			ctx = context.WithValue(ctx, ContextKeyFeatures, int64(0xFF))
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 			http.Error(w, "missing or invalid authorization header", http.StatusUnauthorized)
@@ -77,6 +89,17 @@ func GetUserFeatures(r *http.Request) int64 {
 // connections, so the token must be passed as ?token=<jwt> instead.
 func (s *Server) WSAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Local mode: skip auth, inject default user.
+		if s.Config.Get().JWTSecret == "" {
+			ctx := r.Context()
+			ctx = context.WithValue(ctx, ContextKeyUserID, "local")
+			ctx = context.WithValue(ctx, ContextKeyUsername, "local")
+			ctx = context.WithValue(ctx, ContextKeyRole, "admin")
+			ctx = context.WithValue(ctx, ContextKeyFeatures, int64(0xFF))
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
 		// Prefer Authorization header; fall back to query param.
 		tokenStr := ""
 		authHeader := r.Header.Get("Authorization")

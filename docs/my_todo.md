@@ -1,0 +1,5 @@
+- plugin 裡的 agent、command 是不是都能正常工作，每個 git 倉庫都是一個marketplace
+- gmail 等 connector 沒有看到
+- 狀態欄裡的路徑顯示不能顯示宿主內容
+- settings 裡不要 gitlab token
+- 中英文切換

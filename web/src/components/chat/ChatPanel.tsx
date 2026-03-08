@@ -190,7 +190,7 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
   useEffect(() => {
     if (!hasGitRepo) { setGitDiffStats(null); return; }
     fetchDiffStats();
-    const interval = setInterval(fetchDiffStats, 10_000);
+    const interval = setInterval(fetchDiffStats, 30_000);
     return () => clearInterval(interval);
   }, [hasGitRepo, fetchDiffStats, setGitDiffStats]);
 

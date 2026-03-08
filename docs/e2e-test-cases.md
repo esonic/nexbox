@@ -1,8 +1,9 @@
 # BeeHub E2E Test Cases
 
 > Based on completed tasks from todo.md, todo2.md, todo3.md.
-> Test framework: Playwright (recommended) or similar browser automation.
-> Base URL: `http://localhost:<port>` (configurable)
+> URL: `http://localhost:9040` 
+> 使用 build.sh 構建，使用 my_run.sh 運行
+> 使用 e2e-test-progress.md 跟蹤進度
 
 ---
 
