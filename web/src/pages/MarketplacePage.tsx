@@ -15,10 +15,10 @@ import {
   type InstalledSkill,
 } from "@/lib/api";
 
-type TabType = "mcp" | "skill" | "connector";
+type TabType = "connector" | "skill" | "plugin";
 
 export function MarketplacePage() {
-  const [tab, setTab] = useState<TabType>("mcp");
+  const [tab, setTab] = useState<TabType>("connector");
   const [search, setSearch] = useState("");
   const [plugins, setPlugins] = useState<LocalPlugin[]>([]);
   const [installedMCPs, setInstalledMCPs] = useState<InstalledMCP[]>([]);
@@ -48,21 +48,21 @@ export function MarketplacePage() {
   }, [loadPlugins]);
 
   const isInstalled = (plugin: LocalPlugin) =>
-    plugin.type === "mcp" || plugin.source === "connector"
+    plugin.type === "mcp"
       ? installedMCPs.some((m) => m.name === plugin.name)
       : installedSkills.some((s) => s.name === plugin.name);
 
   const matchesTab = (p: LocalPlugin, t: TabType) => {
     switch (t) {
-      case "mcp":
-        // MCP tab: mcp type but NOT connectors
-        return p.type === "mcp" && p.source !== "connector";
-      case "skill":
-        // Skill tab: skills + pure plugins (no MCP config)
-        return p.type === "skill" || p.type === "plugin";
       case "connector":
-        // Connector tab: external connectors (with MCP config from external_plugins)
-        return p.source === "connector";
+        // Connectors: anything with MCP config (type=mcp), regardless of source
+        return p.type === "mcp";
+      case "skill":
+        // Skills: SKILL.md format
+        return p.type === "skill";
+      case "plugin":
+        // Plugins: .claude-plugin format without MCP
+        return p.type === "plugin";
       default:
         return false;
     }
@@ -81,20 +81,20 @@ export function MarketplacePage() {
   });
 
   const tabConfig = {
-    mcp: {
-      label: "MCP Servers",
-      subtitle: "Browse and install MCP servers",
-      placeholder: "Search MCP servers...",
-    },
-    skill: {
-      label: "Skills & Plugins",
-      subtitle: "Browse and install skills and plugins",
-      placeholder: "Search skills & plugins...",
-    },
     connector: {
       label: "Connectors",
-      subtitle: "Connect to external services (GitHub, Slack, etc.)",
+      subtitle: "Browse and install MCP connectors",
       placeholder: "Search connectors...",
+    },
+    skill: {
+      label: "Skills",
+      subtitle: "Browse and install agent skills",
+      placeholder: "Search skills...",
+    },
+    plugin: {
+      label: "Plugins",
+      subtitle: "Browse and install plugins",
+      placeholder: "Search plugins...",
     },
   } as const;
 
@@ -115,7 +115,7 @@ export function MarketplacePage() {
         {/* Tab bar */}
         <div className="border-b border-t">
           <div className="max-w-3xl mx-auto px-6 flex">
-            {(["mcp", "skill", "connector"] as TabType[]).map((t) => (
+            {(["connector", "skill", "plugin"] as TabType[]).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -197,22 +197,22 @@ interface PluginCardProps {
   installed: boolean;
 }
 
-const typeStyles: Record<string, { bg: string; text: string }> = {
-  mcp:       { bg: "bg-blue-500/10",   text: "text-blue-600" },
-  skill:     { bg: "bg-violet-500/10",  text: "text-violet-600" },
-  plugin:    { bg: "bg-amber-500/10",   text: "text-amber-600" },
-  connector: { bg: "bg-emerald-500/10", text: "text-emerald-600" },
+const typeStyles: Record<string, { bg: string; text: string; icon: "wrench" | "package" }> = {
+  mcp:    { bg: "bg-blue-500/10",   text: "text-blue-600",    icon: "wrench" },
+  skill:  { bg: "bg-violet-500/10", text: "text-violet-600",  icon: "package" },
+  plugin: { bg: "bg-amber-500/10",  text: "text-amber-600",   icon: "package" },
 };
 
 function PluginCard({ plugin, installed }: PluginCardProps) {
-  const displayType = plugin.source === "connector" ? "connector" : plugin.type;
-  const style = typeStyles[displayType] || typeStyles.plugin;
+  const style = typeStyles[plugin.type] || typeStyles.plugin;
+  // In the Connectors tab, all items are MCP — show "connector" label for external ones
+  const displayLabel = plugin.source === "connector" ? "connector" : plugin.type;
 
   return (
     <div className="w-full border rounded-xl bg-card p-4 flex gap-4">
       {/* Icon */}
       <div className="shrink-0 mt-0.5">
-        {plugin.type === "mcp" || plugin.source === "connector" ? (
+        {style.icon === "wrench" ? (
           <Wrench className="h-5 w-5 text-blue-500" />
         ) : (
           <Package className="h-5 w-5 text-violet-500" />
@@ -247,7 +247,7 @@ function PluginCard({ plugin, installed }: PluginCardProps) {
                 style.text,
               )}
             >
-              {displayType}
+              {displayLabel}
             </span>
           </div>
         </div>

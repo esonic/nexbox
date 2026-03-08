@@ -223,7 +223,18 @@ export function AppSidebar() {
   const loadProjects = useCallback(async () => {
     try {
       const data = await projectsApi.list();
-      setProjects(data || []);
+      const list = data || [];
+      if (list.length === 0) {
+        // Auto-create a default project when none exist
+        try {
+          const defaultProj = await projectsApi.create({ name: "Default" });
+          setProjects([defaultProj]);
+          return;
+        } catch (e) {
+          console.error("Failed to create default project:", e);
+        }
+      }
+      setProjects(list);
     } catch (e) {
       console.error("Failed to load projects:", e);
     }
@@ -235,14 +246,13 @@ export function AppSidebar() {
   }, [setMarketplaceUpdateCount]);
 
   const loadBalance = useCallback(async () => {
-    if (!currentUser) return;
     try {
       const data = await balanceApi.get();
       setBalance(data.balance_tokens, data.balance_cny);
     } catch {
-      // balance endpoint may not be available in local mode
+      // balance endpoint may not be available
     }
-  }, [currentUser, setBalance]);
+  }, [setBalance]);
 
   useEffect(() => {
     loadSessions();
@@ -945,50 +955,20 @@ export function AppSidebar() {
             <div className="text-[12px] text-muted-foreground/40 text-center py-8">
               {t("sidebar.no_projects_hint")}<br />
               <button
-                onClick={() => navigate("/projects")}
+                onClick={() => { setEditingProject(null); setProjectDialogOpen(true); }}
                 className="text-primary/60 hover:text-primary underline-offset-2 hover:underline mt-1"
               >
-                {t("sidebar.manage_projects")}
+                {t("sidebar.new_project")}
               </button>
             </div>
           )}
         </div>
 
-        {/* ── Cloud / Local — hidden in JWT auth mode ── */}
-        {!currentUser && (
-          <div className="px-2 pb-1 shrink-0">
-            <button
-              onClick={() => navigate("/connect")}
-              className={cn(
-                "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors",
-                location.pathname === "/connect"
-                  ? "bg-accent text-foreground font-medium"
-                  : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
-              )}
-            >
-              <div className="relative shrink-0">
-                {connectStatus === "connected" ? (
-                  <Cloud className="h-4 w-4 text-green-500" />
-                ) : (
-                  <CloudOff className="h-4 w-4" />
-                )}
-                {notificationUnread && connectStatus === "connected" && (
-                  <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-red-500" />
-                )}
-              </div>
-              <span>{connectStatus === "connected" ? t("sidebar.cloud") : t("sidebar.local")}</span>
-              {connectStatus === "connected" && cloudInfo?.user_name && (
-                <span className="ml-auto text-[11px] text-muted-foreground/50 truncate max-w-[50%]">
-                  {cloudInfo.user_name}
-                </span>
-              )}
-            </button>
-          </div>
-        )}
+        {/* Cloud / Local connect button — hidden (no longer needed) */}
 
         {/* ── Bottom nav ── */}
         <div className="px-2 pb-3 pt-1 shrink-0 space-y-0.5 border-t border-border/40 mt-1">
-          {currentUser && balanceTokens > 0 && (
+          {balanceTokens > 0 && (
             <div className="px-3 py-1.5 text-xs text-muted-foreground/70">
               <span className="tabular-nums">{balanceTokens.toLocaleString()}</span>
               <span className="ml-1">{t("sidebar.tokens")}</span>

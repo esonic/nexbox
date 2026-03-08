@@ -62,6 +62,14 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	if len([]rune(req.Name)) > 20 {
+		writeError(w, http.StatusBadRequest, "name must be less than 20 characters")
+		return
+	}
+	if len([]rune(req.Description)) > 100 {
+		writeError(w, http.StatusBadRequest, "description must be less than 100 characters")
+		return
+	}
 
 	// Set owner from authenticated user
 	req.OwnerID = GetUserID(r)
@@ -171,6 +179,15 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	var req UpdateProjectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name != nil && len([]rune(*req.Name)) > 20 {
+		writeError(w, http.StatusBadRequest, "name must be less than 20 characters")
+		return
+	}
+	if req.Description != nil && len([]rune(*req.Description)) > 100 {
+		writeError(w, http.StatusBadRequest, "description must be less than 100 characters")
 		return
 	}
 

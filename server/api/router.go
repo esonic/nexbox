@@ -157,7 +157,7 @@ func errorOnlyLogger(next http.Handler) http.Handler {
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		start := time.Now()
 		next.ServeHTTP(ww, r)
-		if ww.Status() >= 400 {
+		if ww.Status() >= 500 {
 			log.Printf("%q %s %d %dB %s",
 				r.Method+" "+r.RequestURI, r.Proto, ww.Status(),
 				ww.BytesWritten(), time.Since(start))

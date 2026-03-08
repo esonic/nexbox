@@ -36,7 +36,9 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	s.Hub.AddClient(conn)
+	clientIP := r.RemoteAddr
+	username, _ := r.Context().Value(ContextKeyUsername).(string)
+	s.Hub.AddClient(conn, clientIP, username)
 	defer s.Hub.RemoveClient(conn)
 
 	for {

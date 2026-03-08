@@ -248,11 +248,11 @@ function NewProjectDialog({
         <div className="p-4 space-y-4">
           <div className="space-y-1.5">
             <label className="text-xs text-muted-foreground">Name <span className="text-destructive">*</span></label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My Project" className="h-8 text-sm" autoFocus />
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My Project" className="h-8 text-sm" maxLength={20} autoFocus />
           </div>
           <div className="space-y-1.5">
             <label className="text-xs text-muted-foreground">Description</label>
-            <Textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional…" className="text-sm min-h-[56px] resize-none" />
+            <Textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional…" className="text-sm min-h-[56px] resize-none" maxLength={100} />
           </div>
           {isCloud && (
             <div className="space-y-1.5">

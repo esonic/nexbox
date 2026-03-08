@@ -124,6 +124,7 @@ export function ProjectDialog({
               onChange={(e) => setName(e.target.value)}
               placeholder="My Project"
               className="h-8 text-sm"
+              maxLength={20}
               autoFocus
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.nativeEvent.isComposing && name.trim()) {
@@ -132,6 +133,7 @@ export function ProjectDialog({
                 }
               }}
             />
+            <div className="text-[10px] text-muted-foreground/50 text-right">{name.length}/20</div>
           </div>
 
           {/* Description */}
@@ -145,7 +147,9 @@ export function ProjectDialog({
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Optional description..."
               className="text-sm min-h-[60px] resize-none"
+              maxLength={100}
             />
+            <div className="text-[10px] text-muted-foreground/50 text-right">{description.length}/100</div>
           </div>
         </div>
 
