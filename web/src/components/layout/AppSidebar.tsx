@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
   PanelLeftClose,
@@ -136,6 +137,7 @@ function SessionRow({
 // ── AppSidebar ──────────────────────────────────────────────────────────
 
 export function AppSidebar() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
   const {
@@ -633,7 +635,7 @@ export function AppSidebar() {
           <button
             onClick={() => setCollapsed(false)}
             className="p-1.5 rounded hover:bg-accent transition-colors"
-            title="Expand sidebar"
+            title={t("sidebar.expand_sidebar")}
           >
             <PanelLeftOpen className="h-4 w-4" />
           </button>
@@ -648,7 +650,7 @@ export function AppSidebar() {
                 ? "bg-accent text-foreground"
                 : "text-muted-foreground hover:text-foreground hover:bg-accent"
             )}
-            title={marketplaceUpdateCount > 0 ? `Marketplace (${marketplaceUpdateCount} update${marketplaceUpdateCount > 1 ? "s" : ""} available)` : "Marketplace"}
+            title={t("sidebar.marketplace")}
           >
             <Store className="h-4 w-4" />
             {marketplaceUpdateCount > 0 && (
@@ -663,7 +665,7 @@ export function AppSidebar() {
                 ? "bg-accent text-foreground"
                 : "text-muted-foreground hover:text-foreground hover:bg-accent"
             )}
-            title={connectStatus === "connected" ? "Cloud" : "Local"}
+            title={connectStatus === "connected" ? t("sidebar.cloud") : t("sidebar.local")}
           >
             {connectStatus === "connected" ? (
               <Cloud className="h-4 w-4 text-green-500" />
@@ -679,7 +681,7 @@ export function AppSidebar() {
                 ? "bg-accent text-foreground"
                 : "text-muted-foreground hover:text-foreground hover:bg-accent"
             )}
-            title="Settings"
+            title={t("sidebar.settings")}
           >
             <Settings className="h-4 w-4" />
           </button>
@@ -710,7 +712,7 @@ export function AppSidebar() {
             <button
               onClick={() => setCollapsed(true)}
               className="p-1.5 rounded hover:bg-accent transition-colors text-muted-foreground hover:text-foreground"
-              title="Collapse sidebar"
+              title={t("sidebar.collapse_sidebar")}
             >
               <PanelLeftClose className="h-4 w-4" />
             </button>
@@ -733,14 +735,14 @@ export function AppSidebar() {
             className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
           >
             <SquarePen className="h-4 w-4 shrink-0 text-muted-foreground" />
-            <span>New session</span>
+            <span>{t("sidebar.new_session")}</span>
           </button>
 
           {/* Project picker dropdown */}
           {showNewSessionMenu && (
             <div className="absolute left-2 right-2 top-full z-50 mt-0.5 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
               <div className="px-3 py-2 text-xs font-medium text-muted-foreground border-b border-border bg-muted/30">
-                Select Project
+                {t("sidebar.select_project")}
               </div>
               {projects.filter((p) => p.name !== UNASSIGNED_PROJECT).map((p) => (
                 <button
@@ -760,7 +762,7 @@ export function AppSidebar() {
                     className="w-full flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
                   >
                     <span className="text-muted-foreground/60">—</span>
-                    <span>No project</span>
+                    <span>{t("sidebar.no_project")}</span>
                   </button>
                 </>
               )}
@@ -770,19 +772,19 @@ export function AppSidebar() {
 
         {/* ── Sessions section header ── */}
         <div className="flex items-center justify-between pl-4 pr-3 pt-2 pb-1.5 relative" ref={trashRef}>
-          <span className="text-[13px] font-medium text-muted-foreground/60">Sessions</span>
+          <span className="text-[13px] font-medium text-muted-foreground/60">{t("sidebar.sessions")}</span>
           <div className="flex items-center gap-0.5">
             <button
               onClick={() => setProjectDialogOpen(true)}
               className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-              title="New project"
+              title={t("sidebar.new_project")}
             >
               <FolderPlus className="h-3.5 w-3.5" />
             </button>
             <button
               onClick={handleOpenTrash}
               className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-              title="Recently deleted"
+              title={t("sidebar.recently_deleted")}
             >
               <History className="h-3.5 w-3.5" />
             </button>
@@ -793,7 +795,7 @@ export function AppSidebar() {
               <div className="px-3 py-2 border-b border-border bg-muted/30 flex items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5">
                   <History className="h-3.5 w-3.5 text-muted-foreground/60 shrink-0" />
-                  <span className="text-xs font-medium text-muted-foreground">Recently Deleted</span>
+                  <span className="text-xs font-medium text-muted-foreground">{t("sidebar.recently_deleted")}</span>
                 </div>
                 <button
                   onClick={() => setShowTrash(false)}
@@ -804,13 +806,13 @@ export function AppSidebar() {
               </div>
               <div className="px-3 py-1.5 border-b border-border/50">
                 <p className="text-[11px] text-muted-foreground/60">
-                  Sessions are permanently deleted after 1 day.
+                  {t("sidebar.trash_hint")}
                 </p>
               </div>
               <div className="max-h-64 overflow-y-auto">
                 {trashedSessions.length === 0 ? (
                   <div className="px-3 py-4 text-[12px] text-muted-foreground/40 text-center">
-                    No recently deleted sessions
+                    {t("sidebar.no_deleted_sessions")}
                   </div>
                 ) : (
                   trashedSessions.map((s) => (
@@ -827,7 +829,7 @@ export function AppSidebar() {
                       <button
                         onClick={() => handleRestoreSession(s.id)}
                         className="shrink-0 p-1 rounded hover:bg-accent text-muted-foreground/50 hover:text-foreground transition-colors"
-                        title="Restore session"
+                        title={t("sidebar.restore")}
                       >
                         <RotateCcw className="h-3 w-3" />
                       </button>
@@ -858,10 +860,10 @@ export function AppSidebar() {
                       : <ChevronDown className="h-3 w-3 text-muted-foreground/50 shrink-0" />}
                     <FolderOpen className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
                     <span className="text-[13px] text-muted-foreground truncate">
-                      {group.project?.name === UNASSIGNED_PROJECT ? "Unassigned" : (
+                      {group.project?.name === UNASSIGNED_PROJECT ? t("sidebar.unassigned") : (
                         group.project?.namespace_id
                           ? `${group.project.namespace_id}/${group.project.name}`
-                          : (group.project?.name || "Unassigned")
+                          : (group.project?.name || t("sidebar.unassigned"))
                       )}
                     </span>
                     <span className="text-[11px] text-muted-foreground/30 tabular-nums ml-1.5 shrink-0">
@@ -874,7 +876,7 @@ export function AppSidebar() {
                       <button
                         onClick={(e) => { e.stopPropagation(); setProjectMenuId(projectMenuId === group.projectId ? null : group.projectId); }}
                         className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-all opacity-0 group-hover:opacity-100"
-                        title="Project options"
+                        title={t("sidebar.project_options")}
                       >
                         <MoreHorizontal className="h-3 w-3" />
                       </button>
@@ -882,7 +884,7 @@ export function AppSidebar() {
                       <button
                         onClick={(e) => { e.stopPropagation(); handleNewSession(group.projectId!); }}
                         className="p-1 mr-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-all"
-                        title="New session"
+                        title={t("sidebar.new_session")}
                       >
                         <Plus className="h-3 w-3" />
                       </button>
@@ -897,14 +899,14 @@ export function AppSidebar() {
                             className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors"
                           >
                             <Settings className="h-3 w-3 text-muted-foreground" />
-                            Settings
+                            {t("sidebar.settings")}
                           </button>
                           <button
                             onClick={(e) => { e.stopPropagation(); setProjectMenuId(null); handleOpenEditProject(group.project!); }}
                             className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors text-destructive"
                           >
                             <Trash2 className="h-3 w-3" />
-                            Delete Project
+                            {t("sidebar.delete_project")}
                           </button>
                         </div>
                       )}
@@ -941,12 +943,12 @@ export function AppSidebar() {
 
           {groupedSessions.length === 0 && sessions.length === 0 && (
             <div className="text-[12px] text-muted-foreground/40 text-center py-8">
-              No working projects yet.<br />
+              {t("sidebar.no_projects_hint")}<br />
               <button
                 onClick={() => navigate("/projects")}
                 className="text-primary/60 hover:text-primary underline-offset-2 hover:underline mt-1"
               >
-                Manage Projects
+                {t("sidebar.manage_projects")}
               </button>
             </div>
           )}
@@ -974,7 +976,7 @@ export function AppSidebar() {
                   <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-red-500" />
                 )}
               </div>
-              <span>{connectStatus === "connected" ? "Cloud" : "Local"}</span>
+              <span>{connectStatus === "connected" ? t("sidebar.cloud") : t("sidebar.local")}</span>
               {connectStatus === "connected" && cloudInfo?.user_name && (
                 <span className="ml-auto text-[11px] text-muted-foreground/50 truncate max-w-[50%]">
                   {cloudInfo.user_name}
@@ -989,7 +991,7 @@ export function AppSidebar() {
           {currentUser && balanceTokens > 0 && (
             <div className="px-3 py-1.5 text-xs text-muted-foreground/70">
               <span className="tabular-nums">{balanceTokens.toLocaleString()}</span>
-              <span className="ml-1">tokens</span>
+              <span className="ml-1">{t("sidebar.tokens")}</span>
               {balanceCny > 0 && (
                 <span className="ml-1.5 text-muted-foreground/50">
                   ≈ ¥{balanceCny.toFixed(2)}
@@ -1012,7 +1014,7 @@ export function AppSidebar() {
                 <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-red-500" />
               )}
             </div>
-            <span>Marketplace</span>
+            <span>{t("sidebar.marketplace")}</span>
             {marketplaceUpdateCount > 0 && (
               <span className="ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-500/10 text-red-500">
                 {marketplaceUpdateCount}
@@ -1029,7 +1031,7 @@ export function AppSidebar() {
             )}
           >
             <Settings className="h-4 w-4 shrink-0" />
-            <span>Settings</span>
+            <span>{t("sidebar.settings")}</span>
           </button>
           {currentUser && (
             <button
@@ -1037,7 +1039,7 @@ export function AppSidebar() {
               className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-muted-foreground hover:text-foreground hover:bg-accent/50"
             >
               <LogOut className="h-4 w-4 shrink-0" />
-              <span>退出登录</span>
+              <span>{t("sidebar.logout")}</span>
             </button>
           )}
         </div>

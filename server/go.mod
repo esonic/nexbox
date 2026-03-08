@@ -17,7 +17,6 @@ require (
 	github.com/resend/resend-go/v3 v3.1.1
 	github.com/rs/cors v1.11.1
 	github.com/sergi/go-diff v1.4.0
-	github.com/syndtr/goleveldb v1.0.0
 	golang.org/x/crypto v0.48.0
 	modernc.org/sqlite v1.45.0
 )
@@ -31,7 +30,6 @@ require (
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gobwas/ws v1.4.0 // indirect
-	github.com/golang/snappy v1.0.0 // indirect
 	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/mailru/easyjson v0.9.1 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

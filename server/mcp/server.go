@@ -504,26 +504,6 @@ func (s *Server) registerTools() {
 				"After calling this tool, the Chrome DevTools MCP tools will be available in the next message."),
 	)
 
-	// --- Code review tools ---
-
-	getRuleGroupsTool := gomcp.NewTool("get_code_review_rule_groups",
-		gomcp.WithDescription(
-			"Fetch all available code review rule groups from the Prism service. "+
-				"Returns a list of groups with id, name, and description. "+
-				"Call this to show the user what rule groups are available for review."),
-	)
-
-	getRulesTool := gomcp.NewTool("get_code_review_rules",
-		gomcp.WithDescription(
-			"Fetch code review rules for one or more rule groups from the Prism service. "+
-				"Each rule includes name, description, severity, language, check method, and positive/negative examples. "+
-				"Use the returned rules as review criteria when analyzing code or git diffs."),
-		gomcp.WithString("group_ids",
-			gomcp.Required(),
-			gomcp.Description("Comma-separated rule group IDs, e.g. \"5\" or \"1,3,5\""),
-		),
-	)
-
 	addTool(saveAssetTool, s.handleSaveAsset)
 	addTool(getAssetContentTool, s.handleGetAssetContent)
 	addTool(listAssetsTool, s.handleListAssets)
@@ -540,8 +520,6 @@ func (s *Server) registerTools() {
 	addTool(getWorkflowTool, s.handleGetWorkflow)
 	addTool(executeWorkflowTool, s.handleExecuteWorkflow)
 	addTool(enableBrowserControlTool, s.handleEnableBrowserControl)
-	addTool(getRuleGroupsTool, s.handleGetCodeReviewRuleGroups)
-	addTool(getRulesTool, s.handleGetCodeReviewRules)
 }
 
 func (s *Server) handleSaveAsset(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {

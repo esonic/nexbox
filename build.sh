@@ -13,5 +13,5 @@ cp -r web/dist server/webdist
 # Build Go server with embedded frontend
 cd server
 VERSION=$(date +%Y%m%d%H%M)
-go build -o beehub -ldflags "-s -w -X main.Version=${VERSION}"
+go build -o ../target/beehub -ldflags "-s -w -X main.Version=${VERSION}"
 echo "Built beehub version ${VERSION}"

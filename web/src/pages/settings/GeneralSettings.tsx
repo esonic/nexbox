@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { serverApi } from "@/lib/api";
 import { ChevronDown, Check } from "lucide-react";
@@ -8,7 +9,13 @@ const AGENT_LABELS: Record<string, string> = {
   claude: "Claude Code",
 };
 
+const LANG_OPTIONS = [
+  { value: "zh", label: "中文" },
+  { value: "en", label: "English" },
+];
+
 export function GeneralSettings() {
+  const { t, i18n } = useTranslation();
   const [agents, setAgents] = useState<string[]>([]);
   const [defaultAgent, setDefaultAgent] = useState("");
   const [saving, setSaving] = useState(false);
@@ -74,12 +81,36 @@ export function GeneralSettings() {
 
   return (
     <section className="space-y-4">
+      {/* Language */}
+      <div className="rounded-lg border bg-card">
+        <div className="flex items-center justify-between px-4 py-3">
+          <div>
+            <div className="text-sm font-medium">{t("settings.language")}</div>
+            <div className="text-xs text-muted-foreground mt-0.5">{t("settings.language_desc")}</div>
+          </div>
+          <div className="relative">
+            <select
+              value={i18n.language}
+              onChange={(e) => i18n.changeLanguage(e.target.value)}
+              className="appearance-none bg-background border rounded-md px-3 py-1.5 pr-8 text-sm font-medium cursor-pointer hover:bg-accent/50 transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1"
+            >
+              {LANG_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+          </div>
+        </div>
+      </div>
+
       {/* Default Agent */}
       <div className="rounded-lg border bg-card">
         <div className="flex items-center justify-between px-4 py-3">
           <div>
-            <div className="text-sm font-medium">Default Agent</div>
-            <div className="text-xs text-muted-foreground mt-0.5">New sessions will use this agent</div>
+            <div className="text-sm font-medium">{t("settings.default_agent")}</div>
+            <div className="text-xs text-muted-foreground mt-0.5">{t("settings.default_agent_desc")}</div>
           </div>
           <div className="relative">
             <select
@@ -104,14 +135,14 @@ export function GeneralSettings() {
         <div className="px-4 py-3 space-y-3">
           <div className="flex items-center justify-between">
             <div>
-              <div className="text-sm font-medium">GitLab Token</div>
+              <div className="text-sm font-medium">{t("settings.gitlab_token")}</div>
               <div className="text-xs text-muted-foreground mt-0.5">
-                {hasGitlabToken ? "Personal access token configured" : "No token — GitLab features (MR comments, create MR) won't work"}
+                {hasGitlabToken ? t("settings.gitlab_token_configured") : t("settings.gitlab_token_not_configured")}
               </div>
             </div>
             {gitlabTokenSaved && (
               <span className="flex items-center gap-1 text-xs text-green-500">
-                <Check className="h-3 w-3" /> Saved
+                <Check className="h-3 w-3" /> {t("settings.saved")}
               </span>
             )}
           </div>
@@ -125,7 +156,7 @@ export function GeneralSettings() {
                 onClick={() => setShowGitlabTokenInput(true)}
                 className="text-xs text-muted-foreground hover:text-foreground transition-colors px-2 py-1"
               >
-                Change
+                {t("settings.change")}
               </button>
             </div>
           )}
@@ -145,14 +176,14 @@ export function GeneralSettings() {
                 disabled={saving}
                 className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Save
+                {t("settings.save")}
               </button>
               {showGitlabTokenInput && (
                 <button
                   onClick={() => { setShowGitlabTokenInput(false); setGitlabTokenInput(""); }}
                   className="text-xs text-muted-foreground hover:text-foreground transition-colors px-2 py-1"
                 >
-                  Cancel
+                  {t("settings.cancel")}
                 </button>
               )}
             </div>

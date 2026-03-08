@@ -1,8 +1,6 @@
 package api
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,87 +15,6 @@ import (
 	"gitlab.okg.com/sre_ai/nexbox/config"
 	"gitlab.okg.com/sre_ai/nexbox/store"
 )
-
-// GetAuthLoginURL returns the patrol login URL for the frontend to open in a popup.
-// GET /api/auth/login-url → {"url": "https://..."}
-func (s *Server) GetAuthLoginURL(w http.ResponseWriter, r *http.Request) {
-	cfg := s.Config.Get()
-	if cfg.DisableCloud {
-		writeError(w, http.StatusForbidden, "cloud disabled")
-		return
-	}
-
-	patrolBase, err := extractURLBase(cfg.ServerURL)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "invalid server URL in config")
-		return
-	}
-
-	// Random CSRF state
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	state := hex.EncodeToString(b)
-
-	// Callback URL points back to nexbox itself
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	callbackURL := fmt.Sprintf("%s://%s/api/auth/callback", scheme, r.Host)
-
-	loginURL := fmt.Sprintf("%s/login/nexbox?state=%s&redirect_uri=%s",
-		patrolBase,
-		url.QueryEscape(state),
-		url.QueryEscape(callbackURL))
-
-	writeJSON(w, http.StatusOK, map[string]string{"url": loginURL})
-}
-
-// HandleAuthCallback receives the OAuth callback from patrol with the access token.
-// GET /api/auth/callback?token=<token>&state=<state>
-func (s *Server) HandleAuthCallback(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("token")
-	if token == "" {
-		http.Error(w, "missing token", http.StatusBadRequest)
-		return
-	}
-
-	// Validate by pinging the remote store
-	cfg := s.Config.Get()
-	remoteStore := store.NewRemoteStore(cfg.ServerURL, token)
-	if err := remoteStore.Ping(); err != nil {
-		log.Printf("[auth] token validation failed: %v", err)
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprintf(w, `<!DOCTYPE html><html><body><p>Login failed. Please try again.</p></body></html>`)
-		return
-	}
-
-	// Persist token to config
-	if err := s.Config.Update(func(c *config.Config) {
-		c.Token = token
-	}); err != nil {
-		log.Printf("[auth] failed to save token: %v", err)
-		http.Error(w, "failed to save token", http.StatusInternalServerError)
-		return
-	}
-
-	// Switch store to cloud mode
-	s.ActivateCloud(remoteStore)
-
-	// Auto-create a default project if the user has none yet
-	s.ensureDefaultProject(remoteStore.Info.UserName)
-
-	// Notify connected frontend clients
-	data, _ := json.Marshal(map[string]interface{}{
-		"type":      "auth:success",
-		"user_name": remoteStore.Info.UserName,
-	})
-	s.Hub.BroadcastRaw(data)
-
-	// Return a minimal page that auto-closes; the main window reacts to the WS event
-	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprintf(w, `<!DOCTYPE html><html><body><p>Login successful.</p><script>window.close()</script></body></html>`)
-}
 
 // HandleAuthLogout removes the stored token and drops back to local-only mode.
 // POST /api/auth/logout

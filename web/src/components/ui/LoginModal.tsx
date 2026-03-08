@@ -1,11 +1,14 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { authCloudApi, setToken } from "@/lib/api";
+import { Languages } from "lucide-react";
 
 interface LoginModalProps {
   onSuccess: (token: string) => void;
 }
 
 export default function LoginModal({ onSuccess }: LoginModalProps) {
+  const { t, i18n } = useTranslation();
   const [tab, setTab]           = useState<"login" | "register">("login");
   const [email, setEmail]       = useState("");
   const [password, setPassword] = useState("");
@@ -14,6 +17,10 @@ export default function LoginModal({ onSuccess }: LoginModalProps) {
   const [codeCountdown, setCodeCountdown] = useState(0);
   const [error, setError]       = useState("");
   const [loading, setLoading]   = useState(false);
+
+  const toggleLang = () => {
+    i18n.changeLanguage(i18n.language === "zh" ? "en" : "zh");
+  };
 
   function startCountdown() {
     setCodeCountdown(60);
@@ -27,7 +34,7 @@ export default function LoginModal({ onSuccess }: LoginModalProps) {
 
   async function handleSendCode() {
     if (!email || !email.includes("@")) {
-      setError("请先填写有效的邮箱地址");
+      setError(t("login.error_invalid_email"));
       return;
     }
     setError("");
@@ -37,7 +44,7 @@ export default function LoginModal({ onSuccess }: LoginModalProps) {
       setCodeSent(true);
       startCountdown();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "发送失败");
+      setError(err instanceof Error ? err.message : t("login.error_send_failed"));
     } finally {
       setLoading(false);
     }
@@ -54,7 +61,7 @@ export default function LoginModal({ onSuccess }: LoginModalProps) {
       setToken(res.token);
       onSuccess(res.token);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "操作失败");
+      setError(err instanceof Error ? err.message : t("login.error_operation_failed"));
     } finally {
       setLoading(false);
     }
@@ -62,28 +69,37 @@ export default function LoginModal({ onSuccess }: LoginModalProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
+      {/* Language toggle — top-right */}
+      <button
+        onClick={toggleLang}
+        className="absolute top-4 right-4 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors"
+      >
+        <Languages className="h-4 w-4" />
+        {i18n.language === "zh" ? "EN" : "中文"}
+      </button>
+
       <div className="w-full max-w-sm rounded-xl border bg-card p-8 shadow-lg">
-        <h1 className="mb-6 text-center text-2xl font-bold">BeeHub</h1>
+        <h1 className="mb-6 text-center text-2xl font-bold">{t("login.title")}</h1>
 
         {/* Tab switcher */}
         <div className="mb-6 flex rounded-lg border p-1">
-          {(["login", "register"] as const).map((t) => (
+          {(["login", "register"] as const).map((tabKey) => (
             <button
-              key={t}
+              key={tabKey}
               type="button"
-              onClick={() => { setTab(t); setError(""); setCodeSent(false); setCodeCountdown(0); }}
+              onClick={() => { setTab(tabKey); setError(""); setCodeSent(false); setCodeCountdown(0); }}
               className={`flex-1 rounded-md py-1.5 text-sm font-medium transition-colors ${
-                tab === t ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                tab === tabKey ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              {t === "login" ? "登录" : "注册"}
+              {t(`login.tab_${tabKey}`)}
             </button>
           ))}
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="mb-1 block text-sm font-medium">邮箱</label>
+            <label className="mb-1 block text-sm font-medium">{t("login.email")}</label>
             <input
               type="email"
               required
@@ -91,13 +107,13 @@ export default function LoginModal({ onSuccess }: LoginModalProps) {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
-              placeholder="you@example.com"
+              placeholder={t("login.email_placeholder")}
             />
           </div>
 
           {tab === "register" && (
             <div>
-              <label className="mb-1 block text-sm font-medium">验证码</label>
+              <label className="mb-1 block text-sm font-medium">{t("login.verification_code")}</label>
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -106,7 +122,7 @@ export default function LoginModal({ onSuccess }: LoginModalProps) {
                   value={code}
                   onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
                   className="flex-1 rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
-                  placeholder="6位验证码"
+                  placeholder={t("login.code_placeholder")}
                 />
                 <button
                   type="button"
@@ -114,24 +130,24 @@ export default function LoginModal({ onSuccess }: LoginModalProps) {
                   disabled={loading || codeCountdown > 0}
                   className="whitespace-nowrap rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted disabled:opacity-50"
                 >
-                  {codeCountdown > 0 ? `${codeCountdown}s` : codeSent ? "重新发送" : "发送验证码"}
+                  {codeCountdown > 0 ? `${codeCountdown}s` : codeSent ? t("login.resend_code") : t("login.send_code")}
                 </button>
               </div>
               {codeSent && codeCountdown > 0 && (
-                <p className="mt-1 text-xs text-muted-foreground">验证码已发送至 {email}，10 分钟内有效</p>
+                <p className="mt-1 text-xs text-muted-foreground">{t("login.code_sent", { email })}</p>
               )}
             </div>
           )}
 
           <div>
-            <label className="mb-1 block text-sm font-medium">密码</label>
+            <label className="mb-1 block text-sm font-medium">{t("login.password")}</label>
             <input
               type="password"
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
-              placeholder={tab === "register" ? "至少 8 位" : "password"}
+              placeholder={tab === "register" ? t("login.password_placeholder_register") : t("login.password_placeholder_login")}
             />
           </div>
 
@@ -144,7 +160,7 @@ export default function LoginModal({ onSuccess }: LoginModalProps) {
             disabled={loading}
             className="w-full rounded-md bg-primary py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {loading ? "请稍候..." : tab === "login" ? "登录" : "注册"}
+            {loading ? t("login.loading") : t(`login.submit_${tab}`)}
           </button>
         </form>
       </div>

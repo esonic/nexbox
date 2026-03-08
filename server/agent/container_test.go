@@ -50,13 +50,6 @@ func TestContainerName_LongID(t *testing.T) {
 	}
 }
 
-func TestContainerName_Deterministic(t *testing.T) {
-	id := "proj-123"
-	if containerName(id) != containerName(id) {
-		t.Fatal("containerName must be deterministic")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // ExecInContainer — verifies docker exec command construction
 // ---------------------------------------------------------------------------

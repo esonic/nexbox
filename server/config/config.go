@@ -8,22 +8,19 @@ import (
 	"sync"
 )
 
-const DefaultServerURL = "https://sre-admin.okg.com/rca/api/v1/nexbox"
-
 // Config holds all local-only configuration persisted to ~/.nexbox/config.json.
 type Config struct {
 	DefaultAgent string           `json:"default_agent"`
-	ServerURL    string           `json:"server_url,omitempty"`
 	Token        string           `json:"token,omitempty"`
 	GitLabToken  string           `json:"gitlab_token,omitempty"`
 	DisableCloud bool             `json:"disable_cloud"`
 	Projects     []ProjectMapping `json:"projects,omitempty"`
 
 	// Cloud server settings (used when running as a multi-tenant cloud service)
-	StoreType   string `json:"store_type,omitempty"`   // "sqlite" (default) | "mysql"
-	MySQLDSN    string `json:"mysql_dsn,omitempty"`    // e.g. "user:pass@tcp(host:3306)/dbname?parseTime=true"
+	StoreType string `json:"store_type,omitempty"` // "sqlite" (default) | "mysql"
+	MySQLDSN  string `json:"mysql_dsn,omitempty"`  // e.g. "user:pass@tcp(host:3306)/dbname?parseTime=true"
 
-	JWTSecret  string `json:"jwt_secret,omitempty"`  // required for cloud mode
+	JWTSecret  string `json:"jwt_secret,omitempty"`   // required for cloud mode
 	JWTExpDays int    `json:"jwt_exp_days,omitempty"` // token expiry in days, default 7
 
 	// Email — used for sending verification codes via Resend (resend.com)
@@ -32,11 +29,9 @@ type Config struct {
 
 	MarketplaceDir string `json:"marketplace_dir,omitempty"` // default "/marketplace"
 
-	AnthropicKey string `json:"anthropic_key,omitempty"` // platform-level Anthropic API key
-
 	// Per-user limits
-	DiskQuotaBytes     int64 `json:"disk_quota_bytes,omitempty"`     // default 10GB
-	MaxConcurrentTasks int   `json:"max_concurrent_tasks,omitempty"` // default 3
+	DiskQuotaBytes     int64 `json:"disk_quota_bytes,omitempty"`      // default 10GB
+	MaxConcurrentTasks int   `json:"max_concurrent_tasks,omitempty"`  // default 3
 	MaxSessionsPerUser int   `json:"max_sessions_per_user,omitempty"` // default 20
 
 	// Billing
@@ -76,7 +71,7 @@ func NewManager(path string) (*Manager, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			m.cfg = Config{DefaultAgent: "claude", ServerURL: DefaultServerURL}
+			m.cfg = Config{DefaultAgent: "claude"}
 			return m, m.save()
 		}
 		return nil, fmt.Errorf("read config: %w", err)
@@ -84,9 +79,6 @@ func NewManager(path string) (*Manager, error) {
 
 	if err := json.Unmarshal(data, &m.cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
-	}
-	if m.cfg.ServerURL == "" {
-		m.cfg.ServerURL = DefaultServerURL
 	}
 	return m, nil
 }

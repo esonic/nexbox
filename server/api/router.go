@@ -13,7 +13,6 @@ import (
 	"gitlab.okg.com/sre_ai/nexbox/config"
 	chromemcp "gitlab.okg.com/sre_ai/nexbox/mcp/chrome"
 	"gitlab.okg.com/sre_ai/nexbox/store"
-	"gitlab.okg.com/sre_ai/nexbox/updater"
 )
 
 // ---------------------------------------------------------------------------
@@ -110,28 +109,26 @@ type net_addrErr struct{ addr string }
 
 func (e *net_addrErr) Error() string { return "missing port in address: " + e.addr }
 
-
 // Server holds all API dependencies
 type Server struct {
-	Store          store.Store               // unified data access (CompositeStore / SQLiteStore)
-	LocalStore     *store.SQLiteStore        // always-on local store; used by ActivateCloud / DeactivateCloud
-	Config         *config.Manager           // local config (default_agent, server_url, token, etc.)
-	Agent          agent.Agent               // Default agent (from --agent flag)
-	AgentName      string                    // Default agent name
-	Agents         map[string]agent.Agent    // All available agents by name
-	SessionManager *agent.SessionManager
-	MCPServerURL   string
-	Hub            *ChatHub                  // Hub for session chat messages
-	StoreMode      string                    // "sqlite" or "remote"
-	TerminalMgr    *TerminalManager          // tracks active PTY for run_in_terminal tool
-	DetailCache    *store.DetailCache        // local cache for full message part details
-	Cloud          *store.RemoteStore        // non-nil in cloud mode; for lark chat, change polling, etc.
-	DataDir        string                    // data directory for file storage (images, etc.)
-	Updater        *updater.Updater          // self-update manager (nil in dev mode)
-	Version          string                    // build-time version string
-	ChromeManager    *chromemcp.ChromeManager   // Per-session Chrome DevTools MCP manager for E2E testing
-	MarketplaceStats *MarketplaceStatsBuffer    // In-memory stats accumulator; flushed by pollChanges
-	ContainerMgr     *agent.ContainerManager    // Optional: Docker container isolation per project
+	Store            store.Store            // unified data access (CompositeStore / SQLiteStore)
+	LocalStore       *store.SQLiteStore     // always-on local store; used by ActivateCloud / DeactivateCloud
+	Config           *config.Manager        // local config (default_agent, server_url, token, etc.)
+	Agent            agent.Agent            // Default agent (from --agent flag)
+	AgentName        string                 // Default agent name
+	Agents           map[string]agent.Agent // All available agents by name
+	SessionManager   *agent.SessionManager
+	MCPServerURL     string
+	Hub              *ChatHub                 // Hub for session chat messages
+	StoreMode        string                   // "sqlite" or "remote"
+	TerminalMgr      *TerminalManager         // tracks active PTY for run_in_terminal tool
+	DetailCache      *store.DetailCache       // local cache for full message part details
+	Cloud            *store.RemoteStore       // non-nil in cloud mode; for lark chat, change polling, etc.
+	DataDir          string                   // data directory for file storage (images, etc.)
+	Version          string                   // build-time version string
+	ChromeManager    *chromemcp.ChromeManager // Per-session Chrome DevTools MCP manager for E2E testing
+	MarketplaceStats *MarketplaceStatsBuffer  // In-memory stats accumulator; flushed by pollChanges
+	ContainerMgr     *agent.ContainerManager  // Optional: Docker container isolation per project
 
 	// OnCloudActivated is called by ActivateCloud to start cloud-mode goroutines
 	// (e.g. pollChanges). Set by main during startup.
@@ -142,7 +139,6 @@ type Server struct {
 	// humanGates: executionID+":"+nodeID → channel carrying user input for human node continuation
 	humanGatesMu sync.Mutex
 	humanGates   map[string]chan string
-
 }
 
 // ResolveAgent returns the agent for a given session, falling back to the default.
@@ -205,7 +201,6 @@ func NewRouter(s *Server) *chi.Mux {
 				r.Patch("/admin/users/{userID}/features", s.HandleAdminUpdateUserFeatures)
 				r.Post("/admin/recharge", s.HandleAdminRecharge)
 			})
-
 
 			// Sessions
 			r.Route("/sessions", func(r chi.Router) {
