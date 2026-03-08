@@ -573,6 +573,7 @@ type MarketplacePlugin struct {
 	Source      string   `json:"source,omitempty"`        // "custom", "skill", "plugin", "connector"
 	MCPConfig   string   `json:"mcp_config,omitempty"`   // raw .mcp.json content (JSON string)
 	AuthType    string   `json:"auth_type,omitempty"`     // "oauth", "apikey", "none" — derived from .mcp.json
+	InstallPath string   `json:"install_path,omitempty"` // absolute path on disk (for plugin --plugin-dir install)
 }
 
 // ---------------------------------------------------------------------------

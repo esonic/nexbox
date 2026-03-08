@@ -43,16 +43,18 @@ func (s *MySQLStore) migrate() error {
 	migrations := []string{
 		`CREATE TABLE IF NOT EXISTS projects (
 			id              VARCHAR(36) PRIMARY KEY,
-			name            TEXT NOT NULL,
+			namespace_id    VARCHAR(255) NOT NULL DEFAULT 'local',
+			name            VARCHAR(255) NOT NULL,
 			description     TEXT DEFAULT '',
 			git_repo_path   TEXT DEFAULT '',
 			gitlab_repo_url TEXT DEFAULT '',
-			created_by      VARCHAR(255) DEFAULT 'local',
+			created_by      VARCHAR(255) NOT NULL DEFAULT '',
 			owner_id        VARCHAR(36) NOT NULL DEFAULT '',
 			version         INT DEFAULT 1,
-			namespace_id    VARCHAR(255) DEFAULT 'local',
 			created_at      DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
-			updated_at      DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+			updated_at      DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+			INDEX idx_projects_owner (owner_id),
+			UNIQUE KEY uq_projects_owner_name (owner_id, name)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
 		`CREATE TABLE IF NOT EXISTS tasks (
@@ -78,23 +80,24 @@ func (s *MySQLStore) migrate() error {
 
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id               VARCHAR(36) PRIMARY KEY,
-			namespace_id     VARCHAR(255) DEFAULT 'local',
+			namespace_id     VARCHAR(255) NOT NULL DEFAULT 'local',
 			name             TEXT DEFAULT '',
 			project_id       VARCHAR(36) DEFAULT '',
 			agent            VARCHAR(100) DEFAULT '',
-			model            VARCHAR(100) DEFAULT '',
+			model            VARCHAR(100) NOT NULL DEFAULT '',
 			agent_session_id VARCHAR(255) DEFAULT '',
 			stream_id        VARCHAR(255) DEFAULT '',
 			sort_order       INT DEFAULT 0,
-			created_by       VARCHAR(255) DEFAULT 'local',
-			user_id          VARCHAR(36) NOT NULL DEFAULT '',
 			features         TEXT DEFAULT '',
-			worktree_mode    VARCHAR(50) DEFAULT 'local',
-			worktree_path    TEXT DEFAULT '',
+			worktree_mode    VARCHAR(50) NOT NULL DEFAULT 'local',
+			worktree_path    TEXT NOT NULL DEFAULT '',
+			created_by       VARCHAR(255) NOT NULL DEFAULT '',
+			user_id          VARCHAR(36) NOT NULL DEFAULT '',
 			created_at       DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
 			updated_at       DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
 			deleted_at       DATETIME(3),
-			INDEX idx_sessions_user (user_id)
+			INDEX idx_sessions_user (user_id),
+			INDEX idx_sessions_project (project_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
 		`CREATE TABLE IF NOT EXISTS assets (
@@ -300,6 +303,10 @@ func (s *MySQLStore) migrate() error {
 			project_id   VARCHAR(36) NOT NULL DEFAULT '',
 			install_path TEXT NOT NULL DEFAULT '',
 			installed_at BIGINT NOT NULL DEFAULT 0,
+			id           VARCHAR(36) NOT NULL DEFAULT '',
+			user_id      VARCHAR(36) NOT NULL DEFAULT '',
+			plugin_id    VARCHAR(255) NOT NULL DEFAULT '',
+			config       TEXT NOT NULL,
 			PRIMARY KEY (name, project_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 

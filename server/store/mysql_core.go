@@ -1731,3 +1731,11 @@ func (s *MySQLStore) ListChanges(sinceID int64, limit int, order string) ([]Chan
 	}
 	return items, rows.Err()
 }
+
+func (s *MySQLStore) PurgeOldChanges(olderThan time.Time) (int64, error) {
+	result, err := s.db.Exec("DELETE FROM `changes` WHERE created_at < ?", olderThan)
+	if err != nil {
+		return 0, fmt.Errorf("purge old changes: %w", err)
+	}
+	return result.RowsAffected()
+}

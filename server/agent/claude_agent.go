@@ -175,6 +175,12 @@ func (a *ClaudeAgent) SendMessage(
 		log.Printf("[claude-agent] MCP config content: %s", string(mcpConfigBytes))
 	}
 
+	// Plugin directories
+	if len(req.PluginDirs) > 0 {
+		opts.PluginDirs = req.PluginDirs
+		log.Printf("[claude-agent] Plugin dirs: %v", req.PluginDirs)
+	}
+
 	// Resume session if exists
 	if req.SessionID != "" {
 		opts.Resume = req.SessionID

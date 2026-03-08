@@ -15,12 +15,11 @@ import (
 // Projects
 // ---------------------------------------------------------------------------
 
-const projectColumns = `id, namespace_id, name, description, git_repo_path, gitlab_repo_url, gitlab_token, extra, created_by, owner_id, version, created_at, updated_at`
+const projectColumns = `id, namespace_id, name, description, git_repo_path, gitlab_repo_url, created_by, owner_id, version, created_at, updated_at`
 
 func scanProject(row interface{ Scan(...interface{}) error }) (*Project, error) {
 	var p Project
-	var ignoredToken, ignoredExtra string
-	err := row.Scan(&p.ID, &p.NamespaceID, &p.Name, &p.Description, &p.GitRepoPath, &p.GitLabRepoURL, &ignoredToken, &ignoredExtra, &p.CreatedBy, &p.OwnerID, &p.Version, &p.CreatedAt, &p.UpdatedAt)
+	err := row.Scan(&p.ID, &p.NamespaceID, &p.Name, &p.Description, &p.GitRepoPath, &p.GitLabRepoURL, &p.CreatedBy, &p.OwnerID, &p.Version, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1512,4 +1511,12 @@ func (s *SQLiteStore) ListChanges(sinceID int64, limit int, order string) ([]Cha
 		items = append(items, c)
 	}
 	return items, nil
+}
+
+func (s *SQLiteStore) PurgeOldChanges(olderThan time.Time) (int64, error) {
+	result, err := s.db.Exec(`DELETE FROM changes WHERE created_at < ?`, olderThan)
+	if err != nil {
+		return 0, fmt.Errorf("purge old changes: %w", err)
+	}
+	return result.RowsAffected()
 }

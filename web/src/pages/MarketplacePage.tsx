@@ -13,6 +13,7 @@ import {
   type LocalPlugin,
   type InstalledMCP,
   type InstalledSkill,
+  type InstalledPluginEntry,
 } from "@/lib/api";
 
 type TabType = "connector" | "skill" | "plugin";
@@ -23,19 +24,23 @@ export function MarketplacePage() {
   const [plugins, setPlugins] = useState<LocalPlugin[]>([]);
   const [installedMCPs, setInstalledMCPs] = useState<InstalledMCP[]>([]);
   const [installedSkills, setInstalledSkills] = useState<InstalledSkill[]>([]);
+  const [installedPlugins, setInstalledPlugins] = useState<InstalledPluginEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [installing, setInstalling] = useState<string | null>(null);
 
   const loadPlugins = useCallback(async () => {
     setLoading(true);
     try {
-      const [allPlugins, mcps, skills] = await Promise.all([
+      const [allPlugins, mcps, skills, pluginEntries] = await Promise.all([
         marketplaceApi.listPlugins(),
         marketplaceApi.listInstalledMCPs(),
         marketplaceApi.listInstalledSkills(),
+        marketplaceApi.listInstalledPlugins(),
       ]);
       setPlugins(allPlugins || []);
       setInstalledMCPs(mcps || []);
       setInstalledSkills(skills || []);
+      setInstalledPlugins(pluginEntries || []);
     } catch (e: any) {
       toast.error("Failed to load marketplace", { description: e.message });
     } finally {
@@ -47,10 +52,87 @@ export function MarketplacePage() {
     loadPlugins();
   }, [loadPlugins]);
 
-  const isInstalled = (plugin: LocalPlugin) =>
-    plugin.type === "mcp"
-      ? installedMCPs.some((m) => m.name === plugin.name)
-      : installedSkills.some((s) => s.name === plugin.name);
+  const isInstalled = (plugin: LocalPlugin) => {
+    switch (plugin.type) {
+      case "mcp":
+        return installedMCPs.some((m) => m.name === plugin.name);
+      case "skill":
+        return installedSkills.some((s) => s.name === plugin.name);
+      case "plugin":
+        return installedPlugins.some((p) => p.name === plugin.name);
+      default:
+        return false;
+    }
+  };
+
+  const handleInstall = async (plugin: LocalPlugin) => {
+    setInstalling(plugin.id);
+    try {
+      if (plugin.type === "mcp") {
+        // Parse MCP config to build manifest
+        const mcpConfig = plugin.mcp_config ? JSON.parse(plugin.mcp_config) : {};
+        const manifest: Record<string, unknown> = {};
+        if (mcpConfig.mcpServers) {
+          manifest.mcpServers = mcpConfig.mcpServers;
+        } else {
+          // Build from plugin fields
+          const entry: Record<string, unknown> = {};
+          if (plugin.command) {
+            entry.command = plugin.command;
+            if (plugin.args?.length) entry.args = plugin.args;
+          }
+          manifest.mcpServers = { [plugin.name]: entry };
+        }
+        await marketplaceApi.installMCP({
+          name: plugin.name,
+          version: plugin.version || "0.0.0",
+          mcp_key: plugin.name,
+          manifest,
+        });
+        toast.success(`Installed connector: ${plugin.name}`);
+      } else if (plugin.type === "skill") {
+        await marketplaceApi.installSkill({
+          name: plugin.name,
+          package_id: plugin.id,
+          version: plugin.version || "0.0.0",
+          install_path: plugin.install_path,
+        });
+        toast.success(`Installed skill: ${plugin.name}`);
+      } else if (plugin.type === "plugin") {
+        await marketplaceApi.installPlugin({
+          name: plugin.name,
+          install_path: plugin.install_path || "",
+        });
+        toast.success(`Installed plugin: ${plugin.name}`);
+      }
+      await loadPlugins();
+    } catch (e: any) {
+      toast.error(`Failed to install ${plugin.name}`, { description: e.message });
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  const handleUninstall = async (plugin: LocalPlugin) => {
+    setInstalling(plugin.id);
+    try {
+      if (plugin.type === "mcp") {
+        await marketplaceApi.uninstallMCP(plugin.name);
+        toast.success(`Uninstalled connector: ${plugin.name}`);
+      } else if (plugin.type === "skill") {
+        await marketplaceApi.uninstallSkill(plugin.name);
+        toast.success(`Uninstalled skill: ${plugin.name}`);
+      } else if (plugin.type === "plugin") {
+        await marketplaceApi.uninstallPlugin(plugin.name);
+        toast.success(`Uninstalled plugin: ${plugin.name}`);
+      }
+      await loadPlugins();
+    } catch (e: any) {
+      toast.error(`Failed to uninstall ${plugin.name}`, { description: e.message });
+    } finally {
+      setInstalling(null);
+    }
+  };
 
   const matchesTab = (p: LocalPlugin, t: TabType) => {
     switch (t) {
@@ -181,6 +263,9 @@ export function MarketplacePage() {
                 key={plugin.id}
                 plugin={plugin}
                 installed={isInstalled(plugin)}
+                installing={installing === plugin.id}
+                onInstall={() => handleInstall(plugin)}
+                onUninstall={() => handleUninstall(plugin)}
               />
             ))}
           </div>
@@ -195,6 +280,9 @@ export function MarketplacePage() {
 interface PluginCardProps {
   plugin: LocalPlugin;
   installed: boolean;
+  installing: boolean;
+  onInstall: () => void;
+  onUninstall: () => void;
 }
 
 const typeStyles: Record<string, { bg: string; text: string; icon: "wrench" | "package" }> = {
@@ -203,7 +291,7 @@ const typeStyles: Record<string, { bg: string; text: string; icon: "wrench" | "p
   plugin: { bg: "bg-amber-500/10",  text: "text-amber-600",   icon: "package" },
 };
 
-function PluginCard({ plugin, installed }: PluginCardProps) {
+function PluginCard({ plugin, installed, installing, onInstall, onUninstall }: PluginCardProps) {
   const style = typeStyles[plugin.type] || typeStyles.plugin;
   // In the Connectors tab, all items are MCP — show "connector" label for external ones
   const displayLabel = plugin.source === "connector" ? "connector" : plugin.type;
@@ -252,15 +340,31 @@ function PluginCard({ plugin, installed }: PluginCardProps) {
           </div>
         </div>
 
-        <p className="text-[12px] text-muted-foreground line-clamp-2 mb-1">
+        <p className="text-[12px] text-muted-foreground line-clamp-2 mb-2">
           {plugin.description || "No description"}
         </p>
 
-        {plugin.command && (
-          <span className="text-[10px] font-mono text-muted-foreground/50">
-            {plugin.command} {plugin.args?.join(" ")}
-          </span>
-        )}
+        <div className="flex items-center justify-between">
+          {plugin.command && (
+            <span className="text-[10px] font-mono text-muted-foreground/50">
+              {plugin.command} {plugin.args?.join(" ")}
+            </span>
+          )}
+          {!plugin.command && <span />}
+          <button
+            onClick={installed ? onUninstall : onInstall}
+            disabled={installing}
+            className={cn(
+              "text-xs px-3 py-1 rounded-md font-medium transition-colors",
+              installed
+                ? "bg-red-500/10 text-red-600 hover:bg-red-500/20"
+                : "bg-primary/10 text-primary hover:bg-primary/20",
+              installing && "opacity-50 cursor-not-allowed"
+            )}
+          >
+            {installing ? "..." : installed ? "Uninstall" : "Install"}
+          </button>
+        </div>
       </div>
     </div>
   );

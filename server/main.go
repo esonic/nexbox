@@ -324,6 +324,14 @@ func main() {
 					log.Printf("[trash] Removed worktree %s", wtPath)
 				}
 			}
+
+			// Purge changes older than 7 days
+			changesCutoff := time.Now().Add(-7 * 24 * time.Hour)
+			if n, err := dataStore.PurgeOldChanges(changesCutoff); err != nil {
+				log.Printf("[cleanup] Failed to purge old changes: %v", err)
+			} else if n > 0 {
+				log.Printf("[cleanup] Purged %d changes older than 7 days", n)
+			}
 		}
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()

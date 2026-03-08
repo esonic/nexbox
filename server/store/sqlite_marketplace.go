@@ -214,7 +214,76 @@ func scanInstalledSkill(s skillScanner) (*InstalledSkill, error) {
 	return &sk, nil
 }
 
-// ── Installed Plugins (local marketplace) ────────────────────────────────────
+// ── Installed Plugins (project-scoped, for --plugin-dir injection) ─────────
+
+// InstalledPluginEntry mirrors InstalledSkill but for plugins: name + project scope + disk path.
+type InstalledPluginEntry struct {
+	Name        string    `json:"name"`
+	ProjectID   string    `json:"project_id"`
+	InstallPath string    `json:"install_path"` // absolute path to the plugin directory (in marketplace_dir)
+	InstalledAt time.Time `json:"installed_at"`
+}
+
+func (s *SQLiteStore) UpsertInstalledPluginEntry(p InstalledPluginEntry) error {
+	ts := p.InstalledAt.Unix()
+	if ts == 0 {
+		ts = time.Now().Unix()
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO installed_plugins (name, project_id, install_path, installed_at) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(name, project_id) DO UPDATE SET install_path=excluded.install_path, installed_at=excluded.installed_at`,
+		p.Name, p.ProjectID, p.InstallPath, ts,
+	)
+	return err
+}
+
+func (s *SQLiteStore) DeleteInstalledPluginEntry(name, projectID string) error {
+	_, err := s.db.Exec(`DELETE FROM installed_plugins WHERE name = ? AND project_id = ?`, name, projectID)
+	return err
+}
+
+// ListInstalledPluginEntries returns installed plugin entries for a project.
+//   - projectID="*"    → all
+//   - projectID=""     → global only
+//   - projectID="<id>" → global + project-specific
+func (s *SQLiteStore) ListInstalledPluginEntries(projectID string) ([]InstalledPluginEntry, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	switch projectID {
+	case "*":
+		rows, err = s.db.Query(
+			`SELECT name, project_id, install_path, installed_at FROM installed_plugins ORDER BY name`)
+	case "":
+		rows, err = s.db.Query(
+			`SELECT name, project_id, install_path, installed_at FROM installed_plugins WHERE project_id = '' ORDER BY name`)
+	default:
+		rows, err = s.db.Query(
+			`SELECT name, project_id, install_path, installed_at FROM installed_plugins WHERE project_id IN ('', ?) ORDER BY name`,
+			projectID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []InstalledPluginEntry
+	for rows.Next() {
+		var p InstalledPluginEntry
+		var ts int64
+		if err := rows.Scan(&p.Name, &p.ProjectID, &p.InstallPath, &ts); err != nil {
+			return nil, err
+		}
+		p.InstalledAt = time.Unix(ts, 0)
+		out = append(out, p)
+	}
+	if out == nil {
+		out = []InstalledPluginEntry{}
+	}
+	return out, rows.Err()
+}
+
+// ── Legacy Installed Plugins (user-centric, kept for backward compatibility) ──
 
 func (s *SQLiteStore) ListInstalledPlugins(userID string) ([]InstalledPlugin, error) {
 	rows, err := s.db.Query(

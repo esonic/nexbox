@@ -370,6 +370,8 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		// Collect installed MCP servers and key→package map in a single store query.
 		// Pass session.ProjectID so project-specific MCPs take precedence over global ones.
 		extraMCPs, mcpKeyToPkg := s.resolveInstalledMCPsAndMap(session.ProjectID)
+		// Collect installed plugin directories for --plugin-dir injection.
+		pluginDirs := s.resolveInstalledPluginDirs(session.ProjectID)
 		// toolIDToName maps tool_id → tool_name for EventToolStart events so that
 		// EventToolResult (which carries only tool_id) can look up the name.
 		toolIDToName := make(map[string]string)
@@ -554,6 +556,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				ChromeMCPURL:       chromeMCPURL,
 				ChromeMCPToolNames: chromeMCPToolNames,
 				ExtraMCPServers:    extraMCPs,
+				PluginDirs:         pluginDirs,
 				UserInputHandler:   userInputHandler,
 			},
 			eventHandler,
@@ -595,6 +598,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					ChromeMCPURL:       chromeMCPURL,
 					ChromeMCPToolNames: chromeMCPToolNames,
 					ExtraMCPServers:    extraMCPs,
+					PluginDirs:         pluginDirs,
 					UserInputHandler:   userInputHandler,
 				},
 				eventHandler,

@@ -43,6 +43,7 @@ type QueryOptions struct {
 	AllowedTools   []string // List of allowed tools
 	PermissionMode string   // Permission mode: default, acceptEdits, plan, etc.
 	MCPConfigPath  string   // Path to MCP config file (enables --mcp-config and --strict-mcp-config)
+	PluginDirs     []string // Directories to pass via --plugin-dir
 
 	// UserInputHandler is called when the CLI sends a can_use_tool control_request
 	// for an interactive tool (e.g., AskUserQuestion). The handler shows the
@@ -521,6 +522,11 @@ func (c *ClaudeClient) buildArgs(opts QueryOptions) []string {
 	// MCP configuration
 	if opts.MCPConfigPath != "" {
 		args = append(args, "--mcp-config", opts.MCPConfigPath)
+	}
+
+	// Plugin directories
+	for _, dir := range opts.PluginDirs {
+		args = append(args, "--plugin-dir", dir)
 	}
 
 	return args

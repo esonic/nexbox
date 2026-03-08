@@ -409,13 +409,9 @@ export function AppSidebar() {
 
     const sortSessions = (list: typeof sessions) =>
       [...list].sort((a, b) => {
-        // 1. 优先按 sort_order 排序（升序）
-        if (a.sort_order !== b.sort_order) {
-          return a.sort_order - b.sort_order;
-        }
-        // 2. sort_order 相同时，按 created_at 倒序（新创建的在前）
-        const ta = new Date(a.created_at).getTime();
-        const tb = new Date(b.created_at).getTime();
+        // 按 updated_at 倒序（最近修改的在前）
+        const ta = new Date(a.updated_at || a.created_at).getTime();
+        const tb = new Date(b.updated_at || b.created_at).getTime();
         return tb - ta;
       });
 

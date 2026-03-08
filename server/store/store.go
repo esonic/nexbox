@@ -132,6 +132,7 @@ type ReviewCommentStore interface {
 
 type ChangeStore interface {
 	ListChanges(sinceID int64, limit int, order string) ([]Change, error)
+	PurgeOldChanges(olderThan time.Time) (int64, error)
 }
 
 type WorkflowStore interface {

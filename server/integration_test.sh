@@ -168,10 +168,10 @@ assert_eq "$NOAUTH_STATUS" "401" "GET /api/sessions without auth → 401"
 section "3. Projects CRUD"
 
 # Create project
-PROJ_BODY=$(http_body POST "$API/projects" '{"name":"integration-test-project","description":"test"}')
+PROJ_BODY=$(http_body POST "$API/projects" '{"name":"integ-test-proj","description":"test"}')
 PROJ_ID=$(json_field "id" "$PROJ_BODY")
 assert_not_empty "$PROJ_ID" "POST /api/projects → project ID"
-assert_eq "$(json_field 'name' "$PROJ_BODY")" "integration-test-project" "project name matches"
+assert_eq "$(json_field 'name' "$PROJ_BODY")" "integ-test-proj" "project name matches"
 
 # List projects
 LIST_BODY=$(http_body GET "$API/projects")

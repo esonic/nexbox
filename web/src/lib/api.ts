@@ -636,6 +636,7 @@ export interface LocalPlugin {
   source?: string;       // "custom", "skill", "plugin", "connector"
   mcp_config?: string;   // raw .mcp.json content
   auth_type?: string;    // "oauth", "apikey", "none"
+  install_path?: string; // absolute path on disk (for plugin/skill install)
 }
 
 export interface InstalledMCP {
@@ -656,6 +657,13 @@ export interface InstalledSkill {
   install_path: string;
   installed_at: number;
   missing: boolean;
+}
+
+export interface InstalledPluginEntry {
+  name: string;
+  project_id: string;
+  install_path: string;
+  installed_at: number;
 }
 
 export const marketplaceApi = {
@@ -689,7 +697,7 @@ export const marketplaceApi = {
     return request<InstalledSkill[]>(`/marketplace/installed-skills${qs}`);
   },
 
-  installSkill: (body: { name: string; package_id: string; version: string; project_id?: string }) =>
+  installSkill: (body: { name: string; package_id: string; version: string; project_id?: string; install_path?: string }) =>
     request<InstalledSkill>("/marketplace/installed-skills", {
       method: "POST",
       body: JSON.stringify(body),
@@ -699,6 +707,26 @@ export const marketplaceApi = {
     const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
     return request<void>(
       `/marketplace/installed-skills/${encodeURIComponent(name)}${qs}`,
+      { method: "DELETE" }
+    );
+  },
+
+  // Installed Plugins (--plugin-dir)
+  listInstalledPlugins: (projectId?: string) => {
+    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return request<InstalledPluginEntry[]>(`/marketplace/installed-plugins${qs}`);
+  },
+
+  installPlugin: (body: { name: string; install_path: string; project_id?: string }) =>
+    request<InstalledPluginEntry>("/marketplace/installed-plugins", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  uninstallPlugin: (name: string, projectId?: string) => {
+    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return request<void>(
+      `/marketplace/installed-plugins/${encodeURIComponent(name)}${qs}`,
       { method: "DELETE" }
     );
   },

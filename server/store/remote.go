@@ -1048,6 +1048,10 @@ func (r *RemoteStore) ListChanges(sinceID int64, limit int, order string) ([]Cha
 	return changes, nil
 }
 
+func (r *RemoteStore) PurgeOldChanges(_ time.Time) (int64, error) {
+	return 0, nil // remote store manages its own retention
+}
+
 func (r *RemoteStore) ListLarkChat(sinceID int64, limit int) ([]Change, error) {
 	q := url.Values{
 		"since": {strconv.FormatInt(sinceID, 10)},

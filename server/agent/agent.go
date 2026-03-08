@@ -46,6 +46,7 @@ type Request struct {
 	ChromeMCPURL       string   // Per-request Chrome DevTools MCP URL (set by chat.go when E2E is active)
 	ChromeMCPToolNames []string // Per-request Chrome MCP tool names
 	ExtraMCPServers    []MCPServerEntry // Extra MCP servers from installed marketplace packages
+	PluginDirs         []string          // Directories to pass via --plugin-dir to Claude CLI
 	UserInputHandler   UserInputHandler  // Optional: handle interactive tool calls (e.g., AskUserQuestion)
 }
 

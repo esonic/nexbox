@@ -2,7 +2,6 @@ package api
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -226,6 +225,10 @@ func (s *Server) RegisterMarketplaceRoutes(r chi.Router) {
 		r.Post("/installed-skills", s.InstallSkill)
 		r.Delete("/installed-skills/{name}", s.UninstallSkill)
 
+		r.Get("/installed-plugins", s.ListInstalledPluginEntries)
+		r.Post("/installed-plugins", s.InstallPluginEntry)
+		r.Delete("/installed-plugins/{name}", s.UninstallPluginEntry)
+
 		// Local directory-based plugin registry
 		r.Get("/plugins", s.ListLocalPlugins)
 		r.Get("/plugins/{id}", s.GetLocalPlugin)
@@ -404,6 +407,7 @@ func loadSkillMD(path string) (*store.MarketplacePlugin, error) {
 		Description: desc,
 		Type:        "skill",
 		Source:      "skill",
+		InstallPath: filepath.Dir(path),
 	}
 	return p, nil
 }
@@ -465,6 +469,7 @@ func loadClaudePlugin(pluginRoot, pluginJSONPath string) (*store.MarketplacePlug
 		Author:      meta.Author.Name,
 		Type:        "plugin",
 		Source:      "plugin",
+		InstallPath: pluginRoot,
 	}
 
 	// Check for .mcp.json — if present, this is an MCP plugin or connector.
@@ -912,161 +917,6 @@ func (s *Server) PublishPackageVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, ver)
 }
 
-const (
-	maxSkillTarSize        = 1 << 20        // 1 MB (compressed tar.gz)
-	maxSkillRawSize        = 20 << 20       // 20 MB (uncompressed total)
-	maxSkillFileCount      = 100
-)
-
-// UploadSkillDir reads a local directory path from the JSON body, walks the
-// directory on the server filesystem, checks for SKILL.md, packs everything
-// into a tar.gz in-memory, validates the compressed size is under 1 MB, and
-// uploads to OSS via the remote marketplace.
-// The request body is { "dir": "/absolute/path/to/dir" }.
-func (s *Server) UploadSkillDir(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
-		return
-	}
-	packageID := chi.URLParam(r, "packageId")
-
-	var req struct {
-		Dir string `json:"dir"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	dirPath := filepath.Clean(req.Dir)
-	if dirPath == "" || req.Dir == "" {
-		writeError(w, http.StatusBadRequest, "dir is required")
-		return
-	}
-
-	info, err := os.Stat(dirPath)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "directory not found: "+req.Dir)
-		return
-	}
-	if !info.IsDir() {
-		writeError(w, http.StatusBadRequest, req.Dir+" is not a directory")
-		return
-	}
-
-	// Walk directory and collect entries.
-	type entry struct {
-		abs  string
-		rel  string
-		size int64
-	}
-	var entries []entry
-	var totalSize int64
-
-	walkErr := filepath.Walk(dirPath, func(path string, fi os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if fi.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(dirPath, path)
-		if err != nil {
-			return err
-		}
-		if len(entries) >= maxSkillFileCount {
-			return fmt.Errorf("too many files: max is %d", maxSkillFileCount)
-		}
-		totalSize += fi.Size()
-		entries = append(entries, entry{abs: path, rel: filepath.ToSlash(rel), size: fi.Size()})
-		return nil
-	})
-	if walkErr != nil {
-		writeError(w, http.StatusBadRequest, walkErr.Error())
-		return
-	}
-	if len(entries) == 0 {
-		writeError(w, http.StatusBadRequest, "directory is empty")
-		return
-	}
-	// A valid skill directory must contain a SKILL.md at the top level.
-	// Also read its content to embed in the manifest for display in the detail page.
-	var skillMdContent string
-	for _, e := range entries {
-		if e.rel == "SKILL.md" {
-			if b, err := os.ReadFile(e.abs); err == nil {
-				skillMdContent = string(b)
-			}
-			break
-		}
-	}
-	if skillMdContent == "" {
-		writeError(w, http.StatusBadRequest, "directory must contain a SKILL.md file at the top level")
-		return
-	}
-
-	// Reject before allocating the buffer: check uncompressed total size.
-	if totalSize > maxSkillRawSize {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("uncompressed size %d MB exceeds %d MB limit", totalSize>>20, maxSkillRawSize>>20))
-		return
-	}
-
-	// Pack into tar.gz in memory.
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gw)
-
-	// extractTarGz strips the first path component, so all entries must be nested
-	// under a top-level directory (e.g. "inspect/SKILL.md" not "SKILL.md").
-	tarPrefix := filepath.Base(dirPath) + "/"
-	for _, e := range entries {
-		f, err := os.Open(e.abs)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to open: "+e.rel)
-			return
-		}
-		hdr := &tar.Header{
-			Name:    tarPrefix + e.rel,
-			Size:    e.size,
-			Mode:    0644,
-			ModTime: time.Now(),
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			f.Close()
-			writeError(w, http.StatusInternalServerError, "tar header error")
-			return
-		}
-		if _, err := io.Copy(tw, f); err != nil {
-			f.Close()
-			writeError(w, http.StatusInternalServerError, "tar write error: "+e.rel)
-			return
-		}
-		f.Close()
-	}
-	if err := tw.Close(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to finalize tar archive")
-		return
-	}
-	if err := gw.Close(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to finalize gzip stream")
-		return
-	}
-
-	tarSize := int64(buf.Len())
-	if tarSize > maxSkillTarSize {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("compressed archive size %d KB exceeds %d MB limit", tarSize>>10, maxSkillTarSize>>20))
-		return
-	}
-	archiveName := filepath.Base(dirPath)
-	ossKey, err := s.Cloud.UploadSkillTar(packageID, archiveName, &buf, tarSize)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	log.Printf("[marketplace] dir-upload package=%s dir=%s files=%d raw=%d tar=%d oss_key=%s",
-		packageID, dirPath, len(entries), totalSize, tarSize, ossKey)
-	writeJSON(w, http.StatusOK, map[string]string{"oss_key": ossKey, "skill_md": skillMdContent})
-}
-
 // ---------------------------------------------------------------------------
 // Local MCP install/uninstall
 // ---------------------------------------------------------------------------
@@ -1249,10 +1099,11 @@ func (s *Server) UninstallMCP(w http.ResponseWriter, r *http.Request) {
 
 // InstallSkillRequest is the body for POST /api/marketplace/installed-skills.
 type InstallSkillRequest struct {
-	PackageID string `json:"package_id"` // remote package ID (used for download)
-	Name      string `json:"name"`       // package name (used as skill directory name)
-	Version   string `json:"version"`
-	ProjectID string `json:"project_id"` // "" = global
+	PackageID   string `json:"package_id"`              // remote package ID (used for cloud download)
+	Name        string `json:"name"`                    // package name (used as skill directory name)
+	Version     string `json:"version"`
+	ProjectID   string `json:"project_id"`              // "" = global
+	InstallPath string `json:"install_path,omitempty"`  // local source path (for marketplace_dir skills; skips cloud download)
 }
 
 func (s *Server) ListInstalledSkills(w http.ResponseWriter, r *http.Request) {
@@ -1273,10 +1124,6 @@ func (s *Server) ListInstalledSkills(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) InstallSkill(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "skill install requires cloud mode")
-		return
-	}
 	if s.LocalStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "local store not available")
 		return
@@ -1286,13 +1133,26 @@ func (s *Server) InstallSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Name == "" || req.Version == "" {
-		writeError(w, http.StatusBadRequest, "name and version are required")
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if req.PackageID == "" {
-		writeError(w, http.StatusBadRequest, "package_id is required")
-		return
+	if req.Version == "" {
+		req.Version = "0.0.0"
+	}
+
+	isLocal := req.InstallPath != ""
+
+	if !isLocal {
+		// Cloud install: requires cloud mode and package_id
+		if s.Cloud == nil {
+			writeError(w, http.StatusServiceUnavailable, "skill install requires cloud mode (or provide install_path for local install)")
+			return
+		}
+		if req.PackageID == "" {
+			writeError(w, http.StatusBadRequest, "package_id is required for cloud install")
+			return
+		}
 	}
 
 	// Determine install path
@@ -1302,20 +1162,26 @@ func (s *Server) InstallSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch package detail to resolve mcp_dependencies before downloading the tar
-	detail, err := s.Cloud.GetMarketplacePackage(req.PackageID)
-	if err != nil {
-		log.Printf("[marketplace] failed to fetch package detail for skill %s: %v", req.Name, err)
-		// Non-fatal: proceed without dependency auto-install
+	if isLocal {
+		// Local install: copy skill files from marketplace_dir source to install dir
+		if err := copySkillDir(req.InstallPath, installDir); err != nil {
+			log.Printf("[marketplace] failed to install local skill %s: %v", req.Name, err)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to install skill: %v", err))
+			return
+		}
 	} else {
-		s.autoInstallMCPDeps(detail, req.Version, req.ProjectID)
-	}
-
-	// Download tar.gz from remote and extract
-	if err := s.downloadAndExtractSkill(req.PackageID, req.Version, installDir); err != nil {
-		log.Printf("[marketplace] failed to install skill %s: %v", req.Name, err)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to install skill: %v", err))
-		return
+		// Cloud install: fetch detail and download tar
+		detail, err := s.Cloud.GetMarketplacePackage(req.PackageID)
+		if err != nil {
+			log.Printf("[marketplace] failed to fetch package detail for skill %s: %v", req.Name, err)
+		} else {
+			s.autoInstallMCPDeps(detail, req.Version, req.ProjectID)
+		}
+		if err := s.downloadAndExtractSkill(req.PackageID, req.Version, installDir); err != nil {
+			log.Printf("[marketplace] failed to install skill %s: %v", req.Name, err)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to install skill: %v", err))
+			return
+		}
 	}
 
 	skill := store.InstalledSkill{
@@ -1385,6 +1251,103 @@ func (s *Server) UninstallSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
+// Local plugin install/uninstall (project-scoped, for --plugin-dir injection)
+// ---------------------------------------------------------------------------
+
+func (s *Server) ListInstalledPluginEntries(w http.ResponseWriter, r *http.Request) {
+	if s.LocalStore == nil {
+		writeJSON(w, http.StatusOK, []store.InstalledPluginEntry{})
+		return
+	}
+	projectID := r.URL.Query().Get("project_id")
+	if projectID == "" {
+		projectID = "*"
+	}
+	entries, err := s.LocalStore.ListInstalledPluginEntries(projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// InstallPluginEntryRequest is the body for POST /api/marketplace/installed-plugins.
+type InstallPluginEntryRequest struct {
+	Name        string `json:"name"`
+	InstallPath string `json:"install_path"` // absolute path to the plugin dir (in marketplace_dir)
+	ProjectID   string `json:"project_id"`   // "" = global
+}
+
+func (s *Server) InstallPluginEntry(w http.ResponseWriter, r *http.Request) {
+	if s.LocalStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "local store not available")
+		return
+	}
+	var req InstallPluginEntryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Name == "" || req.InstallPath == "" {
+		writeError(w, http.StatusBadRequest, "name and install_path are required")
+		return
+	}
+	// Verify the install_path exists on disk
+	if _, err := os.Stat(req.InstallPath); os.IsNotExist(err) {
+		writeError(w, http.StatusBadRequest, "install_path does not exist: "+req.InstallPath)
+		return
+	}
+	entry := store.InstalledPluginEntry{
+		Name:        req.Name,
+		ProjectID:   req.ProjectID,
+		InstallPath: req.InstallPath,
+		InstalledAt: time.Now(),
+	}
+	if err := s.LocalStore.UpsertInstalledPluginEntry(entry); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	log.Printf("[marketplace] installed plugin: %s → %s (project=%q)", req.Name, req.InstallPath, req.ProjectID)
+	writeJSON(w, http.StatusOK, entry)
+}
+
+func (s *Server) UninstallPluginEntry(w http.ResponseWriter, r *http.Request) {
+	if s.LocalStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "local store not available")
+		return
+	}
+	name := chi.URLParam(r, "name")
+	projectID := r.URL.Query().Get("project_id")
+	if err := s.LocalStore.DeleteInstalledPluginEntry(name, projectID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	log.Printf("[marketplace] uninstalled plugin: %s (project=%q)", name, projectID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// resolveInstalledPluginDirs returns the list of plugin directory paths for a project.
+func (s *Server) resolveInstalledPluginDirs(projectID string) []string {
+	if s.LocalStore == nil {
+		return nil
+	}
+	entries, err := s.LocalStore.ListInstalledPluginEntries(projectID)
+	if err != nil {
+		log.Printf("[marketplace] failed to load installed plugins: %v", err)
+		return nil
+	}
+	var dirs []string
+	seen := make(map[string]bool)
+	for _, e := range entries {
+		if e.InstallPath != "" && !seen[e.InstallPath] {
+			seen[e.InstallPath] = true
+			dirs = append(dirs, e.InstallPath)
+		}
+	}
+	return dirs
+}
+
+// ---------------------------------------------------------------------------
 // Skill helpers
 // ---------------------------------------------------------------------------
 
@@ -1405,6 +1368,35 @@ func (s *Server) skillInstallDir(name, projectID string) (string, error) {
 		return "", fmt.Errorf("project has no git repo path")
 	}
 	return filepath.Join(project.GitRepoPath, ".claude", "skills", name), nil
+}
+
+// copySkillDir copies a skill directory from src to dst. Any existing content in
+// dst is removed first.
+func copySkillDir(src, dst string) error {
+	if _, err := os.Stat(src); os.IsNotExist(err) {
+		return fmt.Errorf("source path does not exist: %s", src)
+	}
+	if err := os.RemoveAll(dst); err != nil {
+		return fmt.Errorf("clean install dir: %w", err)
+	}
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		return fmt.Errorf("create install dir: %w", err)
+	}
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
 }
 
 // downloadAndExtractSkill downloads the skill tar.gz from the remote marketplace

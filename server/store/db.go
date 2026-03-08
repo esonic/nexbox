@@ -55,20 +55,47 @@ func New(dataDir string) (*DB, error) {
 
 func (db *DB) migrate() error {
 	migrations := []string{
+		// ── Core tables ──────────────────────────────────────────────────
+
 		`CREATE TABLE IF NOT EXISTS projects (
-			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL,
-			description TEXT DEFAULT '',
-			git_repo_path TEXT DEFAULT '',
-			gitlab_token TEXT DEFAULT '',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			extra TEXT DEFAULT '{}',
-			namespace_id TEXT DEFAULT 'local',
+			id              TEXT PRIMARY KEY,
+			namespace_id    TEXT NOT NULL DEFAULT 'local',
+			name            TEXT NOT NULL,
+			description     TEXT DEFAULT '',
+			git_repo_path   TEXT DEFAULT '',
 			gitlab_repo_url TEXT DEFAULT '',
-			created_by TEXT DEFAULT 'local',
-			version INTEGER DEFAULT 1
+			created_by      TEXT NOT NULL DEFAULT '',
+			owner_id        TEXT NOT NULL DEFAULT '',
+			version         INTEGER DEFAULT 1,
+			created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_owner_name ON projects(owner_id, name)`,
+
+		`CREATE TABLE IF NOT EXISTS sessions (
+			id               TEXT PRIMARY KEY,
+			namespace_id     TEXT NOT NULL DEFAULT 'local',
+			name             TEXT DEFAULT '',
+			project_id       TEXT DEFAULT '',
+			agent            TEXT DEFAULT '',
+			model            TEXT NOT NULL DEFAULT '',
+			agent_session_id TEXT DEFAULT '',
+			stream_id        TEXT DEFAULT '',
+			sort_order       INTEGER DEFAULT 0,
+			features         TEXT DEFAULT '',
+			worktree_mode    TEXT NOT NULL DEFAULT 'local',
+			worktree_path    TEXT NOT NULL DEFAULT '',
+			created_by       TEXT NOT NULL DEFAULT '',
+			user_id          TEXT NOT NULL DEFAULT '',
+			created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+			deleted_at       DATETIME
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)`,
+
+		// ── Task / Asset tables (no user isolation yet — admin-only) ──
 
 		`CREATE TABLE IF NOT EXISTS tasks (
 			id TEXT PRIMARY KEY,
@@ -88,22 +115,6 @@ func (db *DB) migrate() error {
 			closed_at DATETIME,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
-
-		`CREATE TABLE IF NOT EXISTS sessions (
-			id TEXT PRIMARY KEY,
-			namespace_id TEXT DEFAULT 'local',
-			name TEXT DEFAULT '',
-			project_id TEXT DEFAULT '',
-			agent TEXT DEFAULT '',
-			agent_session_id TEXT DEFAULT '',
-			stream_id TEXT DEFAULT '',
-			sort_order INTEGER DEFAULT 0,
-			created_by TEXT DEFAULT 'local',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			features TEXT DEFAULT '',
-			deleted_at DATETIME
 		)`,
 
 		`CREATE TABLE IF NOT EXISTS assets (
@@ -146,16 +157,6 @@ func (db *DB) migrate() error {
 			UNIQUE(task_id, asset_id)
 		)`,
 
-		`CREATE TABLE IF NOT EXISTS chat_messages (
-			id TEXT PRIMARY KEY,
-			session_id TEXT NOT NULL,
-			role TEXT NOT NULL,
-			parts TEXT NOT NULL DEFAULT '[]',
-			metadata TEXT DEFAULT '{}',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_messages_session ON chat_messages(session_id)`,
-
 		`CREATE TABLE IF NOT EXISTS task_comments (
 			id TEXT PRIMARY KEY,
 			task_id TEXT NOT NULL,
@@ -191,20 +192,17 @@ func (db *DB) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_reactions_target ON reactions(target_type, target_id)`,
 
-		`CREATE TABLE IF NOT EXISTS changes (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			namespace_id TEXT NOT NULL DEFAULT 'local',
-			project_id TEXT DEFAULT '',
-			entity_type TEXT NOT NULL,
-			entity_id TEXT NOT NULL,
-			action TEXT NOT NULL,
-			summary TEXT DEFAULT '',
-			detail TEXT DEFAULT '',
-			user_name TEXT DEFAULT 'local',
-			entity_version INTEGER,
+		// ── Chat / Queue ─────────────────────────────────────────────────
+
+		`CREATE TABLE IF NOT EXISTS chat_messages (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			role TEXT NOT NULL,
+			parts TEXT NOT NULL DEFAULT '[]',
+			metadata TEXT DEFAULT '{}',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_changes_ns_id ON changes(namespace_id, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_session ON chat_messages(session_id)`,
 
 		`CREATE TABLE IF NOT EXISTS queued_messages (
 			id TEXT PRIMARY KEY,
@@ -222,6 +220,25 @@ func (db *DB) migrate() error {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_part_details_session ON message_part_details(session_id)`,
+
+		// ── Audit log ────────────────────────────────────────────────────
+
+		`CREATE TABLE IF NOT EXISTS changes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			namespace_id TEXT NOT NULL DEFAULT 'local',
+			project_id TEXT DEFAULT '',
+			entity_type TEXT NOT NULL,
+			entity_id TEXT NOT NULL,
+			action TEXT NOT NULL,
+			summary TEXT DEFAULT '',
+			detail TEXT DEFAULT '',
+			user_name TEXT DEFAULT 'local',
+			entity_version INTEGER,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_changes_ns_id ON changes(namespace_id, id)`,
+
+		// ── Workflow ─────────────────────────────────────────────────────
 
 		`CREATE TABLE IF NOT EXISTS workflows (
 			id TEXT PRIMARY KEY,
@@ -276,56 +293,25 @@ func (db *DB) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_wf_node_exec ON wf_node_logs(execution_id, level ASC, node_id)`,
 
-		`CREATE TABLE IF NOT EXISTS ralph_runs (
-			id TEXT PRIMARY KEY,
-			project_id TEXT NOT NULL,
-			workflow_id TEXT DEFAULT '',
-			prompt TEXT NOT NULL,
-			workers INTEGER NOT NULL DEFAULT 1,
-			status TEXT NOT NULL DEFAULT 'running',
-			total_tasks INTEGER DEFAULT 0,
-			total_completed INTEGER DEFAULT 0,
-			total_failed INTEGER DEFAULT 0,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			completed_at DATETIME
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_ralph_runs_project ON ralph_runs(project_id)`,
-
-		`CREATE TABLE IF NOT EXISTS ralph_worker_logs (
-			id TEXT PRIMARY KEY,
-			run_id TEXT NOT NULL,
-			worker_index INTEGER NOT NULL,
-			task_id TEXT NOT NULL,
-			task_title TEXT DEFAULT '',
-			session_id TEXT DEFAULT '',
-			status TEXT NOT NULL DEFAULT 'running',
-			started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			completed_at DATETIME
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_ralph_worker_logs_run ON ralph_worker_logs(run_id)`,
-
 		`CREATE TABLE IF NOT EXISTS workflow_schedules (
 			workflow_id TEXT PRIMARY KEY,
 			schedule    TEXT NOT NULL DEFAULT ''
 		)`,
 
-		// Marketplace: locally installed MCP servers
-		// manifest = JSON runtime config (key, type, cmd/url, args, env, tool_names)
-		// project_id = '' means global (used in all sessions)
+		// ── Marketplace ──────────────────────────────────────────────────
+
 		`CREATE TABLE IF NOT EXISTS installed_mcps (
 			name         TEXT NOT NULL,
 			project_id   TEXT NOT NULL DEFAULT '',
 			mcp_key      TEXT NOT NULL,
 			manifest     TEXT NOT NULL DEFAULT '{}',
 			installed_at INTEGER NOT NULL DEFAULT 0,
-			env_values TEXT NOT NULL DEFAULT '{}',
-			package_id TEXT NOT NULL DEFAULT '',
-			version TEXT NOT NULL DEFAULT '',
+			env_values   TEXT NOT NULL DEFAULT '{}',
+			package_id   TEXT NOT NULL DEFAULT '',
+			version      TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (name, project_id)
 		)`,
 
-		// Marketplace: locally installed skills
-		// project_id = '' means global (copies to all projects on creation)
 		`CREATE TABLE IF NOT EXISTS installed_skills (
 			name         TEXT NOT NULL,
 			project_id   TEXT NOT NULL,
@@ -335,19 +321,31 @@ func (db *DB) migrate() error {
 			PRIMARY KEY (name, project_id)
 		)`,
 
-		// Users
-		`CREATE TABLE IF NOT EXISTS users (
-			id          TEXT PRIMARY KEY,
-			username    TEXT NOT NULL UNIQUE,
-			password_hash TEXT NOT NULL,
-			email       TEXT NOT NULL DEFAULT '',
-			role        TEXT NOT NULL DEFAULT 'user',
-			features    INTEGER NOT NULL DEFAULT 0,
-			created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+		`CREATE TABLE IF NOT EXISTS installed_plugins (
+			name         TEXT NOT NULL,
+			project_id   TEXT NOT NULL DEFAULT '',
+			install_path TEXT NOT NULL DEFAULT '',
+			installed_at INTEGER NOT NULL DEFAULT 0,
+			id           TEXT NOT NULL DEFAULT '',
+			user_id      TEXT NOT NULL DEFAULT '',
+			plugin_id    TEXT NOT NULL DEFAULT '',
+			config       TEXT NOT NULL DEFAULT '{}',
+			PRIMARY KEY (name, project_id)
 		)`,
 
-		// User balances (one row per user)
+		// ── Users & Billing ──────────────────────────────────────────────
+
+		`CREATE TABLE IF NOT EXISTS users (
+			id            TEXT PRIMARY KEY,
+			username      TEXT NOT NULL UNIQUE,
+			password_hash TEXT NOT NULL,
+			email         TEXT NOT NULL DEFAULT '',
+			role          TEXT NOT NULL DEFAULT 'user',
+			features      INTEGER NOT NULL DEFAULT 0,
+			created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
 		`CREATE TABLE IF NOT EXISTS user_balances (
 			user_id         TEXT PRIMARY KEY,
 			balance_tokens  INTEGER NOT NULL DEFAULT 0,
@@ -356,7 +354,6 @@ func (db *DB) migrate() error {
 			updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 
-		// Token transaction log
 		`CREATE TABLE IF NOT EXISTS token_transactions (
 			id         TEXT PRIMARY KEY,
 			user_id    TEXT NOT NULL,
@@ -366,73 +363,11 @@ func (db *DB) migrate() error {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_token_tx_user ON token_transactions(user_id, created_at DESC)`,
-
-		// Marketplace: locally installed plugins
-		`CREATE TABLE IF NOT EXISTS installed_plugins (
-			name         TEXT NOT NULL,
-			project_id   TEXT NOT NULL DEFAULT '',
-			install_path TEXT NOT NULL DEFAULT '',
-			installed_at INTEGER NOT NULL DEFAULT 0,
-			PRIMARY KEY (name, project_id)
-		)`,
 	}
 
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil {
 			return fmt.Errorf("migration failed: %w\nSQL: %s", err, m)
-		}
-	}
-
-	// Additive column migrations (idempotent: skip if column already exists).
-	type colMigration struct{ check, alter string }
-	colMigrations := []colMigration{
-		// installed_plugins: new user-centric columns (Phase 6 marketplace)
-		{
-			check: `SELECT COUNT(*) FROM pragma_table_info('installed_plugins') WHERE name='id'`,
-			alter: `ALTER TABLE installed_plugins ADD COLUMN id TEXT NOT NULL DEFAULT ''`,
-		},
-		{
-			check: `SELECT COUNT(*) FROM pragma_table_info('installed_plugins') WHERE name='user_id'`,
-			alter: `ALTER TABLE installed_plugins ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`,
-		},
-		{
-			check: `SELECT COUNT(*) FROM pragma_table_info('installed_plugins') WHERE name='plugin_id'`,
-			alter: `ALTER TABLE installed_plugins ADD COLUMN plugin_id TEXT NOT NULL DEFAULT ''`,
-		},
-		{
-			check: `SELECT COUNT(*) FROM pragma_table_info('installed_plugins') WHERE name='config'`,
-			alter: `ALTER TABLE installed_plugins ADD COLUMN config TEXT NOT NULL DEFAULT '{}'`,
-		},
-		{
-			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='worktree_mode'`,
-			alter: `ALTER TABLE sessions ADD COLUMN worktree_mode TEXT NOT NULL DEFAULT 'local'`,
-		},
-		{
-			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='worktree_path'`,
-			alter: `ALTER TABLE sessions ADD COLUMN worktree_path TEXT NOT NULL DEFAULT ''`,
-		},
-		// owner_id on projects (for multi-user isolation)
-		{
-			check: `SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='owner_id'`,
-			alter: `ALTER TABLE projects ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''`,
-		},
-		// user_id on sessions (for multi-user isolation)
-		{
-			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='user_id'`,
-			alter: `ALTER TABLE sessions ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`,
-		},
-		// model on sessions (for model selection)
-		{
-			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='model'`,
-			alter: `ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
-		},
-	}
-	for _, cm := range colMigrations {
-		var count int
-		if err := db.QueryRow(cm.check).Scan(&count); err != nil || count == 0 {
-			if _, err := db.Exec(cm.alter); err != nil {
-				return fmt.Errorf("column migration failed: %w\nSQL: %s", err, cm.alter)
-			}
 		}
 	}
 
