@@ -555,18 +555,24 @@ type TokenTransaction struct {
 // ---------------------------------------------------------------------------
 
 // MarketplacePlugin represents a plugin available in the admin-maintained
-// marketplace directory. Each plugin is stored as a JSON file named
-// <MarketplaceDir>/<plugin-id>.json.
+// marketplace directory. Supports three formats:
+//   - Custom JSON files (*.json)
+//   - Anthropic skills (SKILL.md with YAML frontmatter)
+//   - Anthropic plugins (.claude-plugin/plugin.json + optional .mcp.json)
 type MarketplacePlugin struct {
 	ID          string   `json:"id"`
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
-	Type        string   `json:"type"`              // "mcp" or "skill"
+	Type        string   `json:"type"`              // "mcp", "skill", or "plugin"
 	Version     string   `json:"version"`
-	Command     string   `json:"command,omitempty"` // for mcp servers
+	Command     string   `json:"command,omitempty"` // for mcp servers (stdio)
 	Args        []string `json:"args,omitempty"`
 	EnvVars     []string `json:"env_vars,omitempty"` // required env var names
 	IconURL     string   `json:"icon_url,omitempty"`
+	Author      string   `json:"author,omitempty"`       // from plugin.json author.name or SKILL.md
+	Source      string   `json:"source,omitempty"`        // "custom", "skill", "plugin", "connector"
+	MCPConfig   string   `json:"mcp_config,omitempty"`   // raw .mcp.json content (JSON string)
+	AuthType    string   `json:"auth_type,omitempty"`     // "oauth", "apikey", "none" — derived from .mcp.json
 }
 
 // ---------------------------------------------------------------------------

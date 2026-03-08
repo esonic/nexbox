@@ -471,6 +471,12 @@ func (s *Server) UploadProjectFile(w http.ResponseWriter, r *http.Request) {
 
 	rel, _ := filepath.Rel(root, fullPath)
 	log.Printf("[api] UploadProjectFile(%s) wrote %s (%d bytes)", projectID, rel, written)
+
+	// Touch container activity so idle reaper knows the user is active.
+	if s.ContainerMgr != nil {
+		s.ContainerMgr.TouchActivity(projectID)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"path": rel,
 		"size": written,
@@ -517,7 +523,11 @@ func (s *Server) DownloadProjectFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = projectID // used for logging context only
+	// Touch container activity so idle reaper knows the user is active.
+	if s.ContainerMgr != nil {
+		s.ContainerMgr.TouchActivity(projectID)
+	}
+
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(fullPath)))
 	http.ServeFile(w, r, fullPath)
 }

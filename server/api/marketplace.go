@@ -239,49 +239,267 @@ func (s *Server) RegisterMarketplaceRoutes(r chi.Router) {
 // Local directory-based plugin registry
 // ---------------------------------------------------------------------------
 
-// loadMarketplacePlugins scans dir for *.json files and parses each as a
-// MarketplacePlugin. Returns an empty slice (not an error) if dir is empty
-// or does not exist.
+// loadMarketplacePlugins recursively scans dir for plugins in three formats:
+//  1. Custom JSON files (*.json) — legacy format
+//  2. Anthropic skills (dirs containing SKILL.md with YAML frontmatter)
+//  3. Anthropic plugins (dirs containing .claude-plugin/plugin.json + optional .mcp.json)
+//
+// Returns an empty slice (not an error) if dir is empty or does not exist.
 func loadMarketplacePlugins(dir string) ([]store.MarketplacePlugin, error) {
 	if dir == "" {
 		return []store.MarketplacePlugin{}, nil
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []store.MarketplacePlugin{}, nil
-		}
-		return nil, fmt.Errorf("read marketplace dir: %w", err)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return []store.MarketplacePlugin{}, nil
 	}
+
 	var plugins []store.MarketplacePlugin
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	seen := make(map[string]bool) // deduplicate by ID
+
+	// Walk the entire directory tree looking for recognizable formats.
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return nil // skip unreadable entries
 		}
-		if !strings.HasSuffix(entry.Name(), ".json") {
-			continue
+		// Skip hidden dirs (like .git) except .claude-plugin which we need.
+		if info.IsDir() && strings.HasPrefix(info.Name(), ".") && info.Name() != ".claude-plugin" {
+			return filepath.SkipDir
 		}
-		fPath := filepath.Join(dir, entry.Name())
-		data, err := os.ReadFile(fPath)
-		if err != nil {
-			log.Printf("[marketplace] skip %s: read error: %v", entry.Name(), err)
-			continue
+
+		// --- Format 1: .claude-plugin/plugin.json (Anthropic plugins/connectors) ---
+		// Check this BEFORE generic *.json to avoid treating plugin.json as custom JSON.
+		if !info.IsDir() && info.Name() == "plugin.json" {
+			parentDir := filepath.Dir(path)
+			if filepath.Base(parentDir) != ".claude-plugin" {
+				return nil
+			}
+			pluginRoot := filepath.Dir(parentDir) // the actual plugin directory
+			p, err := loadClaudePlugin(pluginRoot, path)
+			if err != nil {
+				log.Printf("[marketplace] skip plugin %s: %v", path, err)
+				return nil
+			}
+			if !seen[p.ID] {
+				seen[p.ID] = true
+				plugins = append(plugins, *p)
+			}
+			return nil
 		}
-		var p store.MarketplacePlugin
-		if err := json.Unmarshal(data, &p); err != nil {
-			log.Printf("[marketplace] skip %s: parse error: %v", entry.Name(), err)
-			continue
+
+		// --- Format 2: SKILL.md (Anthropic skills format) ---
+		if !info.IsDir() && info.Name() == "SKILL.md" {
+			p, err := loadSkillMD(path)
+			if err != nil {
+				log.Printf("[marketplace] skip skill %s: %v", path, err)
+				return nil
+			}
+			if !seen[p.ID] {
+				seen[p.ID] = true
+				plugins = append(plugins, *p)
+			}
+			return nil
 		}
-		// Derive ID from filename if not set in the JSON.
-		if p.ID == "" {
-			p.ID = strings.TrimSuffix(entry.Name(), ".json")
+
+		// --- Format 3: Custom JSON files (*.json at any level) ---
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".json") {
+			// Skip files inside .claude-plugin dirs (plugin metadata, not custom JSON).
+			if strings.Contains(path, "/.claude-plugin/") || strings.Contains(path, "\\.claude-plugin\\") {
+				return nil
+			}
+			// Skip .mcp.json and marketplace.json files.
+			if info.Name() == ".mcp.json" || info.Name() == "marketplace.json" {
+				return nil
+			}
+			p, err := loadCustomJSON(path)
+			if err != nil {
+				log.Printf("[marketplace] skip %s: %v", path, err)
+				return nil
+			}
+			if !seen[p.ID] {
+				seen[p.ID] = true
+				plugins = append(plugins, *p)
+			}
+			return nil
 		}
-		plugins = append(plugins, p)
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk marketplace dir: %w", err)
 	}
+
 	if plugins == nil {
 		plugins = []store.MarketplacePlugin{}
 	}
 	return plugins, nil
+}
+
+// loadCustomJSON parses a legacy *.json plugin definition.
+func loadCustomJSON(path string) (*store.MarketplacePlugin, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	var p store.MarketplacePlugin
+	if err := json.Unmarshal(data, &p); err != nil {
+		return nil, fmt.Errorf("parse: %w", err)
+	}
+	if p.ID == "" {
+		p.ID = strings.TrimSuffix(filepath.Base(path), ".json")
+	}
+	if p.Source == "" {
+		p.Source = "custom"
+	}
+	return &p, nil
+}
+
+// loadSkillMD parses an Anthropic-format SKILL.md with YAML frontmatter.
+// Expected format:
+//
+//	---
+//	name: skill-name
+//	description: what it does
+//	---
+//	<markdown body>
+func loadSkillMD(path string) (*store.MarketplacePlugin, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	content := string(data)
+
+	// Parse YAML frontmatter.
+	name, desc := parseSkillFrontmatter(content)
+	if name == "" {
+		// Fallback: use parent directory name.
+		name = filepath.Base(filepath.Dir(path))
+	}
+
+	p := &store.MarketplacePlugin{
+		ID:          "skill-" + name,
+		Name:        name,
+		Description: desc,
+		Type:        "skill",
+		Source:      "skill",
+	}
+	return p, nil
+}
+
+// parseSkillFrontmatter extracts name and description from YAML frontmatter.
+// Simple parser — no dependency on a YAML library.
+func parseSkillFrontmatter(content string) (name, description string) {
+	if !strings.HasPrefix(strings.TrimSpace(content), "---") {
+		return "", ""
+	}
+	parts := strings.SplitN(content, "---", 3)
+	if len(parts) < 3 {
+		return "", ""
+	}
+	frontmatter := parts[1]
+	for _, line := range strings.Split(frontmatter, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "name:") {
+			name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+			name = strings.Trim(name, `"'`)
+		} else if strings.HasPrefix(line, "description:") {
+			description = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
+			description = strings.Trim(description, `"'`)
+		}
+	}
+	return name, description
+}
+
+// claudePluginJSON is the schema for .claude-plugin/plugin.json.
+type claudePluginJSON struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Version     string `json:"version"`
+	Author      struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	} `json:"author"`
+}
+
+// loadClaudePlugin parses a .claude-plugin/plugin.json and optional .mcp.json.
+func loadClaudePlugin(pluginRoot, pluginJSONPath string) (*store.MarketplacePlugin, error) {
+	data, err := os.ReadFile(pluginJSONPath)
+	if err != nil {
+		return nil, fmt.Errorf("read plugin.json: %w", err)
+	}
+	var meta claudePluginJSON
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("parse plugin.json: %w", err)
+	}
+	if meta.Name == "" {
+		meta.Name = filepath.Base(pluginRoot)
+	}
+
+	p := &store.MarketplacePlugin{
+		ID:          meta.Name,
+		Name:        meta.Name,
+		Description: meta.Description,
+		Version:     meta.Version,
+		Author:      meta.Author.Name,
+		Type:        "plugin",
+		Source:      "plugin",
+	}
+
+	// Check for .mcp.json — if present, this is an MCP plugin or connector.
+	mcpPath := filepath.Join(pluginRoot, ".mcp.json")
+	mcpData, err := os.ReadFile(mcpPath)
+	if err == nil {
+		p.MCPConfig = string(mcpData)
+		p.Type = "mcp"
+
+		// Determine source: connectors live under external_plugins/ dirs.
+		relFromRoot := pluginRoot
+		if strings.Contains(relFromRoot, "external_plugins") {
+			p.Source = "connector"
+		}
+
+		// Extract env_vars from template variables ${VAR_NAME} and detect auth type.
+		envVars, authType := parseMCPConfig(mcpData)
+		if len(envVars) > 0 {
+			p.EnvVars = envVars
+		}
+		p.AuthType = authType
+	}
+
+	return p, nil
+}
+
+// parseMCPConfig parses a .mcp.json file and extracts:
+//   - env_vars: template variable names from ${VAR_NAME} patterns in URLs and headers
+//   - authType: "oauth" if oauth config is present, "apikey" if env vars required, "none" otherwise
+func parseMCPConfig(data []byte) (envVars []string, authType string) {
+	// Find all ${VAR_NAME} template variables.
+	varSet := make(map[string]bool)
+	content := string(data)
+	for i := 0; i < len(content); i++ {
+		if i+1 < len(content) && content[i] == '$' && content[i+1] == '{' {
+			end := strings.Index(content[i:], "}")
+			if end > 0 {
+				varName := content[i+2 : i+end]
+				if varName != "" {
+					varSet[varName] = true
+				}
+			}
+		}
+	}
+	for v := range varSet {
+		envVars = append(envVars, v)
+	}
+	sort.Strings(envVars)
+
+	// Detect OAuth config.
+	authType = "none"
+	if strings.Contains(content, `"oauth"`) {
+		authType = "oauth"
+	} else if len(envVars) > 0 {
+		authType = "apikey"
+	}
+
+	return envVars, authType
 }
 
 // ListLocalPlugins handles GET /api/marketplace/plugins

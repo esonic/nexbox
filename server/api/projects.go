@@ -276,21 +276,21 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request) {
 func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "projectId")
 
+	// Fetch project before deletion so we can clean up its workspace directory.
+	existing, err := s.Store.GetProject(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if existing == nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
 	// Ownership check before delete
-	if GetUserRole(r) != "admin" {
-		existing, err := s.Store.GetProject(id)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if existing == nil {
-			writeError(w, http.StatusNotFound, "project not found")
-			return
-		}
-		if existing.OwnerID != GetUserID(r) {
-			writeError(w, http.StatusForbidden, "access denied")
-			return
-		}
+	if GetUserRole(r) != "admin" && existing.OwnerID != GetUserID(r) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
 	}
 
 	// Always remove local git path mapping when present
@@ -321,6 +321,19 @@ func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	if s.ContainerMgr != nil {
 		if err := s.ContainerMgr.StopContainer(id); err != nil {
 			log.Printf("[projects] failed to stop container for project %s: %v", id, err)
+		}
+	}
+
+	// T3.4 + T9.4: Clean up the workspace directory on the host.
+	// Only remove directories under DataDir/workspaces/ (auto-created workspaces).
+	if s.DataDir != "" && existing.GitRepoPath != "" {
+		wsRoot := filepath.Join(s.DataDir, "workspaces")
+		if isSubPath(wsRoot, existing.GitRepoPath) {
+			if err := os.RemoveAll(existing.GitRepoPath); err != nil {
+				log.Printf("[projects] failed to remove workspace dir %s: %v", existing.GitRepoPath, err)
+			} else {
+				log.Printf("[projects] removed workspace dir %s for project %s", existing.GitRepoPath, id)
+			}
 		}
 	}
 

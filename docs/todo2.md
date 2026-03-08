@@ -68,6 +68,8 @@
 
 **目标**：`DELETE /api/projects/{id}` 时同步 `os.RemoveAll` 宿主机工作目录。
 
+- 另外，token 剩余 quota 为 0 的用户，30 天后自动清理掉他的 project，相当于删除 project
+
 **影响文件**：`server/api/projects.go`
 
 ---
@@ -124,7 +126,8 @@
 
 **现状**：MCP Connector（OAuth 类型的 MCP server）的官方仓库定义位置未确定。
 
-**目标**：调研 modelcontextprotocol.io 上的 Connector 定义，确认是否需要适配。
+**目标**：支持 claude 官方网站上的 connector，例如连接到 gmail、notion 等。一是看从哪里拿到这份 connector 列表
+二是看我们怎么本地维护，并支持用户使用这些 mcp（重点应该是如何授权）
 
 ---
 

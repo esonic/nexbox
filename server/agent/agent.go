@@ -46,6 +46,7 @@ type Request struct {
 	ChromeMCPURL       string   // Per-request Chrome DevTools MCP URL (set by chat.go when E2E is active)
 	ChromeMCPToolNames []string // Per-request Chrome MCP tool names
 	ExtraMCPServers    []MCPServerEntry // Extra MCP servers from installed marketplace packages
+	UserInputHandler   UserInputHandler  // Optional: handle interactive tool calls (e.g., AskUserQuestion)
 }
 
 // Result contains the outcome of an agent message exchange.
@@ -115,3 +116,16 @@ type StreamEvent struct {
 
 // EventCallback is called for each streaming event from the agent.
 type EventCallback func(event StreamEvent)
+
+// UserInputHandler is called when the agent encounters an interactive tool
+// (e.g., Claude CLI's AskUserQuestion) that requires user input via the
+// control protocol's can_use_tool mechanism. It blocks until the user
+// responds or the context is cancelled.
+//
+// Parameters:
+//   - requestID: the control_request ID (for correlating the response)
+//   - toolName: the tool name (e.g., "AskUserQuestion")
+//   - input: JSON-serialized tool input (contains question, options, etc.)
+//
+// Returns the user's response text, or error if cancelled/timed out.
+type UserInputHandler func(requestID, toolName, input string) (string, error)

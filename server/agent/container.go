@@ -8,13 +8,15 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ContainerManager manages per-project Docker containers for isolated agent execution.
 // It uses the docker CLI (not the Docker SDK) to avoid adding new dependencies.
 type ContainerManager struct {
-	image string
-	mu    sync.Mutex
+	image        string
+	mu           sync.Mutex
+	lastActivity map[string]time.Time // projectID → last activity time
 }
 
 // NewContainerManager creates a ContainerManager using the given image.
@@ -23,7 +25,34 @@ func NewContainerManager(image string) *ContainerManager {
 	if image == "" {
 		image = "nexbox-agent:latest"
 	}
-	return &ContainerManager{image: image}
+	return &ContainerManager{image: image, lastActivity: make(map[string]time.Time)}
+}
+
+// RecoverRunningContainers scans for existing nexbox-proj-* containers and seeds
+// the lastActivity map so the idle reaper can track them after a server restart.
+func (m *ContainerManager) RecoverRunningContainers() {
+	out, err := exec.Command(
+		"docker", "ps",
+		"--filter", "name=nexbox-proj-",
+		"--format", "{{.Names}}",
+	).Output()
+	if err != nil {
+		log.Printf("[container] failed to recover running containers: %v", err)
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		// Store container name as key (not projectID, which we can't reverse
+		// from the possibly-hashed name). StopIdleContainers handles both forms.
+		m.lastActivity[name] = now
+		log.Printf("[container] recovered running container: %s", name)
+	}
 }
 
 // containerName returns a deterministic, Docker-safe container name for a project.
@@ -67,6 +96,7 @@ func (m *ContainerManager) EnsureContainer(projectID, repoPath string) (string, 
 	id := strings.TrimSpace(string(out))
 	if id != "" {
 		log.Printf("[container] reusing existing container %s (id=%s) for project %s", name, id, projectID)
+		m.lastActivity[projectID] = time.Now()
 		return name, nil
 	}
 
@@ -93,6 +123,7 @@ func (m *ContainerManager) EnsureContainer(projectID, repoPath string) (string, 
 	}
 	newID := strings.TrimSpace(string(startOut))
 	log.Printf("[container] started container %s (id=%s) for project %s", name, newID, projectID)
+	m.lastActivity[projectID] = time.Now()
 	return name, nil
 }
 
@@ -101,6 +132,11 @@ func (m *ContainerManager) EnsureContainer(projectID, repoPath string) (string, 
 func (m *ContainerManager) StopContainer(projectID string) error {
 	name := containerName(projectID)
 	out, err := exec.Command("docker", "stop", name).CombinedOutput()
+
+	m.mu.Lock()
+	delete(m.lastActivity, projectID)
+	m.mu.Unlock()
+
 	if err != nil {
 		// docker stop exits non-zero when the container doesn't exist — treat as no-op.
 		log.Printf("[container] stop container %s: %v (%s)", name, err, strings.TrimSpace(string(out)))
@@ -108,6 +144,52 @@ func (m *ContainerManager) StopContainer(projectID string) error {
 	}
 	log.Printf("[container] stopped container %s for project %s", name, projectID)
 	return nil
+}
+
+// TouchActivity records a user activity for the given project, resetting its
+// idle timer. Call this from operations that indicate the user is still working
+// with the project (e.g. file upload/download).
+func (m *ContainerManager) TouchActivity(projectID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastActivity[projectID] = time.Now()
+}
+
+// StopIdleContainers stops containers that have been idle for longer than maxIdle.
+// It returns the number of containers stopped.
+func (m *ContainerManager) StopIdleContainers(maxIdle time.Duration) int {
+	m.mu.Lock()
+	// Collect idle project IDs under lock, then release before running docker commands.
+	cutoff := time.Now().Add(-maxIdle)
+	var idle []string
+	for pid, t := range m.lastActivity {
+		if t.Before(cutoff) {
+			idle = append(idle, pid)
+		}
+	}
+	m.mu.Unlock()
+
+	stopped := 0
+	for _, pid := range idle {
+		// pid may be a projectID (normal tracking) or a container name
+		// (recovered after restart). Derive the docker name accordingly.
+		name := pid
+		if !strings.HasPrefix(pid, "nexbox-proj-") {
+			name = containerName(pid)
+		}
+		out, err := exec.Command("docker", "stop", name).CombinedOutput()
+		if err != nil {
+			// Container may already be gone — just clean up the map entry.
+			log.Printf("[container] idle stop %s: %v (%s)", name, err, strings.TrimSpace(string(out)))
+		} else {
+			log.Printf("[container] stopped idle container %s", name)
+			stopped++
+		}
+		m.mu.Lock()
+		delete(m.lastActivity, pid)
+		m.mu.Unlock()
+	}
+	return stopped
 }
 
 // ExecInContainer returns an *exec.Cmd that runs cmd inside the named container.

@@ -150,7 +150,8 @@ export interface ChatEvent {
     | "error"
     | "system"
     | "queue_updated"
-    | "user_message";
+    | "user_message"
+    | "user_input_request";
   session_id?: string;
   content?: string;
   tool?: string;

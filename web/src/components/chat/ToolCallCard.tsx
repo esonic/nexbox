@@ -367,6 +367,24 @@ const toolRegistry: Record<string, ToolMeta> = {
   ReadMcpResource:  { icon: FileText,     label: tense("Read MCP resource", "Reading MCP resource"),     subtitle: textField("uri") },
   FetchMcpResource: { icon: FileText,     label: tense("Fetched MCP resource", "Fetching MCP resource"), subtitle: textField("uri") },
   AskQuestion:      { icon: CircleHelp, label: tense("Asked question", "Asking question"), subtitle: textField("title"), renderInput: (i) => <QuestionPreview input={i} /> },
+  AskUserQuestion:  {
+    icon: CircleHelp,
+    label: tense("Asked question", "Asking question"),
+    subtitle: (i) => {
+      const p = parseJSON(i);
+      return truncate((p.question as string) || (p.title as string) || "", 60);
+    },
+    renderInput: (i) => {
+      const p = parseJSON(i);
+      const question = (p.question as string) || "";
+      if (!question) return <RawJSON input={i} />;
+      return (
+        <div className="text-[11px] text-muted-foreground bg-muted/30 rounded px-2 py-1.5 whitespace-pre-wrap">
+          {question}
+        </div>
+      );
+    },
+  },
 
   // ── Codex file changes ──
   FileChange: {

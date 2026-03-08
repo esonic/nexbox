@@ -621,17 +621,21 @@ export const membersApi = {
 // Marketplace
 // ---------------------------------------------------------------------------
 
-// Local plugin (admin-managed, from marketplace_dir JSON files)
+// Local plugin (admin-managed, from marketplace_dir — supports JSON, SKILL.md, and .claude-plugin formats)
 export interface LocalPlugin {
   id: string;
   name: string;
   description: string;
-  type: string;       // "mcp" or "skill"
+  type: string;       // "mcp", "skill", or "plugin"
   version: string;
   command?: string;
   args?: string[];
   env_vars?: string[];
   icon_url?: string;
+  author?: string;       // from plugin.json author.name
+  source?: string;       // "custom", "skill", "plugin", "connector"
+  mcp_config?: string;   // raw .mcp.json content
+  auth_type?: string;    // "oauth", "apikey", "none"
 }
 
 export interface InstalledMCP {

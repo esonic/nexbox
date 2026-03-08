@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -357,5 +358,263 @@ func TestEnsureContainer_ReusedAfterRestart(t *testing.T) {
 	}
 	if id == "" {
 		t.Fatal("expected container to be reused after restart")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Activity tracking & idle container reaping (T3.3)
+// ---------------------------------------------------------------------------
+
+func TestTouchActivity(t *testing.T) {
+	m := NewContainerManager("alpine:latest")
+
+	// Initially empty
+	m.mu.Lock()
+	if len(m.lastActivity) != 0 {
+		t.Fatal("expected empty lastActivity map")
+	}
+	m.mu.Unlock()
+
+	m.TouchActivity("proj-1")
+
+	m.mu.Lock()
+	ts, ok := m.lastActivity["proj-1"]
+	m.mu.Unlock()
+	if !ok {
+		t.Fatal("expected proj-1 in lastActivity after TouchActivity")
+	}
+	if time.Since(ts) > time.Second {
+		t.Fatal("expected lastActivity to be set to ~now")
+	}
+}
+
+func TestEnsureContainer_SetsLastActivity(t *testing.T) {
+	makeFakeDocker(t, "")
+	t.Setenv("FAKE_DOCKER_MODE", "container_missing")
+
+	m := NewContainerManager("alpine:latest")
+	_, err := m.EnsureContainer("proj-track", "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	m.mu.Lock()
+	ts, ok := m.lastActivity["proj-track"]
+	m.mu.Unlock()
+	if !ok {
+		t.Fatal("EnsureContainer should set lastActivity for new container")
+	}
+	if time.Since(ts) > time.Second {
+		t.Fatal("lastActivity should be ~now")
+	}
+}
+
+func TestEnsureContainer_UpdatesLastActivityOnReuse(t *testing.T) {
+	makeFakeDocker(t, "")
+	t.Setenv("FAKE_DOCKER_MODE", "container_running")
+
+	m := NewContainerManager("alpine:latest")
+
+	// Pre-set old activity
+	m.mu.Lock()
+	m.lastActivity["proj-reuse"] = time.Now().Add(-2 * time.Hour)
+	m.mu.Unlock()
+
+	_, err := m.EnsureContainer("proj-reuse", "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	m.mu.Lock()
+	ts := m.lastActivity["proj-reuse"]
+	m.mu.Unlock()
+	if time.Since(ts) > time.Second {
+		t.Fatal("EnsureContainer should refresh lastActivity on reuse")
+	}
+}
+
+func TestStopContainer_CleansLastActivity(t *testing.T) {
+	makeFakeDocker(t, "")
+	t.Setenv("FAKE_DOCKER_MODE", "stop_ok")
+
+	m := NewContainerManager("alpine:latest")
+	m.TouchActivity("proj-stop")
+
+	_ = m.StopContainer("proj-stop")
+
+	m.mu.Lock()
+	_, ok := m.lastActivity["proj-stop"]
+	m.mu.Unlock()
+	if ok {
+		t.Fatal("StopContainer should remove entry from lastActivity")
+	}
+}
+
+func TestStopIdleContainers_StopsIdleOnly(t *testing.T) {
+	makeFakeDocker(t, "")
+	t.Setenv("FAKE_DOCKER_MODE", "stop_ok")
+
+	m := NewContainerManager("alpine:latest")
+
+	// proj-idle: last active 2 hours ago → should be stopped
+	m.mu.Lock()
+	m.lastActivity["proj-idle"] = time.Now().Add(-2 * time.Hour)
+	// proj-active: last active 5 minutes ago → should be kept
+	m.lastActivity["proj-active"] = time.Now().Add(-5 * time.Minute)
+	m.mu.Unlock()
+
+	stopped := m.StopIdleContainers(1 * time.Hour)
+
+	if stopped != 1 {
+		t.Fatalf("expected 1 container stopped, got %d", stopped)
+	}
+
+	m.mu.Lock()
+	_, hasIdle := m.lastActivity["proj-idle"]
+	_, hasActive := m.lastActivity["proj-active"]
+	m.mu.Unlock()
+
+	if hasIdle {
+		t.Fatal("idle container should be removed from lastActivity")
+	}
+	if !hasActive {
+		t.Fatal("active container should still be in lastActivity")
+	}
+}
+
+func TestStopIdleContainers_NoneIdle(t *testing.T) {
+	m := NewContainerManager("alpine:latest")
+
+	m.mu.Lock()
+	m.lastActivity["proj-1"] = time.Now()
+	m.lastActivity["proj-2"] = time.Now().Add(-10 * time.Minute)
+	m.mu.Unlock()
+
+	stopped := m.StopIdleContainers(1 * time.Hour)
+	if stopped != 0 {
+		t.Fatalf("expected 0 containers stopped, got %d", stopped)
+	}
+
+	m.mu.Lock()
+	count := len(m.lastActivity)
+	m.mu.Unlock()
+	if count != 2 {
+		t.Fatalf("expected 2 entries still tracked, got %d", count)
+	}
+}
+
+func TestStopIdleContainers_RecoveredContainerName(t *testing.T) {
+	makeFakeDocker(t, "")
+	t.Setenv("FAKE_DOCKER_MODE", "stop_ok")
+
+	m := NewContainerManager("alpine:latest")
+
+	// Simulate a recovered container (key is already a container name)
+	m.mu.Lock()
+	m.lastActivity["nexbox-proj-abc123"] = time.Now().Add(-2 * time.Hour)
+	m.mu.Unlock()
+
+	stopped := m.StopIdleContainers(1 * time.Hour)
+
+	if stopped != 1 {
+		t.Fatalf("expected 1 container stopped, got %d", stopped)
+	}
+
+	m.mu.Lock()
+	_, has := m.lastActivity["nexbox-proj-abc123"]
+	m.mu.Unlock()
+	if has {
+		t.Fatal("recovered container entry should be cleaned up")
+	}
+}
+
+// makeFakeDockerWithNames creates a fake docker that returns specific container
+// names for `docker ps` queries. Used to test RecoverRunningContainers.
+func makeFakeDockerWithNames(t *testing.T, names []string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "docker")
+
+	namesOutput := strings.Join(names, "\n")
+	src := `#!/bin/sh
+case "$1" in
+  ps) echo "` + namesOutput + `"; exit 0 ;;
+  stop) exit 0 ;;
+  *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(src), 0755); err != nil {
+		t.Fatalf("write fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+}
+
+func TestRecoverRunningContainers(t *testing.T) {
+	containers := []string{"nexbox-proj-aaa", "nexbox-proj-bbb"}
+	makeFakeDockerWithNames(t, containers)
+
+	m := NewContainerManager("alpine:latest")
+
+	// Initially empty
+	m.mu.Lock()
+	if len(m.lastActivity) != 0 {
+		t.Fatal("expected empty lastActivity before recovery")
+	}
+	m.mu.Unlock()
+
+	m.RecoverRunningContainers()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.lastActivity) != 2 {
+		t.Fatalf("expected 2 recovered entries, got %d", len(m.lastActivity))
+	}
+
+	for _, name := range containers {
+		ts, ok := m.lastActivity[name]
+		if !ok {
+			t.Fatalf("expected %s in lastActivity", name)
+		}
+		if time.Since(ts) > time.Second {
+			t.Fatalf("recovered container %s should have lastActivity ~now", name)
+		}
+	}
+}
+
+func TestRecoverRunningContainers_Empty(t *testing.T) {
+	makeFakeDockerWithNames(t, nil)
+
+	m := NewContainerManager("alpine:latest")
+	m.RecoverRunningContainers()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.lastActivity) != 0 {
+		t.Fatalf("expected 0 entries after recovering with no containers, got %d", len(m.lastActivity))
+	}
+}
+
+func TestRecoverThenIdleReap(t *testing.T) {
+	// End-to-end: recover containers, then reap idle ones after timeout.
+	makeFakeDockerWithNames(t, []string{"nexbox-proj-old"})
+
+	m := NewContainerManager("alpine:latest")
+	m.RecoverRunningContainers()
+
+	// Simulate time passing: set lastActivity to 2 hours ago
+	m.mu.Lock()
+	m.lastActivity["nexbox-proj-old"] = time.Now().Add(-2 * time.Hour)
+	m.mu.Unlock()
+
+	stopped := m.StopIdleContainers(1 * time.Hour)
+	if stopped != 1 {
+		t.Fatalf("expected 1 container reaped, got %d", stopped)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.lastActivity) != 0 {
+		t.Fatalf("expected empty lastActivity after reap, got %d", len(m.lastActivity))
 	}
 }

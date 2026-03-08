@@ -155,7 +155,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     refreshQueue(sessionId);
   }, [sessionId, refreshQueue]);
 
-  // Detect pending ask_question
+  // Detect pending ask_question (MCP structured questions)
   const pendingQuestion = useMemo(() => {
     if (isStreaming) return null;
     const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
@@ -168,6 +168,14 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     if (lastMsg?.id !== lastAssistant.id) return null;
     return parseAskQuestionInput(askToolPart.input);
   }, [messages, isStreaming]);
+
+  // Track pending interactive tool calls (AskUserQuestion from Claude CLI).
+  // These arrive as user_input_request events DURING streaming.
+  const [pendingUserInput, setPendingUserInput] = useState<{
+    toolUseId: string;
+    toolName: string;
+    question: string;
+  } | null>(null);
 
   // Fetch server default agent and available agents
   useEffect(() => {
@@ -317,7 +325,17 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       case "thinking_delta":
         if (event.content !== undefined) { ensureStreaming(); gs().appendThinkingDelta(sid, event.content || ""); }
         break;
+      case "user_input_request":
+        if (event.tool_id && event.tool) {
+          setPendingUserInput({
+            toolUseId: event.tool_id,
+            toolName: event.tool,
+            question: event.content || "",
+          });
+        }
+        break;
       case "done":
+        setPendingUserInput(null);
         gs().setStreamingSession(sid, false);
         gs().finishStreaming(sid, event.stats || undefined);
         if (event.stats?.duration_ms) {
@@ -335,6 +353,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         }
         break;
       case "error":
+        setPendingUserInput(null);
         if (event.message) { ensureStreaming(); gs().appendTextDelta(sid, `\n\n**Error:** ${event.message}`); }
         gs().setStreamingSession(sid, false);
         gs().finishStreaming(sid);
@@ -457,12 +476,18 @@ export function useChatSession({ session }: UseChatSessionOptions) {
 
   const handleStop = useCallback(() => {
     globalWS.stop(sessionId);
+    setPendingUserInput(null);
     if (isStreaming) {
       setStreamingSession(sessionId, false);
       finishStreaming(sessionId);
     }
     window.dispatchEvent(new Event('workflow-stop'));
   }, [sessionId, isStreaming, setStreamingSession, finishStreaming]);
+
+  const sendToolResponse = useCallback((toolUseId: string, response: string) => {
+    globalWS.sendToolResponse(sessionId, toolUseId, response);
+    setPendingUserInput(null);
+  }, [sessionId]);
 
   const sendQueuedNow = useCallback(async (queuedId: string) => {
     try {
@@ -623,6 +648,8 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     loadingMore,
     hasMore,
     pendingQuestion,
+    pendingUserInput,
+    sendToolResponse,
     agentName,
     modelName: session.model || "",
     availableAgents,

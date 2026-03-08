@@ -265,6 +265,7 @@ func main() {
 			dockerImage = "nexbox-agent:latest"
 		}
 		containerMgr := agent.NewContainerManager(cfg.DockerImage)
+		containerMgr.RecoverRunningContainers()
 		srv.ContainerMgr = containerMgr
 		ca.ContainerMgr = containerMgr
 		log.Printf("  Docker isolation enabled (image: %s)", dockerImage)
@@ -379,6 +380,45 @@ func main() {
 			}
 		}
 	}()
+
+	// T3.3: Idle container reaper — stop containers inactive for over 1 hour (checks every 10 min).
+	if srv.ContainerMgr != nil {
+		go func() {
+			const idleTimeout = 1 * time.Hour
+			ticker := time.NewTicker(10 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if n := srv.ContainerMgr.StopIdleContainers(idleTimeout); n > 0 {
+						log.Printf("[container] reaped %d idle container(s)", n)
+					}
+				case <-trashCtx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	// T9.5: Periodic SQLite maintenance (WAL checkpoint + VACUUM), runs daily.
+	if localStore != nil {
+		go func() {
+			ticker := time.NewTicker(24 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if err := localStore.Maintain(); err != nil {
+						log.Printf("[sqlite] maintenance failed: %v", err)
+					} else {
+						log.Printf("[sqlite] maintenance completed (WAL checkpoint + VACUUM)")
+					}
+				case <-trashCtx.Done():
+					return
+				}
+			}
+		}()
+	}
 
 	// Create router with all API routes
 	router := api.NewRouter(srv)

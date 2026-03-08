@@ -72,6 +72,23 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 			}
 			s.handleUserMessage(chatReq.SessionID, chatReq.Content, chatReq.Parts, chatReq.Images, chatReq.Features)
 
+		case "tool_response":
+			if chatReq.SessionID == "" || chatReq.ToolUseID == "" {
+				s.Hub.SendDirect(conn, "", ChatEvent{Type: "error", Message: "tool_response: missing session_id or tool_use_id"})
+				continue
+			}
+			ch := getToolResponseChan(chatReq.SessionID)
+			if ch != nil {
+				log.Printf("[ws] Routing tool_response for session %s, tool_use_id=%s", chatReq.SessionID, chatReq.ToolUseID)
+				select {
+				case ch <- chatReq.ToolResponse:
+				default:
+					log.Printf("[ws] tool_response channel full or closed for session %s", chatReq.SessionID)
+				}
+			} else {
+				log.Printf("[ws] No tool_response channel for session %s (tool_use_id=%s)", chatReq.SessionID, chatReq.ToolUseID)
+			}
+
 		case "stop":
 			if chatReq.SessionID == "" {
 				s.Hub.SendDirect(conn, "", ChatEvent{Type: "error", Message: "stop: missing session_id"})
@@ -482,6 +499,36 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			}
 		}
 
+		// Build the UserInputHandler for interactive tool support (AskUserQuestion).
+		// When the CLI sends a can_use_tool control_request for an interactive tool:
+		// 1. Emits a user_input_request WS event to the frontend
+		// 2. Blocks on a channel until the user responds via tool_response WS message
+		// 3. Returns the user's response so the agent can write control_response to stdin
+		userInputHandler := func(requestID, toolName, input string) (string, error) {
+			log.Printf("[chat] Interactive tool request: session=%s tool=%s id=%s", sessionID, toolName, requestID)
+
+			// Emit user_input_request event to frontend
+			s.Hub.Emit(sessionID, ChatEvent{
+				Type:   "user_input_request",
+				ToolID: requestID,
+				Tool:   toolName,
+				Input:  input,
+			})
+
+			// Create response channel and wait for user response
+			responseCh := make(chan string, 1)
+			setToolResponseChan(sessionID, responseCh)
+			defer removeToolResponseChan(sessionID)
+
+			select {
+			case response := <-responseCh:
+				log.Printf("[chat] Got user response for tool %s: %d bytes", requestID, len(response))
+				return response, nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+
 		agentResult, agentErr := sessionAgent.SendMessage(
 			ctx,
 			agent.Request{
@@ -497,6 +544,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				ChromeMCPURL:       chromeMCPURL,
 				ChromeMCPToolNames: chromeMCPToolNames,
 				ExtraMCPServers:    extraMCPs,
+				UserInputHandler:   userInputHandler,
 			},
 			eventHandler,
 		)
@@ -537,6 +585,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					ChromeMCPURL:       chromeMCPURL,
 					ChromeMCPToolNames: chromeMCPToolNames,
 					ExtraMCPServers:    extraMCPs,
+					UserInputHandler:   userInputHandler,
 				},
 				eventHandler,
 			)
@@ -756,6 +805,37 @@ func (s *Server) pollQueues() {
 			s.processNextQueued(sid)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Interactive tool response channels
+// ---------------------------------------------------------------------------
+// When the agent calls an interactive tool (e.g., AskUserQuestion), the
+// UserInputHandler blocks on a channel waiting for the user's response.
+// The WS handler writes the response to the channel when it receives a
+// tool_response message.
+
+var (
+	toolResponseMu    sync.Mutex
+	toolResponseChans = make(map[string]chan string) // sessionID -> response channel
+)
+
+func setToolResponseChan(sessionID string, ch chan string) {
+	toolResponseMu.Lock()
+	defer toolResponseMu.Unlock()
+	toolResponseChans[sessionID] = ch
+}
+
+func removeToolResponseChan(sessionID string) {
+	toolResponseMu.Lock()
+	defer toolResponseMu.Unlock()
+	delete(toolResponseChans, sessionID)
+}
+
+func getToolResponseChan(sessionID string) chan string {
+	toolResponseMu.Lock()
+	defer toolResponseMu.Unlock()
+	return toolResponseChans[sessionID]
 }
 
 // priority items — per-session in-memory override for RunQueuedNow

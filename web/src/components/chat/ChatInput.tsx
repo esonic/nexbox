@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { toast } from "sonner";
-import { Send, StopCircle, FileText, ChevronDown, Check, X, GitBranch, ImagePlus, Play, Pencil, Workflow, MessageSquare } from "lucide-react";
+import { Send, StopCircle, FileText, ChevronDown, Check, X, GitBranch, ImagePlus, Play, Pencil, Workflow, MessageSquare, CircleHelp } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { INPUT_HEIGHT_MIN, INPUT_HEIGHT_MAX } from "@/lib/constants";
 import { Button } from "@/components/ui/button";
@@ -230,6 +230,67 @@ function RichQueuedItem({
   );
 }
 
+function UserInputPanel({
+  question,
+  onSubmit,
+  onSkip,
+}: {
+  question: string;
+  onSubmit: (response: string) => void;
+  onSkip: () => void;
+}) {
+  const [response, setResponse] = useState("");
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  const handleSubmit = () => {
+    const trimmed = response.trim();
+    if (!trimmed) return;
+    onSubmit(trimmed);
+    setResponse("");
+  };
+
+  return (
+    <div className="py-3 border-b">
+      <div className="flex items-start gap-2 px-1">
+        <CircleHelp className="h-4 w-4 text-blue-400 mt-0.5 shrink-0" />
+        <div className="flex-1 min-w-0 space-y-2">
+          <p className="text-sm text-foreground whitespace-pre-wrap">{question}</p>
+          <div className="flex gap-2">
+            <Textarea
+              ref={inputRef}
+              value={response}
+              onChange={(e) => setResponse(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing) return;
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSubmit();
+                }
+              }}
+              placeholder="Type your response..."
+              className="flex-1 min-h-[36px] max-h-[120px] resize-none text-sm"
+              rows={1}
+            />
+            <div className="flex flex-col gap-1 shrink-0">
+              <Button size="sm" onClick={handleSubmit} disabled={!response.trim()} className="h-7 text-xs">
+                <Send className="h-3 w-3 mr-1" />
+                Send
+              </Button>
+              <Button size="sm" variant="ghost" onClick={onSkip} className="h-7 text-xs text-muted-foreground">
+                Skip
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface ChatInputProps {
   sessionId: string;
   isConnected: boolean;
@@ -242,6 +303,8 @@ interface ChatInputProps {
   pickedAssets: PickedAsset[];
   pickedWorkflows: PickedWorkflow[];
   pendingQuestion: ReturnType<typeof parseAskQuestionInput>;
+  pendingUserInput?: { toolUseId: string; toolName: string; question: string } | null;
+  onSendToolResponse?: (toolUseId: string, response: string) => void;
   queue: QueuedMessage[];
   gitDiffStats?: DiffResponse | null;
   onSend: (message: string, images?: AttachedImage[], features?: string[]) => void;
@@ -278,6 +341,8 @@ export function ChatInput({
   pickedAssets,
   pickedWorkflows,
   pendingQuestion,
+  pendingUserInput,
+  onSendToolResponse,
   queue,
   gitDiffStats,
   onSend,
@@ -459,7 +524,7 @@ export function ChatInput({
         onMouseDown={handleInputResizeMouseDown}
       />
       <div className="max-w-3xl mx-auto px-4 pb-3">
-        {/* Question panel */}
+        {/* Question panel (MCP ask_question) */}
         {pendingQuestion && (
           <div className="py-3 border-b">
             <QuestionCard
@@ -474,6 +539,15 @@ export function ChatInput({
               }}
             />
           </div>
+        )}
+
+        {/* Interactive user input request (Claude CLI AskUserQuestion) */}
+        {pendingUserInput && onSendToolResponse && (
+          <UserInputPanel
+            question={pendingUserInput.question}
+            onSubmit={(response) => onSendToolResponse(pendingUserInput.toolUseId, response)}
+            onSkip={() => onSendToolResponse(pendingUserInput.toolUseId, "Skip this question, please continue.")}
+          />
         )}
 
         {/* Unified input box */}

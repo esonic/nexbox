@@ -15,7 +15,7 @@ import {
   type InstalledSkill,
 } from "@/lib/api";
 
-type TabType = "mcp" | "skill";
+type TabType = "mcp" | "skill" | "connector";
 
 export function MarketplacePage() {
   const [tab, setTab] = useState<TabType>("mcp");
@@ -48,12 +48,28 @@ export function MarketplacePage() {
   }, [loadPlugins]);
 
   const isInstalled = (plugin: LocalPlugin) =>
-    plugin.type === "mcp"
+    plugin.type === "mcp" || plugin.source === "connector"
       ? installedMCPs.some((m) => m.name === plugin.name)
       : installedSkills.some((s) => s.name === plugin.name);
 
+  const matchesTab = (p: LocalPlugin, t: TabType) => {
+    switch (t) {
+      case "mcp":
+        // MCP tab: mcp type but NOT connectors
+        return p.type === "mcp" && p.source !== "connector";
+      case "skill":
+        // Skill tab: skills + pure plugins (no MCP config)
+        return p.type === "skill" || p.type === "plugin";
+      case "connector":
+        // Connector tab: external connectors (with MCP config from external_plugins)
+        return p.source === "connector";
+      default:
+        return false;
+    }
+  };
+
   const filteredPlugins = plugins.filter((p) => {
-    if (p.type !== tab) return false;
+    if (!matchesTab(p, tab)) return false;
     if (search) {
       const q = search.toLowerCase();
       return (
@@ -71,9 +87,14 @@ export function MarketplacePage() {
       placeholder: "Search MCP servers...",
     },
     skill: {
-      label: "Agent Skills",
-      subtitle: "Browse and install agent skills",
-      placeholder: "Search skills...",
+      label: "Skills & Plugins",
+      subtitle: "Browse and install skills and plugins",
+      placeholder: "Search skills & plugins...",
+    },
+    connector: {
+      label: "Connectors",
+      subtitle: "Connect to external services (GitHub, Slack, etc.)",
+      placeholder: "Search connectors...",
     },
   } as const;
 
@@ -94,7 +115,7 @@ export function MarketplacePage() {
         {/* Tab bar */}
         <div className="border-b border-t">
           <div className="max-w-3xl mx-auto px-6 flex">
-            {(["mcp", "skill"] as TabType[]).map((t) => (
+            {(["mcp", "skill", "connector"] as TabType[]).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -176,12 +197,22 @@ interface PluginCardProps {
   installed: boolean;
 }
 
+const typeStyles: Record<string, { bg: string; text: string }> = {
+  mcp:       { bg: "bg-blue-500/10",   text: "text-blue-600" },
+  skill:     { bg: "bg-violet-500/10",  text: "text-violet-600" },
+  plugin:    { bg: "bg-amber-500/10",   text: "text-amber-600" },
+  connector: { bg: "bg-emerald-500/10", text: "text-emerald-600" },
+};
+
 function PluginCard({ plugin, installed }: PluginCardProps) {
+  const displayType = plugin.source === "connector" ? "connector" : plugin.type;
+  const style = typeStyles[displayType] || typeStyles.plugin;
+
   return (
     <div className="w-full border rounded-xl bg-card p-4 flex gap-4">
       {/* Icon */}
       <div className="shrink-0 mt-0.5">
-        {plugin.type === "mcp" ? (
+        {plugin.type === "mcp" || plugin.source === "connector" ? (
           <Wrench className="h-5 w-5 text-blue-500" />
         ) : (
           <Package className="h-5 w-5 text-violet-500" />
@@ -196,20 +227,27 @@ function PluginCard({ plugin, installed }: PluginCardProps) {
             {plugin.version && (
               <span className="text-[11px] text-muted-foreground/60 ml-2">v{plugin.version}</span>
             )}
+            {plugin.author && (
+              <span className="text-[11px] text-muted-foreground/60 ml-2">by {plugin.author}</span>
+            )}
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
             {installed && (
               <CheckCircle2 className="h-4 w-4 text-green-500" aria-label="Installed" />
             )}
+            {plugin.auth_type === "oauth" && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-orange-500/10 text-orange-600">
+                OAuth
+              </span>
+            )}
             <span
               className={cn(
                 "text-[10px] font-medium px-1.5 py-0.5 rounded uppercase",
-                plugin.type === "mcp"
-                  ? "bg-blue-500/10 text-blue-600"
-                  : "bg-violet-500/10 text-violet-600"
+                style.bg,
+                style.text,
               )}
             >
-              {plugin.type}
+              {displayType}
             </span>
           </div>
         </div>

@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 )
 
 var _ Store = (*SQLiteStore)(nil)
@@ -19,6 +20,17 @@ func NewSQLiteStore(db *sql.DB) *SQLiteStore {
 // DB exposes the underlying *sql.DB for use by non-Store code (e.g. MCP helpers).
 func (s *SQLiteStore) DB() *sql.DB {
 	return s.db
+}
+
+// Maintain performs periodic SQLite maintenance: WAL checkpoint and VACUUM.
+func (s *SQLiteStore) Maintain() error {
+	if _, err := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return fmt.Errorf("wal_checkpoint: %w", err)
+	}
+	if _, err := s.db.Exec(`VACUUM`); err != nil {
+		return fmt.Errorf("vacuum: %w", err)
+	}
+	return nil
 }
 
 // GetTaskInfo returns minimal task data for agent context building.

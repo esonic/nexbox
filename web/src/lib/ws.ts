@@ -132,6 +132,16 @@ class GlobalWebSocket {
     this.rawSend({ type: "stop", session_id: sessionId });
   }
 
+  /** Send a tool response for an interactive tool call (e.g., AskUserQuestion). */
+  sendToolResponse(sessionId: string, toolUseId: string, response: string): void {
+    this.rawSend({
+      type: "tool_response",
+      session_id: sessionId,
+      tool_use_id: toolUseId,
+      tool_response: response,
+    });
+  }
+
   /**
    * Subscribe to global (non-session) events, e.g. connect module events
    * like tasks.updated, assets.updated. Returns an unsubscribe function.

@@ -60,6 +60,10 @@ type ChatRequest struct {
 	Parts     []MessagePart `json:"parts,omitempty"`
 	Images    []string      `json:"images,omitempty"`
 	Features  []string      `json:"features,omitempty"`
+
+	// For tool_response messages (interactive tool replies, e.g. AskUserQuestion)
+	ToolUseID    string `json:"tool_use_id,omitempty"`
+	ToolResponse string `json:"tool_response,omitempty"`
 }
 
 type ChatEvent struct {

@@ -92,7 +92,16 @@ func (a *ClaudeAgent) SendMessage(
 	// 	// task
 	// 	"AskUserQuestion", "Agent", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "TaskOutput",
 	// }
+	// Use bypassPermissions as the base mode — the control protocol's
+	// can_use_tool handler in claude_cli.go will auto-allow non-interactive
+	// tools, so this is effectively the same behavior. Interactive tools
+	// (AskUserQuestion) are routed to the UserInputHandler.
 	opts.PermissionMode = "bypassPermissions"
+
+	// Wire interactive handler for AskUserQuestion support
+	if req.UserInputHandler != nil {
+		opts.UserInputHandler = req.UserInputHandler
+	}
 
 	// Generate MCP config if MCPServerURL is set
 	var mcpConfigPath string
