@@ -98,22 +98,18 @@ func isVisibleChange(c store.Change, joined map[string]bool) bool {
 	return joined[c.ProjectID]
 }
 
-// getProjectWithLocalPath fetches a project and patches git_repo_path from
-// local config in cloud mode (remote store doesn't hold local paths).
+// getProjectWithLocalPath fetches a project by ID.
 func (s *Server) getProjectWithLocalPath(id string) (*store.Project, error) {
-	project, err := s.Store.GetProject(id)
-	if err != nil || project == nil {
-		return project, err
+	return s.Store.GetProject(id)
+}
+
+// isSubPath reports whether child is a sub-path of parent.
+func isSubPath(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
 	}
-	if s.StoreMode == "remote" {
-		for _, m := range s.Config.Get().Projects {
-			if m.RemoteID == project.ID {
-				project.GitRepoPath = m.GitRepoPath
-				break
-			}
-		}
-	}
-	return project, nil
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -131,16 +127,11 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-// writeStoreError logs the original error and maps remote ApiError to its real status/message.
+// writeStoreError logs the original error and writes a generic error response.
 // Returns true when an error response has been written.
 func writeStoreError(w http.ResponseWriter, err error, op, fallback string) bool {
 	if err == nil {
 		return false
-	}
-	if ae, ok := err.(*store.ApiError); ok {
-		log.Printf("[api] %s remote error: status=%d message=%s", op, ae.StatusCode, ae.Message)
-		writeError(w, ae.StatusCode, ae.Message)
-		return true
 	}
 	log.Printf("[api] %s error: %v", op, err)
 	writeError(w, http.StatusInternalServerError, fallback)

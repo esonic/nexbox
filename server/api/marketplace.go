@@ -1,8 +1,6 @@
 package api
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -114,100 +111,6 @@ func (s *Server) resolveInstalledMCPsAndMap(projectID string) ([]agentpkg.MCPSer
 		entries = append(entries, entry)
 	}
 	return entries, keyToPkg
-}
-
-// ---------------------------------------------------------------------------
-// Stats buffer — pure in-memory, flushed via pollChanges every few seconds.
-// Data loss on crash is acceptable (a few seconds of stats).
-// ---------------------------------------------------------------------------
-
-// pkgKey is the map key for stats buffers, combining package name and type.
-type pkgKey struct {
-	Name    string
-	PkgType string
-}
-
-// MarketplaceStatsBuffer accumulates install/call/session/message counts in memory.
-type MarketplaceStatsBuffer struct {
-	mu       sync.Mutex
-	installs map[pkgKey]int64
-	calls    map[pkgKey]int64
-	sessions int64
-	messages int64
-}
-
-func NewMarketplaceStatsBuffer() *MarketplaceStatsBuffer {
-	return &MarketplaceStatsBuffer{
-		installs: make(map[pkgKey]int64),
-		calls:    make(map[pkgKey]int64),
-	}
-}
-
-func (b *MarketplaceStatsBuffer) RecordInstall(name, pkgType string) {
-	b.mu.Lock()
-	b.installs[pkgKey{name, pkgType}]++
-	b.mu.Unlock()
-}
-
-func (b *MarketplaceStatsBuffer) RecordCall(name, pkgType string) {
-	b.mu.Lock()
-	b.calls[pkgKey{name, pkgType}]++
-	b.mu.Unlock()
-}
-
-func (b *MarketplaceStatsBuffer) RecordSession() {
-	b.mu.Lock()
-	b.sessions++
-	b.mu.Unlock()
-}
-
-func (b *MarketplaceStatsBuffer) RecordMessage() {
-	b.mu.Lock()
-	b.messages++
-	b.mu.Unlock()
-}
-
-// Flush atomically swaps out the accumulated counters and returns them.
-// Returns nil maps and zero counts if there is nothing to report.
-func (b *MarketplaceStatsBuffer) Flush() (installs, calls map[pkgKey]int64, sessions, messages int64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.installs) == 0 && len(b.calls) == 0 && b.sessions == 0 && b.messages == 0 {
-		return nil, nil, 0, 0
-	}
-	installs, calls = b.installs, b.calls
-	sessions, messages = b.sessions, b.messages
-	b.installs = make(map[pkgKey]int64)
-	b.calls = make(map[pkgKey]int64)
-	b.sessions = 0
-	b.messages = 0
-	return
-}
-
-// FlushMarketplaceStats sends accumulated stats to the remote server, if any.
-// Non-fatal: logs errors and discards stats rather than blocking.
-func (s *Server) FlushMarketplaceStats() {
-	if s.MarketplaceStats == nil || s.Cloud == nil {
-		return
-	}
-	installs, calls, sessions, messages := s.MarketplaceStats.Flush()
-	if installs == nil && calls == nil && sessions == 0 && messages == 0 {
-		return
-	}
-	report := store.MarketplaceStatsReport{
-		User:     s.Cloud.Info.UserName,
-		Sessions: sessions,
-		Messages: messages,
-	}
-	for k, count := range installs {
-		report.Installs = append(report.Installs, store.NameCount{Name: k.Name, Type: k.PkgType, Count: count})
-	}
-	for k, count := range calls {
-		report.Calls = append(report.Calls, store.NameCount{Name: k.Name, Type: k.PkgType, Count: count})
-	}
-	if err := s.Cloud.ReportMarketplaceStats(report); err != nil {
-		log.Printf("[marketplace] stats flush error: %v", err)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -695,237 +598,13 @@ func (s *Server) HandleUninstallPlugin(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// Remote package registry handlers
-// ---------------------------------------------------------------------------
-
-func (s *Server) ListMarketplacePackages(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeJSON(w, http.StatusOK, []interface{}{})
-		return
-	}
-	pkgType := r.URL.Query().Get("type")
-	q := r.URL.Query().Get("q")
-	tag := r.URL.Query().Get("tag")
-	sortBy := r.URL.Query().Get("sort")
-	limit := parseIntParam(r, "limit", 20)
-	offset := parseIntParam(r, "offset", 0)
-	pkgs, err := s.Cloud.ListMarketplacePackages(pkgType, q, tag, sortBy, limit, offset)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, pkgs)
-}
-
-func parseIntParam(r *http.Request, key string, def int) int {
-	s := r.URL.Query().Get(key)
-	if s == "" {
-		return def
-	}
-	v, err := strconv.Atoi(s)
-	if err != nil || v < 0 {
-		return def
-	}
-	return v
-}
-
-func (s *Server) GetMarketplacePackage(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
-		return
-	}
-	id := chi.URLParam(r, "packageId")
-	detail, err := s.Cloud.GetMarketplacePackage(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, detail)
-}
-
-func (s *Server) UpdateMarketplacePackage(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
-		return
-	}
-	id := chi.URLParam(r, "packageId")
-	var body map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	pkg, err := s.Cloud.UpdateMarketplacePackage(id, body)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, pkg)
-}
-
-func (s *Server) DeleteMarketplacePackage(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
-		return
-	}
-	id := chi.URLParam(r, "packageId")
-	if err := s.Cloud.DeletePackage(id); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) GetPackageStarStatus(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
-		return
-	}
-	id := chi.URLParam(r, "packageId")
-	status, err := s.Cloud.GetPackageStarStatus(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, status)
-}
-
-func (s *Server) StarPackage(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
-		return
-	}
-	id := chi.URLParam(r, "packageId")
-	status, err := s.Cloud.StarPackage(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, status)
-}
-
-func (s *Server) UnstarPackage(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
-		return
-	}
-	id := chi.URLParam(r, "packageId")
-	status, err := s.Cloud.UnstarPackage(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, status)
-}
-
-func (s *Server) ListPackageReviews(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
-		return
-	}
-	id := chi.URLParam(r, "packageId")
-	reviews, err := s.Cloud.ListPackageReviews(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if reviews == nil {
-		reviews = []store.PackageReview{}
-	}
-	writeJSON(w, http.StatusOK, reviews)
-}
-
-func (s *Server) AddPackageReview(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
-		return
-	}
-	id := chi.URLParam(r, "packageId")
-	var body map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	review, err := s.Cloud.AddPackageReview(id, body)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, review)
-}
-
-func (s *Server) DeletePackageReview(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
-		return
-	}
-	id := chi.URLParam(r, "packageId")
-	reviewID := chi.URLParam(r, "reviewId")
-	if err := s.Cloud.DeletePackageReview(id, reviewID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) PublishPackage(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
-		return
-	}
-	var body map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	// manifest may arrive as a JSON object; re-serialize to string for the Java backend
-	if m, ok := body["manifest"]; ok {
-		switch v := m.(type) {
-		case string:
-			// already a string, leave as-is
-		default:
-			b, err := json.Marshal(v)
-			if err == nil {
-				body["manifest"] = string(b)
-			}
-		}
-	}
-	// PublishPackage returns a MarketplacePackageDetail (package + versions) directly
-	detail, err := s.Cloud.PublishPackage(body)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, detail)
-}
-
-func (s *Server) PublishPackageVersion(w http.ResponseWriter, r *http.Request) {
-	if s.Cloud == nil {
-		writeError(w, http.StatusServiceUnavailable, "marketplace requires cloud mode")
-		return
-	}
-	packageID := chi.URLParam(r, "packageId")
-	var body map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	ver, err := s.Cloud.PublishPackageVersion(packageID, body)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, ver)
-}
-
-// ---------------------------------------------------------------------------
 // Local MCP install/uninstall
 // ---------------------------------------------------------------------------
 
 // InstallMCPRequest is the body for POST /api/marketplace/installed-mcps.
 type InstallMCPRequest struct {
 	Name      string            `json:"name"`       // display name / package name
-	PackageID string            `json:"package_id"` // remote package ID; used to record install count and update checks
-	Version   string            `json:"version"`    // installed version string (for update detection)
+	Version   string            `json:"version"`    // installed version string
 	MCPKey    string            `json:"mcp_key"`    // server key (falls back to name)
 	Manifest  json.RawMessage   `json:"manifest"`   // MCPServerEntry as JSON object or string
 	Env       map[string]string `json:"env"`        // user-provided env secrets (e.g. API tokens)
@@ -1052,7 +731,6 @@ func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
 	mcp := store.InstalledMCP{
 		Name:        req.Name,
 		ProjectID:   req.ProjectID,
-		PackageID:   req.PackageID,
 		Version:     req.Version,
 		MCPKey:      mcpKey,
 		Manifest:    manifestStr,
@@ -1062,17 +740,6 @@ func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
 	if err := s.LocalStore.UpsertInstalledMCP(mcp); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
-	}
-
-	if s.MarketplaceStats != nil {
-		s.MarketplaceStats.RecordInstall(req.Name, "mcp")
-	}
-	if s.Cloud != nil && req.PackageID != "" {
-		go func() {
-			if err := s.Cloud.RecordPackageInstall(req.PackageID); err != nil {
-				log.Printf("[marketplace] record install count for %s: %v", req.PackageID, err)
-			}
-		}()
 	}
 	log.Printf("[marketplace] installed MCP: %s (key=%s)", req.Name, mcpKey)
 	writeJSON(w, http.StatusOK, mcp)
@@ -1099,11 +766,10 @@ func (s *Server) UninstallMCP(w http.ResponseWriter, r *http.Request) {
 
 // InstallSkillRequest is the body for POST /api/marketplace/installed-skills.
 type InstallSkillRequest struct {
-	PackageID   string `json:"package_id"`              // remote package ID (used for cloud download)
-	Name        string `json:"name"`                    // package name (used as skill directory name)
+	Name        string `json:"name"`                   // package name (used as skill directory name)
 	Version     string `json:"version"`
-	ProjectID   string `json:"project_id"`              // "" = global
-	InstallPath string `json:"install_path,omitempty"`  // local source path (for marketplace_dir skills; skips cloud download)
+	ProjectID   string `json:"project_id"`             // "" = global
+	InstallPath string `json:"install_path"`           // local source path in marketplace_dir
 }
 
 func (s *Server) ListInstalledSkills(w http.ResponseWriter, r *http.Request) {
@@ -1140,19 +806,9 @@ func (s *Server) InstallSkill(w http.ResponseWriter, r *http.Request) {
 	if req.Version == "" {
 		req.Version = "0.0.0"
 	}
-
-	isLocal := req.InstallPath != ""
-
-	if !isLocal {
-		// Cloud install: requires cloud mode and package_id
-		if s.Cloud == nil {
-			writeError(w, http.StatusServiceUnavailable, "skill install requires cloud mode (or provide install_path for local install)")
-			return
-		}
-		if req.PackageID == "" {
-			writeError(w, http.StatusBadRequest, "package_id is required for cloud install")
-			return
-		}
+	if req.InstallPath == "" {
+		writeError(w, http.StatusBadRequest, "install_path is required")
+		return
 	}
 
 	// Determine install path
@@ -1162,26 +818,11 @@ func (s *Server) InstallSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if isLocal {
-		// Local install: copy skill files from marketplace_dir source to install dir
-		if err := copySkillDir(req.InstallPath, installDir); err != nil {
-			log.Printf("[marketplace] failed to install local skill %s: %v", req.Name, err)
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to install skill: %v", err))
-			return
-		}
-	} else {
-		// Cloud install: fetch detail and download tar
-		detail, err := s.Cloud.GetMarketplacePackage(req.PackageID)
-		if err != nil {
-			log.Printf("[marketplace] failed to fetch package detail for skill %s: %v", req.Name, err)
-		} else {
-			s.autoInstallMCPDeps(detail, req.Version, req.ProjectID)
-		}
-		if err := s.downloadAndExtractSkill(req.PackageID, req.Version, installDir); err != nil {
-			log.Printf("[marketplace] failed to install skill %s: %v", req.Name, err)
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to install skill: %v", err))
-			return
-		}
+	// Copy skill files from marketplace_dir source to install dir
+	if err := copySkillDir(req.InstallPath, installDir); err != nil {
+		log.Printf("[marketplace] failed to install skill %s: %v", req.Name, err)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to install skill: %v", err))
+		return
 	}
 
 	skill := store.InstalledSkill{
@@ -1192,7 +833,6 @@ func (s *Server) InstallSkill(w http.ResponseWriter, r *http.Request) {
 		InstalledAt: time.Now(),
 	}
 	if err := s.LocalStore.UpsertInstalledSkill(skill); err != nil {
-		// DB write failed after extraction — clean up to avoid orphaned files.
 		_ = os.RemoveAll(installDir)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1208,16 +848,6 @@ func (s *Server) InstallSkill(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.MarketplaceStats != nil {
-		s.MarketplaceStats.RecordInstall(req.Name, "skill")
-	}
-	if s.Cloud != nil && req.PackageID != "" {
-		go func() {
-			if err := s.Cloud.RecordPackageInstall(req.PackageID); err != nil {
-				log.Printf("[marketplace] record install count for %s: %v", req.PackageID, err)
-			}
-		}()
-	}
 	log.Printf("[marketplace] installed skill: %s v%s → %s", req.Name, req.Version, installDir)
 	writeJSON(w, http.StatusOK, skill)
 }
@@ -1399,108 +1029,6 @@ func copySkillDir(src, dst string) error {
 	})
 }
 
-// downloadAndExtractSkill downloads the skill tar.gz from the remote marketplace
-// and extracts it into destDir. Any existing content in destDir is removed first
-// to prevent stale files from a previous version persisting after reinstall.
-func (s *Server) downloadAndExtractSkill(packageID, version, destDir string) error {
-	// Remove existing content so reinstalls don't leave stale files from prior versions.
-	if err := os.RemoveAll(destDir); err != nil {
-		return fmt.Errorf("clean install dir: %w", err)
-	}
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return fmt.Errorf("create install dir: %w", err)
-	}
-
-	pr, pw := io.Pipe()
-	errCh := make(chan error, 1)
-	go func() {
-		defer pw.Close()
-		_, err := s.Cloud.DownloadSkillTar(packageID, version, pw)
-		errCh <- err
-	}()
-
-	if err := extractTarGz(pr, destDir); err != nil {
-		pr.CloseWithError(err)
-		return fmt.Errorf("extract tar.gz: %w", err)
-	}
-	if err := <-errCh; err != nil {
-		return fmt.Errorf("download: %w", err)
-	}
-	return nil
-}
-
-// extractTarGz extracts a .tar.gz stream into destDir, stripping the top-level directory.
-func extractTarGz(r io.Reader, destDir string) error {
-	gz, err := gzip.NewReader(r)
-	if err != nil {
-		return fmt.Errorf("gzip reader: %w", err)
-	}
-	defer gz.Close()
-
-	tr := tar.NewReader(gz)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("read tar: %w", err)
-		}
-		// Strip leading directory component (e.g. "skill-name-1.0.0/file" → "file").
-		// Use strings.SplitN on the slash-separated path, NOT filepath.SplitList
-		// which splits on the OS path-list separator (colon on Unix).
-		cleanName := filepath.ToSlash(hdr.Name)
-		cleanName = strings.TrimPrefix(cleanName, "./")
-		parts := strings.SplitN(cleanName, "/", 2)
-		var relPath string
-		if len(parts) == 2 && parts[1] != "" {
-			relPath = filepath.FromSlash(parts[1])
-		} else {
-			// top-level directory entry itself — skip
-			continue
-		}
-		relPath = filepath.Clean(relPath)
-		if relPath == "." || relPath == "" {
-			continue
-		}
-		target := filepath.Join(destDir, relPath)
-		// Guard against path traversal
-		if !isSubPath(destDir, target) {
-			log.Printf("[marketplace] skip suspicious tar entry: %s", hdr.Name)
-			continue
-		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0755); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return err
-			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
-				return err
-			}
-			f.Close()
-		}
-	}
-	return nil
-}
-
-func isSubPath(parent, child string) bool {
-	rel, err := filepath.Rel(parent, child)
-	if err != nil {
-		return false
-	}
-	// Accept "." (parent == child) and any relative path that doesn't escape parent
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
 // copyGlobalSkillsToProject copies all globally installed skills into a project on creation.
 func (s *Server) copyGlobalSkillsToProject(gitRepoPath string) {
 	globalSkills, err := s.LocalStore.ListInstalledSkills("")
@@ -1552,19 +1080,6 @@ func (s *Server) copyGlobalSkillToProjects(skillName, srcDir string) {
 		log.Printf("[marketplace] failed to list projects for global skill copy: %v", err)
 		return
 	}
-	// In cloud/remote mode, git_repo_path is stored in local config (not persisted to the remote store).
-	// Patch it in here, mirroring what the ListProjects API handler does.
-	if s.StoreMode == "remote" && s.Config != nil {
-		pathMap := make(map[string]string)
-		for _, m := range s.Config.Get().Projects {
-			pathMap[m.RemoteID] = m.GitRepoPath
-		}
-		for i := range projects {
-			if lp, ok := pathMap[projects[i].ID]; ok {
-				projects[i].GitRepoPath = lp
-			}
-		}
-	}
 	var wg sync.WaitGroup
 	for _, p := range projects {
 		if p.GitRepoPath == "" {
@@ -1583,99 +1098,6 @@ func (s *Server) copyGlobalSkillToProjects(skillName, srcDir string) {
 		}(p)
 	}
 	wg.Wait()
-}
-
-// autoInstallMCPDeps parses mcp_dependencies from the skill manifest and auto-installs
-// any MCP packages that are not already installed. The MCP is installed into the same
-// project scope as the skill (projectID). Non-fatal: errors are only logged.
-func (s *Server) autoInstallMCPDeps(detail *store.MarketplacePackageDetail, version string, projectID string) {
-	if s.Cloud == nil || s.LocalStore == nil {
-		return
-	}
-	// Find the matching version manifest
-	var manifest string
-	for _, v := range detail.Versions {
-		if v.Version == version {
-			manifest = v.Manifest
-			break
-		}
-	}
-	if manifest == "" {
-		return
-	}
-
-	// Parse mcp_dependencies: ["pkg-name-1", "pkg-name-2"]
-	var parsed struct {
-		MCPDeps []string `json:"mcp_dependencies"`
-	}
-	if err := json.Unmarshal([]byte(manifest), &parsed); err != nil || len(parsed.MCPDeps) == 0 {
-		return
-	}
-
-	// A dep is satisfied if it is installed in the target project scope OR globally (project_id="").
-	// Using name-only dedup would incorrectly skip deps that are only installed in a different project.
-	installed, _ := s.LocalStore.ListInstalledMCPs("*")
-	installedForScope := make(map[string]bool, len(installed))
-	for _, m := range installed {
-		if m.ProjectID == projectID || m.ProjectID == "" {
-			installedForScope[m.Name] = true
-		}
-	}
-
-	for _, depName := range parsed.MCPDeps {
-		if installedForScope[depName] {
-			continue // already installed in this scope or globally
-		}
-		// Find the dependency package in the marketplace
-		pkgs, err := s.Cloud.ListMarketplacePackages("mcp", depName, "", "", 5, 0)
-		if err != nil {
-			log.Printf("[marketplace] dep auto-install: search %q failed: %v", depName, err)
-			continue
-		}
-		var depPkg *store.MarketplacePackage
-		for i := range pkgs {
-			if pkgs[i].Name == depName {
-				depPkg = &pkgs[i]
-				break
-			}
-		}
-		if depPkg == nil {
-			log.Printf("[marketplace] dep auto-install: package %q not found in marketplace", depName)
-			continue
-		}
-		depDetail, err := s.Cloud.GetMarketplacePackage(depPkg.ID)
-		if err != nil || len(depDetail.Versions) == 0 {
-			log.Printf("[marketplace] dep auto-install: fetch detail for %q failed: %v", depName, err)
-			continue
-		}
-		// Use the latest version (first in list, sorted desc by server)
-		latestVer := depDetail.Versions[0]
-		var mcpEntry agentpkg.MCPServerEntry
-		if err := json.Unmarshal([]byte(latestVer.Manifest), &mcpEntry); err != nil {
-			log.Printf("[marketplace] dep auto-install: invalid manifest for %q: %v", depName, err)
-			continue
-		}
-		mcpKey := mcpEntry.Key
-		if mcpKey == "" {
-			mcpKey = depName
-		}
-		mcp := store.InstalledMCP{
-			Name:        depName,
-			ProjectID:   projectID,
-			MCPKey:      mcpKey,
-			Manifest:    latestVer.Manifest,
-			EnvValues:   "{}",
-			InstalledAt: time.Now(),
-		}
-		if err := s.LocalStore.UpsertInstalledMCP(mcp); err != nil {
-			log.Printf("[marketplace] dep auto-install: store %q failed: %v", depName, err)
-			continue
-		}
-		if s.MarketplaceStats != nil {
-			s.MarketplaceStats.RecordInstall(depName, "mcp")
-		}
-		log.Printf("[marketplace] dep auto-install: installed MCP %q (key=%s) as dependency", depName, mcpKey)
-	}
 }
 
 // copyDir recursively copies src directory to dst.

@@ -103,10 +103,6 @@ func (s *Server) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.MarketplaceStats != nil {
-		s.MarketplaceStats.RecordSession()
-	}
-
 	writeJSON(w, http.StatusCreated, sess)
 }
 

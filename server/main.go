@@ -255,7 +255,6 @@ func main() {
 		DataDir:          *dataDir,
 		Version:          Version,
 		ChromeManager:    chromeManager,
-		MarketplaceStats: api.NewMarketplaceStatsBuffer(),
 	}
 
 	// Wire up Docker container isolation if enabled.

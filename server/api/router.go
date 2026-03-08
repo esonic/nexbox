@@ -111,8 +111,8 @@ func (e *net_addrErr) Error() string { return "missing port in address: " + e.ad
 
 // Server holds all API dependencies
 type Server struct {
-	Store            store.Store            // unified data access (CompositeStore / SQLiteStore)
-	LocalStore       *store.SQLiteStore     // always-on local store; used by ActivateCloud / DeactivateCloud
+	Store            store.Store            // unified data access (SQLiteStore or MySQLStore)
+	LocalStore       *store.SQLiteStore     // always-on local SQLite store for marketplace, cache, etc.
 	Config           *config.Manager        // local config (default_agent, server_url, token, etc.)
 	Agent            agent.Agent            // Default agent (from --agent flag)
 	AgentName        string                 // Default agent name
@@ -120,21 +120,12 @@ type Server struct {
 	SessionManager   *agent.SessionManager
 	MCPServerURL     string
 	Hub              *ChatHub                 // Hub for session chat messages
-	StoreMode        string                   // "sqlite" or "remote"
 	TerminalMgr      *TerminalManager         // tracks active PTY for run_in_terminal tool
 	DetailCache      *store.DetailCache       // local cache for full message part details
-	Cloud            *store.RemoteStore       // non-nil in cloud mode; for lark chat, change polling, etc.
 	DataDir          string                   // data directory for file storage (images, etc.)
 	Version          string                   // build-time version string
 	ChromeManager    *chromemcp.ChromeManager // Per-session Chrome DevTools MCP manager for E2E testing
-	MarketplaceStats *MarketplaceStatsBuffer  // In-memory stats accumulator; flushed by pollChanges
 	ContainerMgr     *agent.ContainerManager  // Optional: Docker container isolation per project
-
-	// OnCloudActivated is called by ActivateCloud to start cloud-mode goroutines
-	// (e.g. pollChanges). Set by main during startup.
-	OnCloudActivated func()
-	// OnCloudDeactivated is called by DeactivateCloud to stop cloud-mode goroutines.
-	OnCloudDeactivated func()
 
 	// humanGates: executionID+":"+nodeID → channel carrying user input for human node continuation
 	humanGatesMu sync.Mutex

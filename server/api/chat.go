@@ -153,13 +153,8 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		}
 	}
 
-	// If no project bound, bind to the system "Unassigned" project (local mode only).
-	// Cloud mode requires every session to have a project.
+	// If no project bound, bind to the system "Unassigned" project.
 	if session.ProjectID == "" {
-		if s.StoreMode == "remote" {
-			s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "session must be bound to a project in cloud mode"})
-			return
-		}
 		unassignedProject, err := s.getOrCreateUnassignedProject()
 		if err != nil {
 			log.Printf("[chat] Failed to get/create unassigned project: %v", err)
@@ -232,10 +227,6 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			log.Printf("[chat] Failed to persist user message: %v", err)
 		}
 	}
-	if s.MarketplaceStats != nil {
-		s.MarketplaceStats.RecordMessage()
-	}
-
 	// Notify browsers about new user message (needed for Lark-injected messages;
 	// harmless for UI-sent messages since the frontend already has them locally)
 	s.Hub.Emit(sessionID, ChatEvent{Type: "user_message", Content: message})
@@ -260,21 +251,15 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		}()
 		s.SessionManager.SetCancel(sessionID, cancel)
 
-		isRemote := s.StoreMode == "remote"
-
-		// For local stores, create an empty assistant message upfront so partial
-		// progress survives a process restart. Remote stores don't support
-		// message updates, so we only call CreateMessage once at the end.
+		// Create an empty assistant message upfront so partial progress survives a process restart.
 		var assistantMsgID string
-		if !isRemote {
-			assistantMsg, err := s.Store.CreateMessage(sessionID, "assistant", []MessagePart{}, MessageMetadata{})
-			if err != nil {
-				log.Printf("[chat] Failed to create assistant message: %v", err)
-				s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "failed to create message"})
-				return
-			}
-			assistantMsgID = assistantMsg.ID
+		assistantMsg, err := s.Store.CreateMessage(sessionID, "assistant", []MessagePart{}, MessageMetadata{})
+		if err != nil {
+			log.Printf("[chat] Failed to create assistant message: %v", err)
+			s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "failed to create message"})
+			return
 		}
+		assistantMsgID = assistantMsg.ID
 
 		var mu sync.Mutex
 		var msgParts []MessagePart
@@ -369,7 +354,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 
 		// Collect installed MCP servers and key→package map in a single store query.
 		// Pass session.ProjectID so project-specific MCPs take precedence over global ones.
-		extraMCPs, mcpKeyToPkg := s.resolveInstalledMCPsAndMap(session.ProjectID)
+		extraMCPs, _ := s.resolveInstalledMCPsAndMap(session.ProjectID)
 		// Collect installed plugin directories for --plugin-dir injection.
 		pluginDirs := s.resolveInstalledPluginDirs(session.ProjectID)
 		// toolIDToName maps tool_id → tool_name for EventToolStart events so that
@@ -421,19 +406,6 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					Output:     event.Output,
 					IsError:    event.IsError,
 				})
-				// Track MCP call stats: mcp__<key>__<tool_name> → package name
-				if !event.IsError && s.MarketplaceStats != nil && len(mcpKeyToPkg) > 0 {
-					if toolName, ok := toolIDToName[event.ToolID]; ok {
-						if strings.HasPrefix(toolName, "mcp__") {
-							parts := strings.SplitN(toolName, "__", 3)
-							if len(parts) >= 2 {
-								if pkgName, ok := mcpKeyToPkg[parts[1]]; ok {
-									s.MarketplaceStats.RecordCall(pkgName, "mcp")
-								}
-							}
-						}
-					}
-				}
 				dirty = true
 				mu.Unlock()
 				s.Hub.Emit(sessionID, ChatEvent{
@@ -652,24 +624,11 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		mu.Unlock()
 
 		// Final persist: save full parts to the main message table.
-		// Always update the pre-created message (even if empty) so it is never
-		// left in an un-finalized state that shows as "Thinking" after reload.
+		// Update the pre-created message so it is never left in an un-finalized
+		// state that shows as "Thinking" after reload.
 		if assistantMsgID != "" {
 			if err := s.Store.UpdateMessageParts(assistantMsgID, finalParts, finalMeta); err != nil {
 				log.Printf("[chat] Failed to persist final assistant message: %v", err)
-			}
-			if s.MarketplaceStats != nil && len(finalParts) > 0 {
-				s.MarketplaceStats.RecordMessage()
-			}
-		} else if len(finalParts) > 0 {
-			msg, err := s.Store.CreateMessage(sessionID, "assistant", finalParts, finalMeta)
-			if err != nil {
-				log.Printf("[chat] Failed to create final assistant message: %v", err)
-			} else {
-				assistantMsgID = msg.ID
-			}
-			if s.MarketplaceStats != nil {
-				s.MarketplaceStats.RecordMessage()
 			}
 		}
 

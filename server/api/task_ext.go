@@ -216,8 +216,5 @@ func (s *Server) RemoveReaction(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (s *Server) currentUser() string {
-	if s.Cloud != nil && s.Cloud.Info.UserName != "" {
-		return s.Cloud.Info.UserName
-	}
 	return "local"
 }

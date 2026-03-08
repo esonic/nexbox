@@ -39,9 +39,6 @@ func (s *Server) createWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userEmail := "local"
-	if s.Cloud != nil {
-		userEmail = s.Cloud.Info.UserName
-	}
 	projectID := r.URL.Query().Get("project_id")
 
 	if projectID == "" {
