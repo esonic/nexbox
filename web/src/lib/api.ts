@@ -628,7 +628,7 @@ export interface LocalPlugin {
   id: string;
   name: string;
   description: string;
-  type: string;       // "mcp", "skill", or "plugin"
+  type: string;       // "mcp", "skill", "plugin", or "lsp"
   version: string;
   command?: string;
   args?: string[];
@@ -637,6 +637,7 @@ export interface LocalPlugin {
   author?: string;       // from plugin.json author.name
   source?: string;       // "custom", "skill", "plugin", "connector"
   mcp_config?: string;   // raw .mcp.json content
+  lsp_config?: string;   // raw .lsp.json content
   auth_type?: string;    // "oauth", "apikey", "none"
   install_path?: string; // absolute path on disk (for plugin/skill install)
 }
@@ -719,7 +720,7 @@ export const marketplaceApi = {
     return request<InstalledPluginEntry[]>(`/marketplace/installed-plugins${qs}`);
   },
 
-  installPlugin: (body: { name: string; install_path: string; project_id?: string }) =>
+  installPlugin: (body: { name: string; install_path?: string; lsp_config?: string; project_id?: string }) =>
     request<InstalledPluginEntry>("/marketplace/installed-plugins", {
       method: "POST",
       body: JSON.stringify(body),

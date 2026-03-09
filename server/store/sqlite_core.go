@@ -511,6 +511,7 @@ func (s *SQLiteStore) ListMessages(sessionID string) ([]ChatMessage, error) {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 
+		m.Parts = []MessagePart{}
 		if partsJSON != "" && partsJSON != "[]" {
 			if err := json.Unmarshal([]byte(partsJSON), &m.Parts); err != nil {
 				return nil, fmt.Errorf("unmarshal parts: %w", err)
@@ -569,6 +570,7 @@ func (s *SQLiteStore) ListMessagesPaginated(sessionID string, limit int, beforeI
 			return nil, false, fmt.Errorf("scan message: %w", err)
 		}
 
+		m.Parts = []MessagePart{}
 		if partsJSON != "" && partsJSON != "[]" {
 			if err := json.Unmarshal([]byte(partsJSON), &m.Parts); err != nil {
 				return nil, false, fmt.Errorf("unmarshal parts: %w", err)

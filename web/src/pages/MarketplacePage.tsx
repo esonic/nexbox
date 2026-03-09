@@ -58,6 +58,8 @@ export function MarketplacePage() {
     switch (plugin.type) {
       case "mcp":
         return installedMCPs.some((m) => m.name === plugin.name);
+      case "lsp":
+        return installedPlugins.some((p) => p.name === plugin.name);
       case "skill":
         return installedSkills.some((s) => s.name === plugin.name);
       case "plugin":
@@ -90,6 +92,13 @@ export function MarketplacePage() {
           manifest,
         });
         toast.success(`Installed connector: ${plugin.name}`);
+      } else if (plugin.type === "lsp") {
+        await marketplaceApi.installPlugin({
+          name: plugin.name,
+          install_path: plugin.install_path || undefined,
+          lsp_config: plugin.lsp_config || undefined,
+        });
+        toast.success(`Installed connector: ${plugin.name}`);
       } else if (plugin.type === "skill") {
         await marketplaceApi.installSkill({
           name: plugin.name,
@@ -119,6 +128,9 @@ export function MarketplacePage() {
       if (plugin.type === "mcp") {
         await marketplaceApi.uninstallMCP(plugin.name);
         toast.success(`Uninstalled connector: ${plugin.name}`);
+      } else if (plugin.type === "lsp") {
+        await marketplaceApi.uninstallPlugin(plugin.name);
+        toast.success(`Uninstalled connector: ${plugin.name}`);
       } else if (plugin.type === "skill") {
         await marketplaceApi.uninstallSkill(plugin.name);
         toast.success(`Uninstalled skill: ${plugin.name}`);
@@ -137,11 +149,11 @@ export function MarketplacePage() {
   const matchesTab = (p: LocalPlugin, currentTab: TabType) => {
     switch (currentTab) {
       case "connector":
-        return p.type === "mcp" || p.type === "lsp";
+        return p.type === "mcp";
       case "skill":
         return p.type === "skill";
       case "plugin":
-        return p.type === "plugin";
+        return p.type === "plugin" || p.type === "lsp";
       default:
         return false;
     }
@@ -284,6 +296,7 @@ interface PluginCardProps {
 
 const typeStyles: Record<string, { bg: string; text: string; icon: "wrench" | "package" }> = {
   mcp:    { bg: "bg-blue-500/10",   text: "text-blue-600",    icon: "wrench" },
+  lsp:    { bg: "bg-blue-500/10",   text: "text-blue-600",    icon: "wrench" },
   skill:  { bg: "bg-violet-500/10", text: "text-violet-600",  icon: "package" },
   plugin: { bg: "bg-amber-500/10",  text: "text-amber-600",   icon: "package" },
 };

@@ -194,8 +194,8 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     messagesApi.list(sessionId, 20).then(({ messages: persisted, active, has_more }) => {
       if (cancelled) return;
       const mapped: ChatMessageType[] = (persisted || [])
-        .filter((m) => m.role === "user" || (m.role === "assistant" && m.parts.length > 0))
-        .map((m) => ({ ...m, isStreaming: false }));
+        .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))
+        .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
 
       // Restore accumulated duration from persisted message metadata
       let totalDuration = 0;
@@ -209,15 +209,22 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       }
 
       if (active) {
-        mapped.push({
-          id: `reconnecting-${sessionId}`,
-          session_id: sessionId,
-          role: "assistant",
-          parts: [],
-          metadata: {},
-          created_at: new Date().toISOString(),
-          isStreaming: true,
-        });
+        // Mark the last assistant message as still streaming so new events append to it
+        // rather than creating a second bubble alongside the DB partial content.
+        const lastAsstIdx = mapped.reduce((best, m, i) => m.role === "assistant" ? i : best, -1);
+        if (lastAsstIdx >= 0) {
+          mapped[lastAsstIdx] = { ...mapped[lastAsstIdx], isStreaming: true };
+        } else {
+          mapped.push({
+            id: `reconnecting-${sessionId}`,
+            session_id: sessionId,
+            role: "assistant",
+            parts: [],
+            metadata: {},
+            created_at: new Date().toISOString(),
+            isStreaming: true,
+          });
+        }
         setStreamingSession(sessionId, true);
       }
 
@@ -235,27 +242,42 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   }, [sessionId]);
 
   // WS connection state + reconnect recovery
+  // seenDisconnect tracks whether we actually experienced a disconnection.
+  // onConnection() fires immediately on registration even when WS is already connected,
+  // and we must not treat that initial fire as a reconnection (it would reset streaming state).
+  const seenDisconnectRef = useRef(false);
   useEffect(() => {
+    seenDisconnectRef.current = false;
     return globalWS.onConnection((connected) => {
       setIsConnected(connected);
+      if (!connected) {
+        seenDisconnectRef.current = true;
+        return;
+      }
+      refreshQueue();
+      // Only do reconnect recovery when we actually saw a disconnection.
+      if (!seenDisconnectRef.current) return;
+      seenDisconnectRef.current = false;
       // When WS reconnects, check if our session is still actually active on the server.
       // This handles the case where the "done" event was lost during a disconnect.
-      if (connected) {
-        refreshQueue();
-        const gs = useAppStore.getState();
-        if (gs.streamingSessions[sessionId]) {
-          messagesApi.list(sessionId, 20).then(({ messages: persisted, active, has_more }) => {
-            if (!active) {
-              gs.setStreamingSession(sessionId, false);
-              gs.finishStreaming(sessionId);
-            }
-            // Reload DB messages so any content accumulated during the disconnect
-            // (via periodic server-side flush) becomes visible without a full page refresh.
-            const refreshed: ChatMessageType[] = (persisted || [])
-              .filter((m) => m.role === "user" || (m.role === "assistant" && m.parts.length > 0))
-              .map((m) => ({ ...m, isStreaming: false }));
-            if (refreshed.length > 0) {
-              if (active) {
+      const gs = useAppStore.getState();
+      if (gs.streamingSessions[sessionId]) {
+        messagesApi.list(sessionId, 20).then(({ messages: persisted, active, has_more }) => {
+          if (!active) {
+            gs.setStreamingSession(sessionId, false);
+            gs.finishStreaming(sessionId);
+          }
+          // Reload DB messages so any content accumulated during the disconnect
+          // (via periodic server-side flush) becomes visible without a full page refresh.
+          const refreshed: ChatMessageType[] = (persisted || [])
+            .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))
+            .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
+          if (refreshed.length > 0) {
+            if (active) {
+              const lastAsstIdx = refreshed.reduce((best, m, i) => m.role === "assistant" ? i : best, -1);
+              if (lastAsstIdx >= 0) {
+                refreshed[lastAsstIdx] = { ...refreshed[lastAsstIdx], isStreaming: true };
+              } else {
                 refreshed.push({
                   id: `reconnecting-${sessionId}`,
                   session_id: sessionId,
@@ -266,11 +288,11 @@ export function useChatSession({ session }: UseChatSessionOptions) {
                   isStreaming: true,
                 });
               }
-              gs.setChatMessages(sessionId, refreshed);
-              if (has_more !== undefined) setHasMore(has_more);
             }
-          }).catch(() => {});
-        }
+            gs.setChatMessages(sessionId, refreshed);
+            if (has_more !== undefined) setHasMore(has_more);
+          }
+        }).catch(() => {});
       }
     });
   }, [sessionId, refreshQueue]);

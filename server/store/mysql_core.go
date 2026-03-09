@@ -616,6 +616,7 @@ func mysqlScanMessage(row interface{ Scan(...interface{}) error }) (*ChatMessage
 	if err := row.Scan(&m.ID, &m.SessionID, &m.Role, &partsJSON, &metadataJSON, &m.CreatedAt); err != nil {
 		return nil, err
 	}
+	m.Parts = []MessagePart{}
 	if partsJSON != "" && partsJSON != "[]" {
 		if err := json.Unmarshal([]byte(partsJSON), &m.Parts); err != nil {
 			return nil, fmt.Errorf("unmarshal parts: %w", err)
