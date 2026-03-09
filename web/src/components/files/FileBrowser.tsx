@@ -368,6 +368,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   // Upload
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
 
   const handleUpload = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -389,6 +390,23 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }, [projectId, sessionId, selectedPath, tree, loadTree]);
+
+  const handleSidebarDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  const handleSidebarDragLeave = useCallback((e: React.DragEvent) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const handleSidebarDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    await handleUpload(e.dataTransfer.files);
+  }, [handleUpload]);
 
   const handleDownload = useCallback(() => {
     if (!selectedPath) return;
@@ -432,7 +450,12 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   return (
     <div className="flex h-full">
       {/* File tree sidebar */}
-      <div className="w-56 shrink-0 border-r flex flex-col">
+      <div
+        className={cn("w-56 shrink-0 border-r flex flex-col", isDragging && "ring-2 ring-inset ring-primary/50 bg-primary/5")}
+        onDragOver={handleSidebarDragOver}
+        onDragLeave={handleSidebarDragLeave}
+        onDrop={handleSidebarDrop}
+      >
         <div className="flex items-center justify-between px-3 py-1.5 border-b shrink-0">
           <span className="text-xs text-muted-foreground font-medium">{t("files.title")}</span>
           <div className="flex items-center gap-0.5">

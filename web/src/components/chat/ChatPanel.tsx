@@ -285,6 +285,7 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
       {/* Input area */}
       <ChatInput
         sessionId={session.id}
+        projectId={project?.id}
         isConnected={isConnected}
         isStreaming={isStreaming}
         agentName={agentName}

@@ -12,7 +12,8 @@ import {
   formatAnswersMessage,
   type QuestionAnswer,
 } from "@/components/chat/QuestionCard";
-import { imageApi, type DiffResponse } from "@/lib/api";
+import { imageApi, filesApi, type DiffResponse, type FileEntry } from "@/lib/api";
+import { createPortal } from "react-dom";
 import { useAppStore } from "@/stores/app";
 import { STATUS_ICONS } from "@/plugins/task/task-icons";
 import { normalizeStatus, shortId, STATUS_MAP } from "@/plugins/task/task-config";
@@ -408,6 +409,7 @@ function UserInputPanel({
 
 interface ChatInputProps {
   sessionId: string;
+  projectId?: string;
   isConnected: boolean;
   isStreaming: boolean;
   agentName: string;
@@ -446,6 +448,7 @@ interface ChatInputProps {
 
 export function ChatInput({
   sessionId,
+  projectId,
   isConnected,
   isStreaming,
   agentName,
@@ -528,12 +531,60 @@ export function ChatInput({
     });
   }, []);
 
+  // File picker state for @ mention
+  const [filePickerOpen, setFilePickerOpen] = useState(false);
+  const [filePickerQuery, setFilePickerQuery] = useState("");
+  const [filePickerAnchor, setFilePickerAnchor] = useState(0);
+  const [filePickerFiles, setFilePickerFiles] = useState<FileEntry[]>([]);
+  const [filePickerSelected, setFilePickerSelected] = useState(0);
+  const filePickerMenuRef = useRef<HTMLDivElement>(null);
+
+  // Load file list lazily when picker first opens
+  useEffect(() => {
+    if (!filePickerOpen || !projectId) return;
+    if (filePickerFiles.length > 0) return;
+    filesApi.tree(projectId, sessionId).then(entries => {
+      const flat: FileEntry[] = [];
+      const flatten = (list: FileEntry[]) => {
+        for (const e of list) {
+          if (!e.is_dir) flat.push(e);
+          if (e.children) flatten(e.children);
+        }
+      };
+      flatten(entries);
+      setFilePickerFiles(flat);
+    }).catch(() => {});
+  }, [filePickerOpen, projectId, sessionId, filePickerFiles.length]);
+
+  const filteredPickerFiles = filePickerFiles
+    .filter(f => !filePickerQuery || f.path.toLowerCase().includes(filePickerQuery.toLowerCase()))
+    .slice(0, 10);
+
   const saveDraft = useCallback((value: string) => {
     try {
       if (value) localStorage.setItem(DRAFT_KEY_PREFIX + sessionId, value);
       else localStorage.removeItem(DRAFT_KEY_PREFIX + sessionId);
     } catch { /* ignore */ }
   }, [sessionId]);
+
+  // Drop non-image files: upload to project root then insert @relative/path
+  const handleFileDrop = useCallback(async (files: File[], currentInput: string) => {
+    if (!projectId) return;
+    let cur = currentInput;
+    for (const file of files) {
+      try {
+        // Use "." (not "/") as directory — backend rejects absolute paths
+        const result = await filesApi.upload(projectId, file, ".", sessionId);
+        const ref = result.path || file.name;
+        cur = (cur ? cur + " " : "") + `@${ref}`;
+        setInput(cur);
+        saveDraft(cur);
+        setFilePickerFiles([]);
+      } catch (e: any) {
+        toast.error(`Failed to upload ${file.name}`, { description: e.message });
+      }
+    }
+  }, [projectId, sessionId, saveDraft]);
 
   useEffect(() => {
     try { setInput(localStorage.getItem(DRAFT_KEY_PREFIX + sessionId) || ""); }
@@ -568,6 +619,18 @@ export function ChatInput({
     document.addEventListener("mouseup", onMouseUp);
   }, [inputHeight]);
 
+  // Close file picker on outside click
+  useEffect(() => {
+    if (!filePickerOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (filePickerMenuRef.current?.contains(e.target as Node)) return;
+      if (textareaRef.current?.contains(e.target as Node)) return;
+      setFilePickerOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [filePickerOpen]);
+
   // Close model menu on outside click
   useEffect(() => {
     if (!showModelMenu) return;
@@ -601,13 +664,67 @@ export function ChatInput({
     const value = e.target.value;
     setInput(value);
     saveDraft(value);
+
+    // @ file picker detection
+    if (projectId) {
+      const cursor = e.target.selectionStart;
+      const textBefore = value.slice(0, cursor);
+      const atIdx = textBefore.lastIndexOf("@");
+      if (atIdx !== -1 && !/\s/.test(textBefore.slice(atIdx + 1))) {
+        setFilePickerQuery(textBefore.slice(atIdx + 1));
+        setFilePickerAnchor(atIdx);
+        setFilePickerOpen(true);
+        setFilePickerSelected(0);
+      } else {
+        setFilePickerOpen(false);
+      }
+    }
   };
 
-
-
+  const insertFileRef = useCallback((file: FileEntry) => {
+    const el = textareaRef.current;
+    const cursor = el?.selectionStart ?? (filePickerAnchor + filePickerQuery.length + 1);
+    const before = input.slice(0, filePickerAnchor);
+    const after = input.slice(cursor);
+    // Use full relative path so Claude can locate files in subdirectories
+    const ref = file.path || file.name;
+    const newInput = before + `@${ref} ` + after;
+    setInput(newInput);
+    saveDraft(newInput);
+    setFilePickerOpen(false);
+    setTimeout(() => {
+      if (!el) return;
+      el.focus();
+      const pos = before.length + ref.length + 2;
+      el.setSelectionRange(pos, pos);
+    }, 0);
+  }, [input, filePickerAnchor, filePickerQuery.length, saveDraft]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.nativeEvent.isComposing) return;
+
+    // @ file picker keyboard navigation
+    if (filePickerOpen && filteredPickerFiles.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setFilePickerSelected(i => Math.min(i + 1, filteredPickerFiles.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setFilePickerSelected(i => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        insertFileRef(filteredPickerFiles[filePickerSelected]);
+        return;
+      }
+      if (e.key === "Escape") {
+        setFilePickerOpen(false);
+        return;
+      }
+    }
 
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
@@ -664,7 +781,10 @@ export function ChatInput({
             e.preventDefault();
             e.stopPropagation();
             const files = Array.from(e.dataTransfer.files);
-            if (files.length > 0) addImageFiles(files);
+            const imageFiles = files.filter(f => f.type.startsWith("image/"));
+            const otherFiles = files.filter(f => !f.type.startsWith("image/"));
+            if (imageFiles.length > 0) addImageFiles(imageFiles);
+            if (otherFiles.length > 0) handleFileDrop(otherFiles, input);
           }}
         >
           {/* Git diff bar */}
@@ -947,6 +1067,37 @@ export function ChatInput({
           </div>
         </div>
       </div>
+      {/* @ File picker dropdown */}
+      {filePickerOpen && filteredPickerFiles.length > 0 && textareaRef.current && createPortal(
+        <div
+          ref={filePickerMenuRef}
+          style={{
+            position: "fixed",
+            bottom: window.innerHeight - textareaRef.current.getBoundingClientRect().top + 4,
+            left: textareaRef.current.getBoundingClientRect().left,
+            width: textareaRef.current.getBoundingClientRect().width,
+            zIndex: 9999,
+          }}
+          className="bg-popover border rounded-lg shadow-lg overflow-hidden max-h-52 overflow-y-auto"
+        >
+          {filteredPickerFiles.map((file, i) => (
+            <div
+              key={file.path}
+              onMouseDown={(e) => { e.preventDefault(); insertFileRef(file); }}
+              onMouseEnter={() => setFilePickerSelected(i)}
+              className={cn(
+                "flex items-center gap-2 px-3 py-1.5 cursor-pointer text-sm",
+                i === filePickerSelected ? "bg-accent" : "hover:bg-accent/50"
+              )}
+            >
+              <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <span className="font-mono text-xs truncate">{file.name}</span>
+              <span className="text-xs text-muted-foreground truncate flex-1">{file.path}</span>
+            </div>
+          ))}
+        </div>,
+        document.body
+      )}
     </div>
   );
 }

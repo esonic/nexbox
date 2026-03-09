@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
 )
 
 // ---------------------------------------------------------------------------
@@ -324,7 +323,6 @@ func TestBuildStaticContext_Full(t *testing.T) {
 		ID:          "proj-001",
 		Name:        "Order Service",
 		Description: "E-commerce order system",
-		GitRepoPath: "/home/dev/order-service",
 	}
 
 	ctx := BuildStaticContext(project, "sess-001")
@@ -352,9 +350,8 @@ func TestBuildStaticContext_Full(t *testing.T) {
 
 func TestBuildStaticContext_NoDescription(t *testing.T) {
 	project := ProjectInfo{
-		ID:          "proj-002",
-		Name:        "Simple App",
-		GitRepoPath: "/tmp/app",
+		ID:   "proj-002",
+		Name: "Simple App",
 	}
 
 	ctx := BuildStaticContext(project, "")
@@ -379,7 +376,7 @@ func TestBuildDynamicContext_Empty(t *testing.T) {
 }
 
 func TestBuildDynamicContext_ProjectOnly(t *testing.T) {
-	proj := &ProjectInfo{ID: "proj-1", Name: "My Project", GitRepoPath: "/tmp/proj"}
+	proj := &ProjectInfo{ID: "proj-1", Name: "My Project"}
 	ctx := BuildDynamicContext(proj, nil, nil, nil)
 
 	mustContain := []string{
@@ -548,51 +545,6 @@ func TestBuildPrompt_EmptyStatic(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// BuildBrainstormPrompt
-// ---------------------------------------------------------------------------
-
-func TestBuildBrainstormPrompt(t *testing.T) {
-	project := &ProjectInfo{
-		Name:        "Research Project",
-		Description: "AI research",
-	}
-	mindmap := &MindmapRef{
-		Title: "Feature Ideas",
-	}
-
-	prompt := BuildBrainstormPrompt(project, mindmap)
-
-	mustContain := []string{
-		"BoxNex Brainstorm Mode",
-		"brainstorming partner",
-		"Project: Research Project",
-		"Project Description: AI research",
-		"Mindmap: Feature Ideas",
-		"Brainstorming Approach",
-		"Response Style",
-	}
-
-	for _, s := range mustContain {
-		if !containsString(prompt, s) {
-			t.Errorf("brainstorm prompt missing: %q", s)
-		}
-	}
-}
-
-func TestBuildBrainstormPrompt_NilProject(t *testing.T) {
-	mindmap := &MindmapRef{Title: "Ideas"}
-
-	prompt := BuildBrainstormPrompt(nil, mindmap)
-
-	if containsString(prompt, "Project:") {
-		t.Error("should not contain project section when nil")
-	}
-	if !containsString(prompt, "Mindmap: Ideas") {
-		t.Error("should contain mindmap")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // CodexAgent
 // ---------------------------------------------------------------------------
 
@@ -627,7 +579,6 @@ func TestCodexAgent_SendMessage_InvalidWorkDir(t *testing.T) {
 		t.Errorf("error = %q, want to contain 'work directory does not exist'", err.Error())
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // StreamEvent JSON
