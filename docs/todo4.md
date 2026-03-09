@@ -183,18 +183,6 @@
 
 ---
 
-### T20.7 — 规范性改进（CLI 版本检查 + 环境变量）
-
-**现状**：启动时不检查 Claude CLI 版本；没有设置 `CLAUDE_CODE_ENTRYPOINT` 环境变量。
-
-**目标**：
-- 启动时检查 `claude -v`，低于 2.0.0 发出警告
-- 设置 `CLAUDE_CODE_ENTRYPOINT=sdk-go` 用于遥测追踪
-
-**影响文件**：`server/agent/claude_cli.go`
-
----
-
 ### T8.2 — gVisor 容器运行时
 
 **现状**：容器使用默认 runc 运行时。
@@ -230,5 +218,4 @@
 | 🟡 中 | T20.4 | ThinkingBlock 补全 signature 字段 | 低 |
 | 🟡 中 | T20.5 | result 消息补全字段 + stop_reason | 低 |
 | 🟢 低 | T20.6 | task_notification 子任务消息处理 | 中 |
-| 🟢 低 | T20.7 | CLI 版本检查 + CLAUDE_CODE_ENTRYPOINT | 低 |
 | 🟢 低 | T8.2 | gVisor 容器运行时 | 低（配置） |

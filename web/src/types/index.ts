@@ -151,11 +151,15 @@ export interface ChatEvent {
     | "system"
     | "queue_updated"
     | "user_message"
-    | "user_input_request";
+    | "user_input_request"
+    | "subtask_start"
+    | "subtask_progress"
+    | "subtask_done";
   session_id?: string;
   content?: string;
   tool?: string;
   tool_id?: string;
+  task_id?: string;
   input?: string;
   output?: string;
   is_error?: boolean;

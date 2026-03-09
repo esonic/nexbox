@@ -362,6 +362,15 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         gs().finishStreaming(sid);
         window.dispatchEvent(new CustomEvent("session-updated"));
         break;
+      case "subtask_start":
+        if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, `\n\n_↳ Sub-agent: ${event.content}_\n\n`); }
+        break;
+      case "subtask_progress":
+        if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, `_↳ ${event.content}_\n`); }
+        break;
+      case "subtask_done":
+        if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, `_✓ ${event.content}_\n\n`); }
+        break;
       case "system":
         if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, `\n\n_[System: ${event.content}]_\n\n`); }
         break;

@@ -77,8 +77,9 @@ func (a *ClaudeAgent) SendMessage(
 
 	// Build query options (no SystemPrompt - we use BuildPrompt for all context)
 	opts := QueryOptions{
-		WorkDir: req.WorkDir,
-		Model:   req.Model,
+		WorkDir:                req.WorkDir,
+		Model:                  req.Model,
+		IncludePartialMessages: true,
 	}
 
 	// Full capabilities - all tools available
@@ -222,6 +223,7 @@ func (a *ClaudeAgent) SendMessage(
 	// Parallel tool calls share the same message ID with identical usage data.
 	seenMessageIDs := make(map[string]bool)
 	var accInputTokens, accOutputTokens int
+	var hasPartialText, doneSent bool
 
 	resultSessionID, err := client.Query(budgetCtx, combinedPrompt, opts, func(msg StreamMessage, parsed *AssistantMessage) {
 		log.Printf("[claude-agent] Received: type=%s, subtype=%s, session=%s", msg.Type, msg.Subtype, msg.SessionID)
@@ -230,41 +232,60 @@ func (a *ClaudeAgent) SendMessage(
 		case "system":
 			log.Printf("[claude-agent] System message: subtype=%s", msg.Subtype)
 
-			// Handle system init message - extract tools, MCP servers info
-			if msg.Subtype == "init" {
-				// Parse init data for useful information
-				if msg.Data != nil {
-					var tools []string
-					if toolsRaw, ok := msg.Data["tools"].([]interface{}); ok {
-						for _, t := range toolsRaw {
-							if toolName, ok := t.(string); ok {
-								tools = append(tools, toolName)
-							}
+		switch msg.Subtype {
+		case "init":
+			if msg.Data != nil {
+				var tools []string
+				if toolsRaw, ok := msg.Data["tools"].([]interface{}); ok {
+					for _, t := range toolsRaw {
+						if toolName, ok := t.(string); ok {
+							tools = append(tools, toolName)
 						}
 					}
-					log.Printf("[claude-agent] Session initialized with tools: %v", tools)
-
-					// Extract MCP server status
-					if mcpServersRaw, ok := msg.Data["mcp_servers"].([]interface{}); ok {
-						for _, srv := range mcpServersRaw {
-							if srvMap, ok := srv.(map[string]interface{}); ok {
-								name, _ := srvMap["name"].(string)
-								status, _ := srvMap["status"].(string)
-								log.Printf("[claude-agent] MCP server: %s, status: %s", name, status)
-							}
+				}
+				log.Printf("[claude-agent] Session initialized with tools: %v", tools)
+				if mcpServersRaw, ok := msg.Data["mcp_servers"].([]interface{}); ok {
+					for _, srv := range mcpServersRaw {
+						if srvMap, ok := srv.(map[string]interface{}); ok {
+							name, _ := srvMap["name"].(string)
+							status, _ := srvMap["status"].(string)
+							log.Printf("[claude-agent] MCP server: %s, status: %s", name, status)
 						}
 					}
 				}
 			}
-
-			// Handle compact boundary - context was compacted
-			if msg.Subtype == "compact_boundary" {
-				log.Printf("[claude-agent] Context compaction occurred")
-				cb(StreamEvent{
-					Type:    EventSystem,
-					Content: "Context compacted to fit within limits",
-				})
-			}
+		case "compact_boundary":
+			log.Printf("[claude-agent] Context compaction occurred")
+			cb(StreamEvent{Type: EventSystem, Content: "Context compacted to fit within limits"})
+		case "init_response":
+			log.Printf("[claude-agent] Initialize response: %v", msg.Data)
+		case "task_started":
+			cb(StreamEvent{
+				Type:    EventSubTaskStart,
+				Content: msg.Description,
+				Metadata: map[string]interface{}{
+					"task_id": msg.TaskID,
+				},
+			})
+		case "task_progress":
+			cb(StreamEvent{
+				Type:    EventSubTaskProgress,
+				Content: msg.Description,
+				Metadata: map[string]interface{}{
+					"task_id":        msg.TaskID,
+					"last_tool_name": msg.LastToolName,
+				},
+			})
+		case "task_notification":
+			cb(StreamEvent{
+				Type:    EventSubTaskDone,
+				Content: msg.Summary,
+				Metadata: map[string]interface{}{
+					"task_id": msg.TaskID,
+					"status":  msg.Status,
+				},
+			})
+		}
 
 		case "assistant":
 			// Accumulate per-step token usage. Each step produces one or more
@@ -295,10 +316,14 @@ func (a *ClaudeAgent) SendMessage(
 				for _, content := range parsed.Content {
 					switch content.Type {
 					case "text":
-						cb(StreamEvent{
-							Type:    EventTextDelta,
-							Content: content.Text,
-						})
+						if hasPartialText {
+							// Text already streamed via stream_event deltas; skip to avoid duplication.
+						} else {
+							cb(StreamEvent{
+								Type:    EventTextDelta,
+								Content: content.Text,
+							})
+						}
 
 					case "tool_use":
 						inputJSON, _ := json.Marshal(content.Input)
@@ -311,11 +336,16 @@ func (a *ClaudeAgent) SendMessage(
 
 					case "thinking":
 						if content.Thinking != "" {
+							var thinkingMeta map[string]interface{}
+							if content.Signature != "" {
+								thinkingMeta = map[string]interface{}{"signature": content.Signature}
+							}
 							cb(StreamEvent{
 								Type:     EventThinking,
 								ToolID:   content.ID,
 								ToolName: "Thinking",
 								Content:  content.Thinking,
+								Metadata: thinkingMeta,
 							})
 						}
 
@@ -331,6 +361,8 @@ func (a *ClaudeAgent) SendMessage(
 						log.Printf("[claude-agent] Unhandled content block type=%q id=%s", content.Type, content.ID)
 					}
 				}
+				// Reset partial-text flag after processing the complete assistant message.
+				hasPartialText = false
 			}
 
 		case "user":
@@ -470,15 +502,46 @@ func (a *ClaudeAgent) SendMessage(
 				metadata["totalCostUsd"] = msg.TotalCostUSD
 			}
 			metadata["durationMs"] = msg.DurationMs
+			if msg.DurationApiMs > 0 {
+				metadata["durationApiMs"] = msg.DurationApiMs
+			}
+			if msg.StopReason != "" {
+				metadata["stopReason"] = msg.StopReason
+			}
 
 			result.SessionID = msg.SessionID
 			result.Metadata = metadata
 
+			doneSent = true
 			cb(StreamEvent{
 				Type:      EventDone,
 				SessionID: msg.SessionID,
 				Metadata:  metadata,
 			})
+
+		case "stream_event":
+			// Partial message streaming: incremental text/thinking deltas arrive here
+			// before the complete assistant message. Only text_delta is handled;
+			// thinking comes from the complete assistant message (needs signature).
+			if len(msg.Event) > 0 {
+				var event struct {
+					Type  string `json:"type"`
+					Delta struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"delta"`
+				}
+				if json.Unmarshal(msg.Event, &event) == nil &&
+					event.Type == "content_block_delta" &&
+					event.Delta.Type == "text_delta" &&
+					event.Delta.Text != "" {
+					hasPartialText = true
+					cb(StreamEvent{
+						Type:    EventTextDelta,
+						Content: event.Delta.Text,
+					})
+				}
+			}
 
 		default:
 			log.Printf("[claude-agent] Unhandled message type=%q subtype=%q", msg.Type, msg.Subtype)
@@ -491,7 +554,7 @@ func (a *ClaudeAgent) SendMessage(
 	if err != nil {
 		// On cancellation (user stop or budget exceeded): emit a synthetic EventDone
 		// with accumulated tokens so billing (SettleTokens) settles accurately.
-		if budgetCtx.Err() != nil && (accInputTokens > 0 || accOutputTokens > 0) {
+		if budgetCtx.Err() != nil && !doneSent && (accInputTokens > 0 || accOutputTokens > 0) {
 			fallbackMeta := map[string]interface{}{
 				"inputTokens":  accInputTokens,
 				"outputTokens": accOutputTokens,

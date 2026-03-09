@@ -87,7 +87,7 @@ const (
 	EventToolResult = "tool_result"
 
 	// EventThinking is an extended thinking / reasoning chunk.
-	// Fields: Content
+	// Fields: Content, Metadata["signature"]
 	EventThinking = "thinking"
 
 	// EventError indicates an error occurred during execution.
@@ -95,12 +95,24 @@ const (
 	EventError = "error"
 
 	// EventDone signals the agent has finished processing the request.
-	// Fields: SessionID, Metadata (tokens, cost, duration)
+	// Fields: SessionID, Metadata (tokens, cost, duration, stopReason)
 	EventDone = "done"
 
 	// EventSystem is an informational system message (e.g. context compaction).
-	// Fields: Content
+	// Fields: Content, Metadata
 	EventSystem = "system"
+
+	// EventSubTaskStart is emitted when Claude delegates a sub-task to a sub-agent (Agent tool).
+	// Fields: Content (description), Metadata["task_id"]
+	EventSubTaskStart = "subtask_start"
+
+	// EventSubTaskProgress is emitted periodically while a sub-task is running.
+	// Fields: Content (description), Metadata["task_id", "last_tool_name"]
+	EventSubTaskProgress = "subtask_progress"
+
+	// EventSubTaskDone is emitted when a sub-task completes.
+	// Fields: Content (summary), Metadata["task_id", "status"]
+	EventSubTaskDone = "subtask_done"
 )
 
 // StreamEvent represents a unified streaming event from any agent backend.

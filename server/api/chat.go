@@ -511,6 +511,32 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					Content: event.Content,
 				})
 
+			case agent.EventSubTaskStart:
+				taskID, _ := event.Metadata["task_id"].(string)
+				log.Printf("[chat] Sub-agent start: %s (task_id=%s)", event.Content, taskID)
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:    "subtask_start",
+					Content: event.Content,
+					TaskID:  taskID,
+				})
+
+			case agent.EventSubTaskProgress:
+				taskID, _ := event.Metadata["task_id"].(string)
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:    "subtask_progress",
+					Content: event.Content,
+					TaskID:  taskID,
+				})
+
+			case agent.EventSubTaskDone:
+				taskID, _ := event.Metadata["task_id"].(string)
+				log.Printf("[chat] Sub-agent done: %s (task_id=%s)", event.Content, taskID)
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:    "subtask_done",
+					Content: event.Content,
+					TaskID:  taskID,
+				})
+
 			case agent.EventSystem:
 				log.Printf("[chat] System event: %s", event.Content)
 				s.Hub.Emit(sessionID, ChatEvent{

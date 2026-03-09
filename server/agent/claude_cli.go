@@ -10,9 +10,14 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+// outboundCtrlSeq is a monotonically increasing counter for generating unique
+// request IDs in outbound control_request messages sent to the CLI.
+var outboundCtrlSeq int64
 
 // ClaudeClient wraps the Claude CLI for programmatic use
 type ClaudeClient struct {
@@ -46,6 +51,11 @@ type QueryOptions struct {
 	MCPConfigPath  string   // Path to MCP config file (enables --mcp-config and --strict-mcp-config)
 	PluginDirs     []string // Directories to pass via --plugin-dir
 
+	// IncludePartialMessages enables --include-partial-messages, causing the CLI
+	// to emit stream_event messages with incremental text deltas.
+	// When true, CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1 is also set.
+	IncludePartialMessages bool
+
 	// UserInputHandler is called when the CLI sends a can_use_tool control_request
 	// for an interactive tool (e.g., AskUserQuestion). The handler shows the
 	// question to the user and blocks until they respond. If nil, all tools are
@@ -58,7 +68,7 @@ type QueryOptions struct {
 // ---------------------------------------------------------------------------
 
 // StreamMessage represents a message from Claude CLI stream-json output.
-// Covers: assistant, user, system, result, control_request, control_response.
+// Covers: assistant, user, system, result, stream_event, control_request, control_response.
 type StreamMessage struct {
 	Type      string          `json:"type"`
 	Subtype   string          `json:"subtype,omitempty"`
@@ -67,16 +77,28 @@ type StreamMessage struct {
 	Message   json.RawMessage `json:"message,omitempty"`
 
 	// For result messages
-	Result       string                 `json:"result,omitempty"`
-	IsError      bool                   `json:"is_error,omitempty"`
-	DurationMs   int64                  `json:"duration_ms,omitempty"`
-	TotalCostUSD float64                `json:"total_cost_usd,omitempty"`
-	Usage        map[string]interface{} `json:"usage,omitempty"`
-	NumTurns     int                    `json:"num_turns,omitempty"`
-	Errors       []string               `json:"errors,omitempty"`
+	Result        string                 `json:"result,omitempty"`
+	IsError       bool                   `json:"is_error,omitempty"`
+	DurationMs    int64                  `json:"duration_ms,omitempty"`
+	DurationApiMs int64                  `json:"duration_api_ms,omitempty"`
+	TotalCostUSD  float64                `json:"total_cost_usd,omitempty"`
+	Usage         map[string]interface{} `json:"usage,omitempty"`
+	NumTurns      int                    `json:"num_turns,omitempty"`
+	StopReason    string                 `json:"stop_reason,omitempty"`
+	Errors        []string               `json:"errors,omitempty"`
 
-	// For system messages
+	// For system messages (general data payload)
 	Data map[string]interface{} `json:"data,omitempty"`
+
+	// For task_* system subtypes (fields are at top level, not inside data)
+	TaskID      string `json:"task_id,omitempty"`
+	Description string `json:"description,omitempty"`
+	Status      string `json:"status,omitempty"`
+	Summary     string `json:"summary,omitempty"`
+	LastToolName string `json:"last_tool_name,omitempty"`
+
+	// For stream_event messages (partial message streaming)
+	Event json.RawMessage `json:"event,omitempty"`
 
 	// For control_request messages
 	RequestID string          `json:"request_id,omitempty"`
@@ -88,12 +110,13 @@ type StreamMessage struct {
 
 // AssistantContent represents content from an assistant message
 type AssistantContent struct {
-	Type     string      `json:"type"`
-	Text     string      `json:"text,omitempty"`
-	ID       string      `json:"id,omitempty"`
-	Name     string      `json:"name,omitempty"`
-	Input    interface{} `json:"input,omitempty"`
-	Thinking string      `json:"thinking,omitempty"`
+	Type      string      `json:"type"`
+	Text      string      `json:"text,omitempty"`
+	ID        string      `json:"id,omitempty"`
+	Name      string      `json:"name,omitempty"`
+	Input     interface{} `json:"input,omitempty"`
+	Thinking  string      `json:"thinking,omitempty"`
+	Signature string      `json:"signature,omitempty"` // Extended thinking verification signature
 }
 
 // AssistantMessage represents a parsed assistant message
@@ -181,6 +204,9 @@ func (c *ClaudeClient) Query(
 		for k, v := range c.Env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
+		if opts.IncludePartialMessages {
+			cmd.Env = append(cmd.Env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1")
+		}
 	}
 
 	stdin, err := cmd.StdinPipe()
@@ -202,50 +228,8 @@ func (c *ClaudeClient) Query(
 		return "", fmt.Errorf("start claude CLI: %w", err)
 	}
 
-	// Monitor context cancellation and kill the entire process group
-	doneCh := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			if cmd.Process != nil {
-				pgid, err := syscall.Getpgid(cmd.Process.Pid)
-				if err == nil {
-					// Send SIGTERM first to allow Claude CLI to finish the current
-					// API call and emit the final result message (with token usage).
-					log.Printf("[claude] Context cancelled, sending SIGTERM to process group %d", pgid)
-					_ = syscall.Kill(-pgid, syscall.SIGTERM)
-					// Give it up to 5 seconds to exit gracefully.
-					select {
-					case <-doneCh:
-						log.Printf("[claude] Process group %d exited gracefully after SIGTERM", pgid)
-					case <-time.After(5 * time.Second):
-						log.Printf("[claude] Process group %d still running after 5s, sending SIGKILL", pgid)
-						_ = syscall.Kill(-pgid, syscall.SIGKILL)
-					}
-				} else {
-					log.Printf("[claude] Context cancelled, killing process %d", cmd.Process.Pid)
-					_ = cmd.Process.Kill()
-				}
-			}
-		case <-doneCh:
-			// Process finished normally
-		}
-	}()
-
-	// Read stderr in background
-	var stderrBuf []byte
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		stderrBuf, _ = io.ReadAll(stderr)
-		if len(stderrBuf) > 0 {
-			log.Printf("[claude] stderr: %s", string(stderrBuf))
-		}
-	}()
-
-	// Mutex for stdin writes — control_response writes and deferred stdin.Close()
-	// can race with each other, so all stdin operations go through this lock.
+	// Mutex for stdin writes — control_response writes, outbound control_requests,
+	// and deferred stdin.Close() can race; all stdin operations go through this lock.
 	var stdinMu sync.Mutex
 	writeStdin := func(data []byte) error {
 		stdinMu.Lock()
@@ -262,7 +246,88 @@ func (c *ClaudeClient) Query(
 		})
 	}
 
-	// Send user message
+	// doneCh signals the context monitor that the main loop is done.
+	doneCh := make(chan struct{})
+
+	// Monitor context cancellation. First attempt a graceful interrupt by sending
+	// an interrupt control_request via stdin, which lets Claude finish its current
+	// API call and emit a result message (preserving token usage data). Fall back
+	// to SIGTERM/SIGKILL if the CLI does not exit within 5 s.
+	go func() {
+		select {
+		case <-ctx.Done():
+			log.Printf("[claude] Context cancelled, sending interrupt control_request")
+			seq := atomic.AddInt64(&outboundCtrlSeq, 1)
+			interruptMsg := map[string]interface{}{
+				"type":       "control_request",
+				"request_id": fmt.Sprintf("sdk-interrupt-%d", seq),
+				"request":    map[string]interface{}{"subtype": "interrupt"},
+			}
+			if data, merr := json.Marshal(interruptMsg); merr == nil {
+				_ = writeStdin(append(data, '\n')) // best-effort; stdin may already be closing
+			}
+			// Wait for Claude to finish the current turn and exit gracefully.
+			select {
+			case <-doneCh:
+				log.Printf("[claude] Process exited gracefully after interrupt")
+				return
+			case <-time.After(5 * time.Second):
+			}
+			// Graceful interrupt timed out — escalate to SIGTERM.
+			if cmd.Process != nil {
+				pgid, perr := syscall.Getpgid(cmd.Process.Pid)
+				if perr == nil {
+					log.Printf("[claude] Interrupt timed out, sending SIGTERM to process group %d", pgid)
+					_ = syscall.Kill(-pgid, syscall.SIGTERM)
+					select {
+					case <-doneCh:
+						log.Printf("[claude] Process group %d exited after SIGTERM", pgid)
+					case <-time.After(5 * time.Second):
+						log.Printf("[claude] Process group %d still running, sending SIGKILL", pgid)
+						_ = syscall.Kill(-pgid, syscall.SIGKILL)
+					}
+				} else {
+					_ = cmd.Process.Kill()
+				}
+			}
+		case <-doneCh:
+			// Process finished normally — nothing to do.
+		}
+	}()
+
+	// Read stderr in background.
+	var stderrBuf []byte
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		stderrBuf, _ = io.ReadAll(stderr)
+		if len(stderrBuf) > 0 {
+			log.Printf("[claude] stderr: %s", string(stderrBuf))
+		}
+	}()
+
+	// Send initialize control_request before the user message. The CLI processes
+	// stdin in order, so the initialize response arrives before the assistant turn.
+	// We track initReqID to route its control_response to the callback.
+	var initReqID string
+	{
+		seq := atomic.AddInt64(&outboundCtrlSeq, 1)
+		initReqID = fmt.Sprintf("sdk-initialize-%d", seq)
+		initMsg := map[string]interface{}{
+			"type":       "control_request",
+			"request_id": initReqID,
+			"request":    map[string]interface{}{"subtype": "initialize"},
+		}
+		if data, merr := json.Marshal(initMsg); merr == nil {
+			if werr := writeStdin(append(data, '\n')); werr != nil {
+				log.Printf("[claude] Failed to send initialize control_request: %v", werr)
+				initReqID = "" // won't try to match the response
+			}
+		}
+	}
+
+	// Send user message.
 	userMsg := UserInput{
 		Type: "user",
 		Message: UserInputMessage{
@@ -291,13 +356,12 @@ func (c *ClaudeClient) Query(
 		return "", fmt.Errorf("write to stdin: %w", err)
 	}
 
-	// Keep stdin open — we need it for control_response messages.
-	// Close it when the result arrives or context is cancelled.
+	// Keep stdin open — needed for control_response messages.
 	defer closeStdin()
 
-	// Read and process output
+	// Read and process output.
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024) // 10MB max line size
+	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024) // 10 MB max line size
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -317,28 +381,49 @@ func (c *ClaudeClient) Query(
 			log.Printf("[claude] Received: type=%s, subtype=%s", msg.Type, msg.Subtype)
 		}
 
-		// Handle control_request from CLI — this is the bidirectional protocol.
+		// Handle control_request from CLI — bidirectional protocol.
 		if msg.Type == "control_request" {
 			c.handleControlRequest(ctx, msg, opts, writeStdin)
 			continue
 		}
 
-		// Ignore control_response (responses to our own requests, if any)
-		if msg.Type == "control_response" || msg.Type == "control_cancel_request" {
+		// Handle control_response — route responses to our outbound requests.
+		if msg.Type == "control_response" {
+			if initReqID != "" && len(msg.Response) > 0 {
+				var resp struct {
+					RequestID string                 `json:"request_id"`
+					Response  map[string]interface{} `json:"response"`
+				}
+				if json.Unmarshal(msg.Response, &resp) == nil && resp.RequestID == initReqID {
+					log.Printf("[claude] Initialize handshake complete (keys: %v)", mapKeys(resp.Response))
+					// Relay to callback as a synthetic system message so claude_agent.go
+					// can extract available commands and other CLI capabilities.
+					callback(StreamMessage{
+						Type:    "system",
+						Subtype: "init_response",
+						Data:    resp.Response,
+					}, nil)
+					initReqID = "" // consumed
+				}
+			}
 			continue
 		}
 
-		// Log the full raw JSON for error results to aid debugging
+		if msg.Type == "control_cancel_request" {
+			continue
+		}
+
+		// Log the full raw JSON for error results to aid debugging.
 		if msg.Type == "result" && (msg.IsError || msg.Subtype != "success") {
 			log.Printf("[claude] Error result (raw): %s", string(line))
 		}
 
-		// Track session ID
+		// Track session ID.
 		if msg.SessionID != "" {
 			sessionID = msg.SessionID
 		}
 
-		// Parse assistant message content if present
+		// Parse assistant message content if present.
 		var assistantMsg *AssistantMessage
 		if msg.Type == "assistant" && len(msg.Message) > 0 {
 			var am AssistantMessage
@@ -349,7 +434,7 @@ func (c *ClaudeClient) Query(
 
 		callback(msg, assistantMsg)
 
-		// Check for result/error
+		// Exit loop once the result message is received.
 		if msg.Type == "result" {
 			break
 		}
@@ -359,19 +444,16 @@ func (c *ClaudeClient) Query(
 		return sessionID, fmt.Errorf("read stdout: %w", err)
 	}
 
-	// Close stdin now that we've received the result. This signals the CLI
-	// process to exit, which in turn closes stderr. Without this, the stderr
-	// reader (io.ReadAll) would block forever waiting for EOF, deadlocking
-	// against the deferred closeStdin.
+	// Close stdin to signal the CLI process to exit (flushing stderr).
 	closeStdin()
 
-	// Wait for stderr reader
+	// Wait for stderr reader.
 	wg.Wait()
 
-	// Signal the context monitor goroutine that the process is done
+	// Signal the context monitor goroutine.
 	close(doneCh)
 
-	// Wait for process to exit
+	// Wait for process to exit.
 	if err := cmd.Wait(); err != nil {
 		if ctx.Err() != nil {
 			return sessionID, context.Canceled
@@ -383,6 +465,15 @@ func (c *ClaudeClient) Query(
 	}
 
 	return sessionID, nil
+}
+
+// mapKeys returns the keys of a map[string]interface{} for logging.
+func mapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // handleControlRequest processes a control_request from the CLI and writes
@@ -576,6 +667,10 @@ func (c *ClaudeClient) buildArgs(opts QueryOptions) []string {
 	// Plugin directories
 	for _, dir := range opts.PluginDirs {
 		args = append(args, "--plugin-dir", dir)
+	}
+
+	if opts.IncludePartialMessages {
+		args = append(args, "--include-partial-messages")
 	}
 
 	return args

@@ -76,6 +76,7 @@ type ChatEvent struct {
 	IsError   bool   `json:"is_error,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 	Message   string `json:"message,omitempty"`
+	TaskID    string `json:"task_id,omitempty"`
 
 	Stats *ExecutionStats `json:"stats,omitempty"`
 }
