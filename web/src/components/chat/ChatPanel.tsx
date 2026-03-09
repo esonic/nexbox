@@ -40,14 +40,6 @@ function MessageStats({ message }: { message: ChatMessageType }) {
           {totalTokens.toLocaleString()} tokens
         </span>
       )}
-      {metadata.totalCostUsd ? (
-        <span className="inline-flex items-center gap-1">
-          $
-          {metadata.totalCostUsd < 0.01
-            ? metadata.totalCostUsd.toFixed(4)
-            : metadata.totalCostUsd.toFixed(2)}
-        </span>
-      ) : null}
     </div>
   );
 }

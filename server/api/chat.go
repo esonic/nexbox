@@ -201,7 +201,6 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			ID:          project.ID,
 			Name:        project.Name,
 			Description: project.Description,
-			GitRepoPath: workDir,
 		}, sessionID)
 	}
 
@@ -209,7 +208,6 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		ID:          project.ID,
 		Name:        project.Name,
 		Description: project.Description,
-		GitRepoPath: workDir,
 	}, refTasks, refAssets, refWorkflows)
 
 	log.Printf("[chat] Agent request for session %s (project: %s, new: %v, refs: %d tasks, %d assets, %d workflows)",
@@ -218,6 +216,51 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 	if s.SessionManager.IsActive(sessionID) {
 		s.enqueueMessage(sessionID, message, imageFilenames)
 		return
+	}
+
+	// Token billing: reserve estimated tokens before starting the agent.
+	// estimated = rough heuristic (message chars / 4 * 5, min 1000).
+	// Only applies to cloud users (session.UserID != "") who are not privileged.
+	var estimatedTokens int64
+	var tokenBudgetForTask int64
+	if session.UserID != "" {
+		// Privileged users bypass billing entirely (unlimited usage).
+		// Local mode (no JWTSecret) and the special esonice account are both privileged.
+		isPrivileged := s.Config.Get().JWTSecret == ""
+		if !isPrivileged {
+			if u, err := s.Store.GetUser(session.UserID); err == nil && u != nil {
+				isPrivileged = u.Email == "esonice@gmail.com"
+			}
+		}
+
+		if !isPrivileged {
+			// Snapshot balance before reserving — used as the per-task token budget.
+			var tokenBudget int64
+			if bal, err := s.Store.GetBalance(session.UserID); err == nil && bal != nil {
+				tokenBudget = bal.BalanceTokens
+			}
+			if tokenBudget <= 0 {
+				log.Printf("[chat] Insufficient balance for user %s (balance=0)", session.UserID)
+				s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "insufficient_balance"})
+				return
+			}
+			est := int64(len(message)/4) * 5
+			if est < 1000 {
+				est = 1000
+			}
+			if est > tokenBudget {
+				est = tokenBudget
+			}
+			estimatedTokens = est
+			if err := s.Store.ReserveTokens(session.UserID, estimatedTokens); err != nil {
+				log.Printf("[chat] Insufficient balance for user %s: %v", session.UserID, err)
+				s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "insufficient_balance"})
+				return
+			}
+			// Pass the full pre-task balance as the runtime budget so the agent
+			// can self-cancel when actual usage approaches this limit.
+			tokenBudgetForTask = tokenBudget
+		}
 	}
 
 	s.SessionManager.SetActive(sessionID, true)
@@ -271,6 +314,18 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		var msgParts []MessagePart
 		var metadata MessageMetadata
 		dirty := false
+
+		// Settle token billing when the agent goroutine exits (normal or cancelled).
+		if session.UserID != "" && estimatedTokens > 0 {
+			defer func() {
+				mu.Lock()
+				actualTokens := int64(metadata.InputTokens + metadata.OutputTokens)
+				mu.Unlock()
+				if err := s.Store.SettleTokens(session.UserID, sessionID, estimatedTokens, actualTokens); err != nil {
+					log.Printf("[chat] Failed to settle tokens for user %s: %v", session.UserID, err)
+				}
+			}()
+		}
 
 		startTime := time.Now()
 		toolCallCount := 0
@@ -484,6 +539,11 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 						metadata.TotalCostUSD = v
 					}
 				}
+				// If Claude didn't provide a cost (e.g. cancelled before result message),
+				// calculate it from token counts using the configured price.
+				if metadata.TotalCostUSD == 0 && metadata.InputTokens+metadata.OutputTokens > 0 {
+					metadata.TotalCostUSD = s.tokensToMoney(int64(metadata.InputTokens + metadata.OutputTokens))
+				}
 				dirty = true
 				mu.Unlock()
 			}
@@ -551,6 +611,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				PluginDirs:         pluginDirs,
 				UserInputHandler:   userInputHandler,
 				UserFeatures:       userFeatures,
+				TokenBudget:        tokenBudgetForTask,
 			},
 			eventHandler,
 		)
@@ -573,7 +634,6 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				ID:          project.ID,
 				Name:        project.Name,
 				Description: project.Description,
-				GitRepoPath: workDir,
 			}, sessionID)
 
 			agentResult, agentErr = sessionAgent.SendMessage(
@@ -594,6 +654,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					PluginDirs:         pluginDirs,
 					UserInputHandler:   userInputHandler,
 					UserFeatures:       userFeatures,
+				TokenBudget:        tokenBudgetForTask,
 				},
 				eventHandler,
 			)
@@ -606,10 +667,17 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		durationMs := time.Since(startTime).Milliseconds()
 
 		if agentErr != nil {
-			if ctx.Err() != nil {
+			switch {
+			case errors.Is(agentErr, agent.ErrInsufficientBalance):
+				// Token budget exceeded mid-task: the agent already settled billing
+				// via synthetic EventDone. Notify the user.
+				log.Printf("[chat] Agent stopped: token budget exceeded for user %s", session.UserID)
+				appendText("\n\n*[Stopped: 余额不足]*")
+				s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "insufficient_balance"})
+			case ctx.Err() != nil:
 				log.Printf("[chat] Agent stopped by user")
 				appendText("\n\n*[Stopped]*")
-			} else {
+			default:
 				log.Printf("[chat] Agent error: %v", agentErr)
 				s.Hub.Emit(sessionID, ChatEvent{
 					Type:    "error",

@@ -213,8 +213,17 @@ func (a *ClaudeAgent) SendMessage(
 	var result Result
 	isResumeAttempt := req.SessionID != ""
 	resumeFailed := false
+	// budgetCtx wraps the caller's context so we can cancel mid-task when the
+	// accumulated token usage exceeds the user's available balance.
+	budgetCtx, budgetCancel := context.WithCancel(ctx)
+	defer budgetCancel()
+	var budgetExceeded bool
+	// seenMessageIDs deduplicates per-step token usage from assistant messages.
+	// Parallel tool calls share the same message ID with identical usage data.
+	seenMessageIDs := make(map[string]bool)
+	var accInputTokens, accOutputTokens int
 
-	resultSessionID, err := client.Query(ctx, combinedPrompt, opts, func(msg StreamMessage, parsed *AssistantMessage) {
+	resultSessionID, err := client.Query(budgetCtx, combinedPrompt, opts, func(msg StreamMessage, parsed *AssistantMessage) {
 		log.Printf("[claude-agent] Received: type=%s, subtype=%s, session=%s", msg.Type, msg.Subtype, msg.SessionID)
 
 		switch msg.Type {
@@ -258,6 +267,30 @@ func (a *ClaudeAgent) SendMessage(
 			}
 
 		case "assistant":
+			// Accumulate per-step token usage. Each step produces one or more
+			// assistant messages that share the same ID (parallel tool calls).
+			// Deduplicate by ID so we don't double-count.
+			if parsed != nil && parsed.ID != "" && !seenMessageIDs[parsed.ID] {
+				seenMessageIDs[parsed.ID] = true
+				if parsed.Usage != nil {
+					if v, ok := parsed.Usage["input_tokens"].(float64); ok {
+						accInputTokens += int(v)
+					}
+					if v, ok := parsed.Usage["output_tokens"].(float64); ok {
+						accOutputTokens += int(v)
+					}
+					log.Printf("[claude-agent] assistant step %s: input=%v output=%v (acc: in=%d out=%d)",
+						parsed.ID, parsed.Usage["input_tokens"], parsed.Usage["output_tokens"],
+						accInputTokens, accOutputTokens)
+					// Per-step budget check: cancel if accumulated tokens exceed user balance.
+					if req.TokenBudget > 0 && int64(accInputTokens+accOutputTokens) >= req.TokenBudget {
+						log.Printf("[claude-agent] Token budget exceeded: %d >= %d, cancelling",
+							accInputTokens+accOutputTokens, req.TokenBudget)
+						budgetExceeded = true
+						budgetCancel()
+					}
+				}
+			}
 			if parsed != nil {
 				for _, content := range parsed.Content {
 					switch content.Type {
@@ -426,6 +459,13 @@ func (a *ClaudeAgent) SendMessage(
 					metadata["outputTokens"] = int(v)
 				}
 			}
+			// Fallback: if result message has no usage data (unusual), use accumulated
+			// per-step tokens from assistant messages as best approximation.
+			if metadata["inputTokens"] == nil && metadata["outputTokens"] == nil && (accInputTokens > 0 || accOutputTokens > 0) {
+				metadata["inputTokens"] = accInputTokens
+				metadata["outputTokens"] = accOutputTokens
+				log.Printf("[claude-agent] result has no usage; using step-accumulated fallback: input=%d output=%d", accInputTokens, accOutputTokens)
+			}
 			if msg.TotalCostUSD > 0 {
 				metadata["totalCostUsd"] = msg.TotalCostUSD
 			}
@@ -449,6 +489,26 @@ func (a *ClaudeAgent) SendMessage(
 		return Result{}, ErrSessionExpired
 	}
 	if err != nil {
+		// On cancellation (user stop or budget exceeded): emit a synthetic EventDone
+		// with accumulated tokens so billing (SettleTokens) settles accurately.
+		if budgetCtx.Err() != nil && (accInputTokens > 0 || accOutputTokens > 0) {
+			fallbackMeta := map[string]interface{}{
+				"inputTokens":  accInputTokens,
+				"outputTokens": accOutputTokens,
+			}
+			result.Metadata = fallbackMeta
+			log.Printf("[claude-agent] Cancelled: emitting synthetic EventDone with fallback tokens: input=%d output=%d", accInputTokens, accOutputTokens)
+			cb(StreamEvent{
+				Type:      EventDone,
+				SessionID: resultSessionID,
+				Metadata:  fallbackMeta,
+			})
+		}
+		// Budget exceeded: return the dedicated sentinel so chat.go can
+		// distinguish this from a user-initiated stop.
+		if budgetExceeded {
+			return Result{}, ErrInsufficientBalance
+		}
 		return Result{}, fmt.Errorf("claude query: %w", err)
 	}
 

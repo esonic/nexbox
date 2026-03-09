@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // ClaudeClient wraps the Claude CLI for programmatic use
@@ -97,8 +98,10 @@ type AssistantContent struct {
 
 // AssistantMessage represents a parsed assistant message
 type AssistantMessage struct {
-	Role    string             `json:"role"`
-	Content []AssistantContent `json:"content"`
+	Role    string                 `json:"role"`
+	Content []AssistantContent     `json:"content"`
+	ID      string                 `json:"id"`
+	Usage   map[string]interface{} `json:"usage"`
 }
 
 // UserInput represents input sent to Claude CLI
@@ -207,8 +210,18 @@ func (c *ClaudeClient) Query(
 			if cmd.Process != nil {
 				pgid, err := syscall.Getpgid(cmd.Process.Pid)
 				if err == nil {
-					log.Printf("[claude] Context cancelled, killing process group %d", pgid)
-					_ = syscall.Kill(-pgid, syscall.SIGKILL)
+					// Send SIGTERM first to allow Claude CLI to finish the current
+					// API call and emit the final result message (with token usage).
+					log.Printf("[claude] Context cancelled, sending SIGTERM to process group %d", pgid)
+					_ = syscall.Kill(-pgid, syscall.SIGTERM)
+					// Give it up to 5 seconds to exit gracefully.
+					select {
+					case <-doneCh:
+						log.Printf("[claude] Process group %d exited gracefully after SIGTERM", pgid)
+					case <-time.After(5 * time.Second):
+						log.Printf("[claude] Process group %d still running after 5s, sending SIGKILL", pgid)
+						_ = syscall.Kill(-pgid, syscall.SIGKILL)
+					}
 				} else {
 					log.Printf("[claude] Context cancelled, killing process %d", cmd.Process.Pid)
 					_ = cmd.Process.Kill()

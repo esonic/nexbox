@@ -10,6 +10,10 @@ import (
 // the stored AgentSessionID and retry as a new session.
 var ErrSessionExpired = errors.New("agent session expired or not found")
 
+// ErrInsufficientBalance is returned when accumulated token usage exceeds the
+// user's available balance mid-task. The task is cancelled immediately.
+var ErrInsufficientBalance = errors.New("insufficient token balance")
+
 // Agent is the interface that all coding agent backends must implement.
 // Each backend (Claude Code, Codex CLI, etc.) provides its own implementation
 // that translates between this unified protocol and the backend-specific CLI/API.
@@ -49,6 +53,7 @@ type Request struct {
 	PluginDirs         []string          // Directories to pass via --plugin-dir to Claude CLI
 	UserInputHandler   UserInputHandler  // Optional: handle interactive tool calls (e.g., AskUserQuestion)
 	UserFeatures       int64             // Bitmask of enabled features (store.Feature* constants)
+	TokenBudget        int64             // Max tokens this task may consume; 0 = unlimited
 }
 
 // Result contains the outcome of an agent message exchange.

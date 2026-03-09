@@ -114,9 +114,6 @@ function QueuedItem({
             <Pencil className="h-3 w-3" />
           </button>
         )}
-        <button onClick={onSendNow} className="p-1 rounded hover:bg-accent text-primary">
-          <Play className="h-3 w-3 fill-current" />
-        </button>
         <button onClick={onRemove} className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-destructive">
           <X className="h-3 w-3" />
         </button>
@@ -186,9 +183,6 @@ function RichQueuedItem({
               <Pencil className="h-3 w-3" />
             </button>
           )}
-          <button onClick={onSendNow} className="p-1 rounded hover:bg-accent text-primary">
-            <Play className="h-3 w-3 fill-current" />
-          </button>
           <button onClick={onRemove} className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-destructive">
             <X className="h-3 w-3" />
           </button>
