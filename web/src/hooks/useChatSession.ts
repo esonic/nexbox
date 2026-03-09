@@ -511,12 +511,12 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   const handleStop = useCallback(() => {
     globalWS.stop(sessionId);
     setPendingUserInput(null);
-    if (isStreaming) {
-      setStreamingSession(sessionId, false);
-      finishStreaming(sessionId);
-    }
+    // Do NOT immediately finishStreaming here — let the backend's "done" event do it.
+    // The backend suppresses intermediate events after cancel, then sends a final
+    // "done" with token stats. Calling finishStreaming early causes the message to
+    // split into two bubbles (ensureStreaming creates a new one for late events).
     window.dispatchEvent(new Event('workflow-stop'));
-  }, [sessionId, isStreaming, setStreamingSession, finishStreaming]);
+  }, [sessionId]);
 
   const sendToolResponse = useCallback((toolUseId: string, response: string) => {
     globalWS.sendToolResponse(sessionId, toolUseId, response);

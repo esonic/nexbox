@@ -24,7 +24,7 @@ type ClaudeAgent struct {
 func NewClaudeAgent() *ClaudeAgent {
 	return &ClaudeAgent{
 		CLIPath: "claude",
-		Verbose: true,
+		Verbose: false,
 	}
 }
 
@@ -215,10 +215,12 @@ func (a *ClaudeAgent) SendMessage(
 	// Parallel tool calls share the same message ID with identical usage data.
 	seenMessageIDs := make(map[string]bool)
 	var accInputTokens, accOutputTokens int
-	var hasPartialText, doneSent bool
+	var hasPartialText, hasPartialThinking, doneSent bool
 
 	resultSessionID, err := client.Query(budgetCtx, combinedPrompt, opts, func(msg StreamMessage, parsed *AssistantMessage) {
-		log.Printf("[claude-agent] Received: type=%s, subtype=%s, session=%s", msg.Type, msg.Subtype, msg.SessionID)
+		if msg.Type != "stream_event" {
+			log.Printf("[claude-agent] Received: type=%s, subtype=%s, session=%s", msg.Type, msg.Subtype, msg.SessionID)
+		}
 
 		switch msg.Type {
 		case "system":
@@ -328,17 +330,16 @@ func (a *ClaudeAgent) SendMessage(
 
 					case "thinking":
 						if content.Thinking != "" {
-							var thinkingMeta map[string]interface{}
-							if content.Signature != "" {
-								thinkingMeta = map[string]interface{}{"signature": content.Signature}
+							if hasPartialThinking {
+								// Thinking already streamed via stream_event deltas; skip to avoid duplication.
+							} else {
+								cb(StreamEvent{
+									Type:     EventThinking,
+									ToolID:   content.ID,
+									ToolName: "Thinking",
+									Content:  content.Thinking,
+								})
 							}
-							cb(StreamEvent{
-								Type:     EventThinking,
-								ToolID:   content.ID,
-								ToolName: "Thinking",
-								Content:  content.Thinking,
-								Metadata: thinkingMeta,
-							})
 						}
 
 					case "redacted_thinking":
@@ -353,8 +354,9 @@ func (a *ClaudeAgent) SendMessage(
 						log.Printf("[claude-agent] Unhandled content block type=%q id=%s", content.Type, content.ID)
 					}
 				}
-				// Reset partial-text flag after processing the complete assistant message.
+				// Reset partial flags after processing the complete assistant message.
 				hasPartialText = false
+				hasPartialThinking = false
 			}
 
 		case "user":
@@ -464,13 +466,20 @@ func (a *ClaudeAgent) SendMessage(
 					log.Printf("[claude-agent] Error data: %+v", msg.Data)
 				}
 
-				errMsg := buildErrorMessage(msg)
-				log.Printf("[claude-agent] Sending error event: %s", errMsg)
-				cb(StreamEvent{
-					Type:    EventError,
-					Content: errMsg,
-					IsError: true,
-				})
+				// If the context was already cancelled (user-initiated stop), the error
+				// result is caused by the interrupt — suppress it to avoid showing a
+				// spurious error in the UI. The caller handles the cancellation separately.
+				if budgetCtx.Err() != nil {
+					log.Printf("[claude-agent] Suppressing error after context cancel: %v", msg.Errors)
+				} else {
+					errMsg := buildErrorMessage(msg)
+					log.Printf("[claude-agent] Sending error event: %s", errMsg)
+					cb(StreamEvent{
+						Type:    EventError,
+						Content: errMsg,
+						IsError: true,
+					})
+				}
 			}
 
 			// Build metadata
@@ -483,12 +492,14 @@ func (a *ClaudeAgent) SendMessage(
 					metadata["outputTokens"] = int(v)
 				}
 			}
-			// Fallback: if result message has no usage data (unusual), use accumulated
-			// per-step tokens from assistant messages as best approximation.
-			if metadata["inputTokens"] == nil && metadata["outputTokens"] == nil && (accInputTokens > 0 || accOutputTokens > 0) {
+			// Fallback: use step-accumulated tokens when the result message has no usage
+			// or reports zero tokens (happens on interrupt — the API call was aborted).
+			resultIn, _ := metadata["inputTokens"].(int)
+			resultOut, _ := metadata["outputTokens"].(int)
+			if resultIn == 0 && resultOut == 0 && (accInputTokens > 0 || accOutputTokens > 0) {
 				metadata["inputTokens"] = accInputTokens
 				metadata["outputTokens"] = accOutputTokens
-				log.Printf("[claude-agent] result has no usage; using step-accumulated fallback: input=%d output=%d", accInputTokens, accOutputTokens)
+				log.Printf("[claude-agent] result has zero/no usage; using step-accumulated fallback: input=%d output=%d", accInputTokens, accOutputTokens)
 			}
 			if msg.TotalCostUSD > 0 {
 				metadata["totalCostUsd"] = msg.TotalCostUSD
@@ -512,26 +523,37 @@ func (a *ClaudeAgent) SendMessage(
 			})
 
 		case "stream_event":
-			// Partial message streaming: incremental text/thinking deltas arrive here
-			// before the complete assistant message. Only text_delta is handled;
-			// thinking comes from the complete assistant message (needs signature).
+			// Partial message streaming: incremental text and thinking deltas arrive here
+			// before the complete assistant message.
 			if len(msg.Event) > 0 {
 				var event struct {
 					Type  string `json:"type"`
 					Delta struct {
-						Type string `json:"type"`
-						Text string `json:"text"`
+						Type     string `json:"type"`
+						Text     string `json:"text"`
+						Thinking string `json:"thinking"`
 					} `json:"delta"`
 				}
-				if json.Unmarshal(msg.Event, &event) == nil &&
-					event.Type == "content_block_delta" &&
-					event.Delta.Type == "text_delta" &&
-					event.Delta.Text != "" {
-					hasPartialText = true
-					cb(StreamEvent{
-						Type:    EventTextDelta,
-						Content: event.Delta.Text,
-					})
+				if json.Unmarshal(msg.Event, &event) == nil && event.Type == "content_block_delta" {
+					switch event.Delta.Type {
+					case "text_delta":
+						if event.Delta.Text != "" {
+							hasPartialText = true
+							cb(StreamEvent{
+								Type:    EventTextDelta,
+								Content: event.Delta.Text,
+							})
+						}
+					case "thinking_delta":
+						if event.Delta.Thinking != "" {
+							hasPartialThinking = true
+							cb(StreamEvent{
+								Type:     EventThinking,
+								ToolName: "Thinking",
+								Content:  event.Delta.Thinking,
+							})
+						}
+					}
 				}
 			}
 

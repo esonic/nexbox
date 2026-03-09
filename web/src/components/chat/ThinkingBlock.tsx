@@ -9,13 +9,6 @@ interface ThinkingBlockProps {
   onLoadDetails?: () => Promise<boolean>;
 }
 
-function formatTokens(charCount: number): string {
-  const tokens = Math.round(charCount / 4);
-  if (tokens < 1000) return `${tokens} tokens`;
-  const k = tokens / 1000;
-  return k >= 10 ? `${Math.round(k)}k tokens` : `${k.toFixed(1)}k tokens`;
-}
-
 function dedent(text: string): string {
   const trimmed = text.replace(/^\n+/, "").replace(/\s+$/, "");
   const lines = trimmed.split("\n");
@@ -28,8 +21,6 @@ function dedent(text: string): string {
 export function ThinkingBlock({ content, isStreaming, onLoadDetails }: ThinkingBlockProps) {
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
-
-  const tokenLabel = content ? formatTokens(content.length) : "";
 
   const handleOpenChange = async (open: boolean) => {
     if (open && !content && onLoadDetails) {
@@ -59,9 +50,6 @@ export function ThinkingBlock({ content, isStreaming, onLoadDetails }: ThinkingB
         )}>
           {isStreaming ? "Thinking..." : "Thought"}
         </span>
-        {tokenLabel && (
-          <span className="text-muted-foreground/70 font-normal">{tokenLabel}</span>
-        )}
         <span className="ml-auto shrink-0">
           {loading ? (
             <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />

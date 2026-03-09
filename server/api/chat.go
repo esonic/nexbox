@@ -431,6 +431,13 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		toolIDToName := make(map[string]string)
 
 		eventHandler := func(event agent.StreamEvent) {
+			// When user stopped (context cancelled), suppress intermediate events so the
+			// frontend doesn't create a second assistant bubble. EventDone still passes
+			// through so token metadata gets captured for the final billing done event.
+			if ctx.Err() != nil && event.Type != agent.EventDone {
+				return
+			}
+
 			switch event.Type {
 			case agent.EventTextDelta:
 				appendText(event.Content)

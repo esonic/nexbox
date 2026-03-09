@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -515,5 +516,74 @@ func TestNoDuplicateEventDone(t *testing.T) {
 		t.Errorf("duplicate EventDone: got %d, want ≤ 1", doneCount)
 	} else {
 		t.Logf("✓ EventDone fired exactly %d time(s)", doneCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T7: Token fallback on interrupt-while-streaming
+// ---------------------------------------------------------------------------
+
+// TestInterruptWhileStreaming cancels after Claude has started generating text
+// (signalled by the first text_delta). Verifies:
+//  1. EventDone fires
+//  2. Token counts are non-zero (using step-accumulated fallback, not the
+//     zero-valued usage from the interrupted error result)
+func TestInterruptWhileStreaming(t *testing.T) {
+	clearClaudeEnv(t)
+	printSection(t, "T7: Interrupt while streaming — token fallback from accumulated tokens")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	firstDelta := make(chan struct{}, 1)
+	cancelOnce := sync.Once{}
+
+	a := newTestAgent()
+	var events []StreamEvent
+	start := time.Now()
+
+	_, err := a.SendMessage(ctx, Request{
+		ConversationID: "integ-interrupt-streaming-1",
+		WorkDir:        t.TempDir(),
+		Model:          "claude-haiku-4-5-20251001",
+		Message:        "Write a detailed 2000-word essay about the history of the internet.",
+	}, func(e StreamEvent) {
+		events = append(events, e)
+		t.Logf("  [event] %-16s content=%q elapsed=%.2fs",
+			e.Type, truncate(e.Content, 50), time.Since(start).Seconds())
+
+		// Cancel as soon as we receive the first text delta — Claude is streaming
+		if e.Type == EventTextDelta {
+			cancelOnce.Do(func() {
+				select {
+				case firstDelta <- struct{}{}:
+				default:
+				}
+				t.Log("  [test] >>> cancelling context (first text_delta received) <<<")
+				cancel()
+			})
+		}
+	})
+
+	done := doneEvent(events)
+
+	t.Logf("\n--- Result ---")
+	t.Logf("elapsed    : %.2fs", time.Since(start).Seconds())
+	t.Logf("err        : %v", err)
+	t.Logf("firstDelta : received=%v", len(firstDelta) > 0 || true)
+	if done != nil {
+		logMeta(t, done.Metadata)
+	}
+
+	if done == nil {
+		t.Fatal("EventDone not received")
+	}
+
+	in, _ := done.Metadata["inputTokens"].(int)
+	out, _ := done.Metadata["outputTokens"].(int)
+	if in == 0 && out == 0 {
+		t.Error("inputTokens and outputTokens are both 0 — accumulated token fallback did not fire")
+	} else {
+		t.Logf("✓ tokens non-zero after interrupt: input=%d output=%d", in, out)
 	}
 }

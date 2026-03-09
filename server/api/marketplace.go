@@ -89,6 +89,12 @@ func (s *Server) resolveInstalledMCPsAndMap(projectID string) ([]agentpkg.MCPSer
 			log.Printf("[marketplace] skip MCP %s: invalid manifest: %v", mcp.Name, err)
 			continue
 		}
+		// Skip entries with empty key — these are malformed (e.g. LSP configs
+		// accidentally stored as MCP manifests).
+		if entry.Key == "" {
+			log.Printf("[marketplace] skip MCP %s: manifest has empty key (not a valid MCP entry)", mcp.Name)
+			continue
+		}
 
 		// For HTTP MCPs that require auth injection (apikey, oauth_discovery, oauth),
 		// route through the local MCP proxy so Claude never handles tokens directly.
@@ -1100,6 +1106,7 @@ func (s *Server) ListInstalledPluginEntries(w http.ResponseWriter, r *http.Reque
 type InstallPluginEntryRequest struct {
 	Name        string `json:"name"`
 	InstallPath string `json:"install_path"` // absolute path to the plugin dir (in marketplace_dir)
+	LSPConfig   string `json:"lsp_config"`   // inline LSP config JSON (when install_path is not available)
 	ProjectID   string `json:"project_id"`   // "" = global
 }
 
@@ -1113,26 +1120,45 @@ func (s *Server) InstallPluginEntry(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Name == "" || req.InstallPath == "" {
-		writeError(w, http.StatusBadRequest, "name and install_path are required")
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	installPath := req.InstallPath
+	// For inline LSP entries (no install_path), synthesize a plugin directory
+	// containing a .lsp.json file so the Claude CLI can load it via --plugin-dir.
+	if installPath == "" && req.LSPConfig != "" {
+		dir := filepath.Join(s.DataDir, "lsp-plugins", req.Name)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create LSP plugin dir: "+err.Error())
+			return
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".lsp.json"), []byte(req.LSPConfig), 0644); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to write .lsp.json: "+err.Error())
+			return
+		}
+		installPath = dir
+	}
+	if installPath == "" {
+		writeError(w, http.StatusBadRequest, "install_path or lsp_config is required")
 		return
 	}
 	// Verify the install_path exists on disk
-	if _, err := os.Stat(req.InstallPath); os.IsNotExist(err) {
-		writeError(w, http.StatusBadRequest, "install_path does not exist: "+req.InstallPath)
+	if _, err := os.Stat(installPath); os.IsNotExist(err) {
+		writeError(w, http.StatusBadRequest, "install_path does not exist: "+installPath)
 		return
 	}
 	entry := store.InstalledPluginEntry{
 		Name:        req.Name,
 		ProjectID:   req.ProjectID,
-		InstallPath: req.InstallPath,
+		InstallPath: installPath,
 		InstalledAt: time.Now(),
 	}
 	if err := s.LocalStore.UpsertInstalledPluginEntry(entry); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	log.Printf("[marketplace] installed plugin: %s → %s (project=%q)", req.Name, req.InstallPath, req.ProjectID)
+	log.Printf("[marketplace] installed plugin: %s → %s (project=%q)", req.Name, installPath, req.ProjectID)
 	writeJSON(w, http.StatusOK, entry)
 }
 
