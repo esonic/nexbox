@@ -309,7 +309,22 @@ func (db *DB) migrate() error {
 			env_values   TEXT NOT NULL DEFAULT '{}',
 			package_id   TEXT NOT NULL DEFAULT '',
 			version      TEXT NOT NULL DEFAULT '',
+			auth_type    TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (name, project_id)
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
+			mcp_name       TEXT NOT NULL,
+			project_id     TEXT NOT NULL DEFAULT '',
+			access_token   TEXT NOT NULL DEFAULT '',
+			refresh_token  TEXT NOT NULL DEFAULT '',
+			expires_at     INTEGER NOT NULL DEFAULT 0,
+			token_endpoint TEXT NOT NULL DEFAULT '',
+			client_id      TEXT NOT NULL DEFAULT '',
+			state          TEXT NOT NULL DEFAULT '',
+			code_verifier  TEXT NOT NULL DEFAULT '',
+			updated_at     INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (mcp_name, project_id)
 		)`,
 
 		`CREATE TABLE IF NOT EXISTS installed_skills (

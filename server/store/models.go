@@ -564,17 +564,21 @@ type MarketplacePlugin struct {
 	ID          string   `json:"id"`
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
-	Type        string   `json:"type"`              // "mcp", "skill", or "plugin"
+	Type        string   `json:"type"`       // "mcp", "skill", "plugin", "lsp", "remote_git"
 	Version     string   `json:"version"`
 	Command     string   `json:"command,omitempty"` // for mcp servers (stdio)
 	Args        []string `json:"args,omitempty"`
 	EnvVars     []string `json:"env_vars,omitempty"` // required env var names
 	IconURL     string   `json:"icon_url,omitempty"`
-	Author      string   `json:"author,omitempty"`       // from plugin.json author.name or SKILL.md
-	Source      string   `json:"source,omitempty"`        // "custom", "skill", "plugin", "connector"
+	Author      string   `json:"author,omitempty"`
+	Category    string   `json:"category,omitempty"`  // "development", "productivity", etc.
+	Homepage    string   `json:"homepage,omitempty"`
+	Source      string   `json:"source,omitempty"`       // "custom", "skill", "plugin", "connector", "remote_git"
 	MCPConfig   string   `json:"mcp_config,omitempty"`   // raw .mcp.json content (JSON string)
-	AuthType    string   `json:"auth_type,omitempty"`     // "oauth", "apikey", "none" — derived from .mcp.json
-	InstallPath string   `json:"install_path,omitempty"` // absolute path on disk (for plugin --plugin-dir install)
+	LSPConfig   string   `json:"lsp_config,omitempty"`   // JSON: lspServers map (for lsp type)
+	AuthType    string   `json:"auth_type,omitempty"`    // "none", "apikey", "oauth_discovery", "oauth"
+	Components  []string `json:"components,omitempty"`   // ["mcp","commands","agents","hooks","skills","lsp"]
+	InstallPath string   `json:"install_path,omitempty"` // absolute path on disk
 }
 
 // ---------------------------------------------------------------------------

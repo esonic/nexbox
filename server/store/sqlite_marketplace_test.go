@@ -279,3 +279,200 @@ func TestUpsertInstalledSkill_Upsert(t *testing.T) {
 		t.Errorf("after upsert: %+v", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// MCPOAuthToken tests
+// ---------------------------------------------------------------------------
+
+func TestUpsertAndGetMCPOAuthToken(t *testing.T) {
+	s := newTestDB(t)
+
+	expiry := time.Now().Add(time.Hour).Truncate(time.Second)
+	tok := MCPOAuthToken{
+		MCPName:       "gitlab",
+		ProjectID:     "proj-1",
+		AccessToken:   "access-abc",
+		RefreshToken:  "refresh-xyz",
+		ExpiresAt:     expiry,
+		TokenEndpoint: "https://gitlab.com/oauth/token",
+		ClientID:      "client-123",
+		UpdatedAt:     time.Now().Truncate(time.Second),
+	}
+	if err := s.UpsertMCPOAuthToken(tok); err != nil {
+		t.Fatalf("UpsertMCPOAuthToken: %v", err)
+	}
+
+	got, err := s.GetMCPOAuthToken("gitlab", "proj-1")
+	if err != nil {
+		t.Fatalf("GetMCPOAuthToken: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil token")
+	}
+	if got.AccessToken != "access-abc" {
+		t.Errorf("AccessToken = %q, want access-abc", got.AccessToken)
+	}
+	if got.RefreshToken != "refresh-xyz" {
+		t.Errorf("RefreshToken = %q, want refresh-xyz", got.RefreshToken)
+	}
+	if !got.ExpiresAt.Equal(expiry) {
+		t.Errorf("ExpiresAt = %v, want %v", got.ExpiresAt, expiry)
+	}
+	if got.TokenEndpoint != "https://gitlab.com/oauth/token" {
+		t.Errorf("TokenEndpoint = %q", got.TokenEndpoint)
+	}
+}
+
+func TestGetMCPOAuthToken_NotFound(t *testing.T) {
+	s := newTestDB(t)
+	got, err := s.GetMCPOAuthToken("nonexistent", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil, got %+v", got)
+	}
+}
+
+func TestGetMCPOAuthTokenByState(t *testing.T) {
+	s := newTestDB(t)
+
+	// Pending flow: state + verifier set, no access token yet
+	pending := MCPOAuthToken{
+		MCPName:      "linear",
+		ProjectID:    "p",
+		State:        "random-state-123",
+		CodeVerifier: "verifier-abc",
+		UpdatedAt:    time.Now(),
+	}
+	if err := s.UpsertMCPOAuthToken(pending); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	got, err := s.GetMCPOAuthTokenByState("random-state-123")
+	if err != nil {
+		t.Fatalf("GetMCPOAuthTokenByState: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil")
+	}
+	if got.MCPName != "linear" || got.CodeVerifier != "verifier-abc" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestGetMCPOAuthTokenByState_NotFound(t *testing.T) {
+	s := newTestDB(t)
+	got, err := s.GetMCPOAuthTokenByState("bad-state")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil, got %+v", got)
+	}
+}
+
+func TestDeleteMCPOAuthToken(t *testing.T) {
+	s := newTestDB(t)
+	s.UpsertMCPOAuthToken(MCPOAuthToken{MCPName: "stripe", ProjectID: "", State: "s", UpdatedAt: time.Now()})
+
+	if err := s.DeleteMCPOAuthToken("stripe", ""); err != nil {
+		t.Fatalf("DeleteMCPOAuthToken: %v", err)
+	}
+	got, _ := s.GetMCPOAuthToken("stripe", "")
+	if got != nil {
+		t.Errorf("expected nil after delete, got %+v", got)
+	}
+}
+
+func TestUpsertMCPOAuthToken_Upsert(t *testing.T) {
+	s := newTestDB(t)
+
+	tok := MCPOAuthToken{MCPName: "stripe", ProjectID: "", AccessToken: "old-token", State: "s", UpdatedAt: time.Now()}
+	s.UpsertMCPOAuthToken(tok)
+
+	tok.AccessToken = "new-token"
+	tok.State = ""
+	if err := s.UpsertMCPOAuthToken(tok); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, _ := s.GetMCPOAuthToken("stripe", "")
+	if got.AccessToken != "new-token" {
+		t.Errorf("AccessToken after upsert = %q, want new-token", got.AccessToken)
+	}
+}
+
+func TestInstalledMCP_AuthType(t *testing.T) {
+	s := newTestDB(t)
+
+	mcp := InstalledMCP{
+		Name:      "gitlab-mcp",
+		ProjectID: "proj-1",
+		MCPKey:    "gitlab",
+		Manifest:  `{"type":"http","url":"https://gitlab.com/api/v4/mcp"}`,
+		EnvValues: `{}`,
+		AuthType:  "oauth_discovery",
+	}
+	if err := s.UpsertInstalledMCP(mcp); err != nil {
+		t.Fatalf("UpsertInstalledMCP: %v", err)
+	}
+	got, _ := s.GetInstalledMCP("gitlab-mcp", "proj-1")
+	if got.AuthType != "oauth_discovery" {
+		t.Errorf("AuthType = %q, want oauth_discovery", got.AuthType)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// InstalledPluginEntry tests
+// ---------------------------------------------------------------------------
+
+func TestUpsertAndListInstalledPluginEntries(t *testing.T) {
+	s := newTestDB(t)
+
+	e1 := InstalledPluginEntry{Name: "vim-mode", ProjectID: "proj-1", InstallPath: "/market/vim-mode", InstalledAt: time.Now()}
+	e2 := InstalledPluginEntry{Name: "git-helper", ProjectID: "", InstallPath: "/market/git-helper", InstalledAt: time.Now()}
+	s.UpsertInstalledPluginEntry(e1)
+	s.UpsertInstalledPluginEntry(e2)
+
+	// All
+	all, err := s.ListInstalledPluginEntries("*")
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("all = %d, want 2", len(all))
+	}
+
+	// Project-specific (should include global + proj-1)
+	proj, err := s.ListInstalledPluginEntries("proj-1")
+	if err != nil {
+		t.Fatalf("list proj-1: %v", err)
+	}
+	if len(proj) != 2 {
+		t.Errorf("proj-1 = %d, want 2 (global + project)", len(proj))
+	}
+
+	// Global only
+	global, err := s.ListInstalledPluginEntries("")
+	if err != nil {
+		t.Fatalf("list global: %v", err)
+	}
+	if len(global) != 1 || global[0].Name != "git-helper" {
+		t.Errorf("global = %v", global)
+	}
+}
+
+func TestDeleteInstalledPluginEntry(t *testing.T) {
+	s := newTestDB(t)
+	s.UpsertInstalledPluginEntry(InstalledPluginEntry{Name: "del-plugin", ProjectID: "p", InstallPath: "/x", InstalledAt: time.Now()})
+
+	if err := s.DeleteInstalledPluginEntry("del-plugin", "p"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	entries, _ := s.ListInstalledPluginEntries("p")
+	for _, e := range entries {
+		if e.Name == "del-plugin" {
+			t.Error("plugin still present after delete")
+		}
+	}
+}

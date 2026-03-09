@@ -89,7 +89,13 @@ func (s *Server) resolveInstalledMCPsAndMap(projectID string) ([]agentpkg.MCPSer
 			log.Printf("[marketplace] skip MCP %s: invalid manifest: %v", mcp.Name, err)
 			continue
 		}
-		if mcp.EnvValues != "" && mcp.EnvValues != "{}" {
+
+		// For HTTP MCPs that require auth injection (apikey, oauth_discovery, oauth),
+		// route through the local MCP proxy so Claude never handles tokens directly.
+		if entry.Type == "http" && (mcp.AuthType == "apikey" || mcp.AuthType == "oauth_discovery" || mcp.AuthType == "oauth") && s.ListenPort > 0 {
+			entry.URL = fmt.Sprintf("http://127.0.0.1:%d/mcp-proxy/%s", s.ListenPort, mcp.Name)
+			entry.Headers = nil // proxy injects auth; don't send stored headers to Claude
+		} else if mcp.EnvValues != "" && mcp.EnvValues != "{}" {
 			var envVals map[string]string
 			if json.Unmarshal([]byte(mcp.EnvValues), &envVals) == nil && len(envVals) > 0 {
 				for k, v := range envVals {
@@ -355,7 +361,7 @@ type claudePluginJSON struct {
 	} `json:"author"`
 }
 
-// loadClaudePlugin parses a .claude-plugin/plugin.json and optional .mcp.json.
+// loadClaudePlugin parses a .claude-plugin/plugin.json and enriches from the plugin dir.
 func loadClaudePlugin(pluginRoot, pluginJSONPath string) (*store.MarketplacePlugin, error) {
 	data, err := os.ReadFile(pluginJSONPath)
 	if err != nil {
@@ -375,37 +381,13 @@ func loadClaudePlugin(pluginRoot, pluginJSONPath string) (*store.MarketplacePlug
 		Description: meta.Description,
 		Version:     meta.Version,
 		Author:      meta.Author.Name,
-		Type:        "plugin",
-		Source:      "plugin",
-		InstallPath: pluginRoot,
 	}
-
-	// Check for .mcp.json — if present, this is an MCP plugin or connector.
-	mcpPath := filepath.Join(pluginRoot, ".mcp.json")
-	mcpData, err := os.ReadFile(mcpPath)
-	if err == nil {
-		p.MCPConfig = string(mcpData)
-		p.Type = "mcp"
-
-		// Determine source: connectors live under external_plugins/ dirs.
-		relFromRoot := pluginRoot
-		if strings.Contains(relFromRoot, "external_plugins") {
-			p.Source = "connector"
-		}
-
-		// Extract env_vars from template variables ${VAR_NAME} and detect auth type.
-		envVars, authType := parseMCPConfig(mcpData)
-		if len(envVars) > 0 {
-			p.EnvVars = envVars
-		}
-		p.AuthType = authType
-	}
-
+	enrichFromPluginDir(p, pluginRoot)
 	return p, nil
 }
 
-// marketplaceJSONFile is the schema for .claude-plugin/marketplace.json used by
-// third-party plugin repositories.
+// marketplaceJSONFile is the schema for .claude-plugin/marketplace.json.
+// The source field is polymorphic: a local path string or a remote-git object.
 type marketplaceJSONFile struct {
 	Name  string `json:"name"`
 	Owner struct {
@@ -415,20 +397,26 @@ type marketplaceJSONFile struct {
 		Description string `json:"description"`
 		Version     string `json:"version"`
 	} `json:"metadata"`
-	Plugins []struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Version     string `json:"version"`
-		Source      string `json:"source"` // relative path to command/skill file
-		Author      struct {
-			Name string `json:"name"`
-		} `json:"author"`
-		Tags []string `json:"tags"`
-	} `json:"plugins"`
+	Plugins []marketplaceJSONEntry `json:"plugins"`
 }
 
-// loadMarketplaceJSON parses a .claude-plugin/marketplace.json (third-party format).
-// Returns one MarketplacePlugin per entry in the "plugins" array.
+type marketplaceJSONEntry struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Version     string          `json:"version"`
+	Source      json.RawMessage `json:"source"` // string (local path) or {"source":"url","url":"..."}
+	Category    string          `json:"category"`
+	Homepage    string          `json:"homepage"`
+	Author      struct {
+		Name string `json:"name"`
+	} `json:"author"`
+	Tags       []string        `json:"tags"`
+	Skills     []string        `json:"skills"`      // skills-repo: list of relative skill paths
+	LSPServers json.RawMessage `json:"lspServers"`  // inline LSP server config
+}
+
+// loadMarketplaceJSON parses a .claude-plugin/marketplace.json and returns
+// one MarketplacePlugin per entry, with type/components/auth fully detected.
 func loadMarketplaceJSON(pluginRoot, path string) ([]store.MarketplacePlugin, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -445,8 +433,7 @@ func loadMarketplaceJSON(pluginRoot, path string) ([]store.MarketplacePlugin, er
 	repoName := filepath.Base(pluginRoot)
 	var result []store.MarketplacePlugin
 	for _, entry := range mf.Plugins {
-		name := entry.Name
-		if name == "" {
+		if entry.Name == "" {
 			continue
 		}
 		author := entry.Author.Name
@@ -454,33 +441,189 @@ func loadMarketplaceJSON(pluginRoot, path string) ([]store.MarketplacePlugin, er
 			author = mf.Owner.Name
 		}
 		p := store.MarketplacePlugin{
-			ID:          repoName + "-" + name,
-			Name:        name,
+			ID:          repoName + "-" + entry.Name,
+			Name:        entry.Name,
 			Description: entry.Description,
 			Version:     entry.Version,
 			Author:      author,
+			Category:    entry.Category,
+			Homepage:    entry.Homepage,
 			Type:        "plugin",
 			Source:      "plugin",
 		}
+
+		// LSP servers inline → type=lsp
+		if entry.LSPServers != nil && string(entry.LSPServers) != "null" {
+			p.Type = "lsp"
+			p.LSPConfig = string(entry.LSPServers)
+			p.Components = []string{"lsp"}
+			result = append(result, p)
+			continue
+		}
+
+		// Skills-repo format: skills array with local paths
+		if len(entry.Skills) > 0 {
+			p.Type = "skill"
+			p.Source = "skill"
+			// InstallPath points to pluginRoot; frontend/install uses skills paths individually
+			p.InstallPath = pluginRoot
+			p.Components = []string{"skills"}
+			result = append(result, p)
+			continue
+		}
+
+		// Resolve source field
+		if entry.Source == nil || string(entry.Source) == "null" || string(entry.Source) == `""` {
+			result = append(result, p)
+			continue
+		}
+
+		// Try string source first
+		var srcStr string
+		if json.Unmarshal(entry.Source, &srcStr) == nil {
+			if srcStr == "./" || srcStr == "." {
+				// Skills repo self-reference already handled above via Skills field
+				result = append(result, p)
+				continue
+			}
+			srcPath := filepath.Join(pluginRoot, filepath.FromSlash(strings.TrimPrefix(srcStr, "./")))
+			info, err := os.Stat(srcPath)
+			if err != nil {
+				// Path doesn't exist; keep as plugin without install path
+				result = append(result, p)
+				continue
+			}
+			if info.IsDir() {
+				enrichFromPluginDir(&p, srcPath)
+			} else if strings.HasSuffix(srcPath, ".md") {
+				// Direct command file
+				p.Type = "plugin"
+				p.Components = []string{"commands"}
+				p.InstallPath = filepath.Dir(srcPath)
+			}
+			result = append(result, p)
+			continue
+		}
+
+		// Try object source {"source": "url", "url": "..."}
+		var srcObj struct {
+			SrcType string `json:"source"`
+			URL     string `json:"url"`
+		}
+		if json.Unmarshal(entry.Source, &srcObj) == nil && srcObj.SrcType == "url" {
+			p.Type = "remote_git"
+			p.Source = "remote_git"
+			result = append(result, p)
+			continue
+		}
+
 		result = append(result, p)
 	}
 	return result, nil
 }
 
-// parseMCPConfig parses a .mcp.json file and extracts:
-//   - env_vars: template variable names from ${VAR_NAME} patterns in URLs and headers
-//   - authType: "oauth" if oauth config is present, "apikey" if env vars required, "none" otherwise
+// enrichFromPluginDir reads a plugin directory and fills in type, auth, and components.
+func enrichFromPluginDir(p *store.MarketplacePlugin, dir string) {
+	p.InstallPath = dir
+	components := detectPluginComponents(dir)
+	p.Components = components
+
+	// Check for .mcp.json
+	mcpPath := filepath.Join(dir, ".mcp.json")
+	if mcpData, err := os.ReadFile(mcpPath); err == nil {
+		p.MCPConfig = string(mcpData)
+		p.Type = "mcp"
+		p.Source = "connector"
+		envVars, authType := parseMCPConfig(mcpData)
+		p.EnvVars = envVars
+		p.AuthType = authType
+		return
+	}
+
+	// Check for .lsp.json
+	if lspData, err := os.ReadFile(filepath.Join(dir, ".lsp.json")); err == nil {
+		p.Type = "lsp"
+		p.LSPConfig = string(lspData)
+		return
+	}
+
+	// Default: plugin (commands/agents/hooks)
+	p.Type = "plugin"
+	p.Source = "plugin"
+}
+
+// detectPluginComponents inspects a plugin directory for its components.
+func detectPluginComponents(dir string) []string {
+	var components []string
+	if _, err := os.Stat(filepath.Join(dir, ".mcp.json")); err == nil {
+		components = append(components, "mcp")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".lsp.json")); err == nil {
+		components = append(components, "lsp")
+	}
+	if hasMarkdownFiles(filepath.Join(dir, "commands")) {
+		components = append(components, "commands")
+	}
+	if hasMarkdownFiles(filepath.Join(dir, "agents")) {
+		components = append(components, "agents")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hooks", "hooks.json")); err == nil {
+		components = append(components, "hooks")
+	}
+	if hasSkillDirs(filepath.Join(dir, "skills")) {
+		components = append(components, "skills")
+	}
+	return components
+}
+
+func hasMarkdownFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSkillDirs(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			if _, err := os.Stat(filepath.Join(dir, e.Name(), "SKILL.md")); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// parseMCPConfig parses a .mcp.json byte slice and extracts:
+//   - env_vars: template variable names from ${VAR_NAME} patterns
+//   - authType: "oauth" | "apikey" | "oauth_discovery" | "none"
+//
+// Auth type rules:
+//
+//	"oauth"           – explicit oauth field (e.g. Slack with clientId)
+//	"apikey"          – Authorization header or env var with ${VAR} placeholder
+//	"oauth_discovery" – HTTP/SSE URL with no auth headers (server advertises OAuth via RFC 9728)
+//	"none"            – stdio subprocess or URL with no auth needed
 func parseMCPConfig(data []byte) (envVars []string, authType string) {
-	// Find all ${VAR_NAME} template variables.
-	varSet := make(map[string]bool)
 	content := string(data)
-	for i := 0; i < len(content); i++ {
-		if i+1 < len(content) && content[i] == '$' && content[i+1] == '{' {
+	varSet := make(map[string]bool)
+	for i := 0; i+1 < len(content); i++ {
+		if content[i] == '$' && content[i+1] == '{' {
 			end := strings.Index(content[i:], "}")
 			if end > 0 {
-				varName := content[i+2 : i+end]
-				if varName != "" {
-					varSet[varName] = true
+				name := content[i+2 : i+end]
+				if name != "" && !strings.ContainsAny(name, " \t\n") {
+					varSet[name] = true
 				}
 			}
 		}
@@ -490,15 +633,60 @@ func parseMCPConfig(data []byte) (envVars []string, authType string) {
 	}
 	sort.Strings(envVars)
 
-	// Detect OAuth config.
-	authType = "none"
-	if strings.Contains(content, `"oauth"`) {
-		authType = "oauth"
-	} else if len(envVars) > 0 {
-		authType = "apikey"
+	// Parse JSON to classify per server.
+	// Support both {name: cfg} and {mcpServers: {name: cfg}} wrapper.
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawMap); err != nil {
+		if len(envVars) > 0 {
+			return envVars, "apikey"
+		}
+		return envVars, "none"
+	}
+	servers := rawMap
+	if inner, ok := rawMap["mcpServers"]; ok {
+		var innerMap map[string]json.RawMessage
+		if json.Unmarshal(inner, &innerMap) == nil {
+			servers = innerMap
+		}
 	}
 
-	return envVars, authType
+	for _, raw := range servers {
+		var cfg struct {
+			Command string                     `json:"command"`
+			URL     string                     `json:"url"`
+			Headers map[string]json.RawMessage `json:"headers"`
+			OAuth   json.RawMessage            `json:"oauth"`
+		}
+		if json.Unmarshal(raw, &cfg) != nil {
+			continue
+		}
+		if cfg.OAuth != nil && string(cfg.OAuth) != "null" {
+			return envVars, "oauth"
+		}
+		if cfg.URL != "" {
+			hasAuthHeader := false
+			for h := range cfg.Headers {
+				if strings.EqualFold(h, "authorization") || strings.EqualFold(h, "api-key") {
+					hasAuthHeader = true
+					break
+				}
+			}
+			if hasAuthHeader {
+				return envVars, "apikey"
+			}
+			return envVars, "oauth_discovery"
+		}
+		// stdio
+		if len(envVars) > 0 {
+			return envVars, "apikey"
+		}
+		return envVars, "none"
+	}
+
+	if len(envVars) > 0 {
+		return envVars, "apikey"
+	}
+	return envVars, "none"
 }
 
 // ListLocalPlugins handles GET /api/marketplace/plugins
@@ -614,6 +802,7 @@ type InstallMCPRequest struct {
 	Manifest  json.RawMessage   `json:"manifest"`   // MCPServerEntry as JSON object or string
 	Env       map[string]string `json:"env"`        // user-provided env secrets (e.g. API tokens)
 	ProjectID string            `json:"project_id"` // "" = global, else project-scoped
+	AuthType  string            `json:"auth_type"`  // "none","apikey","oauth_discovery","oauth"
 }
 
 func (s *Server) ListInstalledMCPs(w http.ResponseWriter, r *http.Request) {
@@ -740,6 +929,7 @@ func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
 		MCPKey:      mcpKey,
 		Manifest:    manifestStr,
 		EnvValues:   envValues,
+		AuthType:    req.AuthType,
 		InstalledAt: time.Now(),
 	}
 	if err := s.LocalStore.UpsertInstalledMCP(mcp); err != nil {

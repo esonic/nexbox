@@ -119,6 +119,7 @@ type Server struct {
 	Agents           map[string]agent.Agent // All available agents by name
 	SessionManager   *agent.SessionManager
 	MCPServerURL     string
+	ListenPort       int                      // HTTP listen port (for MCP proxy URL generation; distinct from MCPServerURL which is the internal nexmcp tools server)
 	Hub              *ChatHub                 // Hub for session chat messages
 	TerminalMgr      *TerminalManager         // tracks active PTY for run_in_terminal tool
 	DetailCache      *store.DetailCache       // local cache for full message part details
@@ -339,7 +340,20 @@ func NewRouter(s *Server) *chi.Mux {
 
 			// Marketplace (MCP & Skill registry)
 			s.RegisterMarketplaceRoutes(r)
+
+			// MCP OAuth: initiate OAuth flow for an installed MCP connector
+			r.Post("/connectors/{name}/oauth/start", s.HandleOAuthStart)
 		})
+
+		// OAuth callback: browser redirect target (public — no auth required)
+		r.Get("/connectors/oauth/callback", s.HandleOAuthCallback)
+	})
+
+	// MCP reverse proxy — outside /api so Claude can reach it without auth headers.
+	// Claude connects from localhost; no user auth needed here.
+	r.Route("/mcp-proxy/{name}", func(r chi.Router) {
+		r.HandleFunc("/", s.HandleMCPProxy)
+		r.HandleFunc("/{*}", s.HandleMCPProxy)
 	})
 
 	// pprof – goroutine dumps, heap profiles, etc.

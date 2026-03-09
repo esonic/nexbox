@@ -285,14 +285,39 @@ func TestParseMCPConfig_OAuth(t *testing.T) {
 	}
 }
 
-func TestParseMCPConfig_NoAuth(t *testing.T) {
+func TestParseMCPConfig_OAuthDiscovery(t *testing.T) {
+	// Linear: HTTP URL with no auth headers → server advertises OAuth via discovery
 	data := []byte(`{"linear":{"type":"http","url":"https://mcp.linear.app/mcp"}}`)
+	vars, authType := parseMCPConfig(data)
+	if authType != "oauth_discovery" {
+		t.Errorf("authType = %q, want oauth_discovery", authType)
+	}
+	if len(vars) != 0 {
+		t.Errorf("vars = %v, want empty", vars)
+	}
+}
+
+func TestParseMCPConfig_Stdio(t *testing.T) {
+	// context7: stdio subprocess with no env vars → none
+	data := []byte(`{"context7":{"command":"npx","args":["-y","@upstash/context7-mcp@latest"]}}`)
 	vars, authType := parseMCPConfig(data)
 	if authType != "none" {
 		t.Errorf("authType = %q, want none", authType)
 	}
 	if len(vars) != 0 {
 		t.Errorf("vars = %v, want empty", vars)
+	}
+}
+
+func TestParseMCPConfig_StdioWithEnv(t *testing.T) {
+	// greptile: stdio with env var → apikey
+	data := []byte(`{"greptile":{"command":"node","args":["greptile-mcp"],"env":{"GREPTILE_API_KEY":"${GREPTILE_API_KEY}"}}}`)
+	vars, authType := parseMCPConfig(data)
+	if authType != "apikey" {
+		t.Errorf("authType = %q, want apikey", authType)
+	}
+	if len(vars) != 1 || vars[0] != "GREPTILE_API_KEY" {
+		t.Errorf("vars = %v, want [GREPTILE_API_KEY]", vars)
 	}
 }
 

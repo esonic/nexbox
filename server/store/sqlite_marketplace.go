@@ -18,7 +18,24 @@ type InstalledMCP struct {
 	MCPKey      string    `json:"mcp_key"`      // server key used in mcpServers config
 	Manifest    string    `json:"manifest"`     // JSON: MCPServerEntry (key, type, cmd/url, args, env, tool_names)
 	EnvValues   string    `json:"env_values"`   // JSON: user-provided env secrets {"KEY": "value"} merged at runtime
+	AuthType    string    `json:"auth_type"`    // "none", "apikey", "oauth_discovery", "oauth"
 	InstalledAt time.Time `json:"installed_at"`
+}
+
+// MCPOAuthToken stores OAuth 2.0 tokens for an installed MCP connector.
+// Pending flows (before callback) have AccessToken="" and State set.
+type MCPOAuthToken struct {
+	MCPName       string    `json:"mcp_name"`
+	ProjectID     string    `json:"project_id"`
+	AccessToken   string    `json:"access_token"`
+	RefreshToken  string    `json:"refresh_token"`
+	ExpiresAt     time.Time `json:"expires_at"`      // zero = no expiry
+	TokenEndpoint string    `json:"token_endpoint"`  // for refresh
+	ClientID      string    `json:"client_id"`
+	// Transient OAuth flow fields (cleared after token exchange)
+	State        string `json:"state"`         // random state value
+	CodeVerifier string `json:"code_verifier"` // PKCE verifier
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // InstalledSkill holds install info for a locally installed skill package.
@@ -43,9 +60,9 @@ func (s *SQLiteStore) UpsertInstalledMCP(mcp InstalledMCP) error {
 		envValues = "{}"
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO installed_mcps (name, project_id, package_id, version, mcp_key, manifest, env_values, installed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(name, project_id) DO UPDATE SET package_id=excluded.package_id, version=excluded.version, mcp_key=excluded.mcp_key, manifest=excluded.manifest, env_values=excluded.env_values, installed_at=excluded.installed_at`,
-		mcp.Name, mcp.ProjectID, mcp.PackageID, mcp.Version, mcp.MCPKey, mcp.Manifest, envValues, ts,
+		`INSERT INTO installed_mcps (name, project_id, package_id, version, mcp_key, manifest, env_values, auth_type, installed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(name, project_id) DO UPDATE SET package_id=excluded.package_id, version=excluded.version, mcp_key=excluded.mcp_key, manifest=excluded.manifest, env_values=excluded.env_values, auth_type=excluded.auth_type, installed_at=excluded.installed_at`,
+		mcp.Name, mcp.ProjectID, mcp.PackageID, mcp.Version, mcp.MCPKey, mcp.Manifest, envValues, mcp.AuthType, ts,
 	)
 	return err
 }
@@ -57,7 +74,7 @@ func (s *SQLiteStore) DeleteInstalledMCP(name, projectID string) error {
 
 func (s *SQLiteStore) GetInstalledMCP(name, projectID string) (*InstalledMCP, error) {
 	row := s.db.QueryRow(
-		`SELECT name, project_id, package_id, version, mcp_key, manifest, env_values, installed_at FROM installed_mcps WHERE name = ? AND project_id = ?`,
+		`SELECT name, project_id, package_id, version, mcp_key, manifest, env_values, auth_type, installed_at FROM installed_mcps WHERE name = ? AND project_id = ?`,
 		name, projectID)
 	return scanInstalledMCP(row)
 }
@@ -74,13 +91,13 @@ func (s *SQLiteStore) ListInstalledMCPs(projectID string) ([]InstalledMCP, error
 	switch projectID {
 	case "*":
 		rows, err = s.db.Query(
-			`SELECT name, project_id, package_id, version, mcp_key, manifest, env_values, installed_at FROM installed_mcps ORDER BY name, project_id`)
+			`SELECT name, project_id, package_id, version, mcp_key, manifest, env_values, auth_type, installed_at FROM installed_mcps ORDER BY name, project_id`)
 	case "":
 		rows, err = s.db.Query(
-			`SELECT name, project_id, package_id, version, mcp_key, manifest, env_values, installed_at FROM installed_mcps WHERE project_id = '' ORDER BY name`)
+			`SELECT name, project_id, package_id, version, mcp_key, manifest, env_values, auth_type, installed_at FROM installed_mcps WHERE project_id = '' ORDER BY name`)
 	default:
 		rows, err = s.db.Query(
-			`SELECT name, project_id, package_id, version, mcp_key, manifest, env_values, installed_at FROM installed_mcps WHERE project_id IN ('', ?) ORDER BY name, project_id`,
+			`SELECT name, project_id, package_id, version, mcp_key, manifest, env_values, auth_type, installed_at FROM installed_mcps WHERE project_id IN ('', ?) ORDER BY name, project_id`,
 			projectID)
 	}
 	if err != nil {
@@ -105,7 +122,7 @@ type mcpScanner interface {
 func scanInstalledMCP(s mcpScanner) (*InstalledMCP, error) {
 	var m InstalledMCP
 	var ts int64
-	if err := s.Scan(&m.Name, &m.ProjectID, &m.PackageID, &m.Version, &m.MCPKey, &m.Manifest, &m.EnvValues, &ts); err != nil {
+	if err := s.Scan(&m.Name, &m.ProjectID, &m.PackageID, &m.Version, &m.MCPKey, &m.Manifest, &m.EnvValues, &m.AuthType, &ts); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -116,6 +133,75 @@ func scanInstalledMCP(s mcpScanner) (*InstalledMCP, error) {
 	}
 	m.InstalledAt = time.Unix(ts, 0)
 	return &m, nil
+}
+
+// ── MCP OAuth Tokens ──────────────────────────────────────────────────────────
+
+func (s *SQLiteStore) UpsertMCPOAuthToken(t MCPOAuthToken) error {
+	ts := t.UpdatedAt.Unix()
+	if ts <= 0 {
+		ts = time.Now().Unix()
+	}
+	expTs := t.ExpiresAt.Unix()
+	if t.ExpiresAt.IsZero() {
+		expTs = 0
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO mcp_oauth_tokens
+		   (mcp_name, project_id, access_token, refresh_token, expires_at, token_endpoint, client_id, state, code_verifier, updated_at)
+		   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(mcp_name, project_id) DO UPDATE SET
+		   access_token=excluded.access_token, refresh_token=excluded.refresh_token,
+		   expires_at=excluded.expires_at, token_endpoint=excluded.token_endpoint,
+		   client_id=excluded.client_id, state=excluded.state,
+		   code_verifier=excluded.code_verifier, updated_at=excluded.updated_at`,
+		t.MCPName, t.ProjectID, t.AccessToken, t.RefreshToken, expTs,
+		t.TokenEndpoint, t.ClientID, t.State, t.CodeVerifier, ts,
+	)
+	return err
+}
+
+func (s *SQLiteStore) GetMCPOAuthToken(mcpName, projectID string) (*MCPOAuthToken, error) {
+	row := s.db.QueryRow(
+		`SELECT mcp_name, project_id, access_token, refresh_token, expires_at, token_endpoint, client_id, state, code_verifier, updated_at
+		 FROM mcp_oauth_tokens WHERE mcp_name = ? AND project_id = ?`,
+		mcpName, projectID)
+	return scanMCPOAuthToken(row)
+}
+
+// GetMCPOAuthTokenByState finds a pending OAuth flow by state value.
+func (s *SQLiteStore) GetMCPOAuthTokenByState(state string) (*MCPOAuthToken, error) {
+	row := s.db.QueryRow(
+		`SELECT mcp_name, project_id, access_token, refresh_token, expires_at, token_endpoint, client_id, state, code_verifier, updated_at
+		 FROM mcp_oauth_tokens WHERE state = ?`,
+		state)
+	return scanMCPOAuthToken(row)
+}
+
+func (s *SQLiteStore) DeleteMCPOAuthToken(mcpName, projectID string) error {
+	_, err := s.db.Exec(`DELETE FROM mcp_oauth_tokens WHERE mcp_name = ? AND project_id = ?`, mcpName, projectID)
+	return err
+}
+
+type oauthTokenScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanMCPOAuthToken(s oauthTokenScanner) (*MCPOAuthToken, error) {
+	var t MCPOAuthToken
+	var expTs, updTs int64
+	if err := s.Scan(&t.MCPName, &t.ProjectID, &t.AccessToken, &t.RefreshToken, &expTs,
+		&t.TokenEndpoint, &t.ClientID, &t.State, &t.CodeVerifier, &updTs); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if expTs > 0 {
+		t.ExpiresAt = time.Unix(expTs, 0)
+	}
+	t.UpdatedAt = time.Unix(updTs, 0)
+	return &t, nil
 }
 
 // ── Skills ───────────────────────────────────────────────────────────────────

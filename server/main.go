@@ -249,6 +249,7 @@ func main() {
 		Agents:           allAgents,
 		SessionManager:   sessionManager,
 		MCPServerURL:     mcpServer.URL(),
+		ListenPort:       *port,
 		Hub:              hub,
 		TerminalMgr:      termMgr,
 		DetailCache:      detailCache,
