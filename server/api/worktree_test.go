@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"gitlab.okg.com/sre_ai/nexbox/config"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"gitlab.okg.com/sre_ai/boxnex/config"
+	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
-const testJWTSecret = "nexbox-test-secret"
+const testJWTSecret = "boxnex-test-secret"
 
 // makeTestJWT creates a signed JWT token for use in tests.
 func makeTestJWT(t *testing.T) string {

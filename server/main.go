@@ -16,12 +16,12 @@ import (
 	"time"
 
 	"github.com/rs/cors"
-	"gitlab.okg.com/sre_ai/nexbox/agent"
-	"gitlab.okg.com/sre_ai/nexbox/api"
-	"gitlab.okg.com/sre_ai/nexbox/config"
-	nexmcp "gitlab.okg.com/sre_ai/nexbox/mcp"
-	chromemcp "gitlab.okg.com/sre_ai/nexbox/mcp/chrome"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"gitlab.okg.com/sre_ai/boxnex/agent"
+	"gitlab.okg.com/sre_ai/boxnex/api"
+	"gitlab.okg.com/sre_ai/boxnex/config"
+	nexmcp "gitlab.okg.com/sre_ai/boxnex/mcp"
+	chromemcp "gitlab.okg.com/sre_ai/boxnex/mcp/chrome"
+	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
 // Version is injected at build time via -ldflags "-X main.Version=<timestamp>".
@@ -116,7 +116,7 @@ func main() {
 	// operator can see them in the terminal.  All other log.* calls (runtime
 	// logs in goroutines, API handlers, etc.) go to the file only.
 	var startupLog *log.Logger
-	logFile, logErr := newRollingLog(filepath.Join(*dataDir, "logs"), "beehub.log", 5<<20, 5)
+	logFile, logErr := newRollingLog(filepath.Join(*dataDir, "logs"), "boxnex.log", 5<<20, 5)
 	if logErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to init log file: %v; logging to stderr only\n", logErr)
 		startupLog = log.New(os.Stdout, "", log.LstdFlags)
@@ -126,7 +126,7 @@ func main() {
 		startupLog = log.New(io.MultiWriter(os.Stdout, logFile), "", log.LstdFlags)
 	}
 
-	startupLog.Printf("BeeHub node starting...")
+	startupLog.Printf("BoxNex starting...")
 	startupLog.Printf("  Data directory: %s", *dataDir)
 
 	// Detect first run before config is created
@@ -262,7 +262,7 @@ func main() {
 	if cfg.DockerEnabled {
 		dockerImage := cfg.DockerImage
 		if dockerImage == "" {
-			dockerImage = "nexbox-agent:latest"
+			dockerImage = "boxnex-agent:latest"
 		}
 		containerMgr := agent.NewContainerManager(cfg.DockerImage)
 		containerMgr.RecoverRunningContainers()
@@ -444,7 +444,7 @@ func main() {
 			}
 			w.Header().Set("Content-Type", "text/html")
 			fmt.Fprintf(w, `<!DOCTYPE html><html><body>
-				<h1>BeeHub API Server</h1>
+				<h1>BoxNex API Server</h1>
 				<p>Frontend not embedded. Run <code>build.sh</code> to build with embedded frontend.</p>
 				<p>API available at <a href="/api/projects">/api/projects</a></p>
 			</body></html>`)
@@ -492,7 +492,7 @@ func main() {
 	// 	startupLog.Printf("If the browser did not open, please visit: %s", appURL)
 	// 	go openBrowser(appURL)
 	// } else {
-	startupLog.Printf("BeeHub ready. Visit in browser: %s", appURL)
+	startupLog.Printf("BoxNex ready. Visit in browser: %s", appURL)
 	// }
 
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

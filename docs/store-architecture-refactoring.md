@@ -1,4 +1,4 @@
-# NexBox 统一 Store 架构重构
+# BoxNex 统一 Store 架构重构
 
 > 状态：已完成
 >
@@ -62,7 +62,7 @@ type Store interface {
 |---|---|
 | `server/config/config.go` | Config 结构体 + Manager（线程安全读写 JSON 文件） |
 
-**配置文件格式 (`~/.nexbox/config.json`)：**
+**配置文件格式 (`~/.boxnex/config.json`)：**
 
 ```json
 {
@@ -155,8 +155,8 @@ type Store interface {
 **main.go 改造：**
 
 ```
-./nexbox --port 9040                    # 本地模式（默认 --store sqlite）
-./nexbox --port 9040 --store remote     # 云模式
+./boxnex --port 9040                    # 本地模式（默认 --store sqlite）
+./boxnex --port 9040 --store remote     # 云模式
 ```
 
 - `--store sqlite`：初始化 SQLite DB + SQLiteStore（默认行为）

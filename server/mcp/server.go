@@ -12,8 +12,8 @@ import (
 
 	gomcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	gitlabpkg "gitlab.okg.com/sre_ai/nexbox/gitlab"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	gitlabpkg "gitlab.okg.com/sre_ai/boxnex/gitlab"
+	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
 // TerminalWriter abstracts writing commands to a session's terminal.
@@ -59,11 +59,11 @@ type ChromeEnabler interface {
 	EnableChrome(sessionID string) (mcpURL string, toolNames []string, err error)
 }
 
-// nexboxSessionKey is the context key used to carry the nexbox session ID
+// boxnexSessionKey is the context key used to carry the boxnex session ID
 // through MCP HTTP requests.
-type nexboxSessionKey struct{}
+type boxnexSessionKey struct{}
 
-// Server wraps the mcp-go MCP server with NexBox-specific tools
+// Server wraps the mcp-go MCP server with BoxNex-specific tools
 type Server struct {
 	mcpServer        *server.MCPServer
 	httpServer       *server.StreamableHTTPServer
@@ -90,7 +90,7 @@ func NewServer(s store.Store, addr string) *Server {
 
 	// Create MCP server
 	srv.mcpServer = server.NewMCPServer(
-		"BeeHub Asset Manager",
+		"BoxNex",
 		"1.0.0",
 		server.WithToolCapabilities(true),
 		server.WithRecovery(),
@@ -124,12 +124,12 @@ func (s *Server) Serve() error {
 		return fmt.Errorf("mcp: call Listen() before Serve()")
 	}
 	mux := http.NewServeMux()
-	// Wrap the MCP handler to inject the nexbox session ID (passed via ?session=
+	// Wrap the MCP handler to inject the boxnex session ID (passed via ?session=
 	// query param by the agent) into the request context so tool handlers can
 	// access it without requiring the AI to pass it explicitly.
 	mux.Handle("/mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if sid := r.URL.Query().Get("session"); sid != "" {
-			r = r.WithContext(context.WithValue(r.Context(), nexboxSessionKey{}, sid))
+			r = r.WithContext(context.WithValue(r.Context(), boxnexSessionKey{}, sid))
 		}
 		s.httpServer.ServeHTTP(w, r)
 	}))
@@ -216,7 +216,7 @@ func (s *Server) URL() string {
 	return fmt.Sprintf("http://%s/mcp", host)
 }
 
-// ToolNames returns the registered tool names with the "mcp__nexbox__" prefix,
+// ToolNames returns the registered tool names with the "mcp__boxnex__" prefix,
 // suitable for passing directly to Claude's allowed_tools list.
 func (s *Server) ToolNames() []string {
 	out := make([]string, len(s.toolNames))
@@ -228,7 +228,7 @@ func (s *Server) registerTools() {
 	// save_asset: Create or update an asset in a project
 	saveAssetTool := gomcp.NewTool("save_asset",
 		gomcp.WithDescription(
-			"Save a document/asset to the BeeHub platform. "+
+			"Save a document/asset to the platform. "+
 				"If an asset with the same title already exists in the project, "+
 				"a new version is created. Otherwise, a new asset is created. "+
 				"Use this tool whenever you produce a document such as a requirement doc, "+
@@ -311,9 +311,9 @@ func (s *Server) registerTools() {
 	// create_task: Create a new task
 	createTaskTool := gomcp.NewTool("create_task",
 		gomcp.WithDescription(
-			"Create a new task (like a Jira ticket) in BeeHub. "+
+			"Create a new task (like a Jira ticket). "+
 				"Use this when the user asks to create a task, track a piece of work. "+
-				"If you know the current project_id (from BeeHub context), pass it; otherwise omit it."),
+				"If you know the current project_id (from context), pass it; otherwise omit it."),
 		gomcp.WithString("project_id",
 			gomcp.Description("Optional project ID to associate the task with"),
 		),
@@ -350,7 +350,7 @@ func (s *Server) registerTools() {
 	// list_tasks: List tasks (top 20, most recent first)
 	listTasksTool := gomcp.NewTool("list_tasks",
 		gomcp.WithDescription(
-			"List tasks in BeeHub. Returns top 20 tasks sorted by most recently updated. "+
+			"List tasks. Returns top 20 tasks sorted by most recently updated. "+
 				"Returns task metadata (id, title, status, priority, assignee). "+
 				"Use this to see existing tasks or find tasks to reference."),
 		gomcp.WithString("status",
@@ -449,7 +449,7 @@ func (s *Server) registerTools() {
 			return handler(ctx, req)
 		}
 		s.mcpServer.AddTool(tool, wrapped)
-		s.toolNames = append(s.toolNames, "mcp__nexbox__"+name)
+		s.toolNames = append(s.toolNames, "mcp__boxnex__"+name)
 	}
 
 	// --- Workflow tools ---
@@ -1125,7 +1125,7 @@ func (s *Server) handleRunInTerminal(ctx context.Context, request gomcp.CallTool
 	}
 
 	// Get the session ID from context (injected via ?session= query param).
-	sessionID, _ := ctx.Value(nexboxSessionKey{}).(string)
+	sessionID, _ := ctx.Value(boxnexSessionKey{}).(string)
 
 	// Notify the frontend to open this session's terminal panel.
 	if s.changeNotifier != nil {
@@ -1303,7 +1303,7 @@ func (s *Server) handleExecuteWorkflow(ctx context.Context, request gomcp.CallTo
 }
 
 func (s *Server) handleEnableBrowserControl(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	sessionID, _ := ctx.Value(nexboxSessionKey{}).(string)
+	sessionID, _ := ctx.Value(boxnexSessionKey{}).(string)
 	if sessionID == "" {
 		return errorResult("session ID not found in request context; ensure the agent is configured correctly"), nil
 	}

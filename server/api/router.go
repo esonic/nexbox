@@ -9,10 +9,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"gitlab.okg.com/sre_ai/nexbox/agent"
-	"gitlab.okg.com/sre_ai/nexbox/config"
-	chromemcp "gitlab.okg.com/sre_ai/nexbox/mcp/chrome"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"gitlab.okg.com/sre_ai/boxnex/agent"
+	"gitlab.okg.com/sre_ai/boxnex/config"
+	chromemcp "gitlab.okg.com/sre_ai/boxnex/mcp/chrome"
+	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
 // ---------------------------------------------------------------------------

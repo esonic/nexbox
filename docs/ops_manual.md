@@ -1,4 +1,4 @@
-# BeeHub 运维手册
+# BoxNex 运维手册
 
 > 面向未来维护、部署本项目的工程师。
 
@@ -23,7 +23,7 @@
 
 ## 1. 项目概览
 
-BeeHub 是一个**多用户 AI Agent SaaS 平台**，允许多个用户独立使用 Claude 等 AI Agent 完成编程任务。
+BoxNex 是一个**多用户 AI Agent SaaS 平台**，允许多个用户独立使用 Claude 等 AI Agent 完成编程任务。
 
 | 组件 | 技术栈 |
 |------|--------|
@@ -72,8 +72,8 @@ BeeHub 是一个**多用户 AI Agent SaaS 平台**，允许多个用户独立使
 ### 3.1 准备环境（一键脚本）
 
 ```bash
-git clone <repo-url> beehub
-cd beehub
+git clone <repo-url> boxnex
+cd boxnex
 
 # 完整安装（Docker + Go + 构建镜像 + 生成 config.json）
 bash scripts/setup.sh
@@ -85,7 +85,7 @@ bash scripts/setup.sh --no-docker
 脚本会自动完成：
 - 安装 Docker Engine（处理 WSL2 iptables 兼容性）
 - 安装 Go 1.22.5
-- 构建 `nexbox-agent:latest` Docker 镜像
+- 构建 `boxnex-agent:latest` Docker 镜像
 - 生成 `server/data/config.json`（含随机 JWT secret，权限 0600）
 
 ### 3.2 编辑配置
@@ -104,7 +104,7 @@ vi server/data/config.json
   "anthropic_key": "sk-ant-...",
   "token_price_per_million": 15,
   "resend_api_key": "re_xxxx",
-  "resend_from": "BeeHub <noreply@box-nex.top>"
+  "resend_from": "BoxNex <noreply@box-nex.top>"
 }
 ```
 
@@ -116,13 +116,13 @@ vi server/data/config.json
 ./build.sh
 ```
 
-产物：`server/beehub`（单一二进制，前端已嵌入）
+产物：`server/boxnex`（单一二进制，前端已嵌入）
 
 ### 3.4 启动
 
 ```bash
 # 直接启动（前台，适合测试）
-server/beehub --data-dir server/data --port 9040
+server/boxnex --data-dir server/data --port 9040
 
 # 生产用 systemd（见下方）
 ```
@@ -149,10 +149,10 @@ server/beehub --data-dir server/data --port 9040
 | `anthropic_key` | string | — | Anthropic API Key，Agent 执行必填 |
 | `token_price_per_million` | float | `0` | 每百万 token 计费金额（用于余额折算显示） |
 | `resend_api_key` | string | — | Resend API Key，生产发邮件必填；空则验证码打到日志 |
-| `resend_from` | string | `BeeHub <noreply@box-nex.top>` | 发件人地址（需在 Resend 控制台验证域名） |
+| `resend_from` | string | `BoxNex <noreply@box-nex.top>` | 发件人地址（需在 Resend 控制台验证域名） |
 | `marketplace_dir` | string | `{datadir}/marketplace` | 本地插件目录路径，支持多种格式（见下方 Marketplace 章节） |
 | `docker_enabled` | bool | `false` | 是否启用 Docker 容器隔离 |
-| `docker_image` | string | `"nexbox-agent:latest"` | 容器镜像名 |
+| `docker_image` | string | `"boxnex-agent:latest"` | 容器镜像名 |
 | `cors_origins` | []string | — | 允许的 CORS 源，空则使用内置开发默认值 |
 | `disk_quota_bytes` | int | `0`（不限） | 用户磁盘配额 |
 | `max_concurrent_tasks` | int | `0`（不限） | 用户最大并发任务数 |
@@ -191,7 +191,7 @@ data/marketplace/
 
 ```json
 {
-  "marketplace_dir": "/opt/beehub/server/data/marketplace"
+  "marketplace_dir": "/opt/boxnex/server/data/marketplace"
 }
 ```
 
@@ -199,14 +199,14 @@ data/marketplace/
 
 ```bash
 # 首次设置
-mkdir -p /opt/beehub/server/data/marketplace
-cd /opt/beehub/server/data/marketplace
+mkdir -p /opt/boxnex/server/data/marketplace
+cd /opt/boxnex/server/data/marketplace
 git clone https://github.com/anthropics/skills
 git clone https://github.com/anthropics/claude-plugins-official
 
 # 后续更新（无需重启服务，刷新页面即可生效）
-cd /opt/beehub/server/data/marketplace/skills && git pull
-cd /opt/beehub/server/data/marketplace/claude-plugins-official && git pull
+cd /opt/boxnex/server/data/marketplace/skills && git pull
+cd /opt/boxnex/server/data/marketplace/claude-plugins-official && git pull
 ```
 
 Connector（外部服务连接器，如 GitHub、Slack 等）位于 `claude-plugins-official/external_plugins/` 下，会自动识别并归类到 Marketplace 的 Connectors 标签页。OAuth 类型的 Connector（如 Slack）当前标注为需要 OAuth，暂不支持安装。
@@ -218,16 +218,16 @@ Connector（外部服务连接器，如 GitHub、Slack 等）位于 `claude-plug
 ### 5.1 systemd 服务配置
 
 ```ini
-# /etc/systemd/system/beehub.service
+# /etc/systemd/system/boxnex.service
 [Unit]
-Description=BeeHub AI Agent Platform
+Description=BoxNex AI Agent Platform
 After=network.target
 
 [Service]
 Type=simple
-User=beehub
-WorkingDirectory=/opt/beehub
-ExecStart=/opt/beehub/server/beehub --data-dir /opt/beehub/server/data --port 9040
+User=boxnex
+WorkingDirectory=/opt/boxnex
+ExecStart=/opt/boxnex/server/boxnex --data-dir /opt/boxnex/server/data --port 9040
 Restart=on-failure
 RestartSec=5
 Environment=CLAUDE_CODE_OAUTH_TOKEN=<your-anthropic-token>
@@ -238,8 +238,8 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now beehub
-sudo systemctl status beehub
+sudo systemctl enable --now boxnex
+sudo systemctl status boxnex
 ```
 
 ### 5.2 nginx 反向代理（推荐）
@@ -247,10 +247,10 @@ sudo systemctl status beehub
 ```nginx
 server {
     listen 443 ssl;
-    server_name beehub.yourdomain.com;
+    server_name boxnex.yourdomain.com;
 
-    ssl_certificate     /etc/letsencrypt/live/beehub.yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/beehub.yourdomain.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/boxnex.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/boxnex.yourdomain.com/privkey.pem;
 
     location / {
         proxy_pass http://127.0.0.1:9040;
@@ -272,17 +272,17 @@ server {
 
 ### 5.3 查看日志
 
-日志文件位于 `--data-dir/logs/beehub.log`，滚动存储（单文件最大 5MB，保留 5 个）：
+日志文件位于 `--data-dir/logs/boxnex.log`，滚动存储（单文件最大 5MB，保留 5 个）：
 
 ```bash
-tail -f server/data/logs/beehub.log
+tail -f server/data/logs/boxnex.log
 # 或如果 data-dir 是 server/
-tail -f server/logs/beehub.log
+tail -f server/logs/boxnex.log
 ```
 
 **开发模式下查看验证码：**（未配置 `resend_api_key` 时验证码打到此日志）
 ```bash
-grep "Verification code" server/logs/beehub.log | tail -5
+grep "Verification code" server/logs/boxnex.log | tail -5
 ```
 
 ### 5.4 升级部署
@@ -290,25 +290,25 @@ grep "Verification code" server/logs/beehub.log | tail -5
 ```bash
 git pull
 ./build.sh
-sudo systemctl restart beehub
+sudo systemctl restart boxnex
 ```
 
-编译产物 `server/beehub` 包含嵌入的前端，无需单独部署静态文件。
+编译产物 `server/boxnex` 包含嵌入的前端，无需单独部署静态文件。
 
 ### 5.5 备份
 
 **SQLite 模式（单机）：**
 ```bash
 # 在线备份（SQLite 内置，安全）
-sqlite3 server/data/beehub.db ".backup /backup/beehub-$(date +%Y%m%d).db"
+sqlite3 server/data/boxnex.db ".backup /backup/boxnex-$(date +%Y%m%d).db"
 
 # 或直接拷贝（服务停止时）
-cp server/data/beehub.db /backup/
+cp server/data/boxnex.db /backup/
 ```
 
 **MySQL 模式：**
 ```bash
-mysqldump -u beehub -p beehub > /backup/beehub-$(date +%Y%m%d).sql
+mysqldump -u boxnex -p boxnex > /backup/boxnex-$(date +%Y%m%d).sql
 ```
 
 ---
@@ -322,7 +322,7 @@ mysqldump -u beehub -p beehub > /backup/beehub-$(date +%Y%m%d).sql
 nginx（反向代理，SSL 终止）
   │
   ▼
-server/beehub（Go 单二进制）
+server/boxnex（Go 单二进制）
   ├── 嵌入前端（React SPA，路由 /）
   ├── REST API（/api/...）
   │     ├── 公开路由：/api/info, /api/auth/login, /api/auth/register,
@@ -339,7 +339,7 @@ server/beehub（Go 单二进制）
           Claude CLI（agent/claude_cli.go）
               │  可选 docker exec
               ▼
-          nexbox-agent 容器（每个 project 一个）
+          boxnex-agent 容器（每个 project 一个）
 ```
 
 **鉴权流程：**
@@ -353,16 +353,16 @@ server/beehub（Go 单二进制）
 
 ### SQLite（默认，单机部署）
 
-数据库文件位于 `--data-dir/beehub.db`。
+数据库文件位于 `--data-dir/boxnex.db`。
 
 首次启动自动建表，后续启动自动做加列迁移（additive migration），**不会删除已有数据**。
 
 ```bash
 # 查看表结构
-sqlite3 server/data/beehub.db ".schema"
+sqlite3 server/data/boxnex.db ".schema"
 
 # 查看所有用户
-sqlite3 server/data/beehub.db "SELECT id, username, role, features FROM users;"
+sqlite3 server/data/boxnex.db "SELECT id, username, role, features FROM users;"
 ```
 
 ### MySQL（生产多实例）
@@ -370,7 +370,7 @@ sqlite3 server/data/beehub.db "SELECT id, username, role, features FROM users;"
 ```json
 {
   "store_type": "mysql",
-  "mysql_dsn": "beehub:password@tcp(127.0.0.1:3306)/beehub?parseTime=true&charset=utf8mb4"
+  "mysql_dsn": "boxnex:password@tcp(127.0.0.1:3306)/boxnex?parseTime=true&charset=utf8mb4"
 }
 ```
 
@@ -378,9 +378,9 @@ sqlite3 server/data/beehub.db "SELECT id, username, role, features FROM users;"
 
 ```sql
 -- 创建数据库和用户（MySQL 8.x）
-CREATE DATABASE beehub CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'beehub'@'localhost' IDENTIFIED BY 'strong-password';
-GRANT ALL PRIVILEGES ON beehub.* TO 'beehub'@'localhost';
+CREATE DATABASE boxnex CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'boxnex'@'localhost' IDENTIFIED BY 'strong-password';
+GRANT ALL PRIVILEGES ON boxnex.* TO 'boxnex'@'localhost';
 FLUSH PRIVILEGES;
 ```
 
@@ -399,10 +399,10 @@ FLUSH PRIVILEGES;
 
 ```bash
 # SQLite
-sqlite3 server/data/beehub.db "UPDATE users SET role='admin' WHERE username='user@example.com';"
+sqlite3 server/data/boxnex.db "UPDATE users SET role='admin' WHERE username='user@example.com';"
 
 # MySQL
-mysql -u beehub -p beehub -e "UPDATE users SET role='admin' WHERE username='user@example.com';"
+mysql -u boxnex -p boxnex -e "UPDATE users SET role='admin' WHERE username='user@example.com';"
 ```
 
 ### 功能位掩码（features）
@@ -438,7 +438,7 @@ curl -X POST http://localhost:9040/api/admin/recharge \
 
 ## 9. 邮件发送（Resend）
 
-BeeHub 使用 [Resend](https://resend.com) 发送注册验证码邮件。
+BoxNex 使用 [Resend](https://resend.com) 发送注册验证码邮件。
 
 ### 配置步骤
 
@@ -449,7 +449,7 @@ BeeHub 使用 [Resend](https://resend.com) 发送注册验证码邮件。
 ```json
 {
   "resend_api_key": "re_xxxx",
-  "resend_from": "BeeHub <noreply@box-nex.top>"
+  "resend_from": "BoxNex <noreply@box-nex.top>"
 }
 ```
 
@@ -458,7 +458,7 @@ BeeHub 使用 [Resend](https://resend.com) 发送注册验证码邮件。
 验证码会打印到日志文件，无需真实邮箱：
 
 ```bash
-grep "Verification code" server/logs/beehub.log | tail -3
+grep "Verification code" server/logs/boxnex.log | tail -3
 ```
 
 ### 限流规则
@@ -487,7 +487,7 @@ bash scripts/build-agent-image.sh
 ```json
 {
   "docker_enabled": true,
-  "docker_image": "nexbox-agent:latest"
+  "docker_image": "boxnex-agent:latest"
 }
 ```
 
@@ -526,7 +526,7 @@ cd server && go run . --data-dir ./data --port 9040
 或用已有脚本一次性编译并运行：
 ```bash
 ./build.sh          # 编译前端 + 后端
-server/beehub --data-dir server/data --port 9040
+server/boxnex --data-dir server/data --port 9040
 ```
 
 ### 本地开发模式（local mode）
@@ -538,7 +538,7 @@ server/beehub --data-dir server/data --port 9040
 无 Resend 配置时，验证码出现在日志里：
 
 ```bash
-tail -f server/logs/beehub.log | grep "Verification code"
+tail -f server/logs/boxnex.log | grep "Verification code"
 ```
 
 ### 运行单元测试
@@ -567,7 +567,7 @@ cd server && go test ./...
 
 **检查日志：**
 ```bash
-grep '"GET /ws"' server/logs/beehub.log | tail -10
+grep '"GET /ws"' server/logs/boxnex.log | tail -10
 ```
 
 **解决：** 退出登录重新登录，获取新 token。
@@ -597,7 +597,7 @@ docker info           # 检查 daemon 是否运行
 sudo service docker start  # WSL2 下手动启动
 
 # 检查镜像是否存在
-docker images | grep nexbox-agent
+docker images | grep boxnex-agent
 
 # 重新构建镜像
 bash scripts/build-agent-image.sh
@@ -609,7 +609,7 @@ bash scripts/build-agent-image.sh
 
 ```bash
 # 测试连接
-mysql -u beehub -p -h 127.0.0.1 beehub -e "SELECT 1"
+mysql -u boxnex -p -h 127.0.0.1 boxnex -e "SELECT 1"
 
 # 检查 DSN 格式（注意 parseTime=true 是必须的）
 # 正确格式："user:pass@tcp(host:3306)/dbname?parseTime=true&charset=utf8mb4"
@@ -621,7 +621,7 @@ mysql -u beehub -p -h 127.0.0.1 beehub -e "SELECT 1"
 
 **大部分配置修改需重启服务：**
 ```bash
-sudo systemctl restart beehub
+sudo systemctl restart boxnex
 ```
 
 **JWT secret 修改后**：所有已登录用户的 token 立即失效，需重新登录。
@@ -632,10 +632,10 @@ sudo systemctl restart beehub
 
 | 文件/目录 | 说明 |
 |----------|------|
-| `server/beehub` | 编译后的服务二进制 |
+| `server/boxnex` | 编译后的服务二进制 |
 | `server/data/config.json` | 运行时配置（权限 0600） |
-| `server/data/beehub.db` | SQLite 数据库 |
-| `server/data/logs/beehub.log` | 运行日志（滚动，5MB × 5个） |
+| `server/data/boxnex.db` | SQLite 数据库 |
+| `server/data/logs/boxnex.log` | 运行日志（滚动，5MB × 5个） |
 | `server/data/marketplace/` | 本地插件 JSON 文件目录 |
 | `scripts/setup.sh` | 一键环境初始化脚本 |
 | `build.sh` | 编译脚本（前端 + 后端） |

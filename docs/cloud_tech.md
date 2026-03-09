@@ -1,6 +1,6 @@
 # AI Agent Web 平台技术规格文档
 ## 概述
-基于现有 nexbox 代码库改造，构建一个多租户 AI Agent Web 平台。整体架构为：单个 Go 进程服务多用户，每个 Project 对应一个 Docker 容器运行 Agent，数据存储在本地 SQLite + 宿主机文件系统。
+基于现有 boxnex 代码库改造，构建一个多租户 AI Agent Web 平台。整体架构为：单个 Go 进程服务多用户，每个 Project 对应一个 Docker 容器运行 Agent，数据存储在本地 SQLite + 宿主机文件系统。
 ---
 ## 一、模块裁剪（移除/禁用）
 以下模块为内部专用，在改造版本中不对外暴露。原则是**不删代码，在路由注册和初始化处屏蔽**，保留后续可按需恢复的能力。
@@ -164,14 +164,14 @@ WHERE user_id = :uid
 ### 6.2 容器启动参数
 ```bash
 docker run -d \
-  --name nexbox-proj-<projectID> \
-  --network nexbox-egress \        # 出口受限网络（见 6.4）
+  --name boxnex-proj-<projectID> \
+  --network boxnex-egress \        # 出口受限网络（见 6.4）
   --pids-limit 100 \               # 防 fork 炸弹
   --memory 1g \
   --cpus 1.0 \
   -v /data/<userID>/<projectID>:/workspace:rw \   # project 文件，持久化
   -v /data/<userID>/claude-sessions:/root/.claude:rw \  # agent session 历史，持久化
-  nexbox-agent-image \
+  boxnex-agent-image \
   sleep infinity
 ```
 ### 6.3 文件持久化
@@ -188,7 +188,7 @@ docker run -d \
 - DB 拆分，除主要表外，大部分 session 相关的表需要拆分到独立的 sqlite db 文件，放在每个 session 的目录下，以提升性能、方便清理，实现时需考虑拆分粒度。目标是能用目录和文件组织的，就尽量少用 db
 - session 需要限制总数量，当多于 20 个未 trash 的 session 时，告诉用户不能再新建了
 ### 6.4 网络隔离
-创建专用 Docker 网络 `nexbox-egress`，通过 iptables OUTPUT 规则限制该网络出站流量：
+创建专用 Docker 网络 `boxnex-egress`，通过 iptables OUTPUT 规则限制该网络出站流量：
 - 允许：`api.anthropic.com`（claude CLI 需要访问）
 - 允许：DNS（53/udp）
 - 拒绝：其他所有出站连接
@@ -206,7 +206,7 @@ ContainerManager
 ```
 `claude_cli.go` 中将 `exec.Command("claude", ...)` 替换为通过 ContainerManager 的 `Exec` 方法执行 `docker exec`，stdin/stdout pipe 逻辑基本不变。
 ### 6.6 容器镜像
-维护一个 `nexbox-agent-image` 基础镜像：
+维护一个 `boxnex-agent-image` 基础镜像：
 - 基础：ubuntu 或 debian slim
 - 安装：Node.js、claude CLI（npm install -g @anthropic-ai/claude-code）
 - 跟随 claude CLI 版本更新镜像

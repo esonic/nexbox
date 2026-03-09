@@ -1,4 +1,4 @@
-# BeeHub E2E Test Cases
+# BoxNex E2E Test Cases
 
 > Based on completed tasks from todo.md, todo2.md, todo3.md.
 > URL: `http://localhost:9040` 
@@ -9,7 +9,7 @@
 
 ## Prerequisites
 
-- BeeHub server running (with valid Claude API key or mock)
+- BoxNex server running (with valid Claude API key or mock)
 - At least one user account available for login
 - Docker daemon running (for container-related tests)
 - `data/marketplace/` directory with sample plugin JSON, SKILL.md, and .claude-plugin files
@@ -598,7 +598,7 @@
 ### TC-18.1: Login page displayed when token missing
 
 **Steps:**
-1. Clear localStorage (remove `beehub_jwt`)
+1. Clear localStorage (remove `boxnex_jwt`)
 2. Navigate to app root
 
 **Expected:**
@@ -612,7 +612,7 @@
 2. Click Login
 
 **Expected:**
-- JWT token stored in `localStorage` as `beehub_jwt`
+- JWT token stored in `localStorage` as `boxnex_jwt`
 - App layout loads (sidebar + workspace)
 - User info available in app state
 
@@ -636,7 +636,7 @@
 **Expected:**
 - Token is cleared automatically
 - User is redirected to LoginModal
-- `beehub:logout` event is dispatched
+- `boxnex:logout` event is dispatched
 
 ---
 
@@ -658,7 +658,7 @@
 
 **Expected:**
 - Interface language updates immediately
-- Preference stored in `localStorage` as `beehub_lang`
+- Preference stored in `localStorage` as `boxnex_lang`
 - Sidebar labels, buttons, and hints reflect new language
 
 ---

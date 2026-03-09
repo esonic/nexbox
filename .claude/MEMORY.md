@@ -1,8 +1,8 @@
-# NexBox Project Memory
+# BoxNex Project Memory
 
 ## Architecture
 - Go backend (server/) + React frontend (web/src/)
-- BeeHub platform, Project ID: 8c4416a4-5889-4700-a51d-5a1bce50b6ea
+- BoxNex platform, Project ID: 8c4416a4-5889-4700-a51d-5a1bce50b6ea
 - server/main.go is the entry point; server/api/ has all HTTP handlers
 - CompositeStore routes sessions/messages to local SQLite, projects/tasks/assets to remote
 

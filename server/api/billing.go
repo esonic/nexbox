@@ -5,7 +5,7 @@ import (
 	"math"
 	"net/http"
 
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
 // balanceResponse extends UserBalance with a human-readable currency amount.

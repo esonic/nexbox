@@ -427,42 +427,42 @@ const toolRegistry: Record<string, ToolMeta> = {
     },
   },
 
-  // ── NexBox MCP tools (mcp__nexbox__ prefix from Claude) ──
-  "mcp__nexbox__save_asset":            { icon: Save,              label: tense("Saved asset", "Saving asset"), subtitle: (i) => {
+  // ── BoxNex MCP tools (mcp__boxnex__ prefix from Claude) ──
+  "mcp__boxnex__save_asset":            { icon: Save,              label: tense("Saved asset", "Saving asset"), subtitle: (i) => {
     const p = parseJSON(i); const t = (p.title as string) || ""; const ty = (p.type as string) || "";
     return t ? `${t}${ty ? ` (${ty})` : ""}` : "";
   }},
-  "mcp__nexbox__get_asset_content":     { icon: BookOpen,          label: tense("Read asset", "Reading asset"),             subtitle: textField("title") },
-  "mcp__nexbox__list_assets":           { icon: List,              label: tense("Listed assets", "Listing assets") },
-  "mcp__nexbox__list_asset_comments":   { icon: MessageSquareMore, label: tense("Listed comments", "Listing comments"),     subtitle: textField("asset_id") },
-  "mcp__nexbox__ask_question":          { icon: CircleHelp,        label: tense("Asked question", "Asking question"),       subtitle: textField("title"), renderInput: (i) => <QuestionPreview input={i} /> },
-  "mcp__nexbox__get_task":              { icon: BookOpen,          label: tense("Read task", "Reading task"),                subtitle: textField("task_id") },
-  "mcp__nexbox__list_tasks":            { icon: List,              label: tense("Listed tasks", "Listing tasks"),            subtitle: textField("status") },
-  "mcp__nexbox__create_task":           { icon: Sparkles,          label: tense("Created task", "Creating task"),            subtitle: textField("title") },
-  "mcp__nexbox__run_in_terminal":       { icon: SquareTerminal,    label: tense("Ran in terminal", "Running in terminal"),   subtitle: textField("command"), renderInput: (i) => <CommandBlock input={i} />, renderOutput: (o, err) => <TerminalOutput output={o} isError={err} /> },
-  "mcp__nexbox__get_gitlab_mr_comments": { icon: GitPullRequestArrow, label: tense("Fetched MR comments", "Fetching MR comments"), subtitle: textField("mr_url") },
+  "mcp__boxnex__get_asset_content":     { icon: BookOpen,          label: tense("Read asset", "Reading asset"),             subtitle: textField("title") },
+  "mcp__boxnex__list_assets":           { icon: List,              label: tense("Listed assets", "Listing assets") },
+  "mcp__boxnex__list_asset_comments":   { icon: MessageSquareMore, label: tense("Listed comments", "Listing comments"),     subtitle: textField("asset_id") },
+  "mcp__boxnex__ask_question":          { icon: CircleHelp,        label: tense("Asked question", "Asking question"),       subtitle: textField("title"), renderInput: (i) => <QuestionPreview input={i} /> },
+  "mcp__boxnex__get_task":              { icon: BookOpen,          label: tense("Read task", "Reading task"),                subtitle: textField("task_id") },
+  "mcp__boxnex__list_tasks":            { icon: List,              label: tense("Listed tasks", "Listing tasks"),            subtitle: textField("status") },
+  "mcp__boxnex__create_task":           { icon: Sparkles,          label: tense("Created task", "Creating task"),            subtitle: textField("title") },
+  "mcp__boxnex__run_in_terminal":       { icon: SquareTerminal,    label: tense("Ran in terminal", "Running in terminal"),   subtitle: textField("command"), renderInput: (i) => <CommandBlock input={i} />, renderOutput: (o, err) => <TerminalOutput output={o} isError={err} /> },
+  "mcp__boxnex__get_gitlab_mr_comments": { icon: GitPullRequestArrow, label: tense("Fetched MR comments", "Fetching MR comments"), subtitle: textField("mr_url") },
 
-  // ── NexBox MCP tools (nexbox/ prefix from Codex/Cursor) ──
-  "nexbox/save_asset":            { icon: Save,              label: tense("Saved asset", "Saving asset"), subtitle: (i) => {
+  // ── BoxNex MCP tools (boxnex/ prefix from Codex/Cursor) ──
+  "boxnex/save_asset":            { icon: Save,              label: tense("Saved asset", "Saving asset"), subtitle: (i) => {
     const p = parseJSON(i); const t = (p.title as string) || ""; const ty = (p.type as string) || "";
     return t ? `${t}${ty ? ` (${ty})` : ""}` : "";
   }},
-  "nexbox/get_asset_content":     { icon: BookOpen,          label: tense("Read asset", "Reading asset"),             subtitle: textField("title") },
-  "nexbox/list_assets":           { icon: List,              label: tense("Listed assets", "Listing assets") },
-  "nexbox/list_asset_comments":   { icon: MessageSquareMore, label: tense("Listed comments", "Listing comments"),     subtitle: textField("asset_id") },
-  "nexbox/ask_question":          { icon: CircleHelp,        label: tense("Asked question", "Asking question"),       subtitle: textField("title"), renderInput: (i) => <QuestionPreview input={i} /> },
-  "nexbox/get_task":              { icon: BookOpen,          label: tense("Read task", "Reading task"),                subtitle: textField("task_id") },
-  "nexbox/list_tasks":            { icon: List,              label: tense("Listed tasks", "Listing tasks"),            subtitle: textField("status") },
-  "nexbox/create_task":           { icon: Sparkles,          label: tense("Created task", "Creating task"),            subtitle: textField("title") },
-  "nexbox/run_in_terminal":       { icon: SquareTerminal,    label: tense("Ran in terminal", "Running in terminal"),   subtitle: textField("command"), renderInput: (i) => <CommandBlock input={i} />, renderOutput: (o, err) => <TerminalOutput output={o} isError={err} /> },
-  "nexbox/get_gitlab_mr_comments": { icon: GitPullRequestArrow, label: tense("Fetched MR comments", "Fetching MR comments"), subtitle: textField("mr_url") },
+  "boxnex/get_asset_content":     { icon: BookOpen,          label: tense("Read asset", "Reading asset"),             subtitle: textField("title") },
+  "boxnex/list_assets":           { icon: List,              label: tense("Listed assets", "Listing assets") },
+  "boxnex/list_asset_comments":   { icon: MessageSquareMore, label: tense("Listed comments", "Listing comments"),     subtitle: textField("asset_id") },
+  "boxnex/ask_question":          { icon: CircleHelp,        label: tense("Asked question", "Asking question"),       subtitle: textField("title"), renderInput: (i) => <QuestionPreview input={i} /> },
+  "boxnex/get_task":              { icon: BookOpen,          label: tense("Read task", "Reading task"),                subtitle: textField("task_id") },
+  "boxnex/list_tasks":            { icon: List,              label: tense("Listed tasks", "Listing tasks"),            subtitle: textField("status") },
+  "boxnex/create_task":           { icon: Sparkles,          label: tense("Created task", "Creating task"),            subtitle: textField("title") },
+  "boxnex/run_in_terminal":       { icon: SquareTerminal,    label: tense("Ran in terminal", "Running in terminal"),   subtitle: textField("command"), renderInput: (i) => <CommandBlock input={i} />, renderOutput: (o, err) => <TerminalOutput output={o} isError={err} /> },
+  "boxnex/get_gitlab_mr_comments": { icon: GitPullRequestArrow, label: tense("Fetched MR comments", "Fetching MR comments"), subtitle: textField("mr_url") },
 };
 
 function normalizeToolName(toolName: string): string {
-  // "mcp__nexbox__save_asset" → "save_asset"
+  // "mcp__boxnex__save_asset" → "save_asset"
   const mcpMatch = toolName.match(/^mcp__\w+__(.+)$/);
   if (mcpMatch) return mcpMatch[1];
-  // "nexbox/save_asset" or "provider/tool" → "save_asset"
+  // "boxnex/save_asset" or "provider/tool" → "save_asset"
   const slashIdx = toolName.indexOf("/");
   if (slashIdx >= 0) return toolName.slice(slashIdx + 1);
   return toolName;
@@ -471,13 +471,13 @@ function normalizeToolName(toolName: string): string {
 function getToolMeta(toolName: string): ToolMeta {
   if (toolRegistry[toolName]) return toolRegistry[toolName];
 
-  // Try normalized form: strip mcp__nexbox__ or nexbox/ prefix
+  // Try normalized form: strip mcp__boxnex__ or boxnex/ prefix
   const normalized = normalizeToolName(toolName);
   if (normalized !== toolName) {
-    // Try "mcp__nexbox__<normalized>" and "nexbox/<normalized>" forms
-    const mcpKey = `mcp__nexbox__${normalized}`;
+    // Try "mcp__boxnex__<normalized>" and "boxnex/<normalized>" forms
+    const mcpKey = `mcp__boxnex__${normalized}`;
     if (toolRegistry[mcpKey]) return toolRegistry[mcpKey];
-    const slashKey = `nexbox/${normalized}`;
+    const slashKey = `boxnex/${normalized}`;
     if (toolRegistry[slashKey]) return toolRegistry[slashKey];
     // Try normalized as direct key (e.g. "save_asset" might not exist, but "Read" would)
     if (toolRegistry[normalized]) return toolRegistry[normalized];

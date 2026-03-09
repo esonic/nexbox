@@ -5,7 +5,7 @@ import (
 	"log"
 	"net/http"
 
-	"gitlab.okg.com/sre_ai/nexbox/config"
+	"gitlab.okg.com/sre_ai/boxnex/config"
 )
 
 // HandleAuthLogout clears the stored token.

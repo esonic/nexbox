@@ -53,8 +53,8 @@ type MindmapRef struct {
 func BuildStaticContext(project ProjectInfo, sessionID string) string {
 	var sb strings.Builder
 
-	sb.WriteString("[BeeHub Platform Context]\n")
-	sb.WriteString("You are working within the BeeHub development platform.\n\n")
+	sb.WriteString("[BoxNex Platform Context]\n")
+	sb.WriteString("You are working within the BoxNex development platform.\n\n")
 
 	sb.WriteString(fmt.Sprintf("Project: %s\n", project.Name))
 	if project.Description != "" {
@@ -67,7 +67,7 @@ func BuildStaticContext(project ProjectInfo, sessionID string) string {
 	sb.WriteString(fmt.Sprintf("Working Directory: %s\n", project.GitRepoPath))
 
 	sb.WriteString("\n[Guidelines]\n")
-	sb.WriteString(fmt.Sprintf("- Use BeeHub MCP tools for asset/task management (project_id: %s)\n", project.ID))
+	sb.WriteString(fmt.Sprintf("- Use BoxNex MCP tools for asset/task management (project_id: %s)\n", project.ID))
 	sb.WriteString("- Respond in user's language\n")
 	sb.WriteString("- Work within the project directory\n")
 
@@ -177,7 +177,7 @@ func BuildPrompt(staticContext, dynamicContext, message string, isNewSession boo
 func BuildBrainstormPrompt(project *ProjectInfo, mindmap *MindmapRef) string {
 	var sb strings.Builder
 
-	sb.WriteString("[BeeHub Brainstorm Mode]\n")
+	sb.WriteString("[BoxNex Brainstorm Mode]\n")
 	sb.WriteString("You are a brainstorming partner helping to explore, analyze and expand ideas from a mindmap.\n\n")
 
 	if project != nil {

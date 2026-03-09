@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
 // ---------------------------------------------------------------------------

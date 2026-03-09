@@ -470,7 +470,7 @@ export const useAppStore = create<AppState>()(
   setBalance: (tokens, cny) => set({ balanceTokens: tokens, balanceCny: cny }),
 }),
     {
-      name: "nexbox-app",
+      name: "boxnex-app",
       // Persist activeSessionId to remember which session was last selected
       partialize: (state) => ({
         activeSessionId: state.activeSessionId,

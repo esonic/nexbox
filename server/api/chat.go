@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"gitlab.okg.com/sre_ai/nexbox/agent"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"gitlab.okg.com/sre_ai/boxnex/agent"
+	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
 var upgrader = websocket.Upgrader{
@@ -867,7 +867,7 @@ func (s *Server) getOrCreateUnassignedProject() (*Project, error) {
 		}
 	}
 
-	tmpDir := filepath.Join(s.DataDir, "nexbox-unassigned")
+	tmpDir := filepath.Join(s.DataDir, "boxnex-unassigned")
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
 		return nil, err
 	}

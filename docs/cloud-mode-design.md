@@ -1,8 +1,8 @@
-# NexBox 云模式概要设计
+# BoxNex 云模式概要设计
 
 ## 1. 背景与目标
 
-NexBox 目前作为纯本地应用运行，所有数据存储在 SQLite 中。需要支持两种运行模式：
+BoxNex 目前作为纯本地应用运行，所有数据存储在 SQLite 中。需要支持两种运行模式：
 
 - **本地模式（Local）**：当前行为，数据存于本地 SQLite，完全自包含
 - **云模式（Cloud）**：连接远程存储服务，**仅数据存取**走远程，其余所有能力（Agent 执行、WebSocket/Chat、MCP 等）仍在本地运行
@@ -72,10 +72,10 @@ NexBox 目前作为纯本地应用运行，所有数据存储在 SQLite 中。�
 
 ```bash
 # 本地模式（默认，当前行为）
-./nexbox --port 9040 --data-dir ~/.nexbox
+./boxnex --port 9040 --data-dir ~/.boxnex
 
 # 云模式，连接远程存储服务（server_url 和 token 从 config.json 读取）
-./nexbox --port 9040 --store remote
+./boxnex --port 9040 --store remote
 ```
 
 命令行参数：
@@ -85,7 +85,7 @@ NexBox 目前作为纯本地应用运行，所有数据存储在 SQLite 中。�
 | `--store` | `sqlite` | 存储后端类型：`sqlite` / `remote` |
 | `--data-dir` | `.` | SQLite 数据目录（仅 sqlite 模式） |
 
-当 `--store remote` 时即为"云模式"，本地不使用 SQLite，不读取本地数据库。云模式所需的 `server_url` 和 `token` 必须在 `~/.nexbox/config.json` 中手动配置（参见 5.4 节）。
+当 `--store remote` 时即为"云模式"，本地不使用 SQLite，不读取本地数据库。云模式所需的 `server_url` 和 `token` 必须在 `~/.boxnex/config.json` 中手动配置（参见 5.4 节）。
 
 ---
 
@@ -248,7 +248,7 @@ RemoteStore 在构造时注入 `server_url` 和 `token`，所有请求自动携�
 
 ## 4. 远程存储服务设计（独立服务）
 
-> 本章描述的远程存储服务是一个**独立的 REST API 服务**，可以用 Go 实现（复用 MySQLStore），也可以用 Java 等其他语言独立实现。设计上与 NexBox 主程序解耦，仅通过 HTTP API 交互。
+> 本章描述的远程存储服务是一个**独立的 REST API 服务**，可以用 Go 实现（复用 MySQLStore），也可以用 Java 等其他语言独立实现。设计上与 BoxNex 主程序解耦，仅通过 HTTP API 交互。
 
 ### 4.1 服务职责
 
@@ -271,12 +271,12 @@ RemoteStore 在构造时注入 `server_url` 和 `token`，所有请求自动携�
 远程存储服务作为独立项目部署（推荐使用 Java/Spring Boot 实现，详见第 15 章），部署到 k8s 集群：
 
 - 独立的 REST API 服务 + Token 鉴权中间件 + MySQL 数据库连接
-- 不运行 Agent、MCP、ChatHub 等 NexBox 业务逻辑
+- 不运行 Agent、MCP、ChatHub 等 BoxNex 业务逻辑
 - Go 侧通过 `RemoteStore` HTTP 客户端与之交互
 
 ### 4.3 REST API 设计
 
-API 前缀：`/api/v1`（独立版本号，与 NexBox 主 API 区分）
+API 前缀：`/api/v1`（独立版本号，与 BoxNex 主 API 区分）
 
 #### 4.3.1 鉴权
 
@@ -533,13 +533,13 @@ API 前缀：`/api/v1`（独立版本号，与 NexBox 主 API 区分）
 
 云模式下，虽然业务数据全部存储在远程，但本地仍需要保存**本地路径与远程项目的对应关系**。这个信息天然属于本地（不同机器路径不同、同一仓库可能克隆多份），不适合存到远端。
 
-**使用 JSON 配置文件**：`~/.nexbox/config.json`，用户可以直接用文本编辑器查看和修改（例如本地目录 mv 了，改一下路径即可）。
+**使用 JSON 配置文件**：`~/.boxnex/config.json`，用户可以直接用文本编辑器查看和修改（例如本地目录 mv 了，改一下路径即可）。
 
 #### 配置文件格式
 
 ```json
 {
-  "server_url": "https://nexbox-api.example.com",
+  "server_url": "https://boxnex-api.example.com",
   "token": "nex_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
   "projects": [
     {
@@ -720,7 +720,7 @@ WHERE id = ? AND version = ?
 1. 管理员在数据库中创建 `namespaces` 记录
 2. 管理员生成 token（随机字符串），将其哈希写入 `tokens` 表，绑定 namespace + user_name
 3. 将明文 token 分发给对应团队成员
-4. 团队成员将 token 配置到本地 `~/.nexbox/config.json` 的 `token` 字段
+4. 团队成员将 token 配置到本地 `~/.boxnex/config.json` 的 `token` 字段
 5. 所有请求自动携带 token，服务端解析得到身份
 
 ### 8.2 Token 格式
@@ -825,7 +825,7 @@ nex_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
 解析命令行参数
     │
     ▼
-初始化 SQLiteStore (data-dir/nexbox.db)
+初始化 SQLiteStore (data-dir/boxnex.db)
     │
     ▼
 启动 MCP Server
@@ -852,7 +852,7 @@ nex_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
 解析命令行参数 (--store remote)
     │
     ▼
-加载本地 config.json (~/.nexbox/config.json)
+加载本地 config.json (~/.boxnex/config.json)
     │  - 读取 server_url 和 token（缺失则报错退出）
     │  - 读取已添加的项目映射列表
     │  - 若文件不存在则报错退出，提示用户先配置
@@ -904,7 +904,7 @@ nex_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
   "mode": "cloud",
   "namespace": "sre-team",
   "user": "eric",
-  "server_url": "https://nexbox-api.example.com",
+  "server_url": "https://boxnex-api.example.com",
   "version": "1.0.0"
 }
 ```
@@ -1070,7 +1070,7 @@ server/
 
 - **MySQLStore / `--mysql-dsn`**：当前阶段由 Java 服务端管理 MySQL。终极架构阶段会在 Go 侧实现（见第 16 章）
 - **`dataservice/` Go 模块 / `--mode serve`**：远程存储服务由 Java 独立实现
-- **settings SQLite 表**：已删除，所有配置使用 `~/.nexbox/config.json`
+- **settings SQLite 表**：已删除，所有配置使用 `~/.boxnex/config.json`
 - **connect 包 / WebSocket 资源通知**：已删除，共享数据变更通过 changes 表轮询
 
 ---
@@ -1101,7 +1101,7 @@ server/
 ### 15.1 总体架构
 
 ```
-NexBox Go Server                       Java Data Service
+BoxNex Go Server                       Java Data Service
 ┌────────────────┐    HTTP/JSON        ┌─────────────────┐
 │  RemoteStore   │ ─── /api/v1/* ───▶  │  REST Controller │
 │  (HTTP Client) │ ◀── JSON Response── │  + MySQL Storage │
@@ -1638,7 +1638,7 @@ CREATE TABLE changes (
 
 ## 16 终极架构远景：全云端单体 Go 服务
 
-> 本章描述一个长远目标——当 AI Agent（Claude Code、Codex 等）全部迁移到云端运行时，NexBox 可以演进为一个**单一 Go 进程**，同时承担 AI 执行、数据存储、Web 服务的全部职责，不再需要独立的 Java 存储服务。
+> 本章描述一个长远目标——当 AI Agent（Claude Code、Codex 等）全部迁移到云端运行时，BoxNex 可以演进为一个**单一 Go 进程**，同时承担 AI 执行、数据存储、Web 服务的全部职责，不再需要独立的 Java 存储服务。
 
 ### 16.1 架构对比
 

@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/nexbox/agent"
-	"gitlab.okg.com/sre_ai/nexbox/gitlab"
+	"gitlab.okg.com/sre_ai/boxnex/agent"
+	"gitlab.okg.com/sre_ai/boxnex/gitlab"
 )
 
 // --- Types ---

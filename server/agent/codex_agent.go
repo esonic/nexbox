@@ -21,7 +21,7 @@ import (
 // to the unified StreamEvent protocol.
 type CodexAgent struct {
 	CLIPath      string // Path to codex CLI binary (default: "codex")
-	MCPServerURL string // Optional: URL of the NexBox MCP server
+	MCPServerURL string // Optional: URL of the BoxNex MCP server
 	Verbose      bool   // Enable verbose logging
 
 	urlMCPChecked bool // whether we've probed URL-based MCP support
@@ -75,7 +75,7 @@ type codexItem struct {
 	Arguments json.RawMessage `json:"arguments,omitempty"` // arguments (can be object or string)
 	Output    json.RawMessage `json:"output,omitempty"`    // function output (can be object or string)
 	// MCP tool call fields
-	Server string          `json:"server,omitempty"` // MCP server label (e.g. "nexbox")
+	Server string          `json:"server,omitempty"` // MCP server label (e.g. "boxnex")
 	Tool   string          `json:"tool,omitempty"`   // MCP tool name (e.g. "ask_question")
 	Result json.RawMessage `json:"result,omitempty"` // MCP tool result
 	Error  json.RawMessage `json:"error,omitempty"`  // MCP tool error
@@ -536,7 +536,7 @@ func (a *CodexAgent) appendMCPArgs(args []string, conversationID string) []strin
 	if conversationID != "" {
 		url += "?session=" + conversationID
 	}
-	return append(args, "-c", fmt.Sprintf("mcp_servers.nexbox.url=%q", url))
+	return append(args, "-c", fmt.Sprintf("mcp_servers.boxnex.url=%q", url))
 }
 
 // appendChromeMCPArgs appends Chrome DevTools MCP server configuration flags to args.

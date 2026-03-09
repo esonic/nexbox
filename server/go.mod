@@ -1,4 +1,4 @@
-module gitlab.okg.com/sre_ai/nexbox
+module gitlab.okg.com/sre_ai/boxnex
 
 go 1.24.0
 

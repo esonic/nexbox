@@ -1,6 +1,6 @@
-# nexbox-agent — lightweight per-project isolation container
+# boxnex-agent — lightweight per-project isolation container
 #
-# Build:  docker build -f Dockerfile.agent -t nexbox-agent:latest .
+# Build:  docker build -f Dockerfile.agent -t boxnex-agent:latest .
 # Or use: scripts/build-agent-image.sh
 #
 # This image is NOT the server image. It is the sandbox container that
@@ -29,5 +29,5 @@ RUN claude --version
 WORKDIR /workspace
 
 # The container is kept alive by the ContainerManager using:
-#   docker run -d --rm -v <repoPath>:/workspace -w /workspace nexbox-agent:latest tail -f /dev/null
+#   docker run -d --rm -v <repoPath>:/workspace -w /workspace boxnex-agent:latest tail -f /dev/null
 # No ENTRYPOINT or CMD is needed here; the manager passes the command explicitly.

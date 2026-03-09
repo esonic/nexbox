@@ -22,9 +22,9 @@ done
 set -- "${EXTRA_ARGS[@]}"
 
 if [ "$MODE" = "dev" ]; then
-  (cd server && go build -o beehub . && exec ./beehub --listen "$LISTEN" --port "$PORT" "$@") &
+  (cd server && go build -o boxnex . && exec ./boxnex --listen "$LISTEN" --port "$PORT" "$@") &
   (cd web && exec npx vite --host "$LISTEN" --port "$VITE_PORT") &
   wait
 else
-  cd server && exec ./beehub --listen "$LISTEN" --port "$PORT" "$@"
+  cd server && exec ./boxnex --listen "$LISTEN" --port "$PORT" "$@"
 fi

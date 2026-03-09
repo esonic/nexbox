@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	agentpkg "gitlab.okg.com/sre_ai/nexbox/agent"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	agentpkg "gitlab.okg.com/sre_ai/boxnex/agent"
+	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
 // ---------------------------------------------------------------------------

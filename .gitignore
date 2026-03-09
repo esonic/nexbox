@@ -1,6 +1,5 @@
 # Go
-server/nexbox
-server/beehub
+server/boxnex
 server/logs/
 *.exe
 proxy/proxy

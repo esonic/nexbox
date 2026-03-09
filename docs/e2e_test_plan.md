@@ -1,4 +1,4 @@
-# BeeHub E2E 测试计划
+# BoxNex E2E 测试计划
 
 目标服务器：http://localhost:9040
 测试方式：Chrome MCP 控制浏览器 + curl，端到端验证
@@ -11,7 +11,7 @@
 
 | ID | 操作 | 预期结果 |
 |----|------|---------|
-| A1 | POST /api/auth/send-verification {email:"admin@test.dev"} | 200 {ok:true}，验证码写入 logs/beehub.log |
+| A1 | POST /api/auth/send-verification {email:"admin@test.dev"} | 200 {ok:true}，验证码写入 logs/boxnex.log |
 | A2 | POST /api/auth/register {email, password:"password123", code} | 201，返回 token（第一个用户自动成为 admin） |
 | A3 | POST /api/auth/register 同邮箱再注册 | 409 email already registered |
 | A4 | POST /api/auth/register {email, password:"short", code} 密码过短 | 400 |
@@ -104,7 +104,7 @@
 
 | 功能 | 前提 |
 |------|------|
-| Docker 容器生命周期 | 需要 Docker daemon + nexbox-agent 镜像 |
+| Docker 容器生命周期 | 需要 Docker daemon + boxnex-agent 镜像 |
 | Agent 执行（WebSocket 聊天） | 需要 Anthropic API Key |
 | WebSocket 终端 | PTY 环境 |
 | Token 计费全链路 | 需要 agent 实际执行 |

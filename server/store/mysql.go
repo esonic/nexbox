@@ -16,7 +16,7 @@ type MySQLStore struct {
 }
 
 // NewMySQLStore creates a new MySQLStore.
-// dsn example: "user:pass@tcp(127.0.0.1:3306)/nexbox?parseTime=true&charset=utf8mb4"
+// dsn example: "user:pass@tcp(127.0.0.1:3306)/boxnex?parseTime=true&charset=utf8mb4"
 func NewMySQLStore(dsn string) (*MySQLStore, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {

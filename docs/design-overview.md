@@ -1,4 +1,4 @@
-# NexBox：AI 驱动的一站式研发平台 — 概要设计
+# BoxNex：AI 驱动的一站式研发平台 — 概要设计
 
 > 版本：0.3
 >
@@ -44,7 +44,7 @@ Cursor 不会是终点 — 它只是把 AI 嵌入了 VS Code 框架。未来的"
 
 ### 2.1 目标
 
-构建一个**基于 Web 的、AI 驱动的一站式研发平台**（代号：NexBox）：
+构建一个**基于 Web 的、AI 驱动的一站式研发平台**（代号：BoxNex）：
 
 1. 通过 AI 串联研发全流程 — 从需求到设计、编码、测试、Review、变更管理。
 2. 提供统一透明的协作空间，所有研发资产可见可共享。
@@ -203,7 +203,7 @@ AI 在会话中可以访问：
 
 - 变更单配置（应用 ID、服务 ID、环境 ID 等）存储在 Project.Extra 中，按项目维度配置。
 - AI 根据项目资产（设计文档、代码变更等）填充变更单各字段，通过 OKOne API 提交。
-- 变更单创建后由 Leader 在 OKOne 系统中完成审批，发布过程不在 NexBox 范围内。
+- 变更单创建后由 Leader 在 OKOne 系统中完成审批，发布过程不在 BoxNex 范围内。
 
 变更单主要自动填充字段：
 
@@ -569,7 +569,7 @@ Golang 的选择基于可移植性和部署简易性：
 ### 场景三：飞书快速交互
 
 1. 在飞书中发送消息（格式：`[项目ID前8位] 帮我看一下任务描述，分析一下技术方案`）。
-2. NexBox 云端收到消息，路由到对应项目会话，AI 处理后回复结果。
+2. BoxNex 云端收到消息，路由到对应项目会话，AI 处理后回复结果。
 3. 复杂操作（如代码 Review、多轮对话）转到 Web 端完成。
 
 ### 场景四：本地精细化开发
@@ -620,7 +620,7 @@ Golang 的选择基于可移植性和部署简易性：
 
 | 参考项                 | 地址                                                       | 相关性                                     |
 | ---------------------- | ---------------------------------------------------------- | ------------------------------------------ |
-| MCP (Model Context Protocol) | https://modelcontextprotocol.io                    | AI 工具调用协议规范，NexBox MCP 服务实现基础 |
+| MCP (Model Context Protocol) | https://modelcontextprotocol.io                    | AI 工具调用协议规范，BoxNex MCP 服务实现基础 |
 | MCP-Go SDK             | https://github.com/mark3labs/mcp-go                        | Go 语言 MCP 服务端实现                      |
 | 1code                  | https://github.com/21st-dev/1code                          | Web 前端设计参考                            |
 | Daytona                | https://www.daytona.io/                                    | 云端开发环境参考（沙箱规划参考）              |

@@ -20,20 +20,20 @@ type ContainerManager struct {
 }
 
 // NewContainerManager creates a ContainerManager using the given image.
-// If image is empty, it defaults to "nexbox-agent:latest".
+// If image is empty, it defaults to "boxnex-agent:latest".
 func NewContainerManager(image string) *ContainerManager {
 	if image == "" {
-		image = "nexbox-agent:latest"
+		image = "boxnex-agent:latest"
 	}
 	return &ContainerManager{image: image, lastActivity: make(map[string]time.Time)}
 }
 
-// RecoverRunningContainers scans for existing nexbox-proj-* containers and seeds
+// RecoverRunningContainers scans for existing boxnex-proj-* containers and seeds
 // the lastActivity map so the idle reaper can track them after a server restart.
 func (m *ContainerManager) RecoverRunningContainers() {
 	out, err := exec.Command(
 		"docker", "ps",
-		"--filter", "name=nexbox-proj-",
+		"--filter", "name=boxnex-proj-",
 		"--format", "{{.Names}}",
 	).Output()
 	if err != nil {
@@ -73,7 +73,7 @@ func containerName(projectID string) string {
 		h := sha256.Sum256([]byte(projectID))
 		id = fmt.Sprintf("%x", h[:8]) // 16 hex chars, unique enough
 	}
-	return "nexbox-proj-" + id
+	return "boxnex-proj-" + id
 }
 
 // EnsureContainer ensures a container for the given project is running.
@@ -174,7 +174,7 @@ func (m *ContainerManager) StopIdleContainers(maxIdle time.Duration) int {
 		// pid may be a projectID (normal tracking) or a container name
 		// (recovered after restart). Derive the docker name accordingly.
 		name := pid
-		if !strings.HasPrefix(pid, "nexbox-proj-") {
+		if !strings.HasPrefix(pid, "boxnex-proj-") {
 			name = containerName(pid)
 		}
 		out, err := exec.Command("docker", "stop", name).CombinedOutput()

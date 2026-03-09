@@ -6,7 +6,7 @@ import type {
 
 const API_BASE = "/api";
 
-const TOKEN_KEY = "beehub_jwt";
+const TOKEN_KEY = "boxnex_jwt";
 export function getToken(): string | null { return localStorage.getItem(TOKEN_KEY); }
 export function setToken(t: string): void  { localStorage.setItem(TOKEN_KEY, t); }
 export function clearToken(): void         { localStorage.removeItem(TOKEN_KEY); }
@@ -23,7 +23,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (res.status === 401) {
     clearToken();
-    window.dispatchEvent(new Event("beehub:logout"));
+    window.dispatchEvent(new Event("boxnex:logout"));
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));

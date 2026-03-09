@@ -1,4 +1,4 @@
-# BeeHub 待办任务列表（第三轮）
+# BoxNex 待办任务列表（第三轮）
 
 > 整理时间：2026-03-08。基于 todo2.md 检查后的剩余未实现项。
 
@@ -40,7 +40,7 @@
 **实现思路**（二选一）：
 
 1. **Docker 自定义网络 + iptables**
-   - 创建 `--network=beehub-isolated` 网络
+   - 创建 `--network=boxnex-isolated` 网络
    - 宿主机 iptables OUTPUT chain 限制容器子网的目标 IP
    - 白名单域名通过 config 配置，定期 DNS 解析更新 iptables 规则
 
@@ -104,7 +104,7 @@
 **现状**：
 - Task/Asset/Workflow/Terminal 面板受 `userFeatures` 位掩码控制
 - 但后端传给 Claude 的工具列表未联动 features 位掩码
-- NexBox MCP server 未配置时全部不可见
+- BoxNex MCP server 未配置时全部不可见
 
 **目标**：
 - **T5.1**：根据 features 位掩码过滤传给 Claude 的工具列表（如 `features & 1 == 0` 则不注册 task 相关工具）
@@ -130,7 +130,7 @@
 **目标**：
 1. 引入 `react-i18next`
 2. 创建 `web/src/i18n/zh.json` + `en.json`
-3. 语言偏好存 `localStorage`（`beehub_lang`）
+3. 语言偏好存 `localStorage`（`boxnex_lang`）
 4. 登录界面右上角 + Settings 页提供切换
 5. 可分批迁移（先登录界面和主导航）
 

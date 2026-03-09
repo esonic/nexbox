@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sergi/go-diff/diffmatchpatch"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
 func (s *Server) ListAssets(w http.ResponseWriter, r *http.Request) {

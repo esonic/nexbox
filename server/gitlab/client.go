@@ -43,7 +43,7 @@ type ProjectInfo struct {
 	DefaultBranch string `json:"default_branch"`
 }
 
-// NewHTTPClient returns an *http.Client that respects NEXBOX_GITLAB_PROXY
+// NewHTTPClient returns an *http.Client that respects BOXNEX_GITLAB_PROXY
 // (format: host:port@user:pass). Shared by both the GitLab Client and MCP tools.
 func NewHTTPClient() *http.Client {
 	transport := &http.Transport{}

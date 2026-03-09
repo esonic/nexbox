@@ -1,4 +1,4 @@
-# BeeHub 待办任务列表（第四轮）
+# BoxNex 待办任务列表（第四轮）
 
 > 整理时间：2026-03-09。基于 todo3.md 检查后的剩余未实现项，并新增本轮任务。
 
@@ -45,7 +45,7 @@
 **实现思路**（二选一）：
 
 1. **Docker 自定义网络 + iptables**
-   - 创建 `--network=beehub-isolated` 网络
+   - 创建 `--network=boxnex-isolated` 网络
    - 宿主机 iptables OUTPUT chain 限制容器子网的目标 IP
    - 白名单域名通过 config 配置，定期 DNS 解析更新 iptables 规则
 

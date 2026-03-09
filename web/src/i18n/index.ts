@@ -3,7 +3,7 @@ import { initReactI18next } from "react-i18next";
 import zh from "./zh.json";
 import en from "./en.json";
 
-const LANG_KEY = "beehub_lang";
+const LANG_KEY = "boxnex_lang";
 
 i18n.use(initReactI18next).init({
   resources: {

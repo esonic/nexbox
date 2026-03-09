@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"gitlab.okg.com/sre_ai/nexbox/agent"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"gitlab.okg.com/sre_ai/boxnex/agent"
+	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -609,7 +609,7 @@ func buildHookPrompt(userPrompt, nodeOutput string) string {
 
 const hookAgentTimeout = 60 * time.Second
 
-// runEphemeralAgent performs a one-shot agent call without creating a Nexbox session.
+// runEphemeralAgent performs a one-shot agent call without creating a BoxNex session.
 // The agent is resolved by name (falling back to the server default). The call
 // always starts a fresh underlying conversation (SessionID = "").
 func (s *Server) runEphemeralAgent(ctx context.Context, agentName, workDir, prompt string) (string, error) {

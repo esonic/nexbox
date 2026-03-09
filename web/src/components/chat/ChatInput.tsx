@@ -28,7 +28,7 @@ export interface AttachedImage {
   url?: string;
 }
 
-const DRAFT_KEY_PREFIX = "nexbox-draft:";
+const DRAFT_KEY_PREFIX = "boxnex-draft:";
 
 const AGENT_LABELS: Record<string, string> = {
   claude: "Claude Code",

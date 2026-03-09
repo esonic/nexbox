@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-// Config holds all local-only configuration persisted to ~/.nexbox/config.json.
+// Config holds all local-only configuration persisted to ~/.boxnex/config.json.
 type Config struct {
 	DefaultAgent string           `json:"default_agent"`
 	Token        string           `json:"token,omitempty"`
@@ -25,7 +25,7 @@ type Config struct {
 
 	// Email — used for sending verification codes via Resend (resend.com)
 	ResendAPIKey string `json:"resend_api_key,omitempty"` // e.g. "re_xxxx"
-	ResendFrom   string `json:"resend_from,omitempty"`    // e.g. "BeeHub <noreply@yourdomain.com>"
+	ResendFrom   string `json:"resend_from,omitempty"`    // e.g. "BoxNex <noreply@yourdomain.com>"
 
 	MarketplaceDir string `json:"marketplace_dir,omitempty"` // default "/marketplace"
 
@@ -39,7 +39,7 @@ type Config struct {
 
 	// Docker container isolation
 	DockerEnabled bool   `json:"docker_enabled,omitempty"` // enable per-project Docker isolation
-	DockerImage   string `json:"docker_image,omitempty"`   // container image (default: "nexbox-agent:latest")
+	DockerImage   string `json:"docker_image,omitempty"`   // container image (default: "boxnex-agent:latest")
 
 	// CORS allowed origins (e.g. ["http://localhost:5173"]). Falls back to
 	// built-in dev defaults when empty.

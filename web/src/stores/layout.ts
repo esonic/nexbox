@@ -63,7 +63,7 @@ export const useLayoutStore = create<LayoutState>()(
       setSidebarWidth: (width) => set({ sidebarWidth: width }),
     }),
     {
-      name: "nexbox-layout",
+      name: "boxnex-layout",
       partialize: (state) => ({
         rightPanel: state.rightPanel,
         panelWidth: state.panelWidth,

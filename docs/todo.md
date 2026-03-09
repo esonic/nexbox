@@ -1,4 +1,4 @@
-# BeeHub 待办任务列表
+# BoxNex 待办任务列表
 
 > 整理时间：2026-03-08。每项包含：现状、还需做什么、大致实现思路。
 
@@ -92,7 +92,7 @@ data/marketplace/
 ```
 
 **T3.2 网络白名单**：容器只允许访问 Claude API 及特定域名，其他地址（含 localhost 其他端口）一律禁止。实现方式：
-- 创建自定义 Docker network（`--network=beehub-isolated`）
+- 创建自定义 Docker network（`--network=boxnex-isolated`）
 - 容器内 iptables 规则或宿主机 iptables OUTPUT chain 限制目标 IP
 - 白名单域名列表通过 config 配置，定期 DNS 解析更新 iptables 规则
 - 或使用 HTTP 代理（squid/tinyproxy）作为容器唯一出口，代理层做域名白名单
@@ -130,7 +130,7 @@ data/marketplace/
 - `ask_question` **已有完整实现**：`ToolCallCard.tsx` 特殊渲染，聊天中显示为交互卡片
 - Task/Asset/Workflow/Terminal 面板受 `userFeatures` 位掩码（bit 0-3）控制
 - 后端传给 Claude 的工具列表由 MCP server 配置决定，尚未联动 features 位掩码
-- **当前工具不显示的机制**：NexBox MCP server 未配置（`MCPServerURL` 为空），所以 `claude_agent.go` 不注册任何 MCP 工具。`ask_question` 等工具是 MCP 工具集的一部分，MCP server 整体未启用时全部不可见
+- **当前工具不显示的机制**：BoxNex MCP server 未配置（`MCPServerURL` 为空），所以 `claude_agent.go` 不注册任何 MCP 工具。`ask_question` 等工具是 MCP 工具集的一部分，MCP server 整体未启用时全部不可见
 
 ### 还需做什么
 
@@ -224,7 +224,7 @@ GET  /api/projects/{projectId}/files/download?path=src/main.go
 
 1. 引入 `react-i18next`
 2. 创建 `web/src/i18n/zh.json` + `en.json`
-3. 语言偏好存 **localStorage**（`beehub_lang`），不是 config.json
+3. 语言偏好存 **localStorage**（`boxnex_lang`），不是 config.json
 4. 登录界面右上角 + Settings 页提供切换
 5. 工作量大，可分批迁移（先登录界面和主导航）
 
@@ -271,7 +271,7 @@ GET  /api/projects/{projectId}/files/download?path=src/main.go
 
 ### 现状
 
-`ChatInput.tsx` 有 slash command 菜单（`/design`、`/revise`、`/code`、`/review`、`/e2e_test`）和 `@` mention（task/asset/workflow），都是 BeeHub 自定义功能。
+`ChatInput.tsx` 有 slash command 菜单（`/design`、`/revise`、`/code`、`/review`、`/e2e_test`）和 `@` mention（task/asset/workflow），都是 BoxNex 自定义功能。
 
 ### 还需做什么
 
@@ -308,7 +308,7 @@ GET  /api/projects/{projectId}/files/download?path=src/main.go
 
 ### 现状
 
-Claude CLI 通过 `ask_question` 工具可以向用户展示交互式选择界面（多选项 + 自由输入 + "Chat about this"）。当前 BeeHub 的 `ToolCallCard.tsx` 已有 `ask_question` 的渲染实现。
+Claude CLI 通过 `ask_question` 工具可以向用户展示交互式选择界面（多选项 + 自由输入 + "Chat about this"）。当前 BoxNex 的 `ToolCallCard.tsx` 已有 `ask_question` 的渲染实现。
 
 但通过命令行（`claude -p` 或 JSON streaming）调用时，这种交互式工具调用在 JSON 返回中的具体格式尚未研究清楚：
 - tool_use block 的 input schema 是什么样的（选项列表、描述、允许自由输入等字段）

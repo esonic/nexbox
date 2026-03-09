@@ -15,8 +15,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/resend/resend-go/v3"
 	"golang.org/x/crypto/bcrypt"
-	"gitlab.okg.com/sre_ai/nexbox/config"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"gitlab.okg.com/sre_ai/boxnex/config"
+	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ type jwtClaims struct {
 func (s *Server) jwtSecret() []byte {
 	secret := s.Config.Get().JWTSecret
 	if secret == "" {
-		secret = "nexbox-dev-secret-change-in-production"
+		secret = "boxnex-dev-secret-change-in-production"
 	}
 	return []byte(secret)
 }
@@ -237,7 +237,7 @@ func (s *Server) HandleSendVerification(w http.ResponseWriter, r *http.Request) 
 	if cfg.ResendAPIKey != "" {
 		go sendVerificationEmail(cfg, req.Email, code)
 	} else {
-		// Development mode: log the code (check server/logs/beehub.log)
+		// Development mode: log the code (check server/logs/boxnex.log)
 		log.Printf("[auth] Verification code for %s: %s", req.Email, code)
 	}
 
@@ -247,16 +247,16 @@ func (s *Server) HandleSendVerification(w http.ResponseWriter, r *http.Request) 
 func sendVerificationEmail(cfg config.Config, to, code string) {
 	from := cfg.ResendFrom
 	if from == "" {
-		from = "BeeHub <noreply@box-nex.top>"
+		from = "BoxNex <noreply@box-nex.top>"
 	}
 	client := resend.NewClient(cfg.ResendAPIKey)
 	_, err := client.Emails.Send(&resend.SendEmailRequest{
 		From:    from,
 		To:      []string{to},
-		Subject: "BeeHub 验证码",
+		Subject: "BoxNex Verification Code",
 		Html: fmt.Sprintf(
-			`<p>您的 BeeHub 验证码是：<strong style="font-size:24px;letter-spacing:4px">%s</strong></p>`+
-				`<p>验证码 10 分钟内有效，请勿分享给他人。</p>`,
+			`<p>Your BoxNex verification code is: <strong style="font-size:24px;letter-spacing:4px">%s</strong></p>`+
+				`<p>Verification code is valid for 10 minutes. Please do not share it with others.</p>`,
 			code,
 		),
 	})

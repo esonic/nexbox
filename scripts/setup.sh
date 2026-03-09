@@ -1,14 +1,14 @@
 #!/bin/bash
 # scripts/setup.sh
 #
-# 一键准备 nexbox/BeeHub 运行环境
+# 一键准备 BoxNex 运行环境
 # 适用于：Ubuntu 22.04 / 24.04（原生 VPS 或 WSL2）
 #
 # 功能：
 #   1. 安装 Docker Engine
 #   2. 将当前用户加入 docker 组
 #   3. 安装 Go（用于编译 server）
-#   4. 构建 nexbox-agent 镜像
+#   4. 构建 boxnex-agent 镜像
 #   5. 生成初始 data/config.json 模板
 #
 # 用法：
@@ -188,9 +188,9 @@ install_go() {
   success "Go 安装完成：$(go version)"
 }
 
-# ─── Step 3：构建 nexbox-agent 镜像 ───────────────────────────────────────────
+# ─── Step 3：构建 boxnex-agent 镜像 ───────────────────────────────────────────
 build_image() {
-  info "Step 3/4: 构建 nexbox-agent Docker 镜像"
+  info "Step 3/4: 构建 boxnex-agent Docker 镜像"
 
   if ! docker info &>/dev/null 2>&1; then
     # 可能刚加了 docker 组但 newgrp 还没生效，用 sg 临时切组
@@ -200,7 +200,7 @@ build_image() {
     bash "$REPO_ROOT/scripts/build-agent-image.sh"
   fi
 
-  success "nexbox-agent:latest 镜像构建完成"
+  success "boxnex-agent:latest 镜像构建完成"
 }
 
 # ─── Step 4：生成初始 config.json ─────────────────────────────────────────────
@@ -233,7 +233,7 @@ generate_config() {
   "token_price_per_million": 15,
   "marketplace_dir": "${data_dir}/marketplace",
   "docker_enabled": ${docker_enabled},
-  "docker_image": "nexbox-agent:latest"
+  "docker_image": "boxnex-agent:latest"
 }
 EOF
 
@@ -250,7 +250,7 @@ NEED_RELOGIN=false
 
 echo ""
 echo "========================================"
-echo "  nexbox / BeeHub 环境初始化"
+echo "  BoxNex 环境初始化"
 echo "========================================"
 echo ""
 
@@ -285,13 +285,13 @@ echo ""
 
 if ! $SKIP_GO; then
   echo "编译 server："
-  echo "  cd server && go build -o beehub . && ./beehub --data-dir ./data --port 9040"
+  echo "  cd server && go build -o boxnex . && ./boxnex --data-dir ./data --port 9040"
   echo ""
 fi
 
 if ! $NO_DOCKER; then
   echo "首次部署后设置管理员（SQLite）："
-  echo "  sqlite3 server/data/nexbox.db \"UPDATE users SET role='admin' WHERE username='yourname';\""
+  echo "  sqlite3 server/data/boxnex.db \"UPDATE users SET role='admin' WHERE username='yourname';\""
   echo ""
 fi
 

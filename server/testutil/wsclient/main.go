@@ -1,5 +1,5 @@
 // wsclient is a standalone WebSocket client for e2e chat testing.
-// It connects to a NexBox server's global WebSocket, subscribes to a
+// It connects to a BoxNex server's global WebSocket, subscribes to a
 // conversation, sends a message, collects all streaming events, and
 // outputs a JSON summary to stdout.
 //

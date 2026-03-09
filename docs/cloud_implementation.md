@@ -1,8 +1,8 @@
-# BeeHub Cloud SaaS 改造实施文档
+# BoxNex Cloud SaaS 改造实施文档
 
 ## 目标与背景
 
-本次改造将 nexbox/BeeHub 从一个**单用户本地工具**变成一个**多租户云 SaaS 平台**，部署在 VPS 上，支持多用户独立使用 AI Agent（Claude、Codex 等）完成编程任务。
+本次改造将 boxnex/BoxNex 从一个**单用户本地工具**变成一个**多租户云 SaaS 平台**，部署在 VPS 上，支持多用户独立使用 AI Agent（Claude、Codex 等）完成编程任务。
 
 ### 核心需求
 
@@ -126,7 +126,7 @@ Agent 执行后  →  SettleTokens(estimated, actual)
 ```json
 {
   "docker_enabled": true,
-  "docker_image": "nexbox-agent:latest"
+  "docker_image": "boxnex-agent:latest"
 }
 ```
 
@@ -178,7 +178,7 @@ Agent 执行后  →  SettleTokens(estimated, actual)
 
 | 功能 | 前提条件 | 说明 |
 |------|---------|------|
-| **Docker 容器生命周期** | 启动 Docker daemon，构建 nexbox-agent 镜像 | 首次启动、重启复用、project 删除停容器 |
+| **Docker 容器生命周期** | 启动 Docker daemon，构建 boxnex-agent 镜像 | 首次启动、重启复用、project 删除停容器 |
 | **DockerEnabled 模式下 agent 执行** | 同上 | claude_cli 是否走 `docker exec` |
 | **文件读/搜索** | 需要有 git_repo_path 的真实 project | ReadProjectFile、SearchProjectFiles |
 | **Git 操作** | 需要真实 git 仓库 | status/commit/log/diff/branches/discard |
@@ -195,7 +195,7 @@ Agent 执行后  →  SettleTokens(estimated, actual)
 
 | 编号 | 位置 | 严重程度 | 说明 |
 |------|------|---------|------|
-| H5 | `agent/container.go` EnsureContainer | High | `docker ps --filter name=X` 是子串匹配，会错误复用容器。修复：用 `--filter name=^/nexbox-proj-EXACT$` |
+| H5 | `agent/container.go` EnsureContainer | High | `docker ps --filter name=X` 是子串匹配，会错误复用容器。修复：用 `--filter name=^/boxnex-proj-EXACT$` |
 | C3 | `store/sqlite_cloud.go` SettleTokens | Critical | actual > estimated 时不做余额保护，可导致 balance_tokens 为负 |
 | C4 | `store/sqlite_marketplace.go` | Critical | installed_plugins 用 `project_id` 列存 `user_id`，列名错误，是历史遗留，未来改 schema 会数据泄露 |
 | C5 | `api/router.go` | Critical | 注册接口无频率限制，可被滥用批量注册 |
@@ -226,8 +226,8 @@ Agent 执行后  →  SettleTokens(estimated, actual)
 
 ```bash
 cd server
-go build -o beehub .
-./beehub --data-dir ./data --port 9040
+go build -o boxnex .
+./boxnex --data-dir ./data --port 9040
 ```
 
 ### 生产部署（MySQL）
@@ -237,12 +237,12 @@ go build -o beehub .
 ```json
 {
   "store_type": "mysql",
-  "mysql_dsn": "user:pass@tcp(host:3306)/nexbox?parseTime=true",
+  "mysql_dsn": "user:pass@tcp(host:3306)/boxnex?parseTime=true",
   "jwt_secret": "<随机长字符串>",
   "jwt_exp_days": 7,
   "anthropic_key": "sk-ant-...",
   "token_price_per_million": 15,
-  "marketplace_dir": "/opt/nexbox/marketplace"
+  "marketplace_dir": "/opt/boxnex/marketplace"
 }
 ```
 3. 启动后第一个注册的邮箱自动成为 admin，无需手动改库
@@ -256,7 +256,7 @@ go build -o beehub .
 
 # 3. 在 config.json 中添加
 # "docker_enabled": true,
-# "docker_image": "nexbox-agent:latest"
+# "docker_image": "boxnex-agent:latest"
 ```
 
 ---

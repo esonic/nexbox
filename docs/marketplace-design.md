@@ -190,7 +190,7 @@ type MarketplacePlugin struct {
 1. 用户安装 connector → 后端存入 `installed_mcps` 表
 2. 发消息时 → `resolveInstalledMCPsAndMap()` 从 DB 读取 → 构建 `MCPServerEntry` 列表
 3. `claude_agent.go:134` 遍历 `ExtraMCPServers`，写入 `mcpServers` JSON
-4. 传给 Claude CLI `--mcp-config /tmp/beehub-mcp-xxx.json`
+4. 传给 Claude CLI `--mcp-config /tmp/boxnex-mcp-xxx.json`
 5. Claude CLI (v2.1.71) 内置 MCP HTTP transport 的 OAuth 处理：
    - 连接 HTTP URL → 服务端 401 → CLI 自动发现 OAuth 端点 → 打开浏览器授权
    - CLI 的 `claude mcp add` 有 `--callback-port`, `--client-id`, `--client-secret` 选项
@@ -358,7 +358,7 @@ Claude CLI → GET https://gitlab.com/api/v4/mcp (with Bearer token) → 200 OK
 Claude Code CLI (v2.1.71) 确认支持这个流程（`claude mcp add` 有 `--callback-port` 等选项）。
 
 但在我们的架构中：
-- Claude CLI 运行在**服务端**（beehub 进程 spawn 的子进程）
+- Claude CLI 运行在**服务端**（boxnex 进程 spawn 的子进程）
 - "打开浏览器"只能打开服务端的浏览器，对远程用户无效
 - 只有当用户**直接在服务器本机访问** Web UI 时，才有可能完成浏览器授权
 

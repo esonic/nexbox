@@ -16,8 +16,8 @@ import (
 func TestContainerName_SafeUUID(t *testing.T) {
 	id := "550e8400-e29b-41d4-a716-446655440000"
 	name := containerName(id)
-	if !strings.HasPrefix(name, "nexbox-proj-") {
-		t.Fatalf("expected nexbox-proj- prefix, got %s", name)
+	if !strings.HasPrefix(name, "boxnex-proj-") {
+		t.Fatalf("expected boxnex-proj- prefix, got %s", name)
 	}
 	if !strings.Contains(name, id) {
 		t.Fatalf("safe UUID should be used verbatim: got %s", name)
@@ -27,8 +27,8 @@ func TestContainerName_SafeUUID(t *testing.T) {
 func TestContainerName_UnsafePath(t *testing.T) {
 	id := "/home/user/repo/my project"
 	name := containerName(id)
-	if !strings.HasPrefix(name, "nexbox-proj-") {
-		t.Fatalf("expected nexbox-proj- prefix, got %s", name)
+	if !strings.HasPrefix(name, "boxnex-proj-") {
+		t.Fatalf("expected boxnex-proj- prefix, got %s", name)
 	}
 	// Must not contain slashes or spaces
 	for _, c := range name {
@@ -41,10 +41,10 @@ func TestContainerName_UnsafePath(t *testing.T) {
 func TestContainerName_LongID(t *testing.T) {
 	id := strings.Repeat("a", 49) // > 48 chars triggers hash
 	name := containerName(id)
-	if !strings.HasPrefix(name, "nexbox-proj-") {
-		t.Fatalf("expected nexbox-proj- prefix, got %s", name)
+	if !strings.HasPrefix(name, "boxnex-proj-") {
+		t.Fatalf("expected boxnex-proj- prefix, got %s", name)
 	}
-	// Should be hashed to 16 hex chars → total len = len("nexbox-proj-") + 16 = 28
+	// Should be hashed to 16 hex chars → total len = len("boxnex-proj-") + 16 = 28
 	if len(name) != 28 {
 		t.Fatalf("expected hashed name length 28, got %d: %s", len(name), name)
 	}
@@ -248,8 +248,8 @@ func TestStopContainer_NotRunning(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // BUG REPRODUCTION: H5 — docker ps --filter name= is substring match
-// This test documents the known bug where a container named nexbox-proj-abc
-// would also match when filtering for nexbox-proj-abcXYZ.
+// This test documents the known bug where a container named boxnex-proj-abc
+// would also match when filtering for boxnex-proj-abcXYZ.
 // ---------------------------------------------------------------------------
 
 func TestContainerName_SubstringMatchBug(t *testing.T) {
@@ -504,7 +504,7 @@ func TestStopIdleContainers_RecoveredContainerName(t *testing.T) {
 
 	// Simulate a recovered container (key is already a container name)
 	m.mu.Lock()
-	m.lastActivity["nexbox-proj-abc123"] = time.Now().Add(-2 * time.Hour)
+	m.lastActivity["boxnex-proj-abc123"] = time.Now().Add(-2 * time.Hour)
 	m.mu.Unlock()
 
 	stopped := m.StopIdleContainers(1 * time.Hour)
@@ -514,7 +514,7 @@ func TestStopIdleContainers_RecoveredContainerName(t *testing.T) {
 	}
 
 	m.mu.Lock()
-	_, has := m.lastActivity["nexbox-proj-abc123"]
+	_, has := m.lastActivity["boxnex-proj-abc123"]
 	m.mu.Unlock()
 	if has {
 		t.Fatal("recovered container entry should be cleaned up")
@@ -543,7 +543,7 @@ esac
 }
 
 func TestRecoverRunningContainers(t *testing.T) {
-	containers := []string{"nexbox-proj-aaa", "nexbox-proj-bbb"}
+	containers := []string{"boxnex-proj-aaa", "boxnex-proj-bbb"}
 	makeFakeDockerWithNames(t, containers)
 
 	m := NewContainerManager("alpine:latest")
@@ -590,14 +590,14 @@ func TestRecoverRunningContainers_Empty(t *testing.T) {
 
 func TestRecoverThenIdleReap(t *testing.T) {
 	// End-to-end: recover containers, then reap idle ones after timeout.
-	makeFakeDockerWithNames(t, []string{"nexbox-proj-old"})
+	makeFakeDockerWithNames(t, []string{"boxnex-proj-old"})
 
 	m := NewContainerManager("alpine:latest")
 	m.RecoverRunningContainers()
 
 	// Simulate time passing: set lastActivity to 2 hours ago
 	m.mu.Lock()
-	m.lastActivity["nexbox-proj-old"] = time.Now().Add(-2 * time.Hour)
+	m.lastActivity["boxnex-proj-old"] = time.Now().Add(-2 * time.Hour)
 	m.mu.Unlock()
 
 	stopped := m.StopIdleContainers(1 * time.Hour)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# integration_test.sh — Comprehensive black-box integration test for all BeeHub backend APIs.
+# integration_test.sh — Comprehensive black-box integration test for all BoxNex backend APIs.
 #
 # Usage:
 #   ./integration_test.sh                                    # starts server, runs all tests
@@ -30,9 +30,9 @@ if [[ -z "${BASE_URL:-}" ]]; then
   mkdir -p "$DATA_DIR"
 
   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-  BINARY="$SCRIPT_DIR/beehub"
+  BINARY="$SCRIPT_DIR/boxnex"
   if [[ ! -x "$BINARY" ]]; then
-    echo "beehub binary not found at $BINARY — run build.sh first" >&2
+    echo "boxnex binary not found at $BINARY — run build.sh first" >&2
     exit 1
   fi
 
@@ -58,7 +58,7 @@ API="$BASE_URL/api"
 
 # ── Generate JWT for test user ──────────────────────────────────────────────
 # The server uses a well-known dev secret when JWTSecret config is empty.
-JWT_SECRET="nexbox-dev-secret-change-in-production"
+JWT_SECRET="boxnex-dev-secret-change-in-production"
 TEST_USER_ID="test-user-$(date +%s)"
 TEST_USERNAME="testuser@integration.test"
 
@@ -140,7 +140,7 @@ assert_contains() {
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════════════"
-echo " BeeHub Integration Tests  ($BASE_URL)"
+echo " BoxNex Integration Tests  ($BASE_URL)"
 echo "═══════════════════════════════════════════════════════════════════════"
 
 # ════════════════════════════════════════════════════════════════════════════

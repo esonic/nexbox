@@ -55,8 +55,8 @@ function AppLayout() {
     init();
 
     const handleLogout = () => { setCurrentUser(null); setMode("needs_login"); };
-    window.addEventListener("beehub:logout", handleLogout);
-    return () => window.removeEventListener("beehub:logout", handleLogout);
+    window.addEventListener("boxnex:logout", handleLogout);
+    return () => window.removeEventListener("boxnex:logout", handleLogout);
   }, []);
 
   if (mode === null) {

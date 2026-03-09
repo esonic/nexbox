@@ -1,7 +1,7 @@
 #!/bin/bash
 # scripts/build-agent-image.sh
 #
-# Builds the nexbox-agent Docker image used for per-project container isolation.
+# Builds the boxnex-agent Docker image used for per-project container isolation.
 # Run this once before enabling DockerEnabled=true in config.json.
 #
 # Usage:
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-IMAGE_NAME="${REGISTRY:-}nexbox-agent"
+IMAGE_NAME="${REGISTRY:-}boxnex-agent"
 TAG="${TAG:-latest}"
 FULL_IMAGE="${IMAGE_NAME}:${TAG}"
 PUSH=false
@@ -56,4 +56,4 @@ echo ""
 echo "Next steps:"
 echo "  1. Set docker_enabled: true in config.json"
 echo "  2. Set docker_image: \"${FULL_IMAGE}\" in config.json (or leave blank for default)"
-echo "  3. Restart the beehub server"
+echo "  3. Restart the boxnex server"

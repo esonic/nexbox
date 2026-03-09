@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"gitlab.okg.com/sre_ai/nexbox/config"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"gitlab.okg.com/sre_ai/boxnex/config"
+	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
 // getDefaultAgent reads the persisted default agent from config, falling back to in-memory value.

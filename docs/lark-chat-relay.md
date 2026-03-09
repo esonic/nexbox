@@ -39,7 +39,7 @@ nex-chat a3f2b1c9 帮我review最新的PR  → 前缀 a3f2b1c9，匹配后剩余
 
 ### 2. 新增 lark_chat 查询接口
 
-路径：`GET /rca/api/v1/nexbox/lark-chat?since=0&limit=10`
+路径：`GET /rca/api/v1/boxnex/lark-chat?since=0&limit=10`
 
 查询：
 ```sql
@@ -58,7 +58,7 @@ CREATE INDEX idx_lark_chat ON nex_changes (entity_type, entity_id, id);
 
 ### 4. 新增 Lark 回复接口
 
-路径：`POST /rca/api/v1/nexbox/lark-reply`
+路径：`POST /rca/api/v1/boxnex/lark-reply`
 
 请求体：
 ```json
@@ -70,7 +70,7 @@ CREATE INDEX idx_lark_chat ON nex_changes (entity_type, entity_id, id);
 ```
 
 校验：
-- 经过 NexboxAuthFilter 验证 Bearer token。
+- 经过 BoxNexAuthFilter 验证 Bearer token。
 - token 中的 `user_name` 必须等于 `target_user`（只能给自己发消息）。
 - `timestamp` 与服务器当前时间差不超过 60 秒（防回放）。
 

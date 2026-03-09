@@ -14,8 +14,8 @@ import (
 // It spawns a claude subprocess with stream-json I/O for each message exchange.
 type ClaudeAgent struct {
 	CLIPath      string            // Path to claude CLI binary (default: "claude")
-	MCPServerURL string            // Optional: URL of the NexBox MCP server
-	MCPToolNames []string          // MCP tool names (e.g. "mcp__nexbox__save_asset"); populated from mcp.Server.ToolNames()
+	MCPServerURL string            // Optional: URL of the BoxNex MCP server
+	MCPToolNames []string          // MCP tool names (e.g. "mcp__boxnex__save_asset"); populated from mcp.Server.ToolNames()
 	DataDir      string            // For isolated session storage
 	Verbose      bool              // Enable verbose logging
 	ContainerMgr *ContainerManager // Optional: run inside Docker container per project
@@ -106,16 +106,16 @@ func (a *ClaudeAgent) SendMessage(
 	// Generate MCP config if MCPServerURL is set
 	var mcpConfigPath string
 	if a.MCPServerURL != "" {
-		// Append the nexbox conversation ID as ?session= so the MCP server can
+		// Append the boxnex conversation ID as ?session= so the MCP server can
 		// identify which session is making tool calls without the AI passing it.
-		nexboxURL := a.MCPServerURL
+		boxnexURL := a.MCPServerURL
 		if req.ConversationID != "" {
-			nexboxURL += "?session=" + req.ConversationID
+			boxnexURL += "?session=" + req.ConversationID
 		}
 		servers := map[string]interface{}{
-			"nexbox": map[string]interface{}{
+			"boxnex": map[string]interface{}{
 				"type": "http",
-				"url":  nexboxURL,
+				"url":  boxnexURL,
 			},
 		}
 
@@ -156,7 +156,7 @@ func (a *ClaudeAgent) SendMessage(
 		mcpConfig := map[string]interface{}{"mcpServers": servers}
 		mcpConfigBytes, _ := json.Marshal(mcpConfig)
 
-		tmpFile, err := os.CreateTemp(a.DataDir, "beehub-mcp-*.json")
+		tmpFile, err := os.CreateTemp(a.DataDir, "boxnex-mcp-*.json")
 		if err != nil {
 			return Result{}, fmt.Errorf("create MCP config temp file: %w", err)
 		}

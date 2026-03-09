@@ -9,7 +9,7 @@ import (
 // testTempDir creates a temporary directory that works in the sandbox environment.
 func testTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "nexbox-test-*")
+	dir, err := os.MkdirTemp("", "boxnex-test-*")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}

@@ -1,6 +1,6 @@
 package api
 
-import "gitlab.okg.com/sre_ai/nexbox/store"
+import "gitlab.okg.com/sre_ai/boxnex/store"
 
 // Type aliases pointing to the canonical definitions in the store package.
 // Existing handler code can continue using api.Project, api.Session, etc.

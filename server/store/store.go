@@ -10,7 +10,7 @@ import (
 // another client since it was last read).
 var ErrVersionConflict = errors.New("version conflict: entity was modified by another client")
 
-// Store defines the unified data access interface for all NexBox entities.
+// Store defines the unified data access interface for all BoxNex entities.
 // Implementations: SQLiteStore (local), MySQLStore (remote DB).
 type Store interface {
 	ProjectStore
