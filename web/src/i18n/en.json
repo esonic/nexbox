@@ -121,6 +121,7 @@
   },
   "settings": {
     "title": "Settings",
+    "user": "User Account",
     "language": "Language",
     "language_desc": "Switch interface language",
     "default_agent": "Default Agent",

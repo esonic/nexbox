@@ -43,7 +43,11 @@ func (s *Server) diskQuotaBytes() int64 {
 
 // checkDiskQuota checks if the project directory exceeds the disk quota.
 // Returns (currentSize, quotaBytes, error). Error is non-nil when over quota.
+// In local mode (no JWT secret), disk quota is not enforced.
 func (s *Server) checkDiskQuota(root string) (int64, int64, error) {
+	if s.Config.Get().JWTSecret == "" {
+		return 0, 0, nil
+	}
 	quota := s.diskQuotaBytes()
 	used, err := dirSize(root)
 	if err != nil {

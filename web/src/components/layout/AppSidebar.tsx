@@ -1041,15 +1041,6 @@ export function AppSidebar() {
             <Settings className="h-4 w-4 shrink-0" />
             <span>{t("sidebar.settings")}</span>
           </button>
-          {currentUser && (
-            <button
-              onClick={handleLogout}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-muted-foreground hover:text-foreground hover:bg-accent/50"
-            >
-              <LogOut className="h-4 w-4 shrink-0" />
-              <span>{t("sidebar.logout")}</span>
-            </button>
-          )}
         </div>
       </div>
 

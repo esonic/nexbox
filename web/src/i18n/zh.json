@@ -121,6 +121,7 @@
   },
   "settings": {
     "title": "设置",
+    "user": "用户账户",
     "language": "语言",
     "language_desc": "切换界面显示语言",
     "default_agent": "默认智能体",

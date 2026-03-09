@@ -1,5 +1,8 @@
 import { useTranslation } from "react-i18next";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, LogOut } from "lucide-react";
+import { authCloudApi, clearToken } from "@/lib/api";
+import { useAppStore } from "@/stores/app";
+import { Button } from "@/components/ui/button";
 
 const LANG_OPTIONS = [
   { value: "zh", label: "中文" },
@@ -8,9 +11,37 @@ const LANG_OPTIONS = [
 
 export function GeneralSettings() {
   const { t, i18n } = useTranslation();
+  const { currentUser } = useAppStore();
+
+  async function handleLogout() {
+    try { await authCloudApi.logout(); } catch {}
+    clearToken();
+    window.location.reload();
+  }
 
   return (
     <section className="space-y-4">
+      {/* User Account */}
+      {currentUser && (
+        <div className="rounded-lg border bg-card">
+          <div className="flex items-center justify-between px-4 py-3">
+            <div>
+              <div className="text-sm font-medium">{t("settings.user")}</div>
+              <div className="text-xs text-muted-foreground mt-0.5">{currentUser.email}</div>
+            </div>
+            <Button
+              onClick={handleLogout}
+              variant="outline"
+              size="sm"
+              className="gap-2 text-destructive hover:text-destructive"
+            >
+              <LogOut className="h-4 w-4" />
+              <span>{t("sidebar.logout")}</span>
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Language */}
       <div className="rounded-lg border bg-card">
         <div className="flex items-center justify-between px-4 py-3">
