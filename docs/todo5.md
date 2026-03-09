@@ -122,6 +122,23 @@
 
 ---
 
+### T21 - 接入其他模型供应商的能力
+
+复用 claude code，但使用其他模型供应商，使用以下环境变量
+
+环境变量	描述
+ANTHROPIC_DEFAULT_OPUS_MODEL	用于 opus 的模型，或在 Plan Mode 活跃时用于 opusplan 的模型。
+ANTHROPIC_DEFAULT_SONNET_MODEL	用于 sonnet 的模型，或在 Plan Mode 不活跃时用于 opusplan 的模型。
+ANTHROPIC_DEFAULT_HAIKU_MODEL	用于 haiku 的模型，或后台功能
+CLAUDE_CODE_SUBAGENT_MODEL	用于 subagents 的模型
+注意：ANTHROPIC_SMALL_FAST_MODEL 已弃用，改为使用 ANTHROPIC_DEFAULT_HAIKU_MODEL。
+
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+ANTHROPIC_AUTH_TOKEN=
+
+---
+
 ## 优先级总览
 
 | 优先级 | 编号 | 任务 | 复杂度 |
@@ -130,3 +147,4 @@
 | 🔴 高 | T15 | Quota=0 用户自动清理 Project | 中 |
 | 🟡 中 | T13.2 | / 命令透传 Claude CLI | 中 |
 | 🟢 低 | T8.2 | gVisor 容器运行时 | 低（配置） |
+| 🟢 低 | T21 | 接入其他模型供应商 | 中 |
