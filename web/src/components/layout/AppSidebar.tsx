@@ -235,6 +235,13 @@ export function AppSidebar() {
         try {
           const defaultProj = await projectsApi.create({ name: "Default" });
           setProjects([defaultProj]);
+          // Also create a default session so the user can start immediately
+          try {
+            const sess = await sessionsApi.create({ name: "New Chat", project_id: defaultProj.id });
+            setSessions([sess]);
+          } catch (e) {
+            console.error("Failed to create default session:", e);
+          }
           return;
         } catch (e) {
           console.error("Failed to create default project:", e);
@@ -244,7 +251,7 @@ export function AppSidebar() {
     } catch (e) {
       console.error("Failed to load projects:", e);
     }
-  }, []);
+  }, [setSessions]);
 
   const checkMarketplaceUpdates = useCallback(async () => {
     // Local-only marketplace: no cloud update checking needed

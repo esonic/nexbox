@@ -16,7 +16,7 @@ import (
 
 var errForbidden = errors.New("access denied")
 
-const defaultDiskQuota int64 = 1 << 30 // 1 GB
+const defaultDiskQuota int64 = 256 << 20 // 256 MB
 
 // dirSize walks a directory tree and returns the total size in bytes.
 func dirSize(root string) (int64, error) {
