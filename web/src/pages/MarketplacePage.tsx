@@ -137,7 +137,7 @@ export function MarketplacePage() {
   const matchesTab = (p: LocalPlugin, currentTab: TabType) => {
     switch (currentTab) {
       case "connector":
-        return p.type === "mcp";
+        return p.type === "mcp" || p.type === "lsp";
       case "skill":
         return p.type === "skill";
       case "plugin":

@@ -409,6 +409,22 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 // HandleMe GET /api/auth/me
 func (s *Server) HandleMe(w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value(ContextKeyUserID).(string)
+
+	// Local mode (no JWT): return user context from middleware directly.
+	if s.Config.Get().JWTSecret == "" {
+		features, _ := r.Context().Value(ContextKeyFeatures).(int64)
+		role, _ := r.Context().Value(ContextKeyRole).(string)
+		username, _ := r.Context().Value(ContextKeyUsername).(string)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":       userID,
+			"username": username,
+			"role":     role,
+			"features": features,
+		})
+		return
+	}
+
 	u, err := s.Store.GetUser(userID)
 	if err != nil || u == nil {
 		http.Error(w, "user not found", http.StatusNotFound)

@@ -73,7 +73,7 @@ if grep -qi microsoft /proc/version 2>/dev/null; then
   echo ""
 fi
 
-GO_VERSION="${GO_VERSION:-1.22.5}"
+GO_VERSION="${GO_VERSION:-1.26.1}"
 GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
 GO_DOWNLOAD_URL="https://go.dev/dl/${GO_TARBALL}"
 
@@ -229,7 +229,6 @@ generate_config() {
   "store_type": "sqlite",
   "jwt_secret": "${jwt_secret}",
   "jwt_exp_days": 7,
-  "anthropic_key": "",
   "token_price_per_million": 15,
   "marketplace_dir": "${data_dir}/marketplace",
   "docker_enabled": ${docker_enabled},
@@ -241,7 +240,6 @@ EOF
   mkdir -p "$data_dir/marketplace"
 
   success "配置文件已生成：$config_file"
-  warn "记得填入 anthropic_key 才能使用 AI Agent"
   warn "生产部署时将 store_type 改为 mysql 并填写 mysql_dsn"
 }
 

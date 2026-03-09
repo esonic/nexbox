@@ -101,7 +101,6 @@ vi server/data/config.json
   "store_type": "sqlite",
   "jwt_secret": "<openssl rand -hex 32 生成>",
   "jwt_exp_days": 7,
-  "anthropic_key": "sk-ant-...",
   "token_price_per_million": 15,
   "resend_api_key": "re_xxxx",
   "resend_from": "BoxNex <noreply@box-nex.top>"
@@ -146,7 +145,6 @@ server/boxnex --data-dir server/data --port 9040
 | `jwt_exp_days` | int | `7` | JWT 有效期（天） |
 | `store_type` | string | `"sqlite"` | `"sqlite"` 或 `"mysql"` |
 | `mysql_dsn` | string | — | MySQL DSN，`store_type=mysql` 时必填 |
-| `anthropic_key` | string | — | Anthropic API Key，Agent 执行必填 |
 | `token_price_per_million` | float | `0` | 每百万 token 计费金额（用于余额折算显示） |
 | `resend_api_key` | string | — | Resend API Key，生产发邮件必填；空则验证码打到日志 |
 | `resend_from` | string | `BoxNex <noreply@box-nex.top>` | 发件人地址（需在 Resend 控制台验证域名） |
@@ -155,8 +153,6 @@ server/boxnex --data-dir server/data --port 9040
 | `docker_image` | string | `"boxnex-agent:latest"` | 容器镜像名 |
 | `cors_origins` | []string | — | 允许的 CORS 源，空则使用内置开发默认值 |
 | `disk_quota_bytes` | int | `0`（不限） | 用户磁盘配额 |
-| `max_concurrent_tasks` | int | `0`（不限） | 用户最大并发任务数 |
-| `max_sessions_per_user` | int | `0`（不限） | 用户最大 session 数 |
 
 ---
 

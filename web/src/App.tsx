@@ -47,6 +47,11 @@ function AppLayout() {
           setMode("needs_login");
           return;
         }
+        // Local mode: fetch user context (features, role) from /auth/me.
+        try {
+          const user = await authCloudApi.me();
+          setCurrentUser(user);
+        } catch { /* features default to 0 */ }
         setMode(info.mode);
       } catch {
         setMode("local");

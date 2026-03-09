@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -185,13 +184,6 @@ func (a *ClaudeAgent) SendMessage(
 	// Resume session if exists
 	if req.SessionID != "" {
 		opts.Resume = req.SessionID
-	}
-
-	// Ensure DataDir exists for any temp files
-	if a.DataDir != "" {
-		if err := os.MkdirAll(filepath.Join(a.DataDir, "tmp"), 0755); err != nil {
-			log.Printf("[claude-agent] Failed to create tmp dir: %v", err)
-		}
 	}
 
 	// Build the combined prompt
