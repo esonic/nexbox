@@ -94,7 +94,106 @@
 ---
 
 
+## 🟡 中优先级（续）
+
+### T20.1 — Partial Messages 实时流式输出
+
+**现状**：`EventTextDelta` 只在 Claude 完成整个 assistant turn 后才触发，用户看到文字"一段话突然全部出现"。
+
+**目标**：实现打字机效果——Claude 生成中即逐字推送到前端。
+
+**实现思路**：
+- 传 `--include-partial-messages` CLI 参数
+- 设置环境变量 `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1`
+- 在 `claude_agent.go` 中新增对 `stream_event` 消息类型的处理（当前走 `default` 分支被忽略）
+- `stream_event` 携带 partial text delta，映射到 `EventTextDelta` 事件
+
+**影响文件**：`server/agent/claude_cli.go`（参数构建）、`server/agent/claude_agent.go`（消息处理）
+
+---
+
+### T20.2 — 主动 control_request 能力（优雅中断）
+
+**现状**：停止任务依赖 SIGTERM，进程级别强杀，Claude 无法完成清理工作。
+
+**目标**：发送 `interrupt` control_request，让 CLI 优雅地停止当前 turn 并返回结果消息。
+
+**实现思路**：
+- 在 `claude_cli.go` 中新增 `sendControlRequest(subtype, payload)` 方法，向 stdin 写入 `control_request` JSON
+- 等待 CLI 返回对应 `control_response`（带 request_id 匹配）
+- 当前 `Cancel()` 调用改为先发 `interrupt`，超时后再 SIGTERM
+- 这也是后续支持 `set_model`、`mcp_status` 等高级能力的基础
+
+**影响文件**：`server/agent/claude_cli.go`
+
+---
+
+### T20.3 — Initialize 握手 + Hooks 框架
+
+**现状**：没有 initialize 握手，`hook_callback` 直接 auto-continue，hooks 完全无法工作。
+
+**目标**：
+1. 发送第一条用户消息前，先向 CLI 发 `initialize` control_request（注册 hooks、agents）
+2. 建立 hook 回调框架，使 `PreToolUse` 等 hook 可被实际执行
+
+**实现思路**：
+- 在 `Query()` 开始时，发出 `{"subtype":"initialize","hooks":...}` control_request
+- 等待 CLI 的 initialize 响应
+- 在 `hook_callback` 处理中调用已注册的回调（Go 函数），而不是直接 auto-continue
+- `QueryOptions` 增加 `Hooks map[string]HookFunc` 字段
+
+**影响文件**：`server/agent/claude_cli.go`、`server/agent/agent.go`（QueryOptions）
+
+**依赖**：T20.2（需要先有主动 control_request 能力）
+
+---
+
+### T20.4 — ThinkingBlock 补全 signature 字段
+
+**现状**：`AssistantContent` 只有 `Thinking string`，缺少 `Signature string`。
+
+**目标**：多轮 extended thinking 对话中 signature 字段被正确保留并在后续轮次回传给 CLI，确保 thinking 验证机制正常工作。
+
+**影响文件**：`server/agent/claude_cli.go`（`AssistantContent` 结构体）、`server/agent/claude_agent.go`（thinking 块解析）
+
+---
+
+### T20.5 — result 消息补全字段 + stop_reason 处理
+
+**现状**：`stop_reason`、`duration_api_ms` 未捕获，无法区分"达到 max_turns"还是"正常完成"。
+
+**目标**：
+- 捕获 `stop_reason`（`end_turn` / `max_turns` / `tool_use` 等）并透传到前端
+- 捕获 `duration_api_ms`（纯 API 耗时，不含工具执行时间）
+- 前端对 `stop_reason=max_turns` 显示特殊提示
+
+**影响文件**：`server/agent/claude_cli.go`（`StreamMessage` 结构体）、`server/agent/claude_agent.go`（result 处理）、前端 ChatMessage
+
+---
+
 ## 🟢 低优先级
+
+### T20.6 — task_notification 等子任务消息处理
+
+**现状**：`task_started`、`task_progress`、`task_notification` system 子类型被忽略。
+
+**目标**：当 Claude 使用 `Agent` 工具委托子任务时，在前端展示子任务进度（类似 Claude.ai 的 subagent 展示）。
+
+**影响文件**：`server/agent/claude_agent.go`、前端 StreamEvent 展示
+
+---
+
+### T20.7 — 规范性改进（CLI 版本检查 + 环境变量）
+
+**现状**：启动时不检查 Claude CLI 版本；没有设置 `CLAUDE_CODE_ENTRYPOINT` 环境变量。
+
+**目标**：
+- 启动时检查 `claude -v`，低于 2.0.0 发出警告
+- 设置 `CLAUDE_CODE_ENTRYPOINT=sdk-go` 用于遥测追踪
+
+**影响文件**：`server/agent/claude_cli.go`
+
+---
 
 ### T8.2 — gVisor 容器运行时
 
@@ -125,4 +224,11 @@
 | 🔴 高 | T3.2 | 容器网络白名单 | 高 |
 | 🔴 高 | T15 | Quota=0 用户自动清理 Project | 中 |
 | 🟡 中 | T13.2 | / 命令透传 Claude CLI | 中 |
+| 🟡 中 | T20.1 | Partial Messages 实时流式输出 | 中 |
+| 🟡 中 | T20.2 | 主动 control_request 能力（优雅中断） | 中 |
+| 🟡 中 | T20.3 | Initialize 握手 + Hooks 框架 | 高 |
+| 🟡 中 | T20.4 | ThinkingBlock 补全 signature 字段 | 低 |
+| 🟡 中 | T20.5 | result 消息补全字段 + stop_reason | 低 |
+| 🟢 低 | T20.6 | task_notification 子任务消息处理 | 中 |
+| 🟢 低 | T20.7 | CLI 版本检查 + CLAUDE_CODE_ENTRYPOINT | 低 |
 | 🟢 低 | T8.2 | gVisor 容器运行时 | 低（配置） |
