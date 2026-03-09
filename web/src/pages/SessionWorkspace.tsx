@@ -310,8 +310,10 @@ export function SessionWorkspace() {
   const activeSessionIdRef = useRef(activeSessionId);
   const showTerminalRef = useRef(showTerminal);
   const isRealProjectRef = useRef(false);
+  const userFeaturesRef = useRef(userFeatures);
   activeSessionIdRef.current = activeSessionId;
   showTerminalRef.current = showTerminal;
+  userFeaturesRef.current = userFeatures;
 
   // Track sessions where user sent first message but worktree not yet created.
   // Used to immediately disable the worktree selector and show a preparing indicator.
@@ -462,6 +464,7 @@ export function SessionWorkspace() {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "`" && e.ctrlKey && !e.altKey && !e.metaKey) {
         if (!activeSessionIdRef.current || !isRealProjectRef.current) return;
+        if (!(userFeaturesRef.current & 8)) return;
         e.preventDefault();
         setTerminalShow(activeSessionIdRef.current, !showTerminalRef.current);
       }

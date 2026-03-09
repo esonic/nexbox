@@ -489,6 +489,12 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			}
 		}
 
+		// Default model to haiku when the session has no explicit model set.
+		sessionModel := session.Model
+		if sessionModel == "" {
+			sessionModel = "haiku"
+		}
+
 		// Build the UserInputHandler for interactive tool support (AskUserQuestion).
 		// When the CLI sends a can_use_tool control_request for an interactive tool:
 		// 1. Emits a user_input_request WS event to the frontend
@@ -533,7 +539,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				ConversationID:     sessionID,
 				SessionID:          session.AgentSessionID,
 				WorkDir:            workDir,
-				Model:              session.Model,
+				Model:              sessionModel,
 				StaticContext:      staticContext,
 				DynamicContext:     dynamicContext,
 				Message:            message,
@@ -576,7 +582,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					ConversationID:     sessionID,
 					SessionID:          "",
 					WorkDir:            workDir,
-					Model:              session.Model,
+					Model:              sessionModel,
 					StaticContext:      newStaticContext,
 					DynamicContext:     dynamicContext,
 					Message:            message,
