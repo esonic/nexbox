@@ -425,7 +425,8 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		// Pass session.ProjectID so project-specific MCPs take precedence over global ones.
 		extraMCPs, _ := s.resolveInstalledMCPsAndMap(session.ProjectID)
 		// Collect installed plugin directories for --plugin-dir injection.
-		pluginDirs := s.resolveInstalledPluginDirs(session.ProjectID)
+		// Pass the project's repo path so container-mode paths can be translated.
+		pluginDirs := s.resolveInstalledPluginDirs(session.ProjectID, project.GitRepoPath)
 		// toolIDToName maps tool_id → tool_name for EventToolStart events so that
 		// EventToolResult (which carries only tool_id) can look up the name.
 		toolIDToName := make(map[string]string)

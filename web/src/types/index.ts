@@ -171,9 +171,17 @@ export interface ChatEvent {
 
 export type ToolUseState = "streaming" | "running" | "complete" | "error";
 
+export interface NestedTool {
+  toolCallId: string;
+  toolName: string;
+  input: string;
+  state: ToolUseState;
+  result?: { output: string; isError?: boolean };
+}
+
 export type MessagePart =
   | { type: "text"; content: string }
-  | { type: "tool_use"; toolCallId: string; toolName: string; input: string; summary?: string; state: ToolUseState }
+  | { type: "tool_use"; toolCallId: string; toolName: string; input: string; summary?: string; state: ToolUseState; nestedTools?: NestedTool[] }
   | { type: "tool_result"; toolCallId: string; output: string; isError?: boolean }
   | { type: "thinking"; content?: string }
   | { type: "tool_group"; count: number }

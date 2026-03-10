@@ -681,7 +681,7 @@ export const marketplaceApi = {
     return request<InstalledMCP[]>(`/marketplace/installed-mcps${qs}`);
   },
 
-  installMCP: (body: { name: string; package_id?: string; version?: string; mcp_key: string; manifest: object; env?: Record<string, string>; project_id?: string }) =>
+  installMCP: (body: { name: string; package_id?: string; version?: string; mcp_key: string; manifest: object; env?: Record<string, string>; project_id?: string; auth_type?: string }) =>
     request<InstalledMCP>("/marketplace/installed-mcps", {
       method: "POST",
       body: JSON.stringify({ ...body, manifest: JSON.stringify(body.manifest) }),
@@ -732,6 +732,14 @@ export const marketplaceApi = {
       `/marketplace/installed-plugins/${encodeURIComponent(name)}${qs}`,
       { method: "DELETE" }
     );
+  },
+
+  // MCP OAuth
+  oauthStart: (name: string, projectId?: string) => {
+    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return request<{ auth_url: string }>(`/connectors/${encodeURIComponent(name)}/oauth/start${qs}`, {
+      method: "POST",
+    });
   },
 };
 

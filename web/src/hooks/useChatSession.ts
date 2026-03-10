@@ -245,6 +245,10 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   // seenDisconnect tracks whether we actually experienced a disconnection.
   // onConnection() fires immediately on registration even when WS is already connected,
   // and we must not treat that initial fire as a reconnection (it would reset streaming state).
+  // Track the currently-running Agent/Task tool so sub-tool events can be nested inside it
+  const activeAgentToolIdRef = useRef<string | null>(null);
+  const nestedToolIdsRef = useRef<Set<string>>(new Set());
+
   const seenDisconnectRef = useRef(false);
   useEffect(() => {
     seenDisconnectRef.current = false;
@@ -336,13 +340,38 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, event.content); }
         break;
       case "tool_start":
-        if (event.tool && event.tool_id) { ensureStreaming(); gs().addToolStart(sid, event.tool_id, event.tool, event.input); }
+        if (event.tool && event.tool_id) {
+          ensureStreaming();
+          if (activeAgentToolIdRef.current) {
+            // Nested sub-tool: add inside the agent card instead of as a sibling
+            nestedToolIdsRef.current.add(event.tool_id);
+            gs().addNestedToolStart(sid, activeAgentToolIdRef.current, event.tool_id, event.tool, event.input || "");
+          } else {
+            gs().addToolStart(sid, event.tool_id, event.tool, event.input);
+          }
+        }
         break;
       case "tool_input_delta":
-        if (event.tool_id && event.input) { gs().updateToolInput(sid, event.tool_id, event.input); }
+        if (event.tool_id && event.input) {
+          if (nestedToolIdsRef.current.has(event.tool_id)) {
+            gs().updateNestedToolInput(sid, event.tool_id, event.input);
+          } else {
+            gs().updateToolInput(sid, event.tool_id, event.input);
+          }
+        }
         break;
       case "tool_result":
-        if (event.tool_id) { gs().addToolResult(sid, event.tool_id, event.output || "", event.is_error); }
+        if (event.tool_id) {
+          if (nestedToolIdsRef.current.has(event.tool_id)) {
+            gs().addNestedToolResult(sid, event.tool_id, event.output || "", event.is_error);
+          } else {
+            gs().addToolResult(sid, event.tool_id, event.output || "", event.is_error);
+            if (event.tool_id === activeAgentToolIdRef.current) {
+              activeAgentToolIdRef.current = null;
+              nestedToolIdsRef.current.clear();
+            }
+          }
+        }
         break;
       case "thinking_delta":
         if (event.content !== undefined) { ensureStreaming(); gs().appendThinkingDelta(sid, event.content || ""); }
@@ -384,14 +413,29 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         gs().finishStreaming(sid);
         window.dispatchEvent(new CustomEvent("session-updated"));
         break;
-      case "subtask_start":
-        if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, `\n\n_↳ Sub-agent: ${event.content}_\n\n`); }
+      case "subtask_start": {
+        ensureStreaming();
+        // Find the last running tool_use — that's the Agent card to nest sub-tools into
+        const msgs = gs().chatMessages[sid] || [];
+        const lastMsg = msgs[msgs.length - 1];
+        if (lastMsg?.role === "assistant") {
+          for (let i = lastMsg.parts.length - 1; i >= 0; i--) {
+            const p = lastMsg.parts[i];
+            if (p.type === "tool_use" && (p.state === "running" || p.state === "streaming")) {
+              activeAgentToolIdRef.current = p.toolCallId;
+              break;
+            }
+          }
+        }
+        if (event.content) gs().setAgentToolSummary(sid, event.content);
         break;
+      }
       case "subtask_progress":
-        if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, `_↳ ${event.content}_\n`); }
+        // Ignore: real tool_start events carry the same info with proper toolName/input
         break;
       case "subtask_done":
-        if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, `_✓ ${event.content}_\n\n`); }
+        activeAgentToolIdRef.current = null;
+        nestedToolIdsRef.current.clear();
         break;
       case "system":
         if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, `\n\n_[System: ${event.content}]_\n\n`); }

@@ -33,7 +33,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
-import type { ToolUseState } from "@/types";
+import type { ToolUseState, NestedTool } from "@/types";
 
 // ── Helpers ──
 
@@ -371,7 +371,8 @@ const toolRegistry: Record<string, ToolMeta> = {
   },
 
   // ── Task / planning ──
-  Task:       { icon: Sparkles,   label: tense("Completed subagent", "Running subagent"), subtitle: textField("description") },
+  Task:       { icon: Sparkles,   label: tense("Agent", "Agent"), subtitle: textField("description") },
+  Agent:      { icon: Sparkles,   label: tense("Agent", "Agent"), subtitle: textField("description") },
   CreatePlan: { icon: ListChecks, label: tense("Created plan", "Creating plan"),          subtitle: textField("name") },
 
   // ── Mode / diagnostics ──
@@ -513,6 +514,7 @@ interface ToolCallCardProps {
   summary?: string;
   state: ToolUseState;
   result?: { output: string; isError?: boolean };
+  nestedTools?: NestedTool[];
 }
 
 export const TODO_TOOLS = new Set([
@@ -526,11 +528,22 @@ export const ToolCallCard = memo(function ToolCallCard({
   summary,
   state,
   result,
+  nestedTools,
 }: ToolCallCardProps) {
-  const [expanded, setExpanded] = useState(false);
+  const isAgentTool = toolName === "Agent" || toolName === "Task";
+  const [expanded, setExpanded] = useState(isAgentTool && state === "running");
   // displayState lags behind state prop by 1s when transitioning from running→complete/error
   const [displayState, setDisplayState] = useState<ToolUseState>(state);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Auto-expand agent card when nested tools start arriving; auto-collapse when done
+  useEffect(() => {
+    if (isAgentTool && nestedTools && nestedTools.length > 0 && state === "running") {
+      setExpanded(true);
+    } else if (isAgentTool && state === "complete") {
+      setExpanded(false);
+    }
+  }, [isAgentTool, nestedTools?.length, state]);
 
   useEffect(() => {
     // Delay visual transition to complete/error by 1s to prevent flicker.
@@ -557,7 +570,7 @@ export const ToolCallCard = memo(function ToolCallCard({
   const meta = getToolMeta(toolName);
   const label = meta.label(displayState);
   const subtitle = summary || (meta.subtitle ? meta.subtitle(input) : "");
-  const hasDetails = !!(input || result);
+  const hasDetails = !!(input || result || (nestedTools && nestedTools.length > 0));
 
   return (
     <Collapsible open={expanded} onOpenChange={hasDetails ? setExpanded : undefined}>
@@ -582,6 +595,20 @@ export const ToolCallCard = memo(function ToolCallCard({
       <CollapsibleContent>
         <div className="ml-5 pl-3 border-l border-border/40 mt-0.5 mb-1 space-y-1.5">
           {input && (meta.renderInput ? meta.renderInput(input) : <RawJSON input={input} />)}
+          {nestedTools && nestedTools.length > 0 && (
+            <div className="space-y-0">
+              {nestedTools.map((nt) => (
+                <ToolCallCard
+                  key={nt.toolCallId}
+                  toolName={nt.toolName}
+                  toolCallId={nt.toolCallId}
+                  input={nt.input}
+                  state={nt.state}
+                  result={nt.result}
+                />
+              ))}
+            </div>
+          )}
           {result && (meta.renderOutput
             ? meta.renderOutput(result.output, result.isError)
             : <RawOutput output={result.output} isError={result.isError} />

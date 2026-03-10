@@ -1012,44 +1012,22 @@ func (s *Server) InstallSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine install path
-	installDir, err := s.skillInstallDir(req.Name, req.ProjectID)
+	if req.ProjectID == "" {
+		// "All Projects": copy to every project that has a git repo path.
+		// One DB record per project is stored; no global record is kept.
+		skills := s.installSkillToAllProjects(req.Name, req.Version, req.InstallPath)
+		log.Printf("[marketplace] installed skill %s v%s to %d projects", req.Name, req.Version, len(skills))
+		writeJSON(w, http.StatusOK, map[string]interface{}{"scope": "all_projects", "installed": len(skills)})
+		return
+	}
+
+	// Single-project install.
+	skill, err := s.installSkillToProject(req.Name, req.Version, req.InstallPath, req.ProjectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// Copy skill files from marketplace_dir source to install dir
-	if err := copySkillDir(req.InstallPath, installDir); err != nil {
-		log.Printf("[marketplace] failed to install skill %s: %v", req.Name, err)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to install skill: %v", err))
-		return
-	}
-
-	skill := store.InstalledSkill{
-		Name:        req.Name,
-		ProjectID:   req.ProjectID,
-		Version:     req.Version,
-		InstallPath: installDir,
-		InstalledAt: time.Now(),
-	}
-	if err := s.LocalStore.UpsertInstalledSkill(skill); err != nil {
-		_ = os.RemoveAll(installDir)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	// If global install, also copy into all existing projects; otherwise ensure .agents symlink.
-	if req.ProjectID == "" {
-		s.copyGlobalSkillToProjects(req.Name, installDir)
-	} else {
-		project, _ := s.getProjectWithLocalPath(req.ProjectID)
-		if project != nil && project.GitRepoPath != "" {
-			ensureAgentsSymlink(project.GitRepoPath)
-		}
-	}
-
-	log.Printf("[marketplace] installed skill: %s v%s → %s", req.Name, req.Version, installDir)
+	log.Printf("[marketplace] installed skill: %s v%s → %s", req.Name, req.Version, skill.InstallPath)
 	writeJSON(w, http.StatusOK, skill)
 }
 
@@ -1061,22 +1039,42 @@ func (s *Server) UninstallSkill(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	projectID := r.URL.Query().Get("project_id")
 
-	// Resolve the install path before deleting from SQLite (we need the path)
-	installDir, dirErr := s.skillInstallDir(name, projectID)
+	if projectID == "" {
+		// "All Projects": remove from every project that has this skill installed.
+		all, err := s.LocalStore.ListInstalledSkills("*")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, sk := range all {
+			if sk.Name != name {
+				continue
+			}
+			if sk.InstallPath != "" {
+				if err := os.RemoveAll(sk.InstallPath); err != nil {
+					log.Printf("[marketplace] warning: failed to remove skill dir %s: %v", sk.InstallPath, err)
+				}
+			}
+			if err := s.LocalStore.DeleteInstalledSkill(name, sk.ProjectID); err != nil {
+				log.Printf("[marketplace] warning: failed to delete skill record %s/%s: %v", name, sk.ProjectID, err)
+			}
+		}
+		log.Printf("[marketplace] uninstalled skill %s from all projects", name)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
-	// Remove from SQLite
+	// Single-project uninstall: look up stored path then delete.
+	sk, _ := s.LocalStore.GetInstalledSkill(name, projectID)
 	if err := s.LocalStore.DeleteInstalledSkill(name, projectID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	// Remove the installed directory if we were able to determine it
-	if dirErr == nil && installDir != "" {
-		if err := os.RemoveAll(installDir); err != nil {
-			log.Printf("[marketplace] warning: failed to remove skill dir %s: %v", installDir, err)
+	if sk != nil && sk.InstallPath != "" {
+		if err := os.RemoveAll(sk.InstallPath); err != nil {
+			log.Printf("[marketplace] warning: failed to remove skill dir %s: %v", sk.InstallPath, err)
 		}
 	}
-
 	log.Printf("[marketplace] uninstalled skill: %s (project=%q)", name, projectID)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1124,41 +1122,26 @@ func (s *Server) InstallPluginEntry(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	installPath := req.InstallPath
-	// For inline LSP entries (no install_path), synthesize a plugin directory
-	// containing a .lsp.json file so the Claude CLI can load it via --plugin-dir.
-	if installPath == "" && req.LSPConfig != "" {
-		dir := filepath.Join(s.DataDir, "lsp-plugins", req.Name)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to create LSP plugin dir: "+err.Error())
-			return
-		}
-		if err := os.WriteFile(filepath.Join(dir, ".lsp.json"), []byte(req.LSPConfig), 0644); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to write .lsp.json: "+err.Error())
-			return
-		}
-		installPath = dir
-	}
-	if installPath == "" {
+	if req.InstallPath == "" && req.LSPConfig == "" {
 		writeError(w, http.StatusBadRequest, "install_path or lsp_config is required")
 		return
 	}
-	// Verify the install_path exists on disk
-	if _, err := os.Stat(installPath); os.IsNotExist(err) {
-		writeError(w, http.StatusBadRequest, "install_path does not exist: "+installPath)
+
+	if req.ProjectID == "" {
+		// "All Projects": install into every project's workspace.
+		entries := s.installPluginToAllProjects(req.Name, req.InstallPath, req.LSPConfig)
+		log.Printf("[marketplace] installed plugin %s to %d projects", req.Name, len(entries))
+		writeJSON(w, http.StatusOK, map[string]interface{}{"scope": "all_projects", "installed": len(entries)})
 		return
 	}
-	entry := store.InstalledPluginEntry{
-		Name:        req.Name,
-		ProjectID:   req.ProjectID,
-		InstallPath: installPath,
-		InstalledAt: time.Now(),
-	}
-	if err := s.LocalStore.UpsertInstalledPluginEntry(entry); err != nil {
+
+	// Single-project install: copy files into the project's workspace.
+	entry, err := s.installPluginToProject(req.Name, req.InstallPath, req.LSPConfig, req.ProjectID)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	log.Printf("[marketplace] installed plugin: %s → %s (project=%q)", req.Name, installPath, req.ProjectID)
+	log.Printf("[marketplace] installed plugin: %s → %s (project=%q)", req.Name, entry.InstallPath, req.ProjectID)
 	writeJSON(w, http.StatusOK, entry)
 }
 
@@ -1169,6 +1152,44 @@ func (s *Server) UninstallPluginEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	name := chi.URLParam(r, "name")
 	projectID := r.URL.Query().Get("project_id")
+
+	if projectID == "" {
+		// "All Projects": remove from every project that has this plugin installed.
+		all, err := s.LocalStore.ListInstalledPluginEntries("*")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, e := range all {
+			if e.Name != name {
+				continue
+			}
+			if e.InstallPath != "" {
+				if err := os.RemoveAll(e.InstallPath); err != nil {
+					log.Printf("[marketplace] warning: failed to remove plugin dir %s: %v", e.InstallPath, err)
+				}
+			}
+			if err := s.LocalStore.DeleteInstalledPluginEntry(name, e.ProjectID); err != nil {
+				log.Printf("[marketplace] warning: failed to delete plugin record %s/%s: %v", name, e.ProjectID, err)
+			}
+		}
+		log.Printf("[marketplace] uninstalled plugin %s from all projects", name)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Single-project uninstall: look up stored path then delete.
+	entries, _ := s.LocalStore.ListInstalledPluginEntries(projectID)
+	for _, e := range entries {
+		if e.Name == name && e.ProjectID == projectID {
+			if e.InstallPath != "" {
+				if err := os.RemoveAll(e.InstallPath); err != nil {
+					log.Printf("[marketplace] warning: failed to remove plugin dir %s: %v", e.InstallPath, err)
+				}
+			}
+			break
+		}
+	}
 	if err := s.LocalStore.DeleteInstalledPluginEntry(name, projectID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1178,7 +1199,9 @@ func (s *Server) UninstallPluginEntry(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveInstalledPluginDirs returns the list of plugin directory paths for a project.
-func (s *Server) resolveInstalledPluginDirs(projectID string) []string {
+// repoPath is the project's host-side git repo path; when a ContainerMgr is active it is
+// used to translate host paths to the container-internal /workspace/... equivalents.
+func (s *Server) resolveInstalledPluginDirs(projectID, repoPath string) []string {
 	if s.LocalStore == nil {
 		return nil
 	}
@@ -1190,35 +1213,155 @@ func (s *Server) resolveInstalledPluginDirs(projectID string) []string {
 	var dirs []string
 	seen := make(map[string]bool)
 	for _, e := range entries {
-		if e.InstallPath != "" && !seen[e.InstallPath] {
-			seen[e.InstallPath] = true
-			dirs = append(dirs, e.InstallPath)
+		if e.InstallPath == "" {
+			continue
+		}
+		p := e.InstallPath
+		// In container mode the plugin lives inside the repo which is mounted at
+		// /workspace, so translate the host path to the container-visible path.
+		if s.ContainerMgr != nil && repoPath != "" && strings.HasPrefix(p, repoPath+"/") {
+			p = "/workspace" + p[len(repoPath):]
+		}
+		if !seen[p] {
+			seen[p] = true
+			dirs = append(dirs, p)
 		}
 	}
 	return dirs
 }
 
 // ---------------------------------------------------------------------------
-// Skill helpers
+// Skill / Plugin install helpers
 // ---------------------------------------------------------------------------
 
-// skillInstallDir returns the absolute path where a skill should be installed.
-// For project-specific: {project.GitRepoPath}/.claude/skills/{name}/
-// For global: {dataDir}/global-skills/{name}/
-func (s *Server) skillInstallDir(name, projectID string) (string, error) {
-	if projectID == "" {
-		// Global: stored under the data directory
-		return filepath.Join(s.DataDir, "global-skills", name), nil
-	}
-	// Project-specific: under the project's git repo
+// installSkillToProject copies the skill from srcPath into the project's
+// .claude/skills/{name}/ directory and records the installation in the DB.
+func (s *Server) installSkillToProject(name, version, srcPath, projectID string) (store.InstalledSkill, error) {
 	project, err := s.getProjectWithLocalPath(projectID)
 	if err != nil || project == nil {
-		return "", fmt.Errorf("project not found: %s", projectID)
+		return store.InstalledSkill{}, fmt.Errorf("project not found: %s", projectID)
 	}
 	if project.GitRepoPath == "" {
-		return "", fmt.Errorf("project has no git repo path")
+		return store.InstalledSkill{}, fmt.Errorf("project %s has no git repo path", projectID)
 	}
-	return filepath.Join(project.GitRepoPath, ".claude", "skills", name), nil
+	installDir := filepath.Join(project.GitRepoPath, ".claude", "skills", name)
+	if err := copySkillDir(srcPath, installDir); err != nil {
+		return store.InstalledSkill{}, fmt.Errorf("copy skill: %w", err)
+	}
+	ensureAgentsSymlink(project.GitRepoPath)
+	skill := store.InstalledSkill{
+		Name:        name,
+		ProjectID:   projectID,
+		Version:     version,
+		InstallPath: installDir,
+		InstalledAt: time.Now(),
+	}
+	if err := s.LocalStore.UpsertInstalledSkill(skill); err != nil {
+		_ = os.RemoveAll(installDir)
+		return store.InstalledSkill{}, err
+	}
+	return skill, nil
+}
+
+// installSkillToAllProjects installs a skill into every project that has a git
+// repo path.  A separate DB record is created for each project; no global
+// record is stored.  Returns the list of successfully installed records.
+func (s *Server) installSkillToAllProjects(name, version, srcPath string) []store.InstalledSkill {
+	projects, err := s.Store.ListProjects()
+	if err != nil {
+		log.Printf("[marketplace] installSkillToAllProjects: list projects: %v", err)
+		return nil
+	}
+	var mu sync.Mutex
+	var results []store.InstalledSkill
+	var wg sync.WaitGroup
+	for _, p := range projects {
+		if p.GitRepoPath == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(p store.Project) {
+			defer wg.Done()
+			sk, err := s.installSkillToProject(name, version, srcPath, p.ID)
+			if err != nil {
+				log.Printf("[marketplace] installSkillToAllProjects: project %s: %v", p.ID, err)
+				return
+			}
+			mu.Lock()
+			results = append(results, sk)
+			mu.Unlock()
+		}(p)
+	}
+	wg.Wait()
+	return results
+}
+
+// installPluginToProject copies the plugin from srcPath (or writes lspConfig as
+// .lsp.json) into the project's .claude/plugins/{name}/ directory and records it.
+func (s *Server) installPluginToProject(name, srcPath, lspConfig, projectID string) (store.InstalledPluginEntry, error) {
+	project, err := s.getProjectWithLocalPath(projectID)
+	if err != nil || project == nil {
+		return store.InstalledPluginEntry{}, fmt.Errorf("project not found: %s", projectID)
+	}
+	if project.GitRepoPath == "" {
+		return store.InstalledPluginEntry{}, fmt.Errorf("project %s has no git repo path", projectID)
+	}
+	installDir := filepath.Join(project.GitRepoPath, ".claude", "plugins", name)
+	if srcPath != "" {
+		if err := copyDir(srcPath, installDir); err != nil {
+			return store.InstalledPluginEntry{}, fmt.Errorf("copy plugin: %w", err)
+		}
+	} else if lspConfig != "" {
+		if err := os.MkdirAll(installDir, 0755); err != nil {
+			return store.InstalledPluginEntry{}, fmt.Errorf("create plugin dir: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(installDir, ".lsp.json"), []byte(lspConfig), 0644); err != nil {
+			return store.InstalledPluginEntry{}, fmt.Errorf("write .lsp.json: %w", err)
+		}
+	}
+	entry := store.InstalledPluginEntry{
+		Name:        name,
+		ProjectID:   projectID,
+		InstallPath: installDir,
+		InstalledAt: time.Now(),
+	}
+	if err := s.LocalStore.UpsertInstalledPluginEntry(entry); err != nil {
+		_ = os.RemoveAll(installDir)
+		return store.InstalledPluginEntry{}, err
+	}
+	return entry, nil
+}
+
+// installPluginToAllProjects installs a plugin into every project that has a
+// git repo path.  Returns the list of successfully installed records.
+func (s *Server) installPluginToAllProjects(name, srcPath, lspConfig string) []store.InstalledPluginEntry {
+	projects, err := s.Store.ListProjects()
+	if err != nil {
+		log.Printf("[marketplace] installPluginToAllProjects: list projects: %v", err)
+		return nil
+	}
+	var mu sync.Mutex
+	var results []store.InstalledPluginEntry
+	var wg sync.WaitGroup
+	for _, p := range projects {
+		if p.GitRepoPath == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(p store.Project) {
+			defer wg.Done()
+			e, err := s.installPluginToProject(name, srcPath, lspConfig, p.ID)
+			if err != nil {
+				log.Printf("[marketplace] installPluginToAllProjects: project %s: %v", p.ID, err)
+				return
+			}
+			mu.Lock()
+			results = append(results, e)
+			mu.Unlock()
+		}(p)
+	}
+	wg.Wait()
+	return results
 }
 
 // copySkillDir copies a skill directory from src to dst. Any existing content in
@@ -1250,23 +1393,6 @@ func copySkillDir(src, dst string) error {
 	})
 }
 
-// copyGlobalSkillsToProject copies all globally installed skills into a project on creation.
-func (s *Server) copyGlobalSkillsToProject(gitRepoPath string) {
-	globalSkills, err := s.LocalStore.ListInstalledSkills("")
-	if err != nil {
-		log.Printf("[marketplace] failed to load global skills for new project: %v", err)
-		return
-	}
-	for _, skill := range globalSkills {
-		if skill.InstallPath == "" {
-			continue
-		}
-		dest := filepath.Join(gitRepoPath, ".claude", "skills", skill.Name)
-		if err := copyDir(skill.InstallPath, dest); err != nil {
-			log.Printf("[marketplace] failed to copy global skill %s to new project: %v", skill.Name, err)
-		}
-	}
-}
 
 // ensureAgentsSymlink creates a .agents -> .claude symlink at the repo root so that
 // agents like Codex (which look for .agents/) can find skills installed under .claude/.
@@ -1294,32 +1420,6 @@ func ensureAgentsSymlink(repoPath string) {
 	}
 }
 
-// copyGlobalSkillToProjects copies a global skill into all projects that have a git repo path.
-func (s *Server) copyGlobalSkillToProjects(skillName, srcDir string) {
-	projects, err := s.Store.ListProjects()
-	if err != nil {
-		log.Printf("[marketplace] failed to list projects for global skill copy: %v", err)
-		return
-	}
-	var wg sync.WaitGroup
-	for _, p := range projects {
-		if p.GitRepoPath == "" {
-			continue
-		}
-		wg.Add(1)
-		go func(p store.Project) {
-			defer wg.Done()
-			dest := filepath.Join(p.GitRepoPath, ".claude", "skills", skillName)
-			if err := copyDir(srcDir, dest); err != nil {
-				log.Printf("[marketplace] failed to copy global skill %s to project %s: %v", skillName, p.ID, err)
-			} else {
-				log.Printf("[marketplace] copied global skill %s to %s", skillName, dest)
-				ensureAgentsSymlink(p.GitRepoPath)
-			}
-		}(p)
-	}
-	wg.Wait()
-}
 
 // copyDir recursively copies src directory to dst.
 func copyDir(src, dst string) error {

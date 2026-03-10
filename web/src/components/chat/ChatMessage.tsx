@@ -215,6 +215,7 @@ function CollapsibleToolSteps({ parts }: { parts: MessagePart[] }) {
           summary={part.summary}
           state={part.state}
           result={resultMap[part.toolCallId]}
+          nestedTools={part.nestedTools}
         />
       ))}
     </div>

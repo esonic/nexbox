@@ -101,11 +101,6 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Copy global skills into the new project's .claude/skills/ directory
-	if project.GitRepoPath != "" && s.LocalStore != nil {
-		s.copyGlobalSkillsToProject(project.GitRepoPath)
-	}
-
 	writeJSON(w, http.StatusCreated, project)
 }
 

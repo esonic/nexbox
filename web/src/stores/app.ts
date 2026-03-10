@@ -59,6 +59,10 @@ interface AppState {
   updateToolInput: (sessionId: string, toolCallId: string, inputDelta: string) => void;
   addToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
   appendThinkingDelta: (sessionId: string, text: string) => void;
+  setAgentToolSummary: (sessionId: string, summary: string) => void;
+  addNestedToolStart: (sessionId: string, agentToolCallId: string, toolCallId: string, toolName: string, input: string) => void;
+  updateNestedToolInput: (sessionId: string, toolCallId: string, inputDelta: string) => void;
+  addNestedToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
 
   finishStreaming: (sessionId: string, stats?: ExecutionStats) => void;
   clearChatMessages: (sessionId: string) => void;
@@ -229,6 +233,68 @@ export const useAppStore = create<AppState>()(
       }),
     ),
 
+  setAgentToolSummary: (sessionId, summary) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) => {
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const p = parts[i];
+          if (p.type === "tool_use" && (p.state === "running" || p.state === "streaming")) {
+            parts[i] = { ...p, summary };
+            break;
+          }
+        }
+        return parts;
+      })
+    ),
+
+  addNestedToolStart: (sessionId, agentToolCallId, toolCallId, toolName, input) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) =>
+        patchToolUse(parts, agentToolCallId, (p) => ({
+          ...p,
+          nestedTools: [...(p.nestedTools || []), { toolCallId, toolName, input, state: "running" as const }],
+        })),
+      ),
+    ),
+
+  updateNestedToolInput: (sessionId, toolCallId, inputDelta) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) => {
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const p = parts[i];
+          if (p.type === "tool_use" && p.nestedTools) {
+            const nIdx = p.nestedTools.findIndex((n) => n.toolCallId === toolCallId);
+            if (nIdx >= 0) {
+              const updated = [...p.nestedTools];
+              updated[nIdx] = { ...updated[nIdx], input: updated[nIdx].input + inputDelta };
+              parts[i] = { ...p, nestedTools: updated };
+              break;
+            }
+          }
+        }
+        return parts;
+      }),
+    ),
+
+  addNestedToolResult: (sessionId, toolCallId, output, isError) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) => {
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const p = parts[i];
+          if (p.type === "tool_use" && p.nestedTools) {
+            const nIdx = p.nestedTools.findIndex((n) => n.toolCallId === toolCallId);
+            if (nIdx >= 0) {
+              const updated = [...p.nestedTools];
+              updated[nIdx] = { ...updated[nIdx], state: isError ? "error" as const : "complete" as const, result: { output, isError } };
+              parts[i] = { ...p, nestedTools: updated };
+              break;
+            }
+          }
+        }
+        return parts;
+      }),
+    ),
+
   appendThinkingDelta: (sessionId, text) =>
     set((state) =>
       updateLastAssistant(state, sessionId, (parts) => {
@@ -249,7 +315,10 @@ export const useAppStore = create<AppState>()(
       if (lastMsg && lastMsg.role === "assistant") {
         const finalParts = lastMsg.parts.map((p) => {
           if (p.type === "tool_use" && (p.state === "streaming" || p.state === "running")) {
-            return { ...p, state: "complete" as const };
+            const nestedTools = p.nestedTools?.map((n) =>
+              n.state === "running" || n.state === "streaming" ? { ...n, state: "complete" as const } : n
+            );
+            return { ...p, state: "complete" as const, ...(nestedTools ? { nestedTools } : {}) };
           }
           return p;
         });
