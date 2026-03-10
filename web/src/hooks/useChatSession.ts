@@ -173,9 +173,11 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     return parseAskQuestionInput(askToolPart.input);
   }, [messages, isStreaming]);
 
-  // Detect pending todos (TodoWrite tool) — search backwards from last message,
-  // stopping at the most recent user message so we only show current-turn todos.
+  // Detect pending todos (TodoWrite tool) — only during streaming.
+  // Cleared automatically when streaming ends, so it never gets stuck.
   const pendingTodo = useMemo(() => {
+    if (!isStreaming) return null;
+
     const TODO_TOOLS_SET = new Set(["TodoWrite", "UpdateTodos", "ReadTodos", "updateTodosToolCall", "readTodosToolCall", "todoWriteToolCall"]);
 
     // Walk backwards through messages until we hit a user message
