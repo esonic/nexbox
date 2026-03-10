@@ -181,17 +181,24 @@ export function MarketplacePage() {
     }
   };
 
-  const filteredPlugins = plugins.filter((p) => {
-    if (!matchesTab(p, tab)) return false;
-    if (search) {
-      const q = search.toLowerCase();
-      return (
-        p.name.toLowerCase().includes(q) ||
-        p.description?.toLowerCase().includes(q)
-      );
-    }
-    return true;
-  });
+  const filteredPlugins = plugins
+    .filter((p) => {
+      if (!matchesTab(p, tab)) return false;
+      if (search) {
+        const q = search.toLowerCase();
+        return (
+          p.name.toLowerCase().includes(q) ||
+          p.description?.toLowerCase().includes(q)
+        );
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      const aInstalled = isInstalled(a) ? 0 : 1;
+      const bInstalled = isInstalled(b) ? 0 : 1;
+      if (aInstalled !== bInstalled) return aInstalled - bInstalled;
+      return a.name.localeCompare(b.name);
+    });
 
   const tabConfig = {
     connector: {
@@ -331,7 +338,7 @@ const typeStyles: Record<string, { bg: string; text: string; icon: "wrench" | "p
   mcp:    { bg: "bg-blue-500/10",   text: "text-blue-600",    icon: "wrench" },
   lsp:    { bg: "bg-blue-500/10",   text: "text-blue-600",    icon: "wrench" },
   skill:  { bg: "bg-violet-500/10", text: "text-violet-600",  icon: "package" },
-  plugin: { bg: "bg-amber-500/10",  text: "text-amber-600",   icon: "package" },
+  plugin: { bg: "bg-blue-500/10",   text: "text-blue-600",    icon: "package" },
 };
 
 function PluginCard({ plugin, installed, installing, onInstall, onUninstall }: PluginCardProps) {
