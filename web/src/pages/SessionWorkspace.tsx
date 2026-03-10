@@ -205,17 +205,7 @@ function GitPanelContent({
     }
   }, [projectId, mrLoading]);
 
-  const mrButton = gitRepoPath ? (
-    <Button
-      size="sm"
-      onClick={handleCreateMR}
-      disabled={mrLoading}
-      className="h-6 text-xs bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700"
-    >
-      {mrLoading ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <GitMerge className="mr-1 h-3 w-3" />}
-      Create MR
-    </Button>
-  ) : null;
+  const mrButton = null;
 
   return (
     <>
