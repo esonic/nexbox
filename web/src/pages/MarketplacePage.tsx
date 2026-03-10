@@ -465,7 +465,7 @@ function InstallDialog({ plugin, projects, onConfirm, onClose }: InstallDialogPr
         <div className="flex flex-col gap-1.5">
           <label className="text-sm font-medium">Install scope</label>
           <p className="text-[11px] text-muted-foreground">
-            "All Projects" installs into every project's <code className="font-mono">.claude/skills/</code> folder.
+            "All Projects" installs into every project's folder.
           </p>
           <div ref={dropRef} className="relative">
             <button

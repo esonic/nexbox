@@ -271,6 +271,15 @@ func (a *ClaudeAgent) SendMessage(
 				},
 			})
 		case "task_notification":
+			// Accumulate subagent token usage into input tokens.
+			if msg.Usage != nil {
+				if v, ok := msg.Usage["total_tokens"]; ok {
+					if n, ok := toInt(v); ok && n > 0 {
+						accInputTokens += n
+						log.Printf("[claude-agent] Subagent tokens accumulated: %d (all→input)", n)
+					}
+				}
+			}
 			cb(StreamEvent{
 				Type:    EventSubTaskDone,
 				Content: msg.Summary,
@@ -448,8 +457,8 @@ func (a *ClaudeAgent) SendMessage(
 			}
 
 		case "result":
-			log.Printf("[claude-agent] Result: session=%s, isError=%v, subtype=%s, result=%s, errors=%v",
-				msg.SessionID, msg.IsError, msg.Subtype, msg.Result, msg.Errors)
+			log.Printf("[claude-agent] Result: session=%s, isError=%v, subtype=%s, cost=%.6f, errors=%v",
+				msg.SessionID, msg.IsError, msg.Subtype, msg.TotalCostUSD, msg.Errors)
 
 			// Check for errors - both via isError flag AND error subtypes
 			isErrorResult := msg.IsError || strings.HasPrefix(msg.Subtype, "error_")
@@ -727,4 +736,17 @@ func buildErrorMessage(msg StreamMessage) string {
 		}
 		return "Agent returned an error"
 	}
+}
+
+// toInt converts a JSON-decoded numeric value (float64 or int) to int.
+func toInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	}
+	return 0, false
 }
