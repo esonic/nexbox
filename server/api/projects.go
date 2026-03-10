@@ -210,7 +210,7 @@ func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stop the per-project Docker container if Docker isolation is enabled.
+	// Stop the per-project Podman container if Podman isolation is enabled.
 	if s.ContainerMgr != nil {
 		if err := s.ContainerMgr.StopContainer(id); err != nil {
 			log.Printf("[projects] failed to stop container for project %s: %v", id, err)

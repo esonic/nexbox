@@ -15,7 +15,7 @@
 7. [数据库](#7-数据库)
 8. [用户与权限管理](#8-用户与权限管理)
 9. [邮件发送（Resend）](#9-邮件发送resend)
-10. [Docker 容器隔离（可选）](#10-docker-容器隔离可选)
+10. [Podman 容器隔离（可选）](#10-podman-容器隔离可选)
 11. [本地开发](#11-本地开发)
 12. [常见问题排查](#12-常见问题排查)
 
@@ -31,7 +31,7 @@ BoxNex 是一个**多用户 AI Agent SaaS 平台**，允许多个用户独立使
 | 前端 | React + TypeScript + Vite，嵌入到 Go 二进制中 |
 | 数据库 | SQLite（开发/单机）或 MySQL 8.x（生产多实例） |
 | AI Agent | Claude CLI，通过 Anthropic API Key 调用 |
-| 容器隔离 | Docker（可选），每个项目独立沙盒容器 |
+| 容器隔离 | Podman Rootless（可选），每个项目独立沙盒容器 |
 
 **两种运行模式：**
 
@@ -58,8 +58,11 @@ BoxNex 是一个**多用户 AI Agent SaaS 平台**，允许多个用户独立使
 ### 可选软件
 | 软件 | 用途 |
 |------|------|
-| Docker Engine | 项目容器隔离（`docker_enabled: true` 时必须） |
+| Podman（rootless） | 项目容器隔离（`podman_enabled: true` 时必须） |
 | MySQL 8.x | 生产多实例共享数据库 |
+
+> **为什么用 Podman 而不是 Docker？**
+> Podman Rootless 无需 root、无守护进程，用户命名空间隔离开箱即用，内存占用更低，更适合多用户 SaaS 生产部署。Podman 不是 Go 库，BoxNex 通过 `exec.Command("podman", ...)` 调用系统中安装的 podman 二进制，`go.mod` 中不会出现 podman 依赖。
 
 ### 端口
 - 默认监听：`9040`（可通过 `--port` 参数修改）
@@ -75,17 +78,17 @@ BoxNex 是一个**多用户 AI Agent SaaS 平台**，允许多个用户独立使
 git clone <repo-url> boxnex
 cd boxnex
 
-# 完整安装（Docker + Go + 构建镜像 + 生成 config.json）
+# 完整安装（Podman + Go + 构建镜像 + 生成 config.json）
 bash scripts/setup.sh
 
-# 仅安装 Go，跳过 Docker（不启用容器隔离）
-bash scripts/setup.sh --no-docker
+# 仅安装 Go，跳过 Podman（不启用容器隔离）
+bash scripts/setup.sh --no-podman
 ```
 
 脚本会自动完成：
-- 安装 Docker Engine（处理 WSL2 iptables 兼容性）
+- 安装 Podman（rootless 模式，无需 root）
 - 安装 Go 1.22.5
-- 构建 `boxnex-agent:latest` Docker 镜像
+- 构建 `boxnex-agent:latest` 容器镜像（使用 `Containerfile`）
 - 生成 `server/data/config.json`（含随机 JWT secret，权限 0600）
 
 ### 3.2 编辑配置
@@ -149,10 +152,14 @@ server/boxnex --data-dir server/data --port 9040
 | `resend_api_key` | string | — | Resend API Key，生产发邮件必填；空则验证码打到日志 |
 | `resend_from` | string | `BoxNex <noreply@box-nex.top>` | 发件人地址（需在 Resend 控制台验证域名） |
 | `marketplace_dir` | string | `{datadir}/marketplace` | 本地插件目录路径，支持多种格式（见下方 Marketplace 章节） |
-| `docker_enabled` | bool | `false` | 是否启用 Docker 容器隔离 |
-| `docker_image` | string | `"boxnex-agent:latest"` | 容器镜像名 |
+| `podman_enabled` | bool | `false` | 是否启用 Podman 容器隔离 |
+| `podman_image` | string | `"boxnex-agent:latest"` | 容器镜像名（需提前构建） |
+| `podman_network` | string | `"boxnex-egress"` | Podman 网络名，启动时自动创建 |
+| `claude_auth_token` | string | — | Claude OAuth Token 或 API Key（推荐通过 `CLAUDE_CODE_OAUTH_TOKEN` 环境变量注入，避免写入磁盘） |
+| `proxy_listen_addr` | string | `<网关IP>:8118` | 出口代理监听地址，默认自动绑定到 Podman 网络网关 IP |
+| `proxy_allowed_hosts` | []string | — | 除默认白名单外额外允许的出网域名（见下方说明） |
+| `disk_quota_bytes` | int | `268435456`（256MB） | 容器 workspace 磁盘配额，超出则终止 agent |
 | `cors_origins` | []string | — | 允许的 CORS 源，空则使用内置开发默认值 |
-| `disk_quota_bytes` | int | `0`（不限） | 用户磁盘配额 |
 
 ---
 
@@ -226,7 +233,8 @@ WorkingDirectory=/opt/boxnex
 ExecStart=/opt/boxnex/server/boxnex --data-dir /opt/boxnex/server/data --port 9040
 Restart=on-failure
 RestartSec=5
-Environment=CLAUDE_CODE_OAUTH_TOKEN=<your-anthropic-token>
+# Claude OAuth Token（推荐通过环境变量注入，避免写入 config.json 磁盘）
+Environment=CLAUDE_CODE_OAUTH_TOKEN=<your-oauth-token>
 
 [Install]
 WantedBy=multi-user.target
@@ -464,46 +472,126 @@ grep "Verification code" server/logs/boxnex.log | tail -3
 
 ---
 
-## 10. Docker 容器隔离（可选）
+## 10. Podman 容器隔离（可选）
 
-启用后，每个 project 的 AI Agent 运行在独立的 Docker 容器中，项目间文件完全隔离。
+启用后，每个 project 的 AI Agent 运行在独立的 Podman Rootless 容器中，项目间文件完全隔离，并内置出口代理防止 API Key 泄露。
 
-### 前提条件
+### 安装 Podman（Debian/Ubuntu）
 
 ```bash
-# 确认 Docker daemon 运行中
-docker info
+# Debian 12 / Ubuntu 22.04+
+sudo apt-get install -y podman
 
-# 构建 agent 镜像
-bash scripts/build-agent-image.sh
+# 验证安装（rootless 模式，不需要 sudo）
+podman info | grep -E "rootless|version"
+```
+
+### 构建 Agent 镜像
+
+```bash
+# 镜像定义在项目根目录 Containerfile
+podman build -t boxnex-agent:latest -f Containerfile .
+
+# 验证
+podman image ls boxnex-agent
 ```
 
 ### 配置
 
 ```json
 {
-  "docker_enabled": true,
-  "docker_image": "boxnex-agent:latest"
+  "podman_enabled": true,
+  "podman_image": "boxnex-agent:latest",
+  "podman_network": "boxnex-egress",
+  "proxy_allowed_hosts": []
 }
+```
+
+`CLAUDE_CODE_OAUTH_TOKEN` **建议通过环境变量注入**，避免写入 `config.json` 磁盘文件：
+
+```ini
+# /etc/systemd/system/boxnex.service
+[Service]
+Environment=CLAUDE_CODE_OAUTH_TOKEN=<your-oauth-token>
 ```
 
 ### 工作原理
 
-- 创建 session 时，`ContainerManager.EnsureContainer()` 检查是否已有容器
-- 容器以 `tail -f /dev/null` 保活，项目 git 目录 bind-mount 到 `/workspace`
-- Agent 执行通过 `docker exec` 在容器内运行
-- 删除 project 时自动调用 `docker stop` 停止容器
+```
+容器内 Claude CLI
+  │  ANTHROPIC_API_KEY=bxs-<随机token>（容器内假 key，由代理替换）
+  │  ANTHROPIC_BASE_URL=http://<网关IP>:8118
+  ▼
+内嵌出口代理（Go，绑定到 Podman 网络网关 IP）
+  │  验证 bxs- token → 替换为真实 Anthropic API Key
+  │  转发到 api.anthropic.com
+  ▼
+Anthropic API
+```
 
-### WSL2 注意事项
+- 启动时自动创建 `boxnex-egress` 网络（带 `--opt isolate=true` 阻止容器间通信）
+- 代理绑定到网络网关 IP（如 `10.88.0.1:8118`），**不暴露在 `0.0.0.0`**
+- 每个容器获得唯一的一次性 token，服务重启后旧容器自动停止（token 失效）
+- workspace 磁盘超配额时自动终止 agent
 
-WSL2 下 Docker 使用 iptables 可能有兼容性问题，`scripts/setup.sh` 会自动切换为 `iptables-legacy`。
-如果手动安装 Docker 后无法启动，执行：
+### 出网域名白名单
+
+`api.anthropic.com` **不在 CONNECT 白名单**——必须走内嵌代理的 relay 路径（由 `ANTHROPIC_BASE_URL` 指向），这样 API Key 永远不会出现在容器网络流量中。
+
+**内置默认白名单**（无需配置，自动放行）：
+
+| 域名 | 用途 |
+|------|------|
+| `statsig.anthropic.com` | Claude CLI 功能开关 |
+| `sentry.io` | Claude CLI 错误上报 |
+| `registry.npmjs.org` / `npmjs.org` | npm 包下载（npx 类 MCP 必须） |
+| `github.com` / `api.github.com` | Git 操作 + GitHub Copilot MCP |
+| `gitlab.com` | Git 操作 + GitLab MCP |
+| `mcp.slack.com` | Slack MCP |
+| `mcp.stripe.com` | Stripe MCP |
+| `mcp.linear.app` | Linear MCP |
+| `mcp.asana.com` | Asana MCP |
+| `api.githubcopilot.com` | GitHub Copilot MCP（REST） |
+| `api.greptile.com` | Greptile MCP |
+| `mcp.supabase.com` | Supabase MCP |
+
+**追加额外域名**（如自建服务、其他 Connector）：
+
+```json
+{
+  "proxy_allowed_hosts": [
+    "your-service.example.com",
+    "api.notion.com"
+  ]
+}
+```
+
+> **注意**：只需填主机名，不需要带协议或端口。允许的是 HTTPS CONNECT 隧道。对于不遵守 `HTTP_PROXY` 环境变量的工具（直接 raw socket），代理无法拦截——这是 Podman Rootless 无 root 权限的结构性限制。
+
+### 常用运维命令
 
 ```bash
-sudo update-alternatives --set iptables /usr/sbin/iptables-legacy
-sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
-sudo service docker restart
+# 查看正在运行的 agent 容器
+podman ps --filter "name=boxnex-proj-"
+
+# 查看某个容器日志
+podman logs boxnex-proj-<name>
+
+# 手动停止某个项目的容器
+podman stop boxnex-proj-<project-id>
+
+# 查看出口网络
+podman network ls
+podman network inspect boxnex-egress
+
+# 重建镜像后重启（容器会在下次请求时自动用新镜像启动）
+podman build -t boxnex-agent:latest -f Containerfile .
+sudo systemctl restart boxnex
 ```
+
+### WSL2 开发注意事项
+
+WSL2 下 Podman Rootless 可直接工作，无需处理 iptables 兼容性问题（这是相比 Docker 的优势之一）。
 
 ---
 
@@ -586,18 +674,54 @@ grep '"GET /ws"' server/logs/boxnex.log | tail -10
 
 ---
 
-### 问题：`docker: command not found` 或容器无法启动
+### 问题：`podman: command not found` 或容器无法启动
 
 ```bash
-docker info           # 检查 daemon 是否运行
-sudo service docker start  # WSL2 下手动启动
+# 检查 podman 是否安装
+which podman && podman --version
+
+# 安装（Debian/Ubuntu）
+sudo apt-get install -y podman
 
 # 检查镜像是否存在
-docker images | grep boxnex-agent
+podman image ls | grep boxnex-agent
 
 # 重新构建镜像
-bash scripts/build-agent-image.sh
+podman build -t boxnex-agent:latest -f Containerfile .
 ```
+
+---
+
+### 问题：容器启动后 Claude API 返回 401
+
+原因：服务重启后旧容器的 session token 已失效，但容器未停止。
+
+```bash
+# 手动停止所有 boxnex 容器，服务会在下次请求时用新 token 重启它们
+podman stop $(podman ps -q --filter "name=boxnex-proj-")
+```
+
+或直接重启服务（`RecoverRunningContainers` 会自动处理）：
+
+```bash
+sudo systemctl restart boxnex
+```
+
+---
+
+### 问题：Connector/MCP 工具无法访问外网
+
+原因：容器出口代理只允许白名单域名，第三方 API 域名未放行。
+
+**解决**：在 `config.json` 的 `proxy_allowed_hosts` 中添加需要的域名：
+
+```json
+{
+  "proxy_allowed_hosts": ["api.github.com", "registry.npmjs.org"]
+}
+```
+
+修改后重启服务生效。如果工具仍然无法访问，可能是该工具不遵守 `HTTP_PROXY` 环境变量（直接 raw socket），属于 Podman Rootless 的结构性限制，无法通过白名单解决。
 
 ---
 
@@ -635,4 +759,4 @@ sudo systemctl restart boxnex
 | `server/data/marketplace/` | 本地插件 JSON 文件目录 |
 | `scripts/setup.sh` | 一键环境初始化脚本 |
 | `build.sh` | 编译脚本（前端 + 后端） |
-| `Dockerfile.agent` | Agent 沙盒容器镜像定义 |
+| `Containerfile` | Agent 沙盒容器镜像定义（Podman 格式，兼容 Docker） |

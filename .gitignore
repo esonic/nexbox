@@ -6,6 +6,7 @@ proxy/proxy
 stable/
 marketplace/
 target/
+.claude/
 
 # Embedded web dist (built by build.sh, contains copy of web/dist)
 server/webdist/*

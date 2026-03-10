@@ -7,6 +7,10 @@ import { useAppStore } from "@/stores/app";
 import {
   parseAskQuestionInput,
 } from "@/components/chat/QuestionCard";
+import {
+  parseTodoOutput,
+  parseTodoInput,
+} from "@/components/chat/ToolCallCard";
 import type { AttachedImage } from "@/components/chat/ChatInput";
 import { uuid } from "@/lib/utils";
 import type { Session, Task, ChatEvent, ChatMessage as ChatMessageType } from "@/types";
@@ -167,6 +171,46 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     const lastMsg = messages[messages.length - 1];
     if (lastMsg?.id !== lastAssistant.id) return null;
     return parseAskQuestionInput(askToolPart.input);
+  }, [messages, isStreaming]);
+
+  // Detect pending todos (TodoWrite tool during streaming or from last message)
+  const pendingTodo = useMemo(() => {
+    const TODO_TOOLS = new Set(["TodoWrite", "UpdateTodos", "ReadTodos", "updateTodosToolCall", "readTodosToolCall", "todoWriteToolCall"]);
+
+    // Check the current/last streaming message
+    let relevantMsg: ChatMessageType | undefined;
+    if (isStreaming) {
+      // Get the last assistant message that's streaming
+      relevantMsg = [...messages].reverse().find((m) => m.role === "assistant" && m.isStreaming);
+    } else {
+      // Get the last assistant message
+      relevantMsg = [...messages].reverse().find((m) => m.role === "assistant");
+    }
+
+    if (!relevantMsg) return null;
+
+    // Look for TodoWrite or similar tool calls
+    const todoCalls = relevantMsg.parts.filter(
+      (p) => p.type === "tool_use" && TODO_TOOLS.has((p as any).toolName)
+    );
+
+    if (todoCalls.length === 0) return null;
+
+    const lastTodoCall = todoCalls[todoCalls.length - 1];
+    if (lastTodoCall.type !== "tool_use") return null;
+
+    // Try to get the result from parts
+    const result = relevantMsg.parts.find(
+      (p) => p.type === "tool_result" && (p as any).toolCallId === lastTodoCall.toolCallId
+    );
+
+    const todos = result
+      ? parseTodoOutput((result as any).output)
+      : parseTodoInput(lastTodoCall.input);
+
+    const isPending = lastTodoCall.state === "streaming" || lastTodoCall.state === "running";
+
+    return todos.length > 0 ? { todos, isPending } : null;
   }, [messages, isStreaming]);
 
   // Track pending interactive tool calls (AskUserQuestion from Claude CLI).
@@ -725,6 +769,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     loadingMore,
     hasMore,
     pendingQuestion,
+    pendingTodo,
     pendingUserInput,
     sendToolResponse,
     agentName,

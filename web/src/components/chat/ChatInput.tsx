@@ -12,6 +12,7 @@ import {
   formatAnswersMessage,
   type QuestionAnswer,
 } from "@/components/chat/QuestionCard";
+import { TodoPanel } from "@/components/chat/TodoPanel";
 import { imageApi, filesApi, type DiffResponse, type FileEntry } from "@/lib/api";
 import { createPortal } from "react-dom";
 import { useAppStore } from "@/stores/app";
@@ -414,6 +415,7 @@ interface ChatInputProps {
   pickedAssets: PickedAsset[];
   pickedWorkflows: PickedWorkflow[];
   pendingQuestion: ReturnType<typeof parseAskQuestionInput>;
+  pendingTodo?: { todos: Array<{ id: string; content: string; status: string }>; isPending: boolean } | null;
   pendingUserInput?: { toolUseId: string; toolName: string; input: string } | null;
   onSendToolResponse?: (toolUseId: string, response: string) => void;
   queue: QueuedMessage[];
@@ -453,6 +455,7 @@ export function ChatInput({
   pickedAssets,
   pickedWorkflows,
   pendingQuestion,
+  pendingTodo,
   pendingUserInput,
   onSendToolResponse,
   queue,
@@ -741,6 +744,11 @@ export function ChatInput({
         onMouseDown={handleInputResizeMouseDown}
       />
       <div className="max-w-3xl mx-auto px-4 pb-3">
+        {/* Todo panel (TodoWrite from Claude) */}
+        {pendingTodo && (
+          <TodoPanel todos={pendingTodo.todos} isPending={pendingTodo.isPending} />
+        )}
+
         {/* Question panel (MCP ask_question) */}
         {pendingQuestion && (
           <div className="py-3 border-b">

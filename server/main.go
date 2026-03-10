@@ -258,17 +258,61 @@ func main() {
 		ChromeManager:    chromeManager,
 	}
 
-	// Wire up Docker container isolation if enabled.
-	if cfg.DockerEnabled {
-		dockerImage := cfg.DockerImage
-		if dockerImage == "" {
-			dockerImage = "boxnex-agent:latest"
+	// Wire up Podman rootless container isolation if enabled.
+	if cfg.PodmanEnabled {
+		podmanImage := cfg.PodmanImage
+		if podmanImage == "" {
+			podmanImage = "boxnex-agent:latest"
 		}
-		containerMgr := agent.NewContainerManager(cfg.DockerImage)
+		podmanNetwork := cfg.PodmanNetwork
+		if podmanNetwork == "" {
+			podmanNetwork = "boxnex-egress"
+		}
+
+		// Create the container manager first so we can call EnsureNetwork before
+		// starting the proxy — the proxy listen address depends on the gateway IP
+		// of the Podman network, which must exist before we can inspect it.
+		containerMgr := agent.NewContainerManager(podmanImage, podmanNetwork, nil)
+		containerMgr.DiskQuotaBytes = cfg.DiskQuotaBytes
+		if containerMgr.DiskQuotaBytes == 0 {
+			containerMgr.DiskQuotaBytes = 256 << 20 // 256 MB default
+		}
+		if err := containerMgr.EnsureNetwork(); err != nil {
+			log.Printf("  Warning: could not ensure Podman network %s: %v", podmanNetwork, err)
+		}
+
+		// Bind the proxy to the Podman network gateway IP so it is only reachable
+		// from within the container network, not from external interfaces.
+		// Fall back to 0.0.0.0 (with a warning) if the gateway IP cannot be
+		// determined (e.g. network creation failed above).
+		proxyAddr := cfg.ProxyListenAddr
+		if proxyAddr == "" {
+			gw, err := agent.NetworkGatewayIP(podmanNetwork)
+			if err != nil {
+				log.Printf("  Warning: could not determine network gateway IP (%v); binding proxy to 0.0.0.0:8118", err)
+				proxyAddr = "0.0.0.0:8118"
+			} else {
+				proxyAddr = gw + ":8118"
+			}
+		}
+
+		// Prefer claude_auth_token from config; fall back to CLAUDE_CODE_OAUTH_TOKEN env var.
+		// Never passed directly into containers — the proxy relay substitutes it.
+		realAPIKey := cfg.ClaudeAuthToken
+		if realAPIKey == "" {
+			realAPIKey = os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")
+		}
+		containerProxy := agent.NewContainerProxy(proxyAddr, realAPIKey, cfg.ProxyAllowedHosts)
+		if err := containerProxy.Start(); err != nil {
+			startupLog.Fatalf("Failed to start egress proxy: %v", err)
+		}
+		log.Printf("  Egress proxy: %s", containerProxy.Addr())
+
+		containerMgr.SetProxy(containerProxy)
 		containerMgr.RecoverRunningContainers()
 		srv.ContainerMgr = containerMgr
 		ca.ContainerMgr = containerMgr
-		log.Printf("  Docker isolation enabled (image: %s)", dockerImage)
+		log.Printf("  Podman isolation enabled (image: %s, network: %s)", podmanImage, podmanNetwork)
 	}
 
 	// Wire up SessionOrchestrator so MCP execute_workflow can create sessions
@@ -389,11 +433,11 @@ func main() {
 		}
 	}()
 
-	// T3.3: Idle container reaper — stop containers inactive for over 1 hour (checks every 10 min).
+	// Idle container reaper — stop containers inactive for over 20 minutes (checks every 5 min).
 	if srv.ContainerMgr != nil {
 		go func() {
-			const idleTimeout = 1 * time.Hour
-			ticker := time.NewTicker(10 * time.Minute)
+			const idleTimeout = 20 * time.Minute
+			ticker := time.NewTicker(5 * time.Minute)
 			defer ticker.Stop()
 			for {
 				select {

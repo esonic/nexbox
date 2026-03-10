@@ -65,6 +65,7 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
     loadingMore,
     hasMore,
     pendingQuestion,
+    pendingTodo,
     pendingUserInput,
     sendToolResponse,
     agentName,
@@ -288,6 +289,7 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
         pickedAssets={pickedAssets}
         pickedWorkflows={pickedWorkflows}
         pendingQuestion={pendingQuestion}
+        pendingTodo={pendingTodo}
         pendingUserInput={pendingUserInput}
         onSendToolResponse={sendToolResponse}
         gitDiffStats={gitDiffStats}

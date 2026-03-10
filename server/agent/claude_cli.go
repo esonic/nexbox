@@ -24,7 +24,7 @@ type ClaudeClient struct {
 	CLIPath      string            // Path to claude CLI (default: "claude")
 	Env          map[string]string // Additional environment variables
 	Verbose      bool              // Enable verbose logging
-	ContainerMgr *ContainerManager // Optional: run inside Docker container
+	ContainerMgr *ContainerManager // Optional: run inside Podman container
 	ContainerID  string            // Container name/ID (set when ContainerMgr is active)
 }
 
@@ -177,7 +177,7 @@ func (c *ClaudeClient) Query(
 		log.Printf("[claude] Prompt: %s", prompt)
 	}
 
-	// Build the command — either directly on the host or inside a Docker container.
+	// Build the command — either directly on the host or inside a Podman container.
 	var cmd *exec.Cmd
 	if c.ContainerMgr != nil && c.ContainerID != "" {
 		var envSlice []string

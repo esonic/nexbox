@@ -126,7 +126,7 @@ type Server struct {
 	DataDir          string                   // data directory for file storage (images, etc.)
 	Version          string                   // build-time version string
 	ChromeManager    *chromemcp.ChromeManager // Per-session Chrome DevTools MCP manager for E2E testing
-	ContainerMgr     *agent.ContainerManager  // Optional: Docker container isolation per project
+	ContainerMgr     *agent.ContainerManager  // Optional: Podman container isolation per project
 
 	// humanGates: executionID+":"+nodeID → channel carrying user input for human node continuation
 	humanGatesMu sync.Mutex

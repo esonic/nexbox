@@ -185,19 +185,50 @@ export function parseTodoInput(input: string): TodoItem[] {
 
 export function StandaloneTodoList({ todos, isPending }: { todos: TodoItem[]; isPending: boolean }) {
   if (todos.length === 0) return null;
+  const completedCount = todos.filter(t => t.status === "TODO_STATUS_COMPLETED" || t.status === "completed").length;
+  const totalCount = todos.length;
+  const progressPercent = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+
   return (
-    <div className="space-y-px py-0.5">
-      {todos.map((t) => {
-        const { icon: S, color } = TODO_ICONS[t.status] ?? { icon: CircleDashed, color: "text-muted-foreground/40" };
-        const done = t.status === "TODO_STATUS_COMPLETED" || t.status === "completed";
-        return (
-          <div key={t.id} className="flex items-start gap-1.5 py-px text-[11px]">
-            <S className={cn("h-3.5 w-3.5 shrink-0 mt-px", color)} />
-            <span className={cn("min-w-0", done && "line-through text-muted-foreground/50")}>{t.content}</span>
-          </div>
-        );
-      })}
-      {isPending && <Loader2 className="h-3 w-3 animate-spin text-blue-500 mt-0.5" />}
+    <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-3 my-2 space-y-2">
+      {/* Progress header */}
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-2">
+          <ListChecks className="h-4 w-4 text-blue-500" />
+          <span className="text-sm font-medium text-foreground">跟踪任务</span>
+        </div>
+        <span className="text-xs text-muted-foreground">{completedCount}/{totalCount}</span>
+      </div>
+
+      {/* Progress bar */}
+      <div className="w-full bg-muted/40 rounded-full h-1.5">
+        <div
+          className="bg-green-500 h-1.5 rounded-full transition-all duration-300"
+          style={{ width: `${progressPercent}%` }}
+        />
+      </div>
+
+      {/* Task list */}
+      <div className="space-y-1">
+        {todos.map((t) => {
+          const { icon: S, color } = TODO_ICONS[t.status] ?? { icon: CircleDashed, color: "text-muted-foreground/40" };
+          const done = t.status === "TODO_STATUS_COMPLETED" || t.status === "completed";
+          return (
+            <div key={t.id} className="flex items-start gap-2 text-xs">
+              <S className={cn("h-4 w-4 shrink-0 mt-0.5", color)} />
+              <span className={cn("min-w-0 break-words", done && "line-through text-muted-foreground/50")}>{t.content}</span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Loading indicator */}
+      {isPending && (
+        <div className="flex items-center gap-2 text-xs text-blue-500 mt-2 pt-2 border-t border-blue-500/10">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          <span>正在执行任务...</span>
+        </div>
+      )}
     </div>
   );
 }

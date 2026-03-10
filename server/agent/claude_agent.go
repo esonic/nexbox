@@ -17,7 +17,7 @@ type ClaudeAgent struct {
 	MCPToolNames []string          // MCP tool names (e.g. "mcp__boxnex__save_asset"); populated from mcp.Server.ToolNames()
 	DataDir      string            // For isolated session storage
 	Verbose      bool              // Enable verbose logging
-	ContainerMgr *ContainerManager // Optional: run inside Docker container per project
+	ContainerMgr *ContainerManager // Optional: run inside Podman container per project
 }
 
 // NewClaudeAgent creates a new Claude Code agent with default settings.
@@ -60,7 +60,7 @@ func (a *ClaudeAgent) SendMessage(
 	client := NewClaudeClient()
 	client.Verbose = a.Verbose
 
-	// If Docker isolation is enabled, ensure a container is running for this project
+	// If Podman isolation is enabled, ensure a container is running for this project
 	// and wire it into the client so commands execute inside the container.
 	if a.ContainerMgr != nil && req.WorkDir != "" {
 		// Derive a project key from the work directory to identify the container.
@@ -216,6 +216,12 @@ func (a *ClaudeAgent) SendMessage(
 	seenMessageIDs := make(map[string]bool)
 	var accInputTokens, accOutputTokens int
 	var hasPartialText, hasPartialThinking, doneSent bool
+
+	// Start workspace disk-usage monitor so agent tasks cannot write unbounded
+	// data to /workspace via Bash tool (D-01 from container_security_tasks.md).
+	if a.ContainerMgr != nil && req.WorkDir != "" && a.ContainerMgr.DiskQuotaBytes > 0 {
+		a.ContainerMgr.WatchWorkspace(budgetCtx, req.WorkDir, a.ContainerMgr.DiskQuotaBytes, budgetCancel)
+	}
 
 	resultSessionID, err := client.Query(budgetCtx, combinedPrompt, opts, func(msg StreamMessage, parsed *AssistantMessage) {
 		if msg.Type != "stream_event" {

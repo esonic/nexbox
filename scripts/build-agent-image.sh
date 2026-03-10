@@ -1,8 +1,8 @@
 #!/bin/bash
 # scripts/build-agent-image.sh
 #
-# Builds the boxnex-agent Docker image used for per-project container isolation.
-# Run this once before enabling DockerEnabled=true in config.json.
+# Builds the boxnex-agent container image used for per-project container isolation.
+# Run this once before enabling podman_enabled: true in config.json.
 #
 # Usage:
 #   ./scripts/build-agent-image.sh              # build with default tag
@@ -29,13 +29,13 @@ for arg in "$@"; do
 done
 
 echo "==> Building ${FULL_IMAGE}"
-echo "    Dockerfile: Dockerfile.agent"
-echo "    Context:    ${REPO_ROOT}"
+echo "    Containerfile: Containerfile"
+echo "    Context:       ${REPO_ROOT}"
 echo ""
 
-docker build \
+podman build \
   --platform linux/amd64 \
-  -f "${REPO_ROOT}/Dockerfile.agent" \
+  -f "${REPO_ROOT}/Containerfile" \
   -t "${FULL_IMAGE}" \
   "${REPO_ROOT}"
 
@@ -43,17 +43,18 @@ echo ""
 echo "==> Build complete: ${FULL_IMAGE}"
 
 # Show image size
-docker images "${IMAGE_NAME}" --format "    Size: {{.Size}}" | head -1
+podman image ls "${IMAGE_NAME}" --format "    Size: {{.Size}}" | head -1
 
 if [ "$PUSH" = true ]; then
   echo ""
   echo "==> Pushing ${FULL_IMAGE}"
-  docker push "${FULL_IMAGE}"
+  podman push "${FULL_IMAGE}"
   echo "==> Push complete"
 fi
 
 echo ""
 echo "Next steps:"
-echo "  1. Set docker_enabled: true in config.json"
-echo "  2. Set docker_image: \"${FULL_IMAGE}\" in config.json (or leave blank for default)"
-echo "  3. Restart the boxnex server"
+echo "  1. Set podman_enabled: true in config.json"
+echo "  2. Set podman_image: \"${FULL_IMAGE}\" in config.json (or leave blank for default)"
+echo "  3. Set CLAUDE_CODE_OAUTH_TOKEN environment variable (do not write to config.json)"
+echo "  4. Restart the boxnex server"

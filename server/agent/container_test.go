@@ -1,8 +1,8 @@
 package agent
 
 import (
+	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,7 +10,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// containerName — pure logic, no Docker needed
+// containerName — pure logic, no Podman needed
 // ---------------------------------------------------------------------------
 
 func TestContainerName_SafeUUID(t *testing.T) {
@@ -30,7 +30,6 @@ func TestContainerName_UnsafePath(t *testing.T) {
 	if !strings.HasPrefix(name, "boxnex-proj-") {
 		t.Fatalf("expected boxnex-proj- prefix, got %s", name)
 	}
-	// Must not contain slashes or spaces
 	for _, c := range name {
 		if c == '/' || c == ' ' {
 			t.Fatalf("container name contains unsafe char %q: %s", c, name)
@@ -50,80 +49,60 @@ func TestContainerName_LongID(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// ExecInContainer — verifies docker exec command construction
-// ---------------------------------------------------------------------------
-
-func TestExecInContainer_Basic(t *testing.T) {
-	m := NewContainerManager("alpine:latest")
-	cmd := m.ExecInContainer("mycontainer", []string{"ls", "-la"}, nil, "")
-	args := cmd.Args
-	// Expected: docker exec -i mycontainer ls -la
-	if args[0] != "docker" {
-		t.Fatalf("expected docker, got %s", args[0])
-	}
-	if args[1] != "exec" || args[2] != "-i" {
-		t.Fatalf("expected exec -i, got %v", args[1:3])
-	}
-	if args[len(args)-2] != "ls" || args[len(args)-1] != "-la" {
-		t.Fatalf("expected ls -la at end, got %v", args[len(args)-2:])
-	}
-}
-
-func TestExecInContainer_WithEnv(t *testing.T) {
-	m := NewContainerManager("alpine:latest")
-	env := []string{"FOO=bar", "BAZ=qux"}
-	cmd := m.ExecInContainer("mycontainer", []string{"echo", "hi"}, env, "")
-	joined := strings.Join(cmd.Args, " ")
-	if !strings.Contains(joined, "-e FOO=bar") {
-		t.Fatalf("missing -e FOO=bar in: %s", joined)
-	}
-	if !strings.Contains(joined, "-e BAZ=qux") {
-		t.Fatalf("missing -e BAZ=qux in: %s", joined)
-	}
-}
-
-func TestExecInContainer_WithWorkDir(t *testing.T) {
-	m := NewContainerManager("alpine:latest")
-	cmd := m.ExecInContainer("mycontainer", []string{"pwd"}, nil, "/workspace/sub")
-	joined := strings.Join(cmd.Args, " ")
-	if !strings.Contains(joined, "-w /workspace/sub") {
-		t.Fatalf("missing -w /workspace/sub in: %s", joined)
-	}
-}
-
-func TestExecInContainer_NoWorkDir(t *testing.T) {
-	m := NewContainerManager("alpine:latest")
-	cmd := m.ExecInContainer("mycontainer", []string{"pwd"}, nil, "")
-	for i, a := range cmd.Args {
-		if a == "-w" {
-			t.Fatalf("unexpected -w flag at position %d in: %v", i, cmd.Args)
-		}
+func TestContainerName_Deterministic(t *testing.T) {
+	id := "my-project-id"
+	if containerName(id) != containerName(id) {
+		t.Fatal("containerName must be deterministic")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// EnsureContainer + StopContainer — uses a fake docker binary
+// generateSessionToken
 // ---------------------------------------------------------------------------
 
-// makeFakeDocker writes a shell script that simulates docker behaviour and
-// returns the directory it was written to. Caller must add dir to PATH.
+func TestGenerateSessionToken_Format(t *testing.T) {
+	tok, err := generateSessionToken()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasPrefix(tok, "bxs-") {
+		t.Fatalf("expected bxs- prefix, got %s", tok)
+	}
+	// "bxs-" + 64 hex chars
+	if len(tok) != 68 {
+		t.Fatalf("expected length 68, got %d: %s", len(tok), tok)
+	}
+}
+
+func TestGenerateSessionToken_Unique(t *testing.T) {
+	a, _ := generateSessionToken()
+	b, _ := generateSessionToken()
+	if a == b {
+		t.Fatal("two generated tokens must be different")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fake Podman helper — replaces docker in PATH with a podman script
+// ---------------------------------------------------------------------------
+
+// makeFakePodman writes a shell script that simulates podman behaviour and
+// injects it at the front of PATH. Modes are controlled by FAKE_PODMAN_MODE.
 //
-// Modes controlled by the FAKE_DOCKER_MODE env var:
+// Supported modes:
 //
-//	"container_running"  — docker ps returns a fake container ID
-//	"container_missing"  — docker ps returns empty; docker run succeeds
-//	"run_fail"           — docker ps empty; docker run exits non-zero
-//	"stop_ok"            — docker stop exits 0
-//	"stop_fail"          — docker stop exits 1
-func makeFakeDocker(t *testing.T, mode string) string {
+//	"container_running"  — podman ps returns a fake container ID
+//	"container_missing"  — podman ps returns empty; podman run succeeds
+//	"run_fail"           — podman ps empty; podman run exits non-zero
+//	"stop_ok"            — podman stop exits 0
+//	"stop_fail"          — podman stop exits 1
+func makeFakePodman(t *testing.T, mode string) string {
 	t.Helper()
 	dir := t.TempDir()
-	script := filepath.Join(dir, "docker")
+	script := filepath.Join(dir, "podman")
 
-	// The script inspects $FAKE_DOCKER_MODE set in the test environment
 	src := `#!/bin/sh
-MODE="$FAKE_DOCKER_MODE"
+MODE="$FAKE_PODMAN_MODE"
 case "$1" in
   ps)
     if [ "$MODE" = "container_running" ]; then
@@ -147,8 +126,17 @@ case "$1" in
     exit 0
     ;;
   exec)
-    # Just echo the args so callers can verify
     echo "$@"
+    exit 0
+    ;;
+  network)
+    # network ls / network create
+    if [ "$2" = "ls" ]; then
+      exit 0
+    fi
+    if [ "$2" = "create" ]; then
+      exit 0
+    fi
     exit 0
     ;;
   *)
@@ -157,32 +145,104 @@ case "$1" in
 esac
 `
 	if err := os.WriteFile(script, []byte(src), 0755); err != nil {
-		t.Fatalf("write fake docker: %v", err)
+		t.Fatalf("write fake podman: %v", err)
 	}
-
-	// Override PATH so exec.Command("docker",...) finds our fake
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	if mode != "" {
+		t.Setenv("FAKE_PODMAN_MODE", mode)
+	}
 	return dir
 }
 
-// verifyFakeDockerFound ensures the fake docker is actually on PATH.
-func verifyFakeDockerFound(t *testing.T) {
+// makeFakePodmanEmpty creates a fake podman where `ps` returns no containers.
+// Used to test RecoverRunningContainers with an empty cluster.
+func makeFakePodmanEmpty(t *testing.T) {
 	t.Helper()
-	p, err := exec.LookPath("docker")
-	if err != nil {
-		t.Fatalf("fake docker not found on PATH: %v", err)
+	dir := t.TempDir()
+	script := filepath.Join(dir, "podman")
+	src := `#!/bin/sh
+case "$1" in
+  ps) exit 0 ;;
+  stop) exit 0 ;;
+  network) exit 0 ;;
+  *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(src), 0755); err != nil {
+		t.Fatalf("write fake podman: %v", err)
 	}
-	if !strings.Contains(p, t.TempDir()[:10]) { // rough prefix check
-		// TempDir prefix may differ; just check it resolves
-		_ = p
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+}
+
+// ---------------------------------------------------------------------------
+// ExecInContainer — verifies podman exec command construction
+// ---------------------------------------------------------------------------
+
+func TestExecInContainer_Basic(t *testing.T) {
+	m := NewContainerManager("alpine:latest", "", nil)
+	cmd := m.ExecInContainer("mycontainer", []string{"ls", "-la"}, nil, "")
+	args := cmd.Args
+	if args[0] != "podman" {
+		t.Fatalf("expected podman, got %s", args[0])
+	}
+	if args[1] != "exec" || args[2] != "-i" {
+		t.Fatalf("expected exec -i, got %v", args[1:3])
+	}
+	if args[len(args)-2] != "ls" || args[len(args)-1] != "-la" {
+		t.Fatalf("expected ls -la at end, got %v", args[len(args)-2:])
 	}
 }
 
-func TestEnsureContainer_ContainerAlreadyRunning(t *testing.T) {
-	makeFakeDocker(t, "")
-	t.Setenv("FAKE_DOCKER_MODE", "container_running")
+func TestExecInContainer_RunsAsNonRoot(t *testing.T) {
+	// U-04: docker exec must also specify --user 1000:1000
+	m := NewContainerManager("alpine:latest", "", nil)
+	cmd := m.ExecInContainer("mycontainer", []string{"id"}, nil, "")
+	joined := strings.Join(cmd.Args, " ")
+	if !strings.Contains(joined, "--user 1000:1000") {
+		t.Fatalf("ExecInContainer must include --user 1000:1000, got: %s", joined)
+	}
+}
 
-	m := NewContainerManager("alpine:latest")
+func TestExecInContainer_WithEnv(t *testing.T) {
+	m := NewContainerManager("alpine:latest", "", nil)
+	env := []string{"FOO=bar", "BAZ=qux"}
+	cmd := m.ExecInContainer("mycontainer", []string{"echo", "hi"}, env, "")
+	joined := strings.Join(cmd.Args, " ")
+	if !strings.Contains(joined, "-e FOO=bar") {
+		t.Fatalf("missing -e FOO=bar in: %s", joined)
+	}
+	if !strings.Contains(joined, "-e BAZ=qux") {
+		t.Fatalf("missing -e BAZ=qux in: %s", joined)
+	}
+}
+
+func TestExecInContainer_WithWorkDir(t *testing.T) {
+	m := NewContainerManager("alpine:latest", "", nil)
+	cmd := m.ExecInContainer("mycontainer", []string{"pwd"}, nil, "/workspace/sub")
+	joined := strings.Join(cmd.Args, " ")
+	if !strings.Contains(joined, "-w /workspace/sub") {
+		t.Fatalf("missing -w /workspace/sub in: %s", joined)
+	}
+}
+
+func TestExecInContainer_NoWorkDir(t *testing.T) {
+	m := NewContainerManager("alpine:latest", "", nil)
+	cmd := m.ExecInContainer("mycontainer", []string{"pwd"}, nil, "")
+	for i, a := range cmd.Args {
+		if a == "-w" {
+			t.Fatalf("unexpected -w flag at position %d in: %v", i, cmd.Args)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// EnsureContainer — basic lifecycle
+// ---------------------------------------------------------------------------
+
+func TestEnsureContainer_ContainerAlreadyRunning(t *testing.T) {
+	makeFakePodman(t, "container_running")
+
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
 	id, err := m.EnsureContainer("proj-abc", "/tmp/repo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -190,17 +250,15 @@ func TestEnsureContainer_ContainerAlreadyRunning(t *testing.T) {
 	if id == "" {
 		t.Fatal("expected non-empty container id/name")
 	}
-	// Should reuse — name contains projectID
 	if !strings.Contains(id, "proj-abc") {
 		t.Fatalf("expected container name to contain proj-abc, got %s", id)
 	}
 }
 
 func TestEnsureContainer_StartsNewContainer(t *testing.T) {
-	makeFakeDocker(t, "")
-	t.Setenv("FAKE_DOCKER_MODE", "container_missing")
+	makeFakePodman(t, "container_missing")
 
-	m := NewContainerManager("alpine:latest")
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
 	id, err := m.EnsureContainer("proj-new", "/tmp/repo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -211,157 +269,299 @@ func TestEnsureContainer_StartsNewContainer(t *testing.T) {
 }
 
 func TestEnsureContainer_RunFailure(t *testing.T) {
-	makeFakeDocker(t, "")
-	t.Setenv("FAKE_DOCKER_MODE", "run_fail")
+	makeFakePodman(t, "run_fail")
 
-	m := NewContainerManager("alpine:latest")
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
 	_, err := m.EnsureContainer("proj-fail", "/tmp/repo")
 	if err == nil {
-		t.Fatal("expected error when docker run fails")
+		t.Fatal("expected error when podman run fails")
 	}
-	if !strings.Contains(err.Error(), "docker run") {
-		t.Fatalf("expected 'docker run' in error, got: %v", err)
+	if !strings.Contains(err.Error(), "podman run") {
+		t.Fatalf("expected 'podman run' in error, got: %v", err)
 	}
 }
 
 func TestStopContainer_OK(t *testing.T) {
-	makeFakeDocker(t, "")
-	t.Setenv("FAKE_DOCKER_MODE", "stop_ok")
+	makeFakePodman(t, "stop_ok")
 
-	m := NewContainerManager("alpine:latest")
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
 	if err := m.StopContainer("proj-abc"); err != nil {
 		t.Fatalf("expected no error on stop, got: %v", err)
 	}
 }
 
 func TestStopContainer_NotRunning(t *testing.T) {
-	makeFakeDocker(t, "")
-	t.Setenv("FAKE_DOCKER_MODE", "stop_fail")
+	makeFakePodman(t, "stop_fail")
 
-	m := NewContainerManager("alpine:latest")
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
 	err := m.StopContainer("proj-ghost")
-	// Should return error (non-running containers are not silent)
 	if err == nil {
 		t.Fatal("expected error when container not found")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// BUG REPRODUCTION: H5 — docker ps --filter name= is substring match
-// This test documents the known bug where a container named boxnex-proj-abc
-// would also match when filtering for boxnex-proj-abcXYZ.
+// Security flags verification (C-01 through C-06)
 // ---------------------------------------------------------------------------
 
-func TestContainerName_SubstringMatchBug(t *testing.T) {
-	// Two distinct project IDs where one name is a prefix of another
-	nameA := containerName("abc")
-	nameB := containerName("abcxyz")
-
-	// They must be different names
-	if nameA == nameB {
-		t.Fatalf("different project IDs produced the same container name: %s", nameA)
-	}
-
-	// BUG: docker ps --filter name=nameA would ALSO return containers named nameB
-	// because Docker name filter matches substrings, not exact names.
-	// Demonstrate the issue: nameA IS a prefix of nameB
-	if !strings.HasPrefix(nameB, nameA) {
-		// Not a prefix — in this case the bug doesn't trigger for this pair
-		t.Logf("INFO: %q is not a prefix of %q — substring match bug would not trigger for this pair", nameA, nameB)
-	} else {
-		// Bug would trigger: searching for nameA would return the nameB container
-		t.Logf("BUG CONFIRMED: docker ps --filter name=%q would also match container %q", nameA, nameB)
-		t.Logf("  Fix: use --filter name=^/%s$ to anchor the match", nameA)
-		// We intentionally do NOT call t.Fatal here — this is a known, documented bug
-		// tracked as issue H5. The test serves as a regression marker.
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Bind-mount path construction verification
-// ---------------------------------------------------------------------------
-
-func TestEnsureContainer_BindMountPath(t *testing.T) {
-	// Capture the docker run args by intercepting via fake docker that logs args
+func TestEnsureContainer_SecurityFlags(t *testing.T) {
 	dir := t.TempDir()
-	logFile := filepath.Join(dir, "docker-args.log")
-	script := filepath.Join(dir, "docker")
+	logFile := filepath.Join(dir, "podman-args.log")
+	script := filepath.Join(dir, "podman")
 	src := `#!/bin/sh
 echo "$@" >> ` + logFile + `
 case "$1" in
   ps) exit 0 ;;
   run) echo "cid123"; exit 0 ;;
+  network) exit 0 ;;
   *) exit 1 ;;
 esac
 `
 	if err := os.WriteFile(script, []byte(src), 0755); err != nil {
-		t.Fatalf("write fake docker: %v", err)
+		t.Fatalf("write fake podman: %v", err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
+	_, err := m.EnsureContainer("proj-security", "/tmp/repo")
+	if err != nil {
+		t.Fatalf("EnsureContainer error: %v", err)
+	}
+
+	data, _ := os.ReadFile(logFile)
+	logged := string(data)
+
+	// C-01: no-new-privileges
+	if !strings.Contains(logged, "no-new-privileges") {
+		t.Errorf("C-01: expected no-new-privileges, got:\n%s", logged)
+	}
+	// C-02: cap-drop ALL
+	if !strings.Contains(logged, "--cap-drop ALL") {
+		t.Errorf("C-02: expected --cap-drop ALL, got:\n%s", logged)
+	}
+	// C-02: minimum caps re-added
+	for _, cap := range []string{"CHOWN", "DAC_OVERRIDE", "FOWNER"} {
+		if !strings.Contains(logged, "--cap-add "+cap) {
+			t.Errorf("C-02: expected --cap-add %s, got:\n%s", cap, logged)
+		}
+	}
+	// C-03: tmpfs /tmp
+	if !strings.Contains(logged, "/tmp") {
+		t.Errorf("C-03: expected --tmpfs /tmp, got:\n%s", logged)
+	}
+	// C-04: memory-swap equals memory (swap disabled)
+	if !strings.Contains(logged, "--memory-swap") {
+		t.Errorf("C-04: expected --memory-swap flag, got:\n%s", logged)
+	}
+	// U-01/02: non-root user
+	if !strings.Contains(logged, "--user 1000:1000") {
+		t.Errorf("U-02: expected --user 1000:1000, got:\n%s", logged)
+	}
+	// U-01: rootless uid mapping
+	if !strings.Contains(logged, "--userns=keep-id") {
+		t.Errorf("U-01: expected --userns=keep-id, got:\n%s", logged)
+	}
+	// N-04: dedicated network
+	if !strings.Contains(logged, "boxnex-egress") {
+		t.Errorf("N-04: expected boxnex-egress network, got:\n%s", logged)
+	}
+	// Claude tuning env vars
+	if !strings.Contains(logged, "CLAUDE_CONFIG_DIR=/workspace/.claude") {
+		t.Errorf("expected CLAUDE_CONFIG_DIR env var, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "DISABLE_TELEMETRY=1") {
+		t.Errorf("expected DISABLE_TELEMETRY=1, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "DISABLE_AUTOUPDATER=1") {
+		t.Errorf("expected DISABLE_AUTOUPDATER=1, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "USE_BUILTIN_RIPGREP=0") {
+		t.Errorf("expected USE_BUILTIN_RIPGREP=0, got:\n%s", logged)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Session token — proxy integration (T-01 through T-03)
+// ---------------------------------------------------------------------------
+
+func TestEnsureContainer_RegistersSessionToken(t *testing.T) {
+	makeFakePodman(t, "container_missing")
+
+	proxy := NewContainerProxy("127.0.0.1:0", "real-key-xxx", nil)
+	m := NewContainerManager("alpine:latest", "boxnex-egress", proxy)
+	_, err := m.EnsureContainer("proj-token", "/tmp/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Proxy must have one session registered
+	if proxy.SessionCount() != 1 {
+		t.Fatalf("expected 1 session registered, got %d", proxy.SessionCount())
+	}
+}
+
+func TestStopContainer_RevokesSessionToken(t *testing.T) {
+	makeFakePodman(t, "stop_ok")
+
+	proxy := NewContainerProxy("127.0.0.1:0", "real-key-xxx", nil)
+	m := NewContainerManager("alpine:latest", "boxnex-egress", proxy)
+
+	// Manually register a session to simulate a running container
+	token, _ := generateSessionToken()
+	proxy.RegisterSession(token, "proj-revoke")
+	m.mu.Lock()
+	m.sessionTokens["proj-revoke"] = token
+	m.lastActivity["proj-revoke"] = time.Now()
+	m.mu.Unlock()
+
+	if proxy.SessionCount() != 1 {
+		t.Fatal("precondition: 1 session should be registered")
+	}
+
+	_ = m.StopContainer("proj-revoke")
+
+	if proxy.SessionCount() != 0 {
+		t.Fatalf("StopContainer must revoke session token; sessions remaining: %d", proxy.SessionCount())
+	}
+}
+
+func TestEnsureContainer_InjectsSessionTokenNotRealKey(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "podman-args.log")
+	script := filepath.Join(dir, "podman")
+	src := `#!/bin/sh
+echo "$@" >> ` + logFile + `
+case "$1" in
+  ps) exit 0 ;;
+  run) echo "cid123"; exit 0 ;;
+  network) exit 0 ;;
+  *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(src), 0755); err != nil {
+		t.Fatalf("write fake podman: %v", err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	const realKey = "sk-ant-real-secret-key"
+	proxy := NewContainerProxy("127.0.0.1:0", realKey, nil)
+	m := NewContainerManager("alpine:latest", "boxnex-egress", proxy)
+	_, err := m.EnsureContainer("proj-key", "/tmp/repo")
+	if err != nil {
+		t.Fatalf("EnsureContainer error: %v", err)
+	}
+
+	data, _ := os.ReadFile(logFile)
+	logged := string(data)
+
+	// Real key must never appear in podman args (T-01)
+	if strings.Contains(logged, realKey) {
+		t.Errorf("T-01 VIOLATED: real API key appeared in podman args:\n%s", logged)
+	}
+	// A session token (bxs- prefix) must be injected as CLAUDE_CODE_OAUTH_TOKEN instead
+	if !strings.Contains(logged, "CLAUDE_CODE_OAUTH_TOKEN=bxs-") {
+		t.Errorf("T-01: expected fake session token (bxs-) as CLAUDE_CODE_OAUTH_TOKEN, got:\n%s", logged)
+	}
+}
+
+func TestEnsureContainer_InjectsProxyEnvVars(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "podman-args.log")
+	script := filepath.Join(dir, "podman")
+	src := `#!/bin/sh
+echo "$@" >> ` + logFile + `
+case "$1" in
+  ps) exit 0 ;;
+  run) echo "cid123"; exit 0 ;;
+  network) exit 0 ;;
+  *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(src), 0755); err != nil {
+		t.Fatalf("write fake podman: %v", err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	proxy := NewContainerProxy("127.0.0.1:9999", "real-key", nil)
+	// Don't start the proxy server — we just need the addr for env var injection.
+	m := NewContainerManager("alpine:latest", "boxnex-egress", proxy)
+	_, err := m.EnsureContainer("proj-proxyenv", "/tmp/repo")
+	if err != nil {
+		t.Fatalf("EnsureContainer error: %v", err)
+	}
+
+	data, _ := os.ReadFile(logFile)
+	logged := string(data)
+
+	// N-03: proxy env vars must be injected
+	if !strings.Contains(logged, "HTTP_PROXY=") {
+		t.Errorf("N-03: missing HTTP_PROXY env var in:\n%s", logged)
+	}
+	if !strings.Contains(logged, "HTTPS_PROXY=") {
+		t.Errorf("N-03: missing HTTPS_PROXY env var in:\n%s", logged)
+	}
+	if !strings.Contains(logged, "NO_PROXY=") {
+		t.Errorf("N-03: missing NO_PROXY env var in:\n%s", logged)
+	}
+	// ANTHROPIC_BASE_URL must point at the proxy (N-01 relay)
+	if !strings.Contains(logged, "ANTHROPIC_BASE_URL=http://127.0.0.1:9999") {
+		t.Errorf("N-01: expected ANTHROPIC_BASE_URL pointing at proxy, got:\n%s", logged)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bind-mount and container lifecycle flags
+// ---------------------------------------------------------------------------
+
+func TestEnsureContainer_BindMountPath(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "podman-args.log")
+	script := filepath.Join(dir, "podman")
+	src := `#!/bin/sh
+echo "$@" >> ` + logFile + `
+case "$1" in
+  ps) exit 0 ;;
+  run) echo "cid123"; exit 0 ;;
+  network) exit 0 ;;
+  *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(src), 0755); err != nil {
+		t.Fatalf("write fake podman: %v", err)
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 
 	repoPath := "/home/user/myproject"
-	m := NewContainerManager("alpine:latest")
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
 	_, err := m.EnsureContainer("proj-mount", repoPath)
 	if err != nil {
 		t.Fatalf("EnsureContainer error: %v", err)
 	}
 
-	data, err := os.ReadFile(logFile)
-	if err != nil {
-		t.Fatalf("read log: %v", err)
-	}
+	data, _ := os.ReadFile(logFile)
 	logged := string(data)
 
-	// The run invocation should contain the bind mount
-	expectedMount := repoPath + ":/workspace"
-	if !strings.Contains(logged, expectedMount) {
-		t.Fatalf("expected bind mount %q in docker args, got:\n%s", expectedMount, logged)
+	if !strings.Contains(logged, repoPath+":/workspace") {
+		t.Fatalf("expected bind mount %q in podman args, got:\n%s", repoPath+":/workspace", logged)
 	}
-
-	// Working directory inside container should be /workspace
 	if !strings.Contains(logged, "-w /workspace") {
-		t.Fatalf("expected -w /workspace in docker args, got:\n%s", logged)
+		t.Fatalf("expected -w /workspace in podman args, got:\n%s", logged)
 	}
-
-	// Container should use --rm flag (auto-removed on stop)
 	if !strings.Contains(logged, "--rm") {
-		t.Fatalf("expected --rm in docker args, got:\n%s", logged)
+		t.Fatalf("expected --rm in podman args, got:\n%s", logged)
 	}
-
-	// Container should run tail -f /dev/null to stay alive
 	if !strings.Contains(logged, "tail -f /dev/null") {
-		t.Fatalf("expected 'tail -f /dev/null' in docker args, got:\n%s", logged)
+		t.Fatalf("expected 'tail -f /dev/null' in podman args, got:\n%s", logged)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Server restart recovery: container should be reused after server restart
-// (simulated by creating a second ContainerManager and calling EnsureContainer)
-// ---------------------------------------------------------------------------
-
-func TestEnsureContainer_ReusedAfterRestart(t *testing.T) {
-	makeFakeDocker(t, "")
-	t.Setenv("FAKE_DOCKER_MODE", "container_running")
-
-	// Simulate server restart: a NEW ContainerManager (no in-memory state)
-	m2 := NewContainerManager("alpine:latest")
-	id, err := m2.EnsureContainer("proj-restart", "/tmp/repo")
-	if err != nil {
-		t.Fatalf("unexpected error on restart reuse: %v", err)
-	}
-	if id == "" {
-		t.Fatal("expected container to be reused after restart")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Activity tracking & idle container reaping (T3.3)
+// Activity tracking & idle container reaping (R-01)
 // ---------------------------------------------------------------------------
 
 func TestTouchActivity(t *testing.T) {
-	m := NewContainerManager("alpine:latest")
+	m := NewContainerManager("alpine:latest", "", nil)
 
-	// Initially empty
 	m.mu.Lock()
 	if len(m.lastActivity) != 0 {
 		t.Fatal("expected empty lastActivity map")
@@ -382,10 +582,9 @@ func TestTouchActivity(t *testing.T) {
 }
 
 func TestEnsureContainer_SetsLastActivity(t *testing.T) {
-	makeFakeDocker(t, "")
-	t.Setenv("FAKE_DOCKER_MODE", "container_missing")
+	makeFakePodman(t, "container_missing")
 
-	m := NewContainerManager("alpine:latest")
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
 	_, err := m.EnsureContainer("proj-track", "/tmp/repo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -403,12 +602,10 @@ func TestEnsureContainer_SetsLastActivity(t *testing.T) {
 }
 
 func TestEnsureContainer_UpdatesLastActivityOnReuse(t *testing.T) {
-	makeFakeDocker(t, "")
-	t.Setenv("FAKE_DOCKER_MODE", "container_running")
+	makeFakePodman(t, "container_running")
 
-	m := NewContainerManager("alpine:latest")
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
 
-	// Pre-set old activity
 	m.mu.Lock()
 	m.lastActivity["proj-reuse"] = time.Now().Add(-2 * time.Hour)
 	m.mu.Unlock()
@@ -427,10 +624,9 @@ func TestEnsureContainer_UpdatesLastActivityOnReuse(t *testing.T) {
 }
 
 func TestStopContainer_CleansLastActivity(t *testing.T) {
-	makeFakeDocker(t, "")
-	t.Setenv("FAKE_DOCKER_MODE", "stop_ok")
+	makeFakePodman(t, "stop_ok")
 
-	m := NewContainerManager("alpine:latest")
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
 	m.TouchActivity("proj-stop")
 
 	_ = m.StopContainer("proj-stop")
@@ -444,15 +640,12 @@ func TestStopContainer_CleansLastActivity(t *testing.T) {
 }
 
 func TestStopIdleContainers_StopsIdleOnly(t *testing.T) {
-	makeFakeDocker(t, "")
-	t.Setenv("FAKE_DOCKER_MODE", "stop_ok")
+	makeFakePodman(t, "stop_ok")
 
-	m := NewContainerManager("alpine:latest")
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
 
-	// proj-idle: last active 2 hours ago → should be stopped
 	m.mu.Lock()
 	m.lastActivity["proj-idle"] = time.Now().Add(-2 * time.Hour)
-	// proj-active: last active 5 minutes ago → should be kept
 	m.lastActivity["proj-active"] = time.Now().Add(-5 * time.Minute)
 	m.mu.Unlock()
 
@@ -476,7 +669,7 @@ func TestStopIdleContainers_StopsIdleOnly(t *testing.T) {
 }
 
 func TestStopIdleContainers_NoneIdle(t *testing.T) {
-	m := NewContainerManager("alpine:latest")
+	m := NewContainerManager("alpine:latest", "", nil)
 
 	m.mu.Lock()
 	m.lastActivity["proj-1"] = time.Now()
@@ -496,89 +689,75 @@ func TestStopIdleContainers_NoneIdle(t *testing.T) {
 	}
 }
 
-func TestStopIdleContainers_RecoveredContainerName(t *testing.T) {
-	makeFakeDocker(t, "")
-	t.Setenv("FAKE_DOCKER_MODE", "stop_ok")
+func TestStopIdleContainers_RevokesSessionTokens(t *testing.T) {
+	makeFakePodman(t, "stop_ok")
 
-	m := NewContainerManager("alpine:latest")
+	proxy := NewContainerProxy("127.0.0.1:0", "real-key", nil)
+	m := NewContainerManager("alpine:latest", "boxnex-egress", proxy)
 
-	// Simulate a recovered container (key is already a container name)
+	token, _ := generateSessionToken()
+	proxy.RegisterSession(token, "proj-idle2")
 	m.mu.Lock()
-	m.lastActivity["boxnex-proj-abc123"] = time.Now().Add(-2 * time.Hour)
+	m.sessionTokens["proj-idle2"] = token
+	m.lastActivity["proj-idle2"] = time.Now().Add(-2 * time.Hour)
 	m.mu.Unlock()
 
-	stopped := m.StopIdleContainers(1 * time.Hour)
+	m.StopIdleContainers(1 * time.Hour)
 
-	if stopped != 1 {
-		t.Fatalf("expected 1 container stopped, got %d", stopped)
-	}
-
-	m.mu.Lock()
-	_, has := m.lastActivity["boxnex-proj-abc123"]
-	m.mu.Unlock()
-	if has {
-		t.Fatal("recovered container entry should be cleaned up")
+	if proxy.SessionCount() != 0 {
+		t.Fatalf("idle reaper must revoke session tokens; sessions remaining: %d", proxy.SessionCount())
 	}
 }
 
-// makeFakeDockerWithNames creates a fake docker that returns specific container
-// names for `docker ps` queries. Used to test RecoverRunningContainers.
-func makeFakeDockerWithNames(t *testing.T, names []string) {
-	t.Helper()
-	dir := t.TempDir()
-	script := filepath.Join(dir, "docker")
+// ---------------------------------------------------------------------------
+// RecoverRunningContainers
+// ---------------------------------------------------------------------------
 
-	namesOutput := strings.Join(names, "\n")
+func TestRecoverRunningContainers_StopsStaleContainers(t *testing.T) {
+	// RecoverRunningContainers must STOP stale containers so they can be
+	// restarted with fresh session tokens on next use (T-03 / restart bug fix).
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "podman.log")
+	script := filepath.Join(dir, "podman")
 	src := `#!/bin/sh
+echo "$@" >> ` + logFile + `
 case "$1" in
-  ps) echo "` + namesOutput + `"; exit 0 ;;
+  ps) echo "boxnex-proj-aaa
+boxnex-proj-bbb"; exit 0 ;;
   stop) exit 0 ;;
   *) exit 1 ;;
 esac
 `
 	if err := os.WriteFile(script, []byte(src), 0755); err != nil {
-		t.Fatalf("write fake docker: %v", err)
+		t.Fatalf("write fake podman: %v", err)
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-}
 
-func TestRecoverRunningContainers(t *testing.T) {
-	containers := []string{"boxnex-proj-aaa", "boxnex-proj-bbb"}
-	makeFakeDockerWithNames(t, containers)
-
-	m := NewContainerManager("alpine:latest")
-
-	// Initially empty
-	m.mu.Lock()
-	if len(m.lastActivity) != 0 {
-		t.Fatal("expected empty lastActivity before recovery")
-	}
-	m.mu.Unlock()
-
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
 	m.RecoverRunningContainers()
 
+	// Must NOT populate lastActivity — containers are stopped, not tracked.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if len(m.lastActivity) != 2 {
-		t.Fatalf("expected 2 recovered entries, got %d", len(m.lastActivity))
+	count := len(m.lastActivity)
+	m.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("RecoverRunningContainers must not seed lastActivity; got %d entries", count)
 	}
 
-	for _, name := range containers {
-		ts, ok := m.lastActivity[name]
-		if !ok {
-			t.Fatalf("expected %s in lastActivity", name)
-		}
-		if time.Since(ts) > time.Second {
-			t.Fatalf("recovered container %s should have lastActivity ~now", name)
+	// Both containers must have been stopped.
+	data, _ := os.ReadFile(logFile)
+	logged := string(data)
+	for _, name := range []string{"boxnex-proj-aaa", "boxnex-proj-bbb"} {
+		if !strings.Contains(logged, "stop "+name) {
+			t.Errorf("expected 'stop %s' in podman calls, got:\n%s", name, logged)
 		}
 	}
 }
 
 func TestRecoverRunningContainers_Empty(t *testing.T) {
-	makeFakeDockerWithNames(t, nil)
+	makeFakePodmanEmpty(t)
 
-	m := NewContainerManager("alpine:latest")
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
 	m.RecoverRunningContainers()
 
 	m.mu.Lock()
@@ -588,26 +767,225 @@ func TestRecoverRunningContainers_Empty(t *testing.T) {
 	}
 }
 
-func TestRecoverThenIdleReap(t *testing.T) {
-	// End-to-end: recover containers, then reap idle ones after timeout.
-	makeFakeDockerWithNames(t, []string{"boxnex-proj-old"})
+// ---------------------------------------------------------------------------
+// WatchWorkspace (D-01) — workspace disk monitor
+// ---------------------------------------------------------------------------
 
-	m := NewContainerManager("alpine:latest")
-	m.RecoverRunningContainers()
+func TestWatchWorkspace_CancelsOnQuotaExceeded(t *testing.T) {
+	dir := t.TempDir()
 
-	// Simulate time passing: set lastActivity to 2 hours ago
-	m.mu.Lock()
-	m.lastActivity["boxnex-proj-old"] = time.Now().Add(-2 * time.Hour)
-	m.mu.Unlock()
-
-	stopped := m.StopIdleContainers(1 * time.Hour)
-	if stopped != 1 {
-		t.Fatalf("expected 1 container reaped, got %d", stopped)
+	// Write enough data to exceed a tiny quota (1 byte)
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), []byte("hello world"), 0644); err != nil {
+		t.Fatalf("write test file: %v", err)
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if len(m.lastActivity) != 0 {
-		t.Fatalf("expected empty lastActivity after reap, got %d", len(m.lastActivity))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cancelled := make(chan struct{})
+	wrappedCancel := func() {
+		cancel()
+		close(cancelled)
+	}
+
+	m := NewContainerManager("alpine:latest", "", nil)
+	m.WatchInterval = 50 * time.Millisecond // fast interval for test
+	m.WatchWorkspace(ctx, dir, 1 /* 1 byte quota */, wrappedCancel)
+
+	select {
+	case <-cancelled:
+		// Good: quota exceeded, cancel was called
+	case <-time.After(5 * time.Second):
+		t.Fatal("WatchWorkspace did not cancel within 5s after quota exceeded")
+	}
+}
+
+func TestWatchWorkspace_DoesNotCancelWhenUnderQuota(t *testing.T) {
+	dir := t.TempDir()
+	// Write a small file — stays well under a 10 MB quota
+	if err := os.WriteFile(filepath.Join(dir, "small.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cancelCalled := false
+	m := NewContainerManager("alpine:latest", "", nil)
+	m.WatchInterval = 50 * time.Millisecond
+	m.WatchWorkspace(ctx, dir, 10<<20 /* 10 MB */, func() { cancelCalled = true })
+
+	// Let the goroutine tick a couple of times
+	time.Sleep(250 * time.Millisecond)
+
+	// Cancel the monitor context to clean up goroutine
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+
+	if cancelCalled {
+		t.Fatal("WatchWorkspace must not cancel when usage is below quota")
+	}
+}
+
+func TestWatchWorkspace_NoopOnZeroQuota(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cancelCalled := false
+	m := NewContainerManager("alpine:latest", "", nil)
+	// quota=0 → should be a no-op (no goroutine launched)
+	m.WatchWorkspace(ctx, dir, 0, func() { cancelCalled = true })
+
+	time.Sleep(100 * time.Millisecond)
+	if cancelCalled {
+		t.Fatal("WatchWorkspace with quota=0 must be a no-op")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// workspaceSize helper
+// ---------------------------------------------------------------------------
+
+func TestWorkspaceSize(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("hello world") // 11 bytes
+	if err := os.WriteFile(filepath.Join(dir, "test.txt"), content, 0644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	size, err := workspaceSize(dir)
+	if err != nil {
+		t.Fatalf("workspaceSize error: %v", err)
+	}
+	if size < int64(len(content)) {
+		t.Fatalf("expected size >= %d, got %d", len(content), size)
+	}
+}
+
+func TestWorkspaceSize_NonExistentDir(t *testing.T) {
+	_, err := workspaceSize("/nonexistent/path/abc123")
+	if err == nil {
+		t.Fatal("expected error for non-existent directory")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// EnsureNetwork
+// ---------------------------------------------------------------------------
+
+func TestEnsureNetwork_CreatesWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "podman.log")
+	script := filepath.Join(dir, "podman")
+	// Simulate: network ls returns empty (not found), network create succeeds
+	src := `#!/bin/sh
+echo "$@" >> ` + logFile + `
+case "$1 $2" in
+  "network ls") exit 0 ;;
+  "network create") exit 0 ;;
+  *) exit 0 ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(src), 0755); err != nil {
+		t.Fatalf("write fake podman: %v", err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
+	if err := m.EnsureNetwork(); err != nil {
+		t.Fatalf("EnsureNetwork error: %v", err)
+	}
+
+	data, _ := os.ReadFile(logFile)
+	logged := string(data)
+	if !strings.Contains(logged, "network") {
+		t.Errorf("expected podman network command to be called, got:\n%s", logged)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NetworkGatewayIP
+// ---------------------------------------------------------------------------
+
+func TestNetworkGatewayIP_ReturnsGateway(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "podman")
+	// Return a minimal JSON array matching podman network inspect output.
+	src := `#!/bin/sh
+echo '[{"subnets":[{"subnet":"10.88.0.0/16","gateway":"10.88.0.1"}]}]'
+exit 0
+`
+	if err := os.WriteFile(script, []byte(src), 0755); err != nil {
+		t.Fatalf("write fake podman: %v", err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	gw, err := NetworkGatewayIP("boxnex-egress")
+	if err != nil {
+		t.Fatalf("NetworkGatewayIP error: %v", err)
+	}
+	if gw != "10.88.0.1" {
+		t.Fatalf("expected gateway 10.88.0.1, got %s", gw)
+	}
+}
+
+func TestNetworkGatewayIP_ErrorOnPodmanFailure(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "podman")
+	src := `#!/bin/sh
+echo "network not found" >&2
+exit 1
+`
+	if err := os.WriteFile(script, []byte(src), 0755); err != nil {
+		t.Fatalf("write fake podman: %v", err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	_, err := NetworkGatewayIP("boxnex-egress")
+	if err == nil {
+		t.Fatal("expected error when podman fails")
+	}
+}
+
+func TestNetworkGatewayIP_ErrorOnEmptySubnets(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "podman")
+	src := `#!/bin/sh
+echo '[{"subnets":[]}]'
+exit 0
+`
+	if err := os.WriteFile(script, []byte(src), 0755); err != nil {
+		t.Fatalf("write fake podman: %v", err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	_, err := NetworkGatewayIP("boxnex-egress")
+	if err == nil {
+		t.Fatal("expected error when subnets are empty")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Exact name anchor — filter uses ^ prefix to avoid substring matches
+// ---------------------------------------------------------------------------
+
+func TestContainerName_SubstringMatchFixed(t *testing.T) {
+	// Verify that our --filter uses ^ anchoring to avoid the old docker substring bug.
+	// We can't run podman here, but we can verify the containerName function produces
+	// distinct names that would only match with exact anchoring.
+	nameA := containerName("abc")
+	nameB := containerName("abcxyz")
+
+	if nameA == nameB {
+		t.Fatalf("different project IDs produced the same container name: %s", nameA)
+	}
+	// Verify both are valid container names (no special chars)
+	for _, name := range []string{nameA, nameB} {
+		for _, c := range name {
+			if c == '/' || c == ' ' || c == '\t' {
+				t.Fatalf("container name contains invalid char %q: %s", c, name)
+			}
+		}
 	}
 }

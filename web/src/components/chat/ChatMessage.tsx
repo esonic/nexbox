@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { Loader2, Sparkles, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, ChevronDown, ChevronRight } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
-import { ToolCallCard, TODO_TOOLS, parseTodoOutput, parseTodoInput, StandaloneTodoList } from "@/components/chat/ToolCallCard";
+import { ToolCallCard, TODO_TOOLS } from "@/components/chat/ToolCallCard";
 import { ThinkingBlock } from "@/components/chat/ThinkingBlock";
 import { IssueRow } from "@/plugins/task/IssueRow";
 import { messagesApi } from "@/lib/api";
@@ -413,18 +413,6 @@ export function ChatMessage({ message }: ChatMessageProps) {
     ? message.parts.filter((p) => p.type === "workflow_ref") as Array<{ type: "workflow_ref"; workflowId: string; name: string; nodeCount?: number; edgeCount?: number }>
     : [];
 
-  const todoData = useMemo(() => {
-    if (isUser) return null;
-    type TU = Extract<MessagePart, { type: "tool_use" }>;
-    type TR = Extract<MessagePart, { type: "tool_result" }>;
-    const todoCalls = effectiveParts.filter((p): p is TU => p.type === "tool_use" && TODO_TOOLS.has((p as TU).toolName));
-    if (todoCalls.length === 0) return null;
-    const last = todoCalls[todoCalls.length - 1];
-    const result = effectiveParts.find((p): p is TR => p.type === "tool_result" && (p as TR).toolCallId === last.toolCallId);
-    const todos = result ? parseTodoOutput(result.output) : parseTodoInput(last.input);
-    const isPending = last.state === "streaming" || last.state === "running";
-    return { todos, isPending };
-  }, [isUser, effectiveParts]);
 
   return (
     <div
@@ -572,9 +560,6 @@ export function ChatMessage({ message }: ChatMessageProps) {
                     return null;
                 }
               })}
-              {todoData && todoData.todos.length > 0 && (
-                <StandaloneTodoList todos={todoData.todos} isPending={todoData.isPending} />
-              )}
               {message.isStreaming && groups.length > 0 && (
                 <span className="inline-flex items-center gap-1 text-muted-foreground mt-1">
                   <Loader2 className="size-3 animate-spin" />
