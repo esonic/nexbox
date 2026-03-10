@@ -35,7 +35,10 @@ export function TodoPanel({ todos, isPending }: TodoPanelProps) {
     <div className="border border-border rounded-lg overflow-hidden bg-background mb-3">
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-2 border-b bg-muted/30">
-        <ListChecks className="h-4 w-4 text-muted-foreground" />
+        {isPending
+          ? <Loader2 className="h-4 w-4 text-muted-foreground animate-spin" />
+          : <ListChecks className="h-4 w-4 text-muted-foreground" />
+        }
         <span className="text-sm font-medium">Tasks</span>
         <span className="ml-auto text-xs text-muted-foreground tabular-nums">
           {completedCount} / {totalCount}
@@ -55,14 +58,6 @@ export function TodoPanel({ todos, isPending }: TodoPanelProps) {
           );
         })}
       </div>
-
-      {/* Footer */}
-      {isPending && (
-        <div className="flex items-center gap-2 px-4 py-2 border-t text-xs text-muted-foreground">
-          <Loader2 className="h-3 w-3 animate-spin" />
-          <span>Running…</span>
-        </div>
-      )}
     </div>
   );
 }

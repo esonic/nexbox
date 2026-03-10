@@ -208,6 +208,14 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       if (todos.length === 0) continue;
 
       const isPending = msg.isStreaming || lastTodoCall.state === "streaming" || lastTodoCall.state === "running";
+
+      // All tasks done/cancelled — mission complete, close the panel
+      const allDone = todos.every(
+        (t) => t.status === "completed" || t.status === "TODO_STATUS_COMPLETED" ||
+               t.status === "cancelled" || t.status === "TODO_STATUS_CANCELLED"
+      );
+      if (allDone) return null;
+
       return { todos, isPending };
     }
 

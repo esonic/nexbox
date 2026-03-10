@@ -139,6 +139,10 @@ ANTHROPIC_AUTH_TOKEN=
 
 ---
 
+模擬 subapi 主頁及登錄界面；接入 stripe
+
+---
+
 ## 优先级总览
 
 | 优先级 | 编号 | 任务 | 复杂度 |
