@@ -277,7 +277,24 @@ func loadMarketplacePlugins(dir string) ([]store.MarketplacePlugin, error) {
 	if plugins == nil {
 		plugins = []store.MarketplacePlugin{}
 	}
-	return plugins, nil
+
+	// Deduplicate by (name, type): later entries (from direct plugin.json) take
+	// precedence over earlier entries from parent marketplace.json, which may use
+	// the repo owner as a fallback author rather than the plugin's actual author.
+	// Keying on type ensures a "frontend-design" skill and a "frontend-design" plugin
+	// are treated as distinct entries that appear in different tabs.
+	byKey := make(map[string]int, len(plugins)) // "name:type" → index in result
+	deduped := plugins[:0:0]
+	for _, p := range plugins {
+		key := p.Name + ":" + p.Type
+		if idx, exists := byKey[key]; exists {
+			deduped[idx] = p // overwrite with later (more specific) entry
+		} else {
+			byKey[key] = len(deduped)
+			deduped = append(deduped, p)
+		}
+	}
+	return deduped, nil
 }
 
 // loadCustomJSON parses a legacy *.json plugin definition.
@@ -467,14 +484,10 @@ func loadMarketplaceJSON(pluginRoot, path string) ([]store.MarketplacePlugin, er
 			continue
 		}
 
-		// Skills-repo format: skills array with local paths
+		// Skills-repo format: skills array with local paths — these are install bundles,
+		// not individual skills. The walker discovers each SKILL.md individually, so
+		// we skip the bundle entry to avoid confusing non-installable aggregate entries.
 		if len(entry.Skills) > 0 {
-			p.Type = "skill"
-			p.Source = "skill"
-			// InstallPath points to pluginRoot; frontend/install uses skills paths individually
-			p.InstallPath = pluginRoot
-			p.Components = []string{"skills"}
-			result = append(result, p)
 			continue
 		}
 
