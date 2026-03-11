@@ -18,11 +18,25 @@ func (s *Server) ListTasks(w http.ResponseWriter, r *http.Request) {
 
 	var projectIDs []string
 	if projectID != "" {
+		// Validate the requesting user can access this project.
+		if GetUserRole(r) != "admin" {
+			project, err := s.Store.GetProject(projectID)
+			if err != nil || project == nil || project.OwnerID != GetUserID(r) {
+				writeError(w, http.StatusForbidden, "access denied")
+				return
+			}
+		}
 		projectIDs = []string{projectID}
-	} else if joined := s.joinedProjectIDs(); joined != nil {
-		projectIDs = make([]string, 0, len(joined))
-		for id := range joined {
-			projectIDs = append(projectIDs, id)
+	} else if GetUserRole(r) != "admin" {
+		// Scope to the user's own projects so tasks from other users are never leaked.
+		allProjects, err := s.Store.ListProjects()
+		if err == nil {
+			userID := GetUserID(r)
+			for _, p := range allProjects {
+				if p.OwnerID == userID {
+					projectIDs = append(projectIDs, p.ID)
+				}
+			}
 		}
 	}
 
@@ -46,6 +60,14 @@ func (s *Server) CreateTask(w http.ResponseWriter, r *http.Request) {
 	if req.Title == "" {
 		writeError(w, http.StatusBadRequest, "title is required")
 		return
+	}
+	// Validate project ownership so users can only create tasks in their own projects.
+	if req.ProjectID != "" && GetUserRole(r) != "admin" {
+		project, err := s.Store.GetProject(req.ProjectID)
+		if err != nil || project == nil || project.OwnerID != GetUserID(r) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
 	}
 	if req.ParentID != "" {
 		parent, err := s.Store.GetTask(req.ParentID)

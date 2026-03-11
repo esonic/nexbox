@@ -165,15 +165,16 @@ func NewRouter(s *Server) *chi.Mux {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 
-	// Rate limiter for the registration endpoint: max 5 requests per IP per minute.
 	registerRL := newIPRateLimiter(5, time.Minute)
+	loginRL    := newIPRateLimiter(5, time.Minute)
+	verifyRL   := newIPRateLimiter(1, time.Minute)
 
 	r.Route("/api", func(r chi.Router) {
 		// ── Public routes (no auth required) ──
 		r.Get("/info", s.GetServerInfo)
 		r.With(registerRateLimit(registerRL)).Post("/auth/register", s.HandleRegister)
-		r.Post("/auth/login", s.HandleLogin)
-		r.Post("/auth/send-verification", s.HandleSendVerification)
+		r.With(registerRateLimit(loginRL)).Post("/auth/login", s.HandleLogin)
+		r.With(registerRateLimit(verifyRL)).Post("/auth/send-verification", s.HandleSendVerification)
 
 		// ── All routes requiring authentication ──
 		r.Group(func(r chi.Router) {
@@ -229,6 +230,7 @@ func NewRouter(s *Server) *chi.Mux {
 				r.Get("/lookup-by-dir", s.LookupProjectByDir)
 				r.Get("/by-git-dir", s.CheckProjectByGitDir)
 				r.Route("/{projectId}", func(r chi.Router) {
+					r.Use(s.requireProjectAccess)
 					r.Get("/", s.GetProject)
 					r.Put("/", s.UpdateProject)
 					r.Delete("/", s.DeleteProject)
@@ -277,6 +279,7 @@ func NewRouter(s *Server) *chi.Mux {
 				r.Get("/", s.ListTasks)
 				r.Post("/", s.CreateTask)
 				r.Route("/{taskId}", func(r chi.Router) {
+					r.Use(s.requireTaskAccess)
 					r.Get("/", s.GetTask)
 					r.Put("/", s.UpdateTask)
 					r.Delete("/", s.DeleteTask)
@@ -308,6 +311,7 @@ func NewRouter(s *Server) *chi.Mux {
 
 			// Assets direct access by ID
 			r.Route("/assets/{assetId}", func(r chi.Router) {
+				r.Use(s.requireAssetAccess)
 				r.Get("/", s.GetAsset)
 				r.Put("/", s.UpdateAsset)
 				r.Delete("/", s.DeleteAsset)

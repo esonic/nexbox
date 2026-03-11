@@ -134,7 +134,18 @@ func (a *ClaudeAgent) SendMessage(
 		for _, mcp := range req.ExtraMCPServers {
 			entry := map[string]interface{}{"type": mcp.Type}
 			if mcp.Type == "http" {
-				entry["url"] = mcp.URL
+				u := mcp.URL
+				// Append ?session= so HandleMCPProxy can verify project ownership.
+				// The session UUID also acts as an unguessable token, blocking
+				// unauthenticated access to the proxy from the public internet.
+				if req.ConversationID != "" {
+					if strings.Contains(u, "?") {
+						u += "&session=" + req.ConversationID
+					} else {
+						u += "?session=" + req.ConversationID
+					}
+				}
+				entry["url"] = u
 				if len(mcp.Headers) > 0 {
 					entry["headers"] = mcp.Headers
 				}
@@ -658,17 +669,8 @@ func isBenignToolError(output string) bool {
 	return false
 }
 
-// deprecatedMCPTools lists MCP tool suffixes that should never be passed to the CLI.
-var deprecatedMCPTools = map[string]bool{
-	"ask_question":            true,
-	"run_in_terminal":         true,
-	"get_gitlab_mr_comments":  true,
-	"create_gitlab_mr":        true,
-	"enable_browser_control":  true,
-}
-
 // mcpToolFeatureMap maps MCP tool name suffixes to the feature bit required.
-// Tools not in this map (and not deprecated) are always included.
+// Tools not in this map are always included.
 var mcpToolFeatureMap = map[string]int64{
 	"save_asset":          1 << 1, // FeatureAsset
 	"get_asset_content":   1 << 1,
@@ -683,8 +685,7 @@ var mcpToolFeatureMap = map[string]int64{
 	"execute_workflow":    1 << 2,
 }
 
-// filterMCPTools removes deprecated tools and tools whose feature bit is not
-// enabled in userFeatures.
+// filterMCPTools removes tools whose feature bit is not enabled in userFeatures.
 func filterMCPTools(allTools []string, userFeatures int64) []string {
 	var filtered []string
 	for _, tool := range allTools {
@@ -692,9 +693,6 @@ func filterMCPTools(allTools []string, userFeatures int64) []string {
 		suffix := tool
 		if idx := strings.LastIndex(tool, "__"); idx >= 0 {
 			suffix = tool[idx+2:]
-		}
-		if deprecatedMCPTools[suffix] {
-			continue
 		}
 		requiredBit, guarded := mcpToolFeatureMap[suffix]
 		if !guarded || (userFeatures&requiredBit) != 0 {

@@ -27,7 +27,7 @@ BoxNex 是一个**多用户 AI Agent SaaS 平台**，允许多个用户独立使
 
 | 组件 | 技术栈 |
 |------|--------|
-| 后端 | Go 1.22+，chi 路由，JWT 鉴权 |
+| 后端 | Go 1.26+，chi 路由，JWT 鉴权 |
 | 前端 | React + TypeScript + Vite，嵌入到 Go 二进制中 |
 | 数据库 | SQLite（开发/单机）或 MySQL 8.x（生产多实例） |
 | AI Agent | Claude CLI，通过 Anthropic API Key 调用 |
@@ -51,7 +51,7 @@ BoxNex 是一个**多用户 AI Agent SaaS 平台**，允许多个用户独立使
 ### 必要软件
 | 软件 | 版本 | 用途 |
 |------|------|------|
-| Go | 1.22+ | 编译后端 |
+| Go | 1.26+ | 编译后端 |
 | Node.js | 18+ | 编译前端 |
 | npm | 8+ | 前端包管理 |
 
@@ -87,7 +87,7 @@ bash scripts/setup.sh --no-podman
 
 脚本会自动完成：
 - 安装 Podman（rootless 模式，无需 root）
-- 安装 Go 1.22.5
+- 安装 Go 1.26.1
 - 构建 `boxnex-agent:latest` 容器镜像（使用 `Dockerfile.agent`）
 - 生成 `server/data/config.json`（含随机 JWT secret，权限 0600）
 
@@ -103,12 +103,15 @@ vi server/data/config.json
 {
   "store_type": "sqlite",
   "jwt_secret": "<openssl rand -hex 32 生成>",
-  "jwt_exp_days": 7,
   "token_price_per_million": 15,
   "resend_api_key": "re_xxxx",
-  "resend_from": "BoxNex <noreply@box-nex.top>"
+  "podman_enabled": true,
+  "claude_auth_token": "<CLAUDE_CODE_OAUTH_TOKEN 或 ANTHROPIC_API_KEY>"
 }
 ```
+
+> `jwt_exp_days` 默认 7 天；`resend_from` 默认 `BoxNex <noreply@box-nex.top>`，如需自定义发件人再添加。
+> `claude_auth_token` 也可不写入 config，改用环境变量 `CLAUDE_CODE_OAUTH_TOKEN` 启动服务（两者取其一）。
 
 > `config.json` 保存时自动设置文件权限 `0600`，防止泄露 secret。
 

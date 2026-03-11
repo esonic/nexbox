@@ -12,26 +12,8 @@ import (
 
 	gomcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	gitlabpkg "gitlab.okg.com/sre_ai/boxnex/gitlab"
 	"gitlab.okg.com/sre_ai/boxnex/store"
 )
-
-// TerminalWriter abstracts writing commands to a session's terminal.
-type TerminalWriter interface {
-	// WriteCommand sends a command to the terminal for the given session.
-	WriteCommand(sessionID, command string) error
-	// WaitReady blocks until a terminal for the session is active or the context expires.
-	WaitReady(ctx context.Context, sessionID string) error
-}
-
-// ConfigGetter abstracts reading local config values.
-type ConfigGetter interface {
-	GitLabToken() string
-	ProjectIDs() []string
-	// GitRepoPath returns the local git repo path for a project (by remote ID).
-	// Returns empty string if not found.
-	GitRepoPath(projectID string) string
-}
 
 // ChangeNotifier is called when MCP tools modify data (assets, tasks, etc.)
 // so the main server can broadcast updates to connected browsers.
@@ -51,17 +33,12 @@ type WorkflowExecutor interface {
 	ExecuteWorkflow(workflowID, projectID, userContext, triggeredBy string, taskIDs []string) (executionID string, err error)
 }
 
-// ChromeEnabler allows the MCP server to enable per-session browser control.
-type ChromeEnabler interface {
-	// EnableChrome adds chrome_devtools to the session's features and starts
-	// the Chrome MCP server for that session. Returns the Chrome MCP URL and
-	// tool names on success.
-	EnableChrome(sessionID string) (mcpURL string, toolNames []string, err error)
-}
-
-// boxnexSessionKey is the context key used to carry the boxnex session ID
-// through MCP HTTP requests.
+// boxnexSessionKey carries the BoxNex session ID through MCP HTTP requests.
 type boxnexSessionKey struct{}
+
+// boxnexProjectKey carries the project ID bound to the session making the request.
+// Populated by the HTTP middleware when ?session= is present; empty for direct clients.
+type boxnexProjectKey struct{}
 
 // Server wraps the mcp-go MCP server with BoxNex-specific tools
 type Server struct {
@@ -73,12 +50,9 @@ type Server struct {
 	listener         net.Listener
 	httpSrv          *http.Server
 	toolNames        []string
-	terminalMgr      TerminalWriter
-	configGetter     ConfigGetter
 	changeNotifier   ChangeNotifier
 	orchestrator     SessionOrchestrator
 	workflowExecutor WorkflowExecutor
-	chromeEnabler    ChromeEnabler
 }
 
 // NewServer creates a new MCP server with asset management tools
@@ -129,7 +103,13 @@ func (s *Server) Serve() error {
 	// access it without requiring the AI to pass it explicitly.
 	mux.Handle("/mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if sid := r.URL.Query().Get("session"); sid != "" {
-			r = r.WithContext(context.WithValue(r.Context(), boxnexSessionKey{}, sid))
+			ctx := context.WithValue(r.Context(), boxnexSessionKey{}, sid)
+			// Bind the session's project to the context so tool handlers can
+			// enforce per-project isolation without trusting the AI's arguments.
+			if sess, err := s.store.GetSession(sid); err == nil && sess != nil && sess.ProjectID != "" {
+				ctx = context.WithValue(ctx, boxnexProjectKey{}, sess.ProjectID)
+			}
+			r = r.WithContext(ctx)
 		}
 		s.httpServer.ServeHTTP(w, r)
 	}))
@@ -153,16 +133,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// SetTerminalManager sets the terminal manager for the run_in_terminal tool.
-func (s *Server) SetTerminalManager(tm TerminalWriter) {
-	s.terminalMgr = tm
-}
-
-// SetConfigGetter sets the config getter for reading local settings (e.g. GitLab token).
-func (s *Server) SetConfigGetter(cg ConfigGetter) {
-	s.configGetter = cg
-}
-
 // SetChangeNotifier sets the callback for broadcasting data changes to browsers.
 func (s *Server) SetChangeNotifier(fn ChangeNotifier) {
 	s.changeNotifier = fn
@@ -183,11 +153,6 @@ func (s *Server) SetWorkflowExecutor(exec WorkflowExecutor) {
 // tools use the correct (remote or local) store without requiring a restart.
 func (s *Server) SetStore(st store.Store) {
 	s.store = st
-}
-
-// SetChromeEnabler sets the chrome enabler for the enable_browser_control tool.
-func (s *Server) SetChromeEnabler(ce ChromeEnabler) {
-	s.chromeEnabler = ce
 }
 
 func (s *Server) notifyChange(entityType, entityID, action string) {
@@ -286,28 +251,6 @@ func (s *Server) registerTools() {
 		),
 	)
 
-	// ask_question: Present questions to the user and wait for their response
-	askQuestionTool := gomcp.NewTool("ask_question",
-		gomcp.WithDescription(
-			"Present one or more multiple-choice questions to the user via an interactive UI. "+
-				"Use this tool when you need clarification or user decisions before proceeding. "+
-				"IMPORTANT: After calling this tool, you MUST stop and wait for the user's response "+
-				"in the next message. Do NOT continue working until you receive the answers."),
-		gomcp.WithString("title",
-			gomcp.Description("Optional title for the question form"),
-		),
-		gomcp.WithString("questions",
-			gomcp.Required(),
-			gomcp.Description(
-				"JSON array of question objects. Each question has: "+
-					"id (string, unique identifier), "+
-					"prompt (string, the question text), "+
-					"options (array of {id, label} with at least 2 items), "+
-					"allow_multiple (boolean, optional, default false for single-select). "+
-					"Example: [{\"id\":\"q1\",\"prompt\":\"Which approach?\",\"options\":[{\"id\":\"a\",\"label\":\"Option A\"},{\"id\":\"b\",\"label\":\"Option B\"}]}]"),
-		),
-	)
-
 	// create_task: Create a new task
 	createTaskTool := gomcp.NewTool("create_task",
 		gomcp.WithDescription(
@@ -386,47 +329,6 @@ func (s *Server) registerTools() {
 		),
 	)
 
-	getGitlabMRCommentsTool := gomcp.NewTool("get_gitlab_mr_comments",
-		gomcp.WithDescription(
-			"Fetch review comments from a GitLab Merge Request. "+
-				"Returns structured JSON comments including file paths, line numbers, content, and author. "+
-				"If this tool returns a 'token not configured' error, immediately tell the user to configure their GitLab personal access token in Settings. Do NOT attempt to find or set the token yourself."),
-		gomcp.WithString("mr_url",
-			gomcp.Required(),
-			gomcp.Description("The full GitLab MR URL, e.g. https://gitlab.okg.com/group/project/-/merge_requests/123"),
-		),
-	)
-
-	createGitlabMRTool := gomcp.NewTool("create_gitlab_mr",
-		gomcp.WithDescription(
-			"Create a GitLab Merge Request for a project. "+
-				"Pushes the current branch to origin and opens an MR against the default branch. "+
-				"Returns the MR iid, URL, title, and state. "+
-				"If this tool returns a 'token not configured' error, immediately tell the user to configure their GitLab personal access token in Settings. Do NOT attempt to find or set the token yourself."),
-		gomcp.WithString("project_id",
-			gomcp.Required(),
-			gomcp.Description("The project ID"),
-		),
-		gomcp.WithString("title",
-			gomcp.Required(),
-			gomcp.Description("MR title"),
-		),
-		gomcp.WithString("desc",
-			gomcp.Description("MR description (optional)"),
-		),
-	)
-
-	runInTerminalTool := gomcp.NewTool("run_in_terminal",
-		gomcp.WithDescription(
-			"Send a command to the integrated terminal for execution. "+
-				"The command is sent asynchronously — like pasting it into the terminal. "+
-				"Output is NOT captured; the user will see the output in their terminal panel."),
-		gomcp.WithString("command",
-			gomcp.Required(),
-			gomcp.Description("The shell command to execute in the terminal"),
-		),
-	)
-
 	addTool := func(tool gomcp.Tool, handler server.ToolHandlerFunc) {
 		name := tool.Name
 		wrapped := func(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
@@ -494,60 +396,58 @@ func (s *Server) registerTools() {
 		),
 	)
 
-	// --- Browser control tool ---
-
-	enableBrowserControlTool := gomcp.NewTool("enable_browser_control",
-		gomcp.WithDescription(
-			"Enable Chrome browser control for the current session. "+
-				"Call this tool when you need to perform end-to-end browser testing, "+
-				"UI verification, or any task that requires controlling a real browser. "+
-				"After calling this tool, the Chrome DevTools MCP tools will be available in the next message."),
-	)
-
 	addTool(saveAssetTool, s.handleSaveAsset)
 	addTool(getAssetContentTool, s.handleGetAssetContent)
 	addTool(listAssetsTool, s.handleListAssets)
 	addTool(listAssetCommentsTool, s.handleListAssetComments)
-	addTool(askQuestionTool, s.handleAskQuestion)
 	addTool(createTaskTool, s.handleCreateTask)
 	addTool(getTaskTool, s.handleGetTask)
 	addTool(listTasksTool, s.handleListTasks)
 	addTool(updateTaskTool, s.handleUpdateTask)
-	addTool(runInTerminalTool, s.handleRunInTerminal)
-	addTool(getGitlabMRCommentsTool, s.handleGetGitlabMRComments)
-	addTool(createGitlabMRTool, s.handleCreateGitlabMR)
 	addTool(listWorkflowsTool, s.handleListWorkflows)
 	addTool(getWorkflowTool, s.handleGetWorkflow)
 	addTool(executeWorkflowTool, s.handleExecuteWorkflow)
-	addTool(enableBrowserControlTool, s.handleEnableBrowserControl)
+}
+
+// resolveProject returns the project ID to use for a tool call.
+// When called from an agent session (boxnexProjectKey is in context), the
+// session's project is returned regardless of the arg — agents cannot access
+// another project's data by passing a different project_id.
+// For direct (non-agent) MCP clients the arg is used as-is.
+func resolveProject(ctx context.Context, argProjectID string) (string, error) {
+	if pid, _ := ctx.Value(boxnexProjectKey{}).(string); pid != "" {
+		return pid, nil
+	}
+	if argProjectID == "" {
+		return "", fmt.Errorf("project_id is required")
+	}
+	return argProjectID, nil
+}
+
+// enforceProjectOwnership returns an error when the calling session's project
+// does not match the object's project. No-ops for direct (non-agent) callers.
+func enforceProjectOwnership(ctx context.Context, objectProjectID string) error {
+	pid, _ := ctx.Value(boxnexProjectKey{}).(string)
+	if pid != "" && pid != objectProjectID {
+		return fmt.Errorf("not found") // deliberately vague — don't leak other projects
+	}
+	return nil
 }
 
 func (s *Server) handleSaveAsset(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := request.GetArguments()
 
-	projectID, _ := args["project_id"].(string)
+	argProjectID, _ := args["project_id"].(string)
 	assetType, _ := args["type"].(string)
 	title, _ := args["title"].(string)
 	content, _ := args["content"].(string)
 
-	if projectID == "" || title == "" || content == "" {
-		return errorResult("project_id, title, and content are required"), nil
+	projectID, err := resolveProject(ctx, argProjectID)
+	if err != nil {
+		return errorResult(err.Error()), nil
 	}
-
-	if s.configGetter != nil {
-		ids := s.configGetter.ProjectIDs()
-		if len(ids) > 0 {
-			found := false
-			for _, id := range ids {
-				if id == projectID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return errorResult(fmt.Sprintf("project_id %q not found", projectID)), nil
-			}
-		}
+	if title == "" || content == "" {
+		return errorResult("title and content are required"), nil
 	}
 
 	// Validate asset type
@@ -607,6 +507,14 @@ func (s *Server) handleGetAssetContent(ctx context.Context, request gomcp.CallTo
 		return errorResult("asset_id is required"), nil
 	}
 
+	// Verify ownership in agent mode before returning content.
+	if pid, _ := ctx.Value(boxnexProjectKey{}).(string); pid != "" {
+		asset, err := s.store.GetAsset(assetID)
+		if err != nil || asset == nil || asset.ProjectID != pid {
+			return errorResult(fmt.Sprintf("asset %s not found", assetID)), nil
+		}
+	}
+
 	content, err := s.store.GetLatestAssetContent(assetID)
 	if err != nil {
 		return errorResult(fmt.Sprintf("failed to get content: %v", err)), nil
@@ -621,9 +529,10 @@ func (s *Server) handleGetAssetContent(ctx context.Context, request gomcp.CallTo
 func (s *Server) handleListAssets(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := request.GetArguments()
 
-	projectID, _ := args["project_id"].(string)
-	if projectID == "" {
-		return errorResult("project_id is required"), nil
+	argProjectID, _ := args["project_id"].(string)
+	projectID, err := resolveProject(ctx, argProjectID)
+	if err != nil {
+		return errorResult(err.Error()), nil
 	}
 
 	assets, err := s.store.ListAssets(projectID, 20, 0, "")
@@ -674,6 +583,14 @@ func (s *Server) handleListAssetComments(ctx context.Context, request gomcp.Call
 		return errorResult("asset_id is required"), nil
 	}
 
+	// Verify ownership in agent mode.
+	if pid, _ := ctx.Value(boxnexProjectKey{}).(string); pid != "" {
+		asset, err := s.store.GetAsset(assetID)
+		if err != nil || asset == nil || asset.ProjectID != pid {
+			return errorResult(fmt.Sprintf("asset %s not found", assetID)), nil
+		}
+	}
+
 	comments, err := s.store.ListReviewComments(assetID)
 	if err != nil {
 		return errorResult(fmt.Sprintf("database error: %v", err)), nil
@@ -713,80 +630,11 @@ func (s *Server) handleListAssetComments(ctx context.Context, request gomcp.Call
 	return textResult(string(data)), nil
 }
 
-// Question/option structures for validation
-type questionOption struct {
-	ID    string `json:"id"`
-	Label string `json:"label"`
-}
-
-type questionDef struct {
-	ID            string           `json:"id"`
-	Prompt        string           `json:"prompt"`
-	Options       []questionOption `json:"options"`
-	AllowMultiple bool             `json:"allow_multiple"`
-}
-
-func (s *Server) handleAskQuestion(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	args := request.GetArguments()
-
-	questionsJSON, _ := args["questions"].(string)
-	if questionsJSON == "" {
-		return errorResult("questions parameter is required"), nil
-	}
-
-	// Validate the questions JSON
-	var questions []questionDef
-	if err := json.Unmarshal([]byte(questionsJSON), &questions); err != nil {
-		return errorResult(fmt.Sprintf("invalid questions JSON: %v", err)), nil
-	}
-
-	if len(questions) == 0 {
-		return errorResult("questions array must contain at least one question"), nil
-	}
-
-	for i, q := range questions {
-		if q.ID == "" {
-			return errorResult(fmt.Sprintf("question[%d]: id is required", i)), nil
-		}
-		if q.Prompt == "" {
-			return errorResult(fmt.Sprintf("question[%d]: prompt is required", i)), nil
-		}
-		if len(q.Options) < 2 {
-			return errorResult(fmt.Sprintf("question[%d]: at least 2 options are required", i)), nil
-		}
-		for j, opt := range q.Options {
-			if opt.ID == "" || opt.Label == "" {
-				return errorResult(fmt.Sprintf("question[%d].options[%d]: both id and label are required", i, j)), nil
-			}
-		}
-	}
-
-	title, _ := args["title"].(string)
-
-	// Build a summary for the tool result
-	var sb strings.Builder
-	sb.WriteString("Questions have been presented to the user.\n")
-	if title != "" {
-		sb.WriteString(fmt.Sprintf("Title: %s\n", title))
-	}
-	sb.WriteString(fmt.Sprintf("Number of questions: %d\n", len(questions)))
-	for _, q := range questions {
-		sb.WriteString(fmt.Sprintf("- [%s] %s (%d options", q.ID, q.Prompt, len(q.Options)))
-		if q.AllowMultiple {
-			sb.WriteString(", multi-select")
-		}
-		sb.WriteString(")\n")
-	}
-	sb.WriteString("\nSTOP HERE. Wait for the user's response in the next message before continuing.")
-
-	log.Printf("[mcp] ask_question: presented %d questions to user", len(questions))
-	return textResult(sb.String()), nil
-}
-
 func (s *Server) handleCreateTask(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := request.GetArguments()
 
-	projectID, _ := args["project_id"].(string)
+	argProjectID, _ := args["project_id"].(string)
+	projectID, _ := resolveProject(ctx, argProjectID) // project is optional for tasks
 	title, _ := args["title"].(string)
 	description, _ := args["description"].(string)
 	priority, _ := args["priority"].(string)
@@ -851,6 +699,9 @@ func (s *Server) handleGetTask(ctx context.Context, request gomcp.CallToolReques
 		return errorResult(fmt.Sprintf("failed to get task: %v", err)), nil
 	}
 	if task == nil {
+		return errorResult(fmt.Sprintf("task %s not found", taskID)), nil
+	}
+	if err := enforceProjectOwnership(ctx, task.ProjectID); err != nil {
 		return errorResult(fmt.Sprintf("task %s not found", taskID)), nil
 	}
 
@@ -942,6 +793,14 @@ func (s *Server) handleUpdateTask(ctx context.Context, request gomcp.CallToolReq
 		req.Assigner = &assignee
 	}
 
+	// Verify ownership before mutating.
+	if pid, _ := ctx.Value(boxnexProjectKey{}).(string); pid != "" {
+		existing, err := s.store.GetTask(taskID)
+		if err != nil || existing == nil || existing.ProjectID != pid {
+			return errorResult(fmt.Sprintf("task %s not found", taskID)), nil
+		}
+	}
+
 	task, err := s.store.UpdateTask(taskID, req)
 	if err != nil {
 		log.Printf("[mcp] UpdateTask error: %v", err)
@@ -967,7 +826,10 @@ func (s *Server) handleUpdateTask(ctx context.Context, request gomcp.CallToolReq
 func (s *Server) handleListTasks(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := request.GetArguments()
 	statusFilter, _ := args["status"].(string)
-	projectID, _ := args["project_id"].(string)
+	argProjectID, _ := args["project_id"].(string)
+
+	// In agent mode the session project overrides the arg; in direct mode use arg.
+	projectID, _ := resolveProject(ctx, argProjectID)
 
 	var projectIDs []string
 	if projectID != "" {
@@ -1036,129 +898,16 @@ func (s *Server) handleListTasks(ctx context.Context, request gomcp.CallToolRequ
 	return textResult(string(data)), nil
 }
 
-func (s *Server) handleGetGitlabMRComments(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	args := request.GetArguments()
-	mrURL, _ := args["mr_url"].(string)
-
-	if mrURL == "" {
-		return errorResult("mr_url is required"), nil
-	}
-
-	if s.configGetter == nil {
-		return errorResult("config is not available"), nil
-	}
-	token := s.configGetter.GitLabToken()
-	if token == "" {
-		return errorResult("GitLab personal access token is not configured. Please add it in Settings > GitLab Token."), nil
-	}
-
-	host, projectPath, mrIID, err := parseMRURL(mrURL)
-	if err != nil {
-		return errorResult(err.Error()), nil
-	}
-
-	result, err := fetchMRComments(host, projectPath, mrIID, token)
-	if err != nil {
-		log.Printf("[mcp] get_gitlab_mr_comments error: %v", err)
-		return errorResult(fmt.Sprintf("Failed to fetch MR comments: %v", err)), nil
-	}
-
-	return textResult(result), nil
-}
-
-func (s *Server) handleCreateGitlabMR(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	args := request.GetArguments()
-	projectID, _ := args["project_id"].(string)
-	title, _ := args["title"].(string)
-	desc, _ := args["desc"].(string)
-	if projectID == "" {
-		return errorResult("project_id is required"), nil
-	}
-	if title == "" {
-		return errorResult("title is required"), nil
-	}
-
-	if s.configGetter == nil {
-		return errorResult("config is not available"), nil
-	}
-	token := s.configGetter.GitLabToken()
-	if token == "" {
-		return errorResult("GitLab personal access token is not configured. Please add it in Settings > GitLab Token."), nil
-	}
-
-	project, err := s.store.GetProject(projectID)
-	if err != nil || project == nil {
-		return errorResult(fmt.Sprintf("project not found: %v", err)), nil
-	}
-	if project.GitRepoPath == "" {
-		project.GitRepoPath = s.configGetter.GitRepoPath(projectID)
-	}
-	if project.GitRepoPath == "" {
-		return errorResult("project has no git repo path configured"), nil
-	}
-
-	mr, err := gitlabpkg.CreateMRForProject(ctx, project.GitRepoPath, title, desc, token)
-	if err != nil {
-		log.Printf("[mcp] create_gitlab_mr error: %v", err)
-		return errorResult(err.Error()), nil
-	}
-
-	result, _ := json.Marshal(map[string]interface{}{
-		"iid":     mr.IID,
-		"web_url": mr.WebURL,
-		"title":   mr.Title,
-		"state":   mr.State,
-	})
-	log.Printf("[mcp] create_gitlab_mr: created MR !%d: %s", mr.IID, mr.WebURL)
-	return textResult(string(result)), nil
-}
-
-func (s *Server) handleRunInTerminal(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	args := request.GetArguments()
-	command, _ := args["command"].(string)
-	if command == "" {
-		return errorResult("command is required"), nil
-	}
-
-	if s.terminalMgr == nil {
-		return errorResult("no open terminal found"), nil
-	}
-
-	// Get the session ID from context (injected via ?session= query param).
-	sessionID, _ := ctx.Value(boxnexSessionKey{}).(string)
-
-	// Notify the frontend to open this session's terminal panel.
-	if s.changeNotifier != nil {
-		s.changeNotifier("terminal", sessionID, "open")
-	}
-
-	if err := s.terminalMgr.WriteCommand(sessionID, command); err != nil {
-		// No active PTY yet — wait for the frontend to connect.
-		waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		if waitErr := s.terminalMgr.WaitReady(waitCtx, sessionID); waitErr != nil {
-			log.Printf("[mcp] run_in_terminal: timed out waiting for terminal: %v", waitErr)
-			return errorResult("timed out waiting for terminal to open"), nil
-		}
-		if err = s.terminalMgr.WriteCommand(sessionID, command); err != nil {
-			log.Printf("[mcp] run_in_terminal error: %v", err)
-			return errorResult(err.Error()), nil
-		}
-	}
-
-	log.Printf("[mcp] run_in_terminal: sent command %q", command)
-	return textResult(fmt.Sprintf("Command sent to terminal: %s", command)), nil
-}
-
 // ---------------------------------------------------------------------------
 // Workflow handlers
 // ---------------------------------------------------------------------------
 
 func (s *Server) handleListWorkflows(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := request.GetArguments()
-	projectID, _ := args["project_id"].(string)
-	if projectID == "" {
-		return errorResult("project_id is required"), nil
+	argProjectID, _ := args["project_id"].(string)
+	projectID, err := resolveProject(ctx, argProjectID)
+	if err != nil {
+		return errorResult(err.Error()), nil
 	}
 
 	workflows, err := s.store.ListWorkflows(projectID)
@@ -1219,6 +968,9 @@ func (s *Server) handleGetWorkflow(ctx context.Context, request gomcp.CallToolRe
 	if wf == nil {
 		return errorResult(fmt.Sprintf("workflow %s not found", workflowID)), nil
 	}
+	if err := enforceProjectOwnership(ctx, wf.ProjectID); err != nil {
+		return errorResult(fmt.Sprintf("workflow %s not found", workflowID)), nil
+	}
 
 	type fullWorkflow struct {
 		ID          string          `json:"id"`
@@ -1261,20 +1013,28 @@ func (s *Server) handleExecuteWorkflow(ctx context.Context, request gomcp.CallTo
 	args := request.GetArguments()
 	workflowID, _ := args["workflow_id"].(string)
 	taskIDsRaw, _ := args["task_ids"].(string)
-	projectID, _ := args["project_id"].(string)
+	argProjectID, _ := args["project_id"].(string)
 	userContext, _ := args["user_context"].(string)
 
 	if workflowID == "" {
 		return errorResult("workflow_id is required"), nil
 	}
 
-	// Auto-resolve project_id from workflow if not provided
-	if projectID == "" {
-		wf, err := s.store.GetWorkflow(workflowID)
-		if err != nil || wf == nil {
-			return errorResult(fmt.Sprintf("workflow %s not found", workflowID)), nil
-		}
-		projectID = wf.ProjectID
+	// Fetch the workflow first so we can validate ownership and get projectID.
+	wf, err := s.store.GetWorkflow(workflowID)
+	if err != nil || wf == nil {
+		return errorResult(fmt.Sprintf("workflow %s not found", workflowID)), nil
+	}
+	if err := enforceProjectOwnership(ctx, wf.ProjectID); err != nil {
+		return errorResult(fmt.Sprintf("workflow %s not found", workflowID)), nil
+	}
+
+	// In agent mode the project comes from the session; otherwise use the arg or the workflow's own project.
+	projectID := wf.ProjectID
+	if pid, _ := ctx.Value(boxnexProjectKey{}).(string); pid != "" {
+		projectID = pid
+	} else if argProjectID != "" {
+		projectID = argProjectID
 	}
 
 	var taskIDs []string
@@ -1300,29 +1060,6 @@ func (s *Server) handleExecuteWorkflow(ctx context.Context, request gomcp.CallTo
 			"This call returns immediately — do not wait for completion.",
 		execID, len(taskIDs),
 	)), nil
-}
-
-func (s *Server) handleEnableBrowserControl(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	sessionID, _ := ctx.Value(boxnexSessionKey{}).(string)
-	if sessionID == "" {
-		return errorResult("session ID not found in request context; ensure the agent is configured correctly"), nil
-	}
-
-	if s.chromeEnabler == nil {
-		return errorResult("browser control is not available on this server"), nil
-	}
-
-	_, _, err := s.chromeEnabler.EnableChrome(sessionID)
-	if err != nil {
-		return errorResult(fmt.Sprintf("failed to enable browser control: %v", err)), nil
-	}
-
-	log.Printf("[mcp] enable_browser_control: enabled chrome_devtools for session %s", sessionID)
-	return textResult(
-		"Browser control has been enabled for this session. " +
-			"The Chrome DevTools MCP tools will be available starting from the next message.\n\n" +
-			"Please inform the user and ask them to send a new message to start the browser testing task.",
-	), nil
 }
 
 // Helper to create a text result

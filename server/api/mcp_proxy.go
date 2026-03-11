@@ -28,9 +28,30 @@ import (
 // Route: /mcp-proxy/{name}/{path...}
 func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	projectID := r.URL.Query().Get("project_id") // optional hint
 
-	mcp, err := s.resolveMCPForProxy(name, projectID)
+	if s.LocalStore == nil {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Require a valid session ID.  This serves two purposes:
+	//   1. Project isolation — we use the session's ProjectID to scope the MCP
+	//      lookup, so one container cannot reach another project's connectors.
+	//   2. Public-internet protection — the session UUID is cryptographically
+	//      random, acting as an unguessable bearer token even if this route is
+	//      reachable from the public internet.
+	sessionID := r.URL.Query().Get("session")
+	if sessionID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	sess, err := s.LocalStore.GetSession(sessionID)
+	if err != nil || sess == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	mcp, err := s.resolveMCPForProxy(name, sess.ProjectID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

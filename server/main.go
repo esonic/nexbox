@@ -28,63 +28,6 @@ import (
 // Stays "dev" for local development builds.
 var Version = "dev"
 
-// configAdapter adapts config.Manager to the mcp.ConfigGetter interface.
-type configAdapter struct{ mgr *config.Manager }
-
-func (a configAdapter) GitLabToken() string { return a.mgr.Get().GitLabToken }
-func (a configAdapter) ProjectIDs() []string {
-	cfg := a.mgr.Get()
-	ids := make([]string, len(cfg.Projects))
-	for i, p := range cfg.Projects {
-		ids[i] = p.RemoteID
-	}
-	return ids
-}
-
-func (a configAdapter) GitRepoPath(projectID string) string {
-	for _, m := range a.mgr.Get().Projects {
-		if m.RemoteID == projectID {
-			return m.GitRepoPath
-		}
-	}
-	return ""
-}
-
-// chromeEnablerImpl adapts ChromeManager + store to the mcp.ChromeEnabler interface.
-type chromeEnablerImpl struct {
-	manager *chromemcp.ChromeManager
-	store   store.Store
-}
-
-func (c *chromeEnablerImpl) EnableChrome(sessionID string) (string, []string, error) {
-	sess, err := c.store.GetSession(sessionID)
-	if err != nil || sess == nil {
-		return "", nil, fmt.Errorf("session not found: %s", sessionID)
-	}
-	features := "chrome_devtools"
-	if sess.Features != "" {
-		already := false
-		for _, f := range strings.Split(sess.Features, ",") {
-			if strings.TrimSpace(f) == "chrome_devtools" {
-				already = true
-				break
-			}
-		}
-		if !already {
-			features = sess.Features + ",chrome_devtools"
-		} else {
-			features = sess.Features
-		}
-	}
-	if err := c.store.UpdateSessionFeatures(sessionID, features); err != nil {
-		return "", nil, fmt.Errorf("failed to save feature: %w", err)
-	}
-	chromeSrv := c.manager.GetOrCreate(sessionID)
-	if err := chromeSrv.EnsureStarted(context.Background()); err != nil {
-		return "", nil, fmt.Errorf("failed to start Chrome MCP: %w", err)
-	}
-	return chromeSrv.URL(), chromeSrv.ToolNames(), nil
-}
 
 func main() {
 	showVersion := flag.Bool("version", false, "Print version and exit")
@@ -225,12 +168,7 @@ func main() {
 	// Create ChatHub for global WebSocket multiplexing
 	hub := api.NewChatHub()
 
-	// Terminal manager for run_in_terminal MCP tool
 	termMgr := api.NewTerminalManager()
-	mcpServer.SetTerminalManager(termMgr)
-
-	// Config getter for MCP tools (e.g. GitLab token)
-	mcpServer.SetConfigGetter(configAdapter{cfgMgr})
 
 	// Let MCP tools broadcast data changes to connected browsers
 	mcpServer.SetChangeNotifier(hub.NotifyChange)
@@ -339,7 +277,6 @@ func main() {
 	// Wire up SessionOrchestrator so MCP execute_workflow can create sessions
 	mcpServer.SetSessionOrchestrator(srv)
 	mcpServer.SetWorkflowExecutor(srv)
-	mcpServer.SetChromeEnabler(&chromeEnablerImpl{manager: chromeManager, store: dataStore})
 
 	// Reset stale workflow executions from previous run (pending/running → failed)
 	if err := localStore.ResetStaleExecutions(); err != nil {

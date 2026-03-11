@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -82,6 +83,77 @@ func GetUserRole(r *http.Request) string {
 func GetUserFeatures(r *http.Request) int64 {
 	v, _ := r.Context().Value(ContextKeyFeatures).(int64)
 	return v
+}
+
+// requireProjectAccess ensures the authenticated user owns the project identified
+// by the {projectId} URL parameter. Admins bypass the check.
+// Apply to any route group nested under /{projectId}.
+func (s *Server) requireProjectAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if GetUserRole(r) == "admin" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		projectID := chi.URLParam(r, "projectId")
+		project, err := s.Store.GetProject(projectID)
+		if err != nil || project == nil {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		if project.OwnerID != GetUserID(r) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireTaskAccess ensures the authenticated user owns the project that
+// contains the task identified by the {taskId} URL parameter. Admins bypass.
+func (s *Server) requireTaskAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if GetUserRole(r) == "admin" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		taskID := chi.URLParam(r, "taskId")
+		task, err := s.Store.GetTask(taskID)
+		if err != nil || task == nil {
+			writeError(w, http.StatusNotFound, "task not found")
+			return
+		}
+		if task.ProjectID != "" {
+			project, err := s.Store.GetProject(task.ProjectID)
+			if err != nil || project == nil || project.OwnerID != GetUserID(r) {
+				writeError(w, http.StatusForbidden, "access denied")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireAssetAccess ensures the authenticated user owns the project that
+// contains the asset identified by the {assetId} URL parameter. Admins bypass.
+func (s *Server) requireAssetAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if GetUserRole(r) == "admin" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		assetID := chi.URLParam(r, "assetId")
+		asset, err := s.Store.GetAsset(assetID)
+		if err != nil || asset == nil {
+			writeError(w, http.StatusNotFound, "asset not found")
+			return
+		}
+		project, err := s.Store.GetProject(asset.ProjectID)
+		if err != nil || project == nil || project.OwnerID != GetUserID(r) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // WSAuthMiddleware is like AuthMiddleware but also accepts the JWT via the
