@@ -1,0 +1,57 @@
+# boxnex-agent — lightweight per-project isolation container
+#
+# Build:  podman build -f Dockerfile.agent -t boxnex-agent:latest .
+# Or use: scripts/build-agent-image.sh
+#
+# This image is NOT the server image. It is the sandbox container that
+# runs one instance per project when PodmanEnabled=true in config.json.
+# The project's git repository is bind-mounted to /workspace at runtime.
+
+FROM alpine:latest
+
+# Runtime dependencies required by the Claude CLI (glibc-compat via libgcc/libstdc++)
+# and ripgrep for fast file search inside the agent sandbox.
+RUN apk add --no-cache \
+    libgcc \
+    libstdc++ \
+    ripgrep \
+    curl \
+    git \
+    bash \
+    shadow
+
+# Install the official Claude CLI (installs as root, typically to /root/.local/bin/claude)
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Verify the installation
+RUN claude --version
+
+# ---------------------------------------------------------------------------
+# User setup
+#
+#   agent (UID 1000)         — default container user; owns /workspace files,
+#                              runs general shell commands
+#   claude-runner (UID 9999) — dedicated user for Claude CLI execution only
+#
+# Two-user model provides /proc isolation: with --cap-drop ALL (no CAP_SYS_PTRACE),
+# UID 1000 cannot read /proc/<pid>/environ of processes owned by UID 9999.
+# The real API key is injected only at `podman exec -u 9999:9999 -e KEY=...`
+# time, so it is never visible to the agent user.
+# ---------------------------------------------------------------------------
+RUN addgroup -g 1001 workspace-users && \
+    adduser -D -u 1000 -G workspace-users agent && \
+    adduser -D -u 9999 -G workspace-users claude-runner
+
+# Make Claude CLI executable only by claude-runner (UID 9999).
+# agent (1000) cannot run it directly — the server uses `podman exec -u 9999:9999`.
+# 0500 = read+exec for owner only (needed for both ELF binaries and shell wrappers).
+RUN CLAUDE_BIN=$(which claude 2>/dev/null || echo "/root/.local/bin/claude") && \
+    chown 9999:9999 "$CLAUDE_BIN" && \
+    chmod 0500 "$CLAUDE_BIN"
+
+# Default working directory — overridden at runtime via -w /workspace bind-mount
+WORKDIR /workspace
+
+# The container is kept alive by the ContainerManager using:
+#   podman run -d --rm -v <repoPath>:/workspace -w /workspace boxnex-agent:latest tail -f /dev/null
+# No ENTRYPOINT or CMD is needed here; the manager passes the command explicitly.

@@ -202,7 +202,6 @@ func TestBuildArgs_FirstTurn(t *testing.T) {
 	})
 
 	expected := map[string]bool{
-		"-p":              false,
 		"--output-format": false,
 		"stream-json":     false,
 		"--session-id":    false,
@@ -328,17 +327,10 @@ func TestBuildStaticContext_Full(t *testing.T) {
 	ctx := BuildStaticContext(project, "sess-001")
 
 	mustContain := []string{
-		"BoxNex Platform Context",
-		"You are working within the BoxNex development platform.",
+		"BoxNex AI platform",
 		"Project: Order Service",
 		"Project Description: E-commerce order system",
 		"Project ID: proj-001",
-		"Session ID: sess-001",
-		"Working Directory: /home/dev/order-service",
-		"[Guidelines]",
-		"Use BoxNex MCP tools for asset/task management (project_id: proj-001)",
-		"Respond in user's language",
-		"Work within the project directory",
 	}
 
 	for _, s := range mustContain {
@@ -380,7 +372,7 @@ func TestBuildDynamicContext_ProjectOnly(t *testing.T) {
 	ctx := BuildDynamicContext(proj, nil, nil, nil)
 
 	mustContain := []string{
-		"[Project: My Project | ID: proj-1 | Dir: /tmp/proj]",
+		"[Project: My Project | ID: proj-1]",
 	}
 	for _, s := range mustContain {
 		if !containsString(ctx, s) {

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -18,19 +19,22 @@ var errForbidden = errors.New("access denied")
 
 const defaultDiskQuota int64 = 256 << 20 // 256 MB
 
-// dirSize walks a directory tree and returns the total size in bytes.
+// dirSize returns the total byte size of a directory using `du -sb`.
+// Consistent with workspaceSize in agent/container.go so both quota checks
+// (pre-task in chat.go and mid-task in WatchWorkspace) use the same measurement.
 func dirSize(root string) (int64, error) {
-	var total int64
-	err := filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // skip inaccessible entries
-		}
-		if !info.IsDir() {
-			total += info.Size()
-		}
-		return nil
-	})
-	return total, err
+	out, err := exec.Command("du", "-sb", root).Output()
+	if err != nil {
+		return 0, err
+	}
+	// du output: "<bytes>\t<path>"
+	parts := strings.Fields(strings.TrimSpace(string(out)))
+	if len(parts) == 0 {
+		return 0, fmt.Errorf("unexpected du output: %q", string(out))
+	}
+	var size int64
+	_, err = fmt.Sscanf(parts[0], "%d", &size)
+	return size, err
 }
 
 // diskQuotaBytes returns the configured disk quota, falling back to defaultDiskQuota.

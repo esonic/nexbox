@@ -189,7 +189,9 @@ func (c *ClaudeClient) Query(
 			containerWorkDir = "/workspace"
 		}
 		cliCmd := append([]string{c.CLIPath}, args...)
-		cmd = c.ContainerMgr.ExecInContainer(c.ContainerID, cliCmd, envSlice, containerWorkDir)
+		// Run Claude as the claude-runner user (UID 9999) so the real API key
+		// injected via -e is not visible to the agent user (1000) via /proc.
+		cmd = c.ContainerMgr.ExecClaudeInContainer(c.ContainerID, cliCmd, envSlice, containerWorkDir)
 	} else {
 		cmd = exec.Command(c.CLIPath, args...)
 		cmd.Dir = opts.WorkDir

@@ -3,9 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,20 +17,19 @@ import (
 // ContainerManager manages per-project Podman containers for isolated agent execution.
 // Podman runs in rootless mode — no daemon, no root socket.
 type ContainerManager struct {
-	image         string
-	network       string             // Podman network name (default: "boxnex-egress")
-	proxy         *ContainerProxy    // Optional: egress proxy for API-key relay + whitelist
-	mu            sync.Mutex
-	lastActivity  map[string]time.Time   // projectID → last activity time
-	sessionTokens map[string]string      // projectID → session token (fake API key)
-	DiskQuotaBytes  int64                 // workspace quota; 0 = no monitoring
-	WatchInterval   time.Duration         // workspace check interval; 0 = default (10s)
+	image          string
+	network        string          // Podman network name (default: "boxnex-egress")
+	proxy          *ContainerProxy // Optional: egress whitelist proxy
+	RealAPIKey     string          // CLAUDE_CODE_OAUTH_TOKEN injected only into ExecClaudeInContainer (UID 9999)
+	mu             sync.Mutex
+	lastActivity   map[string]time.Time // projectID → last activity time
+	DiskQuotaBytes int64                // workspace quota; 0 = no monitoring
+	WatchInterval  time.Duration        // workspace check interval; 0 = default (10s)
 }
 
 // NewContainerManager creates a ContainerManager using the given image and network.
 // If image or network are empty they fall back to "boxnex-agent:latest" / "boxnex-egress".
-// proxy may be nil; when set, a session token is generated per container and the
-// proxy is configured to relay Anthropic API calls for that session.
+// proxy may be nil; when set, containers are configured to route egress through it.
 func NewContainerManager(image, network string, proxy *ContainerProxy) *ContainerManager {
 	if image == "" {
 		image = "boxnex-agent:latest"
@@ -41,20 +38,16 @@ func NewContainerManager(image, network string, proxy *ContainerProxy) *Containe
 		network = "boxnex-egress"
 	}
 	return &ContainerManager{
-		image:         image,
-		network:       network,
-		proxy:         proxy,
-		lastActivity:  make(map[string]time.Time),
-		sessionTokens: make(map[string]string),
+		image:        image,
+		network:      network,
+		proxy:        proxy,
+		lastActivity: make(map[string]time.Time),
 	}
 }
 
 // EnsureNetwork creates the Podman network if it does not already exist.
 // Safe to call on every startup; it is a no-op when the network is present.
 func (m *ContainerManager) EnsureNetwork() error {
-	// Check existence first to avoid spamming logs.
-	// Use substring filter to narrow results, then exact-match each line in case
-	// the filter returns multiple entries (Podman filter is substring-based).
 	out, err := exec.Command("podman", "network", "ls",
 		"--filter", "name="+m.network,
 		"--format", "{{.Name}}",
@@ -112,9 +105,8 @@ func (m *ContainerManager) SetProxy(proxy *ContainerProxy) {
 }
 
 // RecoverRunningContainers stops any boxnex-proj-* containers left over from a
-// previous server run. Their session tokens are gone (in-memory state was lost),
-// so letting them continue would cause every API call to return 401. Stopping
-// them here means they will be restarted with fresh tokens on next use.
+// previous server run. Their in-memory state is lost on restart, so we stop them
+// here — they will be recreated with fresh state on next use.
 func (m *ContainerManager) RecoverRunningContainers() {
 	out, err := exec.Command(
 		"podman", "ps",
@@ -133,7 +125,7 @@ func (m *ContainerManager) RecoverRunningContainers() {
 		if err := exec.Command("podman", "stop", name).Run(); err != nil {
 			log.Printf("[container] failed to stop stale container %s: %v", name, err)
 		} else {
-			log.Printf("[container] stopped stale container %s (session tokens lost on restart)", name)
+			log.Printf("[container] stopped stale container %s on recovery", name)
 		}
 	}
 }
@@ -155,20 +147,8 @@ func containerName(projectID string) string {
 	return "boxnex-proj-" + id
 }
 
-// generateSessionToken produces a cryptographically random token injected into
-// the container as CLAUDE_CODE_OAUTH_TOKEN. Claude CLI (claude-code agent) reads
-// this env var and sends it as Authorization: Bearer — the proxy intercepts it,
-// validates the session, and substitutes the real CLAUDE_CODE_OAUTH_TOKEN.
-func generateSessionToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return "bxs-" + hex.EncodeToString(b), nil // "bxs-" prefix for easy identification
-}
-
 // EnsureContainer ensures a container for the given project is running.
-// Returns the container name that can be passed to ExecInContainer.
+// Returns the container name that can be passed to ExecInContainer / ExecClaudeInContainer.
 func (m *ContainerManager) EnsureContainer(projectID, repoPath string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -190,69 +170,58 @@ func (m *ContainerManager) EnsureContainer(projectID, repoPath string) (string, 
 		return name, nil
 	}
 
-	// Generate session token for this container instance.
-	sessionToken, err := generateSessionToken()
-	if err != nil {
-		return "", fmt.Errorf("generate session token: %w", err)
-	}
-
-	// Ensure workspace is writable by the container user (uid 1000).
-	// With --userns=keep-id the service-account uid maps to itself inside the
-	// container, but --user 1000:1000 runs the process as uid 1000 regardless.
-	// 0777 ensures Claude can always write to /workspace independent of host uid.
+	// 0777 ensures both the agent user (UID 1000) and the claude-runner user
+	// (UID 9999) can write to /workspace. With --userns=keep-id the host UID
+	// maps directly inside the container, but UID 9999 maps through the subuid
+	// range — making the directory world-writable is the simplest way to give
+	// both users write access without requiring host-side chown (which needs root).
 	if err := os.Chmod(repoPath, 0777); err != nil {
 		log.Printf("[container] warning: could not chmod workspace %s: %v", repoPath, err)
 	}
 
-	// Determine proxy address for environment injection.
+	// Determine proxy address for egress routing.
 	proxyEnv := ""
-	baseURL := ""
 	if m.proxy != nil {
-		proxyAddr := m.proxy.Addr()
-		proxyEnv = "http://" + proxyAddr
-		baseURL = "http://" + proxyAddr
-		m.proxy.RegisterSession(sessionToken, projectID)
+		proxyEnv = "http://" + m.proxy.Addr()
 	}
 
 	// Build the podman run arguments.
-	// Security posture (all P0/P1 measures from container_security_tasks.md):
-	//   --userns=keep-id        map host user → container user (rootless-friendly)
-	//   --user 1000:1000        run as non-root agent user inside container
+	//
+	// Security posture:
+	//   --userns=keep-id        map host user → same UID inside container
 	//   --security-opt no-new-privileges  prevent setuid escalation
-	//   --cap-drop ALL          drop all capabilities; add back only what is needed
-	//   --cap-add CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID  minimum for git/npm/bash
-	//   --tmpfs /tmp            writable temp space without exposing host /tmp
-	//   --memory-swap           equal to --memory to disable swap
+	//   --cap-drop ALL          drop all capabilities
+	//   --cap-add CHOWN,DAC_OVERRIDE,FOWNER  minimum for git/file ops
+	//   --tmpfs /tmp            writable temp space, noexec+nosuid
+	//   --memory-swap = --memory  disable swap
 	//   --network               dedicated egress network (boxnex-egress)
-	//   CLAUDE_CONFIG_DIR       session data stored under /workspace/.claude (no extra mount)
+	//   CLAUDE_CONFIG_DIR       session data under /workspace/.claude (no extra mount)
+	//
+	// Note: SETUID/SETGID are intentionally NOT added. Switching to the
+	// claude-runner user (UID 9999) is handled externally via `podman exec -u`
+	// in ExecClaudeInContainer — no in-container privilege escalation needed.
 	startArgs := []string{
 		"run", "-d",
 		"--name", name,
 		"--rm",
-		"--memory", "4g",
-		"--memory-swap", "4g",
+		"--memory", "2g",
+		"--memory-swap", "2g",
 		"--cpus", "1.0",
 		"--pids-limit", "200",
 		"--network", m.network,
 		"--userns=keep-id",
-		"--user", "1000:1000",
 		"--security-opt", "no-new-privileges",
 		"--cap-drop", "ALL",
 		"--cap-add", "CHOWN",
 		"--cap-add", "DAC_OVERRIDE",
 		"--cap-add", "FOWNER",
-		"--cap-add", "SETUID",
-		"--cap-add", "SETGID",
 		"--tmpfs", "/tmp:size=256m,noexec,nosuid",
 		"-v", repoPath + ":/workspace",
 		"-w", "/workspace",
-		// Claude CLI environment tuning
-		"-e", "CLAUDE_CONFIG_DIR=/workspace/.claude", // persist session under workspace (no extra mount needed)
-		"-e", "USE_BUILTIN_RIPGREP=0",                // use system ripgrep
-		"-e", "DISABLE_TELEMETRY=1",                  // no telemetry
-		"-e", "DISABLE_AUTOUPDATER=1",                // no auto-update inside container
-		// Proxy environment: containers use HTTP_PROXY for general egress
-		// and ANTHROPIC_BASE_URL so Claude CLI sends API calls through our relay.
+		"-e", "CLAUDE_CONFIG_DIR=/workspace/.claude",
+		"-e", "USE_BUILTIN_RIPGREP=0",
+		"-e", "DISABLE_TELEMETRY=1",
+		"-e", "DISABLE_AUTOUPDATER=1",
 	}
 
 	if proxyEnv != "" {
@@ -262,15 +231,6 @@ func (m *ContainerManager) EnsureContainer(projectID, repoPath string) (string, 
 			"-e", "NO_PROXY=localhost,127.0.0.1",
 		)
 	}
-	if baseURL != "" {
-		startArgs = append(startArgs, "-e", "ANTHROPIC_BASE_URL="+baseURL)
-	}
-
-	// Inject a one-time fake session token as CLAUDE_CODE_OAUTH_TOKEN — this is the
-	// env var Claude CLI (claude-code agent) reads for authentication.
-	// The proxy intercepts the Bearer header carrying this fake token, validates the
-	// session, and substitutes the real CLAUDE_CODE_OAUTH_TOKEN before forwarding.
-	startArgs = append(startArgs, "-e", "CLAUDE_CODE_OAUTH_TOKEN="+sessionToken)
 
 	startArgs = append(startArgs, m.image, "tail", "-f", "/dev/null")
 
@@ -279,35 +239,24 @@ func (m *ContainerManager) EnsureContainer(projectID, repoPath string) (string, 
 	startCmd.Stderr = &stderr
 	startOut, err := startCmd.Output()
 	if err != nil {
-		// Revoke the session token if container start failed.
-		if m.proxy != nil {
-			m.proxy.RevokeSession(sessionToken)
-		}
 		return "", fmt.Errorf("podman run: %w; stderr: %s", err, stderr.String())
 	}
 	newID := strings.TrimSpace(string(startOut))
 	log.Printf("[container] started container %s (id=%s) for project %s", name, newID, projectID)
 
 	m.lastActivity[projectID] = time.Now()
-	m.sessionTokens[projectID] = sessionToken
 	return name, nil
 }
 
-// StopContainer stops the container for a project and revokes its session token.
+// StopContainer stops the container for a project.
 // It is safe to call even if the container is not running.
 func (m *ContainerManager) StopContainer(projectID string) error {
 	name := containerName(projectID)
 	out, err := exec.Command("podman", "stop", name).CombinedOutput()
 
 	m.mu.Lock()
-	token := m.sessionTokens[projectID]
 	delete(m.lastActivity, projectID)
-	delete(m.sessionTokens, projectID)
 	m.mu.Unlock()
-
-	if token != "" && m.proxy != nil {
-		m.proxy.RevokeSession(token)
-	}
 
 	if err != nil {
 		log.Printf("[container] stop container %s: %v (%s)", name, err, strings.TrimSpace(string(out)))
@@ -346,14 +295,8 @@ func (m *ContainerManager) StopIdleContainers(maxIdle time.Duration) int {
 		out, err := exec.Command("podman", "stop", name).CombinedOutput()
 
 		m.mu.Lock()
-		token := m.sessionTokens[pid]
 		delete(m.lastActivity, pid)
-		delete(m.sessionTokens, pid)
 		m.mu.Unlock()
-
-		if token != "" && m.proxy != nil {
-			m.proxy.RevokeSession(token)
-		}
 
 		if err != nil {
 			log.Printf("[container] idle stop %s: %v (%s)", name, err, strings.TrimSpace(string(out)))
@@ -365,32 +308,52 @@ func (m *ContainerManager) StopIdleContainers(maxIdle time.Duration) int {
 	return stopped
 }
 
-// ExecInContainer returns an *exec.Cmd that runs cmd inside the named container.
+// ExecInContainer returns an *exec.Cmd that runs cmd inside the named container
+// as the agent user (UID 1000:1000). Use for general file/git operations.
 // env entries must be in KEY=VALUE format.
-// workDir is the working directory inside the container (empty = container default).
 func (m *ContainerManager) ExecInContainer(containerID string, cmd []string, env []string, workDir string) *exec.Cmd {
 	args := []string{"exec", "-i",
-		"--user", "1000:1000", // exec processes must also run as non-root (U-04)
+		"--user", "1000:1000",
 	}
-
 	for _, e := range env {
 		args = append(args, "-e", e)
 	}
 	if workDir != "" {
 		args = append(args, "-w", workDir)
 	}
-
 	args = append(args, containerID)
 	args = append(args, cmd...)
+	return exec.Command("podman", args...)
+}
 
+// ExecClaudeInContainer returns an *exec.Cmd that runs cmd inside the named
+// container as the claude-runner user (UID 9999:9999) with the real API key
+// injected via -e. Running as a separate UID means the agent user (1000) cannot
+// read the API key from /proc/<pid>/environ (no ptrace capability in container).
+// env entries must be in KEY=VALUE format.
+func (m *ContainerManager) ExecClaudeInContainer(containerID string, cmd []string, env []string, workDir string) *exec.Cmd {
+	args := []string{"exec", "-i",
+		"--user", "9999:9999",
+	}
+	// Inject real API key only at exec time — never stored in the container's
+	// persistent environment (not in `podman run` args).
+	if m.RealAPIKey != "" {
+		args = append(args, "-e", "CLAUDE_CODE_OAUTH_TOKEN="+m.RealAPIKey)
+	}
+	for _, e := range env {
+		args = append(args, "-e", e)
+	}
+	if workDir != "" {
+		args = append(args, "-w", workDir)
+	}
+	args = append(args, containerID)
+	args = append(args, cmd...)
 	return exec.Command("podman", args...)
 }
 
 // WatchWorkspace starts a background goroutine that periodically checks the size
 // of workDir. When usage exceeds quotaBytes the provided cancel function is called,
 // terminating the agent task. The goroutine exits when ctx is cancelled.
-//
-// Call this from the agent's SendMessage after setting up budgetCtx/budgetCancel.
 func (m *ContainerManager) WatchWorkspace(ctx context.Context, workDir string, quotaBytes int64, cancel context.CancelFunc) {
 	if quotaBytes <= 0 || workDir == "" {
 		return
@@ -423,8 +386,8 @@ func (m *ContainerManager) WatchWorkspace(ctx context.Context, workDir string, q
 	}()
 }
 
-// workspaceSize returns the total byte size of a directory using the `du` command.
-// This is faster than filepath.Walk for large directories as it leverages kernel VFS.
+// workspaceSize returns the total byte size of a directory using `du -sb`.
+// Consistent with the dirSize implementation in api/files.go.
 func workspaceSize(dir string) (int64, error) {
 	out, err := exec.Command("du", "-sb", dir).Output()
 	if err != nil {

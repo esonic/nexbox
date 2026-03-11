@@ -57,32 +57,6 @@ func TestContainerName_Deterministic(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// generateSessionToken
-// ---------------------------------------------------------------------------
-
-func TestGenerateSessionToken_Format(t *testing.T) {
-	tok, err := generateSessionToken()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.HasPrefix(tok, "bxs-") {
-		t.Fatalf("expected bxs- prefix, got %s", tok)
-	}
-	// "bxs-" + 64 hex chars
-	if len(tok) != 68 {
-		t.Fatalf("expected length 68, got %d: %s", len(tok), tok)
-	}
-}
-
-func TestGenerateSessionToken_Unique(t *testing.T) {
-	a, _ := generateSessionToken()
-	b, _ := generateSessionToken()
-	if a == b {
-		t.Fatal("two generated tokens must be different")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Fake Podman helper — replaces docker in PATH with a podman script
 // ---------------------------------------------------------------------------
 
@@ -353,11 +327,7 @@ esac
 	if !strings.Contains(logged, "--memory-swap") {
 		t.Errorf("C-04: expected --memory-swap flag, got:\n%s", logged)
 	}
-	// U-01/02: non-root user
-	if !strings.Contains(logged, "--user 1000:1000") {
-		t.Errorf("U-02: expected --user 1000:1000, got:\n%s", logged)
-	}
-	// U-01: rootless uid mapping
+	// U-01: rootless uid mapping (--user not set in run; UID switching handled by exec -u)
 	if !strings.Contains(logged, "--userns=keep-id") {
 		t.Errorf("U-01: expected --userns=keep-id, got:\n%s", logged)
 	}
@@ -381,51 +351,10 @@ esac
 }
 
 // ---------------------------------------------------------------------------
-// Session token — proxy integration (T-01 through T-03)
+// API key isolation — real key injected only via ExecClaudeInContainer (T-01)
 // ---------------------------------------------------------------------------
 
-func TestEnsureContainer_RegistersSessionToken(t *testing.T) {
-	makeFakePodman(t, "container_missing")
-
-	proxy := NewContainerProxy("127.0.0.1:0", "real-key-xxx", nil)
-	m := NewContainerManager("alpine:latest", "boxnex-egress", proxy)
-	_, err := m.EnsureContainer("proj-token", "/tmp/repo")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Proxy must have one session registered
-	if proxy.SessionCount() != 1 {
-		t.Fatalf("expected 1 session registered, got %d", proxy.SessionCount())
-	}
-}
-
-func TestStopContainer_RevokesSessionToken(t *testing.T) {
-	makeFakePodman(t, "stop_ok")
-
-	proxy := NewContainerProxy("127.0.0.1:0", "real-key-xxx", nil)
-	m := NewContainerManager("alpine:latest", "boxnex-egress", proxy)
-
-	// Manually register a session to simulate a running container
-	token, _ := generateSessionToken()
-	proxy.RegisterSession(token, "proj-revoke")
-	m.mu.Lock()
-	m.sessionTokens["proj-revoke"] = token
-	m.lastActivity["proj-revoke"] = time.Now()
-	m.mu.Unlock()
-
-	if proxy.SessionCount() != 1 {
-		t.Fatal("precondition: 1 session should be registered")
-	}
-
-	_ = m.StopContainer("proj-revoke")
-
-	if proxy.SessionCount() != 0 {
-		t.Fatalf("StopContainer must revoke session token; sessions remaining: %d", proxy.SessionCount())
-	}
-}
-
-func TestEnsureContainer_InjectsSessionTokenNotRealKey(t *testing.T) {
+func TestEnsureContainer_RealKeyNotInRunArgs(t *testing.T) {
 	dir := t.TempDir()
 	logFile := filepath.Join(dir, "podman-args.log")
 	script := filepath.Join(dir, "podman")
@@ -444,8 +373,8 @@ esac
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 
 	const realKey = "sk-ant-real-secret-key"
-	proxy := NewContainerProxy("127.0.0.1:0", realKey, nil)
-	m := NewContainerManager("alpine:latest", "boxnex-egress", proxy)
+	m := NewContainerManager("alpine:latest", "boxnex-egress", nil)
+	m.RealAPIKey = realKey
 	_, err := m.EnsureContainer("proj-key", "/tmp/repo")
 	if err != nil {
 		t.Fatalf("EnsureContainer error: %v", err)
@@ -454,13 +383,13 @@ esac
 	data, _ := os.ReadFile(logFile)
 	logged := string(data)
 
-	// Real key must never appear in podman args (T-01)
+	// T-01: real key must never appear in podman run args — only injected at exec time.
 	if strings.Contains(logged, realKey) {
-		t.Errorf("T-01 VIOLATED: real API key appeared in podman args:\n%s", logged)
+		t.Errorf("T-01 VIOLATED: real API key appeared in podman run args:\n%s", logged)
 	}
-	// A session token (bxs- prefix) must be injected as CLAUDE_CODE_OAUTH_TOKEN instead
-	if !strings.Contains(logged, "CLAUDE_CODE_OAUTH_TOKEN=bxs-") {
-		t.Errorf("T-01: expected fake session token (bxs-) as CLAUDE_CODE_OAUTH_TOKEN, got:\n%s", logged)
+	// CLAUDE_CODE_OAUTH_TOKEN must not be set in the container environment.
+	if strings.Contains(logged, "CLAUDE_CODE_OAUTH_TOKEN=") {
+		t.Errorf("T-01: CLAUDE_CODE_OAUTH_TOKEN must not appear in podman run args:\n%s", logged)
 	}
 }
 
@@ -482,7 +411,7 @@ esac
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 
-	proxy := NewContainerProxy("127.0.0.1:9999", "real-key", nil)
+	proxy := NewContainerProxy("127.0.0.1:9999", nil)
 	// Don't start the proxy server — we just need the addr for env var injection.
 	m := NewContainerManager("alpine:latest", "boxnex-egress", proxy)
 	_, err := m.EnsureContainer("proj-proxyenv", "/tmp/repo")
@@ -493,7 +422,7 @@ esac
 	data, _ := os.ReadFile(logFile)
 	logged := string(data)
 
-	// N-03: proxy env vars must be injected
+	// N-03: proxy env vars must be injected for egress whitelist routing
 	if !strings.Contains(logged, "HTTP_PROXY=") {
 		t.Errorf("N-03: missing HTTP_PROXY env var in:\n%s", logged)
 	}
@@ -503,9 +432,40 @@ esac
 	if !strings.Contains(logged, "NO_PROXY=") {
 		t.Errorf("N-03: missing NO_PROXY env var in:\n%s", logged)
 	}
-	// ANTHROPIC_BASE_URL must point at the proxy (N-01 relay)
-	if !strings.Contains(logged, "ANTHROPIC_BASE_URL=http://127.0.0.1:9999") {
-		t.Errorf("N-01: expected ANTHROPIC_BASE_URL pointing at proxy, got:\n%s", logged)
+}
+
+// ---------------------------------------------------------------------------
+// ExecClaudeInContainer — UID 9999 + API key injection (T-01)
+// ---------------------------------------------------------------------------
+
+func TestExecClaudeInContainer_UsesUID9999(t *testing.T) {
+	m := NewContainerManager("alpine:latest", "", nil)
+	cmd := m.ExecClaudeInContainer("mycontainer", []string{"claude", "--version"}, nil, "")
+	joined := strings.Join(cmd.Args, " ")
+	if !strings.Contains(joined, "--user 9999:9999") {
+		t.Fatalf("ExecClaudeInContainer must use --user 9999:9999, got: %s", joined)
+	}
+}
+
+func TestExecClaudeInContainer_InjectsRealAPIKey(t *testing.T) {
+	const realKey = "sk-ant-real-secret-key"
+	m := NewContainerManager("alpine:latest", "", nil)
+	m.RealAPIKey = realKey
+	cmd := m.ExecClaudeInContainer("mycontainer", []string{"claude"}, nil, "")
+	joined := strings.Join(cmd.Args, " ")
+	if !strings.Contains(joined, "CLAUDE_CODE_OAUTH_TOKEN="+realKey) {
+		t.Fatalf("ExecClaudeInContainer must inject real API key, got: %s", joined)
+	}
+}
+
+func TestExecClaudeInContainer_NoKeyWhenEmpty(t *testing.T) {
+	m := NewContainerManager("alpine:latest", "", nil)
+	// RealAPIKey deliberately left empty
+	cmd := m.ExecClaudeInContainer("mycontainer", []string{"claude"}, nil, "")
+	for _, a := range cmd.Args {
+		if strings.HasPrefix(a, "CLAUDE_CODE_OAUTH_TOKEN=") {
+			t.Fatalf("expected no CLAUDE_CODE_OAUTH_TOKEN when RealAPIKey is empty, got arg: %s", a)
+		}
 	}
 }
 
@@ -686,26 +646,6 @@ func TestStopIdleContainers_NoneIdle(t *testing.T) {
 	m.mu.Unlock()
 	if count != 2 {
 		t.Fatalf("expected 2 entries still tracked, got %d", count)
-	}
-}
-
-func TestStopIdleContainers_RevokesSessionTokens(t *testing.T) {
-	makeFakePodman(t, "stop_ok")
-
-	proxy := NewContainerProxy("127.0.0.1:0", "real-key", nil)
-	m := NewContainerManager("alpine:latest", "boxnex-egress", proxy)
-
-	token, _ := generateSessionToken()
-	proxy.RegisterSession(token, "proj-idle2")
-	m.mu.Lock()
-	m.sessionTokens["proj-idle2"] = token
-	m.lastActivity["proj-idle2"] = time.Now().Add(-2 * time.Hour)
-	m.mu.Unlock()
-
-	m.StopIdleContainers(1 * time.Hour)
-
-	if proxy.SessionCount() != 0 {
-		t.Fatalf("idle reaper must revoke session tokens; sessions remaining: %d", proxy.SessionCount())
 	}
 }
 

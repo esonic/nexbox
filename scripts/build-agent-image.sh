@@ -29,13 +29,13 @@ for arg in "$@"; do
 done
 
 echo "==> Building ${FULL_IMAGE}"
-echo "    Containerfile: Containerfile"
-echo "    Context:       ${REPO_ROOT}"
+echo "    Dockerfile: Dockerfile.agent"
+echo "    Context:    ${REPO_ROOT}"
 echo ""
 
 podman build \
   --platform linux/amd64 \
-  -f "${REPO_ROOT}/Containerfile" \
+  -f "${REPO_ROOT}/Dockerfile.agent" \
   -t "${FULL_IMAGE}" \
   "${REPO_ROOT}"
 

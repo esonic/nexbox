@@ -297,12 +297,14 @@ func main() {
 		}
 
 		// Prefer claude_auth_token from config; fall back to CLAUDE_CODE_OAUTH_TOKEN env var.
-		// Never passed directly into containers — the proxy relay substitutes it.
+		// Stored only in server memory — injected into containers via `podman exec -e` at runtime.
 		realAPIKey := cfg.ClaudeAuthToken
 		if realAPIKey == "" {
 			realAPIKey = os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")
 		}
-		containerProxy := agent.NewContainerProxy(proxyAddr, realAPIKey, cfg.ProxyAllowedHosts)
+		containerMgr.RealAPIKey = realAPIKey
+
+		containerProxy := agent.NewContainerProxy(proxyAddr, cfg.ProxyAllowedHosts)
 		if err := containerProxy.Start(); err != nil {
 			startupLog.Fatalf("Failed to start egress proxy: %v", err)
 		}

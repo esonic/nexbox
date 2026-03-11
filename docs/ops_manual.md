@@ -88,7 +88,7 @@ bash scripts/setup.sh --no-podman
 脚本会自动完成：
 - 安装 Podman（rootless 模式，无需 root）
 - 安装 Go 1.22.5
-- 构建 `boxnex-agent:latest` 容器镜像（使用 `Containerfile`）
+- 构建 `boxnex-agent:latest` 容器镜像（使用 `Dockerfile.agent`）
 - 生成 `server/data/config.json`（含随机 JWT secret，权限 0600）
 
 ### 3.2 编辑配置
@@ -489,8 +489,11 @@ podman info | grep -E "rootless|version"
 ### 构建 Agent 镜像
 
 ```bash
-# 镜像定义在项目根目录 Containerfile
-podman build -t boxnex-agent:latest -f Containerfile .
+# 镜像定义在项目根目录 Dockerfile.agent，推荐用脚本构建
+bash scripts/build-agent-image.sh
+
+# 或手动构建
+podman build -t boxnex-agent:latest -f Dockerfile.agent .
 
 # 验证
 podman image ls boxnex-agent
@@ -518,30 +521,35 @@ Environment=CLAUDE_CODE_OAUTH_TOKEN=<your-oauth-token>
 ### 工作原理
 
 ```
-容器内 Claude CLI
-  │  ANTHROPIC_API_KEY=bxs-<随机token>（容器内假 key，由代理替换）
-  │  ANTHROPIC_BASE_URL=http://<网关IP>:8118
+BoxNex 服务（宿主机）
+  │  podman exec -u 9999:9999 -e CLAUDE_CODE_OAUTH_TOKEN=<真实key> ...
   ▼
-内嵌出口代理（Go，绑定到 Podman 网络网关 IP）
-  │  验证 bxs- token → 替换为真实 Anthropic API Key
-  │  转发到 api.anthropic.com
+容器内 claude-runner 用户（UID 9999）
+  │  直接持有真实 API Key，连接 api.anthropic.com
+  │  agent 用户（UID 1000）无法通过 /proc 读取（无 CAP_SYS_PTRACE）
   ▼
 Anthropic API
 ```
 
+**安全模型说明：**
+
+- 容器内有两个用户：`agent`（UID 1000，运行用户命令）和 `claude-runner`（UID 9999，专属运行 Claude CLI）
+- 真实 API Key 仅在 `podman exec -u 9999:9999 -e KEY=...` 时注入，从不写入容器持久环境
+- 容器以 `--cap-drop ALL` 启动，无 `CAP_SYS_PTRACE`，UID 1000 无法读取 UID 9999 进程的 `/proc/<pid>/environ`
+- Claude CLI 二进制权限设为 `0500`，只有 UID 9999 可执行，agent 用户无法直接运行
 - 启动时自动创建 `boxnex-egress` 网络（带 `--opt isolate=true` 阻止容器间通信）
-- 代理绑定到网络网关 IP（如 `10.88.0.1:8118`），**不暴露在 `0.0.0.0`**
-- 每个容器获得唯一的一次性 token，服务重启后旧容器自动停止（token 失效）
+- 出口代理绑定到网络网关 IP（如 `10.88.0.1:8118`），**不暴露在 `0.0.0.0`**
 - workspace 磁盘超配额时自动终止 agent
 
 ### 出网域名白名单
 
-`api.anthropic.com` **不在 CONNECT 白名单**——必须走内嵌代理的 relay 路径（由 `ANTHROPIC_BASE_URL` 指向），这样 API Key 永远不会出现在容器网络流量中。
+容器通过出口代理访问外网，只有白名单内的域名可以建立 HTTPS CONNECT 隧道。`api.anthropic.com` 在白名单内，Claude CLI 直接使用由 `podman exec -e` 注入的真实 API Key 连接。
 
 **内置默认白名单**（无需配置，自动放行）：
 
 | 域名 | 用途 |
 |------|------|
+| `api.anthropic.com` | Claude API（Claude CLI 直连，Key 由 podman exec -e 注入） |
 | `statsig.anthropic.com` | Claude CLI 功能开关 |
 | `sentry.io` | Claude CLI 错误上报 |
 | `registry.npmjs.org` / `npmjs.org` | npm 包下载（npx 类 MCP 必须） |
@@ -585,7 +593,7 @@ podman network ls
 podman network inspect boxnex-egress
 
 # 重建镜像后重启（容器会在下次请求时自动用新镜像启动）
-podman build -t boxnex-agent:latest -f Containerfile .
+bash scripts/build-agent-image.sh
 sudo systemctl restart boxnex
 ```
 
@@ -687,21 +695,25 @@ sudo apt-get install -y podman
 podman image ls | grep boxnex-agent
 
 # 重新构建镜像
-podman build -t boxnex-agent:latest -f Containerfile .
+bash scripts/build-agent-image.sh
 ```
 
 ---
 
 ### 问题：容器启动后 Claude API 返回 401
 
-原因：服务重启后旧容器的 session token 已失效，但容器未停止。
+可能原因：
+
+1. **`CLAUDE_CODE_OAUTH_TOKEN` 未配置或已过期**：检查 systemd 服务的 `Environment=` 行，或确认环境变量已正确注入。Token 过期需在 Anthropic Console 重新生成。
+
+2. **旧容器残留**：服务重启后旧容器若未停止，下次调用时 BoxNex 会复用旧容器，但注入的是新读取的 Key，一般不会有问题。如仍有异常：
 
 ```bash
-# 手动停止所有 boxnex 容器，服务会在下次请求时用新 token 重启它们
+# 手动停止所有 boxnex 容器，下次请求时自动用当前 Key 重启
 podman stop $(podman ps -q --filter "name=boxnex-proj-")
 ```
 
-或直接重启服务（`RecoverRunningContainers` 会自动处理）：
+或直接重启服务（`RecoverRunningContainers` 会自动清理旧容器）：
 
 ```bash
 sudo systemctl restart boxnex
@@ -758,5 +770,6 @@ sudo systemctl restart boxnex
 | `server/data/logs/boxnex.log` | 运行日志（滚动，5MB × 5个） |
 | `server/data/marketplace/` | 本地插件 JSON 文件目录 |
 | `scripts/setup.sh` | 一键环境初始化脚本 |
+| `scripts/build-agent-image.sh` | 构建 Agent 容器镜像脚本 |
 | `build.sh` | 编译脚本（前端 + 后端） |
-| `Containerfile` | Agent 沙盒容器镜像定义（Podman 格式，兼容 Docker） |
+| `Dockerfile.agent` | Agent 沙盒容器镜像定义 |
