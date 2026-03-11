@@ -537,8 +537,8 @@ Anthropic API
 - 真实 API Key 仅在 `podman exec -u 9999:9999 -e KEY=...` 时注入，从不写入容器持久环境
 - 容器以 `--cap-drop ALL` 启动，无 `CAP_SYS_PTRACE`，UID 1000 无法读取 UID 9999 进程的 `/proc/<pid>/environ`
 - Claude CLI 二进制权限设为 `0500`，只有 UID 9999 可执行，agent 用户无法直接运行
-- 启动时自动创建 `boxnex-egress` 网络（带 `--opt isolate=true` 阻止容器间通信）
-- 出口代理绑定到网络网关 IP（如 `10.88.0.1:8118`），**不暴露在 `0.0.0.0`**
+- 启动时自动创建 `boxnex-egress` 网络（带 `--opt isolate=true` 阻止容器间直接通信）
+- 出口代理优先绑定到 Podman 网络网关 IP（如 `10.89.0.1:8118`）；若网关 IP 暂未绑定（Podman rootless 懒建桥接口），则 fallback 到 `0.0.0.0:8118`，并通过宿主机出口 IP 告知容器代理地址
 - workspace 磁盘超配额时自动终止 agent
 
 ### 出网域名白名单
@@ -771,5 +771,6 @@ sudo systemctl restart boxnex
 | `server/data/marketplace/` | 本地插件 JSON 文件目录 |
 | `scripts/setup.sh` | 一键环境初始化脚本 |
 | `scripts/build-agent-image.sh` | 构建 Agent 容器镜像脚本 |
+| `scripts/e2e-container-test.sh` | 容器隔离端到端测试套件 |
 | `build.sh` | 编译脚本（前端 + 后端） |
 | `Dockerfile.agent` | Agent 沙盒容器镜像定义 |
