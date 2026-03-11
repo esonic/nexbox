@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -22,7 +23,14 @@ type CodexAgent struct {
 
 	urlMCPChecked bool
 	urlMCPSupport bool
+
+	modelMu           sync.RWMutex
+	supportedModels   []string
+	supportedModelSrc string // dynamic | fallback
+	modelsLoaded      bool
 }
+
+var codexFallbackModels = []string{"ops", "sonnet", "haiku"}
 
 // NewCodexAgent creates a Codex agent with default settings.
 func NewCodexAgent() *CodexAgent {
@@ -230,14 +238,25 @@ func (a *CodexAgent) SendMessage(
 	}()
 
 	var (
-		result            Result
-		stateMu           sync.Mutex
-		currentTurnID     string
-		doneEmitted       bool
-		planToolStarted   bool
-		streamedAgentText = make(map[string]bool)
-		streamedReasoning = make(map[string]bool)
-		latestTokenUsage  *codexThreadTokenUsageUpdatedNotification
+		result             Result
+		stateMu            sync.Mutex
+		currentTurnID      string
+		doneEmitted        bool
+		planToolStarted    bool
+		requestToolEmitted = make(map[string]struct{})
+		compatExecTools    = make(map[string]string) // codex/event exec id -> emitted tool id
+		compatExecInputs   = make(map[string]string) // codex/event exec id -> deferred tool input
+		compatExecOutputs  = make(map[string]string) // codex/event exec id -> buffered output delta
+		compatExecSkip     = make(map[string]bool)   // codex/event exec id -> canonical item/* already emitted
+		compatPatchTools   = make(map[string]string) // codex/event patch id -> emitted tool id
+		compatPatchNames   = make(map[string]string) // codex/event patch id -> Edit/Write/Delete
+		compatPatchPaths   = make(map[string]string) // codex/event patch id -> changed file path
+		compatPatchInputs  = make(map[string]string) // codex/event patch id -> buffered input for delayed start
+		compatPatchOutputs = make(map[string]string) // codex/event patch id -> buffered delta/message
+		compatPatchStarted = make(map[string]bool)   // codex/event patch id -> whether tool_start emitted
+		streamedAgentText  = make(map[string]bool)
+		streamedReasoning  = make(map[string]bool)
+		latestTokenUsage   *codexThreadTokenUsageUpdatedNotification
 	)
 	turnDone := make(chan struct{}, 1)
 	var turnDoneOnce sync.Once
@@ -409,16 +428,65 @@ func (a *CodexAgent) SendMessage(
 			})
 			return map[string]interface{}{"action": "decline"}, nil
 		case "item/tool/call":
-			// Client-side dynamic tools are not wired in NexBox today.
-			return map[string]interface{}{
-				"success": false,
-				"contentItems": []map[string]interface{}{
-					{
-						"type": "inputText",
-						"text": "Dynamic client tools are not supported in NexBox Codex bridge.",
-					},
-				},
-			}, nil
+			call, err := parseCodexDynamicToolCall(params)
+			if err != nil {
+				if a.Verbose {
+					log.Printf("[codex-agent] failed to parse item/tool/call: %v, params=%s", err, string(params))
+				}
+				return buildCodexDynamicToolResponse(false, "Failed to parse tool call: "+err.Error()), nil
+			}
+
+			toolID := call.ItemID
+			if strings.TrimSpace(toolID) == "" {
+				toolID = fmt.Sprintf("toolreq:%d", time.Now().UnixNano())
+			}
+			toolInput := string(call.Arguments)
+			if strings.TrimSpace(toolInput) == "" || toolInput == "null" {
+				toolInput = "{}"
+			}
+			cb(StreamEvent{
+				Type:     EventToolStart,
+				ToolID:   toolID,
+				ToolName: call.ToolName,
+				Input:    toolInput,
+			})
+
+			toolCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			defer cancel()
+
+			output, execErr := runCodexDynamicToolCall(toolCtx, req.WorkDir, call.ToolName, call.Arguments)
+			if execErr != nil {
+				msg := execErr.Error()
+				if strings.TrimSpace(output) != "" {
+					msg += "\n" + output
+				}
+				cb(StreamEvent{
+					Type:    EventToolResult,
+					ToolID:  toolID,
+					Output:  msg,
+					IsError: true,
+				})
+				if call.ItemID != "" {
+					stateMu.Lock()
+					requestToolEmitted[call.ItemID] = struct{}{}
+					stateMu.Unlock()
+				}
+				if a.Verbose {
+					log.Printf("[codex-agent] dynamic tool failed: tool=%s item=%s err=%v", call.ToolName, call.ItemID, execErr)
+				}
+				return buildCodexDynamicToolResponse(false, msg), nil
+			}
+			cb(StreamEvent{
+				Type:   EventToolResult,
+				ToolID: toolID,
+				Output: output,
+			})
+			if call.ItemID != "" {
+				stateMu.Lock()
+				requestToolEmitted[call.ItemID] = struct{}{}
+				stateMu.Unlock()
+			}
+			return buildCodexDynamicToolResponse(true, output), nil
 		case "applyPatchApproval":
 			return map[string]interface{}{"decision": "approved"}, nil
 		case "execCommandApproval":
@@ -483,15 +551,246 @@ func (a *CodexAgent) SendMessage(
 				cb(StreamEvent{Type: EventThinking, Content: n.Delta})
 			}
 
+		case "codex/event/exec_command_begin":
+			if payload, ok := parseRawJSONMap(params); ok {
+				rawID := firstJSONMapStringDeep(payload, "call_id", "callId", "id", "item_id", "itemId", "tool_call_id", "toolCallId")
+				if rawID == "" {
+					rawID = fmt.Sprintf("exec:%d", time.Now().UnixNano())
+				}
+				toolID := "compat-exec:" + rawID
+				cmd := firstJSONMapStringDeep(payload, "command", "cmd")
+				input := "{}"
+				if cmd != "" {
+					cmdJSON, _ := json.Marshal(map[string]string{"command": normalizeExecCommandText(cmd)})
+					input = string(cmdJSON)
+				}
+				stateMu.Lock()
+				compatExecTools[rawID] = toolID
+				compatExecInputs[rawID] = input
+				compatExecOutputs[rawID] = ""
+				compatExecSkip[rawID] = false
+				stateMu.Unlock()
+			}
+
+		case "codex/event/exec_command_output_delta":
+			if payload, ok := parseRawJSONMap(params); ok {
+				rawID := firstJSONMapStringDeep(payload, "call_id", "callId", "id", "item_id", "itemId", "tool_call_id", "toolCallId")
+				if rawID == "" {
+					return
+				}
+				delta := firstJSONMapStringDeep(payload, "delta", "output", "stdout", "stderr", "text", "content")
+				if delta == "" {
+					return
+				}
+				stateMu.Lock()
+				compatExecOutputs[rawID] += delta
+				stateMu.Unlock()
+			}
+
+		case "codex/event/exec_command_end":
+			if payload, ok := parseRawJSONMap(params); ok {
+				rawID := firstJSONMapStringDeep(payload, "call_id", "callId", "id", "item_id", "itemId", "tool_call_id", "toolCallId")
+				stateMu.Lock()
+				toolID := compatExecTools[rawID]
+				if toolID == "" {
+					toolID = "compat-exec:" + rawID
+				}
+				input := compatExecInputs[rawID]
+				bufferedOutput := compatExecOutputs[rawID]
+				skip := compatExecSkip[rawID]
+				delete(compatExecTools, rawID)
+				delete(compatExecInputs, rawID)
+				delete(compatExecOutputs, rawID)
+				delete(compatExecSkip, rawID)
+				stateMu.Unlock()
+				if skip {
+					return
+				}
+
+				output := firstJSONMapStringDeep(payload, "output", "stdout", "stderr", "result", "message")
+				if strings.TrimSpace(output) == "" {
+					output = bufferedOutput
+				}
+				exitCode := firstJSONMapIntDeep(payload, "exit_code", "exitCode")
+				success := firstJSONMapBoolDeep(payload, "success")
+				isError := (exitCode != 0) || (!success && hasJSONMapKeyDeep(payload, "success"))
+				cb(StreamEvent{
+					Type:     EventToolStart,
+					ToolID:   toolID,
+					ToolName: "Bash",
+					Input:    input,
+				})
+				cb(StreamEvent{
+					Type:    EventToolResult,
+					ToolID:  toolID,
+					Output:  output,
+					IsError: isError,
+				})
+			}
+
+		case "codex/event/patch_apply_begin":
+			if payload, ok := parseRawJSONMap(params); ok {
+				rawID := firstJSONMapStringDeep(payload, "call_id", "callId", "id", "item_id", "itemId", "tool_call_id", "toolCallId")
+				if rawID == "" {
+					rawID = fmt.Sprintf("patch:%d", time.Now().UnixNano())
+				}
+				toolID := "compat-patch:" + rawID
+
+				toolName, input, path := codexPatchToolStart(payload, params)
+				if input == "" {
+					input = "{}"
+				}
+
+				stateMu.Lock()
+				compatPatchTools[rawID] = toolID
+				compatPatchNames[rawID] = toolName
+				compatPatchPaths[rawID] = path
+				compatPatchInputs[rawID] = input
+				compatPatchOutputs[rawID] = ""
+				compatPatchStarted[rawID] = false
+				stateMu.Unlock()
+				// If path is unknown at begin, defer tool_start until we can infer file name
+				// from outputDelta/end message so UI can show "Edited <file>".
+				if path != "" {
+					stateMu.Lock()
+					compatPatchStarted[rawID] = true
+					stateMu.Unlock()
+					cb(StreamEvent{
+						Type:     EventToolStart,
+						ToolID:   toolID,
+						ToolName: toolName,
+						Input:    input,
+					})
+				}
+			}
+
+		case "item/fileChange/outputDelta":
+			if payload, ok := parseRawJSONMap(params); ok {
+				rawID := firstJSONMapStringDeep(payload, "item_id", "itemId", "id", "call_id", "callId")
+				delta := firstJSONMapStringDeep(payload, "delta", "output", "text", "content")
+				if delta == "" {
+					return
+				}
+				var emitStart *StreamEvent
+				stateMu.Lock()
+				// Some payloads don't carry the same id as patch_apply_*.
+				// If exactly one patch call is in-flight, attribute delta to it.
+				if rawID == "" {
+					if len(compatPatchTools) == 1 {
+						for id := range compatPatchTools {
+							rawID = id
+						}
+					}
+				}
+				if _, ok := compatPatchOutputs[rawID]; ok {
+					compatPatchOutputs[rawID] += delta
+					if compatPatchPaths[rawID] == "" {
+						compatPatchPaths[rawID] = extractPatchPathFromResultText(delta)
+					}
+					if !compatPatchStarted[rawID] && compatPatchPaths[rawID] != "" {
+						compatPatchStarted[rawID] = true
+						inputJSON, _ := json.Marshal(map[string]string{"path": compatPatchPaths[rawID]})
+						emitStart = &StreamEvent{
+							Type:     EventToolStart,
+							ToolID:   compatPatchTools[rawID],
+							ToolName: compatPatchNames[rawID],
+							Input:    string(inputJSON),
+						}
+					}
+				}
+				stateMu.Unlock()
+				if emitStart != nil {
+					cb(*emitStart)
+				}
+			}
+
+		case "codex/event/patch_apply_end":
+			if payload, ok := parseRawJSONMap(params); ok {
+				rawID := firstJSONMapStringDeep(payload, "call_id", "callId", "id", "item_id", "itemId", "tool_call_id", "toolCallId")
+				stateMu.Lock()
+				toolID := compatPatchTools[rawID]
+				if toolID == "" {
+					toolID = "compat-patch:" + rawID
+				}
+				toolName := compatPatchNames[rawID]
+				path := compatPatchPaths[rawID]
+				toolInput := compatPatchInputs[rawID]
+				bufferedOutput := compatPatchOutputs[rawID]
+				started := compatPatchStarted[rawID]
+				delete(compatPatchTools, rawID)
+				delete(compatPatchNames, rawID)
+				delete(compatPatchPaths, rawID)
+				delete(compatPatchInputs, rawID)
+				delete(compatPatchOutputs, rawID)
+				delete(compatPatchStarted, rawID)
+				stateMu.Unlock()
+
+				msg := firstJSONMapStringDeep(payload, "message", "result", "output")
+				if strings.TrimSpace(msg) == "" {
+					msg = bufferedOutput
+				}
+				if path == "" {
+					path = extractPatchPathFromResultText(msg)
+				}
+				if !started {
+					if path != "" {
+						inputJSON, _ := json.Marshal(map[string]string{"path": path})
+						toolInput = string(inputJSON)
+					}
+					if strings.TrimSpace(toolInput) == "" {
+						toolInput = "{}"
+					}
+					cb(StreamEvent{
+						Type:     EventToolStart,
+						ToolID:   toolID,
+						ToolName: toolName,
+						Input:    toolInput,
+					})
+				}
+				if strings.TrimSpace(msg) == "" && path != "" {
+					msg = codexPatchResultMessage(toolName, path)
+				}
+				success := firstJSONMapBoolDeep(payload, "success")
+				isError := !success && hasJSONMapKeyDeep(payload, "success")
+				cb(StreamEvent{
+					Type:    EventToolResult,
+					ToolID:  toolID,
+					Output:  msg,
+					IsError: isError,
+				})
+			}
+
 		case "item/started":
 			var n codexItemNotification
 			if err := json.Unmarshal(params, &n); err == nil {
+				if n.Item.Type == "commandExecution" && n.Item.ID != "" {
+					stateMu.Lock()
+					if _, ok := compatExecSkip[n.Item.ID]; ok {
+						compatExecSkip[n.Item.ID] = true
+					}
+					stateMu.Unlock()
+				}
+				stateMu.Lock()
+				_, skip := requestToolEmitted[n.Item.ID]
+				stateMu.Unlock()
+				if skip {
+					return
+				}
 				emitCodexItemStarted(n.Item, cb)
 			}
 
 		case "item/completed":
 			var n codexItemNotification
 			if err := json.Unmarshal(params, &n); err == nil {
+				stateMu.Lock()
+				_, skip := requestToolEmitted[n.Item.ID]
+				if skip {
+					delete(requestToolEmitted, n.Item.ID)
+				}
+				stateMu.Unlock()
+				if skip {
+					return
+				}
 				stateMu.Lock()
 				agentStreamed := streamedAgentText[n.Item.ID]
 				reasoningStreamed := streamedReasoning[n.Item.ID]
@@ -555,7 +854,7 @@ func (a *CodexAgent) SendMessage(
 			}
 
 		default:
-			if a.Verbose {
+			if a.Verbose && !codexIsIgnorableNotification(method) {
 				log.Printf("[codex-agent] Unhandled notification method=%s", method)
 			}
 		}
@@ -588,8 +887,7 @@ func (a *CodexAgent) SendMessage(
 	}
 
 	// Start the turn.
-	var turnResp codexTurnStartResponse
-	if err := client.Request(ctx, "turn/start", map[string]interface{}{
+	turnStartParams := map[string]interface{}{
 		"threadId": result.SessionID,
 		"input": []map[string]interface{}{
 			{
@@ -597,7 +895,13 @@ func (a *CodexAgent) SendMessage(
 				"text": prompt,
 			},
 		},
-	}, &turnResp); err != nil {
+	}
+	if req.Model != "" {
+		turnStartParams["model"] = req.Model
+	}
+
+	var turnResp codexTurnStartResponse
+	if err := client.Request(ctx, "turn/start", turnStartParams, &turnResp); err != nil {
 		return Result{}, err
 	}
 	if turnResp.Turn.ID != "" {
@@ -626,297 +930,97 @@ func (a *CodexAgent) SendMessage(
 	return result, nil
 }
 
-func emitCodexItemStarted(item codexThreadItem, cb EventCallback) {
-	switch item.Type {
-	case "commandExecution":
-		cmdJSON, _ := json.Marshal(map[string]string{"command": item.Command})
-		cb(StreamEvent{
-			Type:     EventToolStart,
-			ToolID:   item.ID,
-			ToolName: "Bash",
-			Input:    string(cmdJSON),
-		})
-
-	case "mcpToolCall":
-		cb(StreamEvent{
-			Type:     EventToolStart,
-			ToolID:   item.ID,
-			ToolName: codexToolDisplayName(item),
-			Input:    string(item.Arguments),
-		})
-
-	case "dynamicToolCall":
-		cb(StreamEvent{
-			Type:     EventToolStart,
-			ToolID:   item.ID,
-			ToolName: item.Tool,
-			Input:    string(item.Arguments),
-		})
-
-	case "collabAgentToolCall":
-		inputJSON, _ := json.Marshal(map[string]interface{}{
-			"tool":   item.Tool,
-			"prompt": item.Prompt,
-		})
-		cb(StreamEvent{
-			Type:     EventToolStart,
-			ToolID:   item.ID,
-			ToolName: "collab/" + item.Tool,
-			Input:    string(inputJSON),
-		})
-
-	case "webSearch":
-		qJSON, _ := json.Marshal(map[string]string{"query": item.Query})
-		cb(StreamEvent{
-			Type:     EventToolStart,
-			ToolID:   item.ID,
-			ToolName: "WebSearch",
-			Input:    string(qJSON),
-		})
-
-	case "fileChange":
-		changesJSON, _ := json.Marshal(map[string]interface{}{"changes": item.Changes})
-		cb(StreamEvent{
-			Type:     EventToolStart,
-			ToolID:   item.ID,
-			ToolName: "FileChange",
-			Input:    string(changesJSON),
-		})
-	}
+// WarmupSupportedModels best-effort initializes the model cache.
+func (a *CodexAgent) WarmupSupportedModels(ctx context.Context) {
+	_, _ = a.ListSupportedModels(ctx)
 }
 
-func emitCodexItemCompleted(item codexThreadItem, agentStreamed, reasoningStreamed bool, cb EventCallback) {
-	switch item.Type {
-	case "commandExecution":
-		output := ""
-		if item.AggregatedOutput != nil {
-			output = *item.AggregatedOutput
-		}
-		isError := item.Status == "failed" || item.Status == "declined"
-		if item.ExitCode != nil && *item.ExitCode != 0 {
-			isError = true
-		}
-		cb(StreamEvent{
-			Type:    EventToolResult,
-			ToolID:  item.ID,
-			Output:  output,
-			IsError: isError,
-		})
-
-	case "mcpToolCall":
-		isError := item.Status == "failed" || (len(item.Error) > 0 && string(item.Error) != "null")
-		cb(StreamEvent{
-			Type:    EventToolResult,
-			ToolID:  item.ID,
-			Output:  codexMCPResultText(item.Result),
-			IsError: isError,
-		})
-
-	case "dynamicToolCall":
-		isError := item.Status == "failed" || (item.Success != nil && !*item.Success)
-		cb(StreamEvent{
-			Type:    EventToolResult,
-			ToolID:  item.ID,
-			Output:  codexDynamicToolOutputText(item.ContentItems),
-			IsError: isError,
-		})
-
-	case "collabAgentToolCall":
-		isError := item.Status == "failed"
-		output := string(item.AgentsStates)
-		cb(StreamEvent{
-			Type:    EventToolResult,
-			ToolID:  item.ID,
-			Output:  output,
-			IsError: isError,
-		})
-
-	case "webSearch":
-		cb(StreamEvent{
-			Type:   EventToolResult,
-			ToolID: item.ID,
-		})
-
-	case "fileChange":
-		isError := item.Status == "failed"
-		cb(StreamEvent{
-			Type:    EventToolResult,
-			ToolID:  item.ID,
-			IsError: isError,
-		})
-
-	case "agentMessage":
-		if !agentStreamed && item.Text != "" {
-			cb(StreamEvent{Type: EventTextDelta, Content: item.Text})
-		}
-
-	case "reasoning":
-		if reasoningStreamed {
-			return
-		}
-		var parts []string
-		if len(item.Content) > 0 {
-			parts = append(parts, strings.Join(item.Content, "\n"))
-		}
-		if len(item.Summary) > 0 {
-			parts = append(parts, strings.Join(item.Summary, "\n"))
-		}
-		if len(parts) == 0 && item.Text != "" {
-			parts = append(parts, item.Text)
-		}
-		if len(parts) > 0 {
-			cb(StreamEvent{
-				Type:    EventThinking,
-				ToolID:  item.ID,
-				Content: strings.Join(parts, "\n"),
-			})
-		}
-
-	case "plan":
-		if item.Text != "" {
-			cb(StreamEvent{
-				Type:    EventSystem,
-				Content: "Plan: " + item.Text,
-			})
-		}
-
-	case "contextCompaction":
-		cb(StreamEvent{
-			Type:    EventSystem,
-			Content: "Context compacted to fit within limits",
-		})
+// ListSupportedModels returns codex model IDs. It prefers dynamic discovery via
+// app-server model/list and falls back to a fixed tier list.
+func (a *CodexAgent) ListSupportedModels(ctx context.Context) ([]string, string) {
+	a.modelMu.RLock()
+	if a.modelsLoaded {
+		models := append([]string(nil), a.supportedModels...)
+		source := a.supportedModelSrc
+		a.modelMu.RUnlock()
+		return models, source
 	}
+	a.modelMu.RUnlock()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	models, source := a.detectSupportedModels(ctx)
+
+	a.modelMu.Lock()
+	if !a.modelsLoaded {
+		a.supportedModels = append([]string(nil), models...)
+		a.supportedModelSrc = source
+		a.modelsLoaded = true
+	}
+	models = append([]string(nil), a.supportedModels...)
+	source = a.supportedModelSrc
+	a.modelMu.Unlock()
+
+	return models, source
 }
 
-func codexToolDisplayName(item codexThreadItem) string {
-	if item.Tool == "" {
-		return "Tool"
+func (a *CodexAgent) detectSupportedModels(ctx context.Context) ([]string, string) {
+	models, err := a.listModelsViaAppServer(ctx)
+	if err == nil && len(models) > 0 {
+		if a.Verbose {
+			log.Printf("[codex-agent] Loaded %d models via app-server model/list", len(models))
+		}
+		return models, "dynamic"
 	}
-	if item.Server != "" {
-		return item.Server + "/" + item.Tool
+	if a.Verbose && err != nil {
+		log.Printf("[codex-agent] model/list failed, fallback to static models: %v", err)
 	}
-	return item.Tool
+	return append([]string(nil), codexFallbackModels...), "fallback"
 }
 
-// codexMCPResultText extracts text blocks from an MCP tool result.
-func codexMCPResultText(resultRaw json.RawMessage) string {
-	if len(resultRaw) == 0 || string(resultRaw) == "null" {
-		return ""
+func (a *CodexAgent) listModelsViaAppServer(ctx context.Context) ([]string, error) {
+	client := NewCodexAppServerClient(a.CLIPath, a.buildAppServerArgs(Request{}))
+	client.Verbose = false
+
+	if err := client.Start(ctx, ""); err != nil {
+		return nil, fmt.Errorf("start app-server for model/list: %w", err)
 	}
-	var result struct {
-		Content []map[string]interface{} `json:"content"`
+	defer func() { _ = client.Close() }()
+
+	if err := client.Initialize(ctx, "nexbox", "1.0.0"); err != nil {
+		return nil, fmt.Errorf("initialize app-server for model/list: %w", err)
 	}
-	if err := json.Unmarshal(resultRaw, &result); err != nil {
-		return string(resultRaw)
+
+	var resp struct {
+		Data []struct {
+			Model string `json:"model"`
+		} `json:"data"`
 	}
-	var parts []string
-	for _, c := range result.Content {
-		t, _ := c["type"].(string)
-		if t != "text" {
+	if err := client.Request(ctx, "model/list", map[string]interface{}{
+		"includeHidden": false,
+	}, &resp); err != nil {
+		return nil, fmt.Errorf("request model/list: %w", err)
+	}
+
+	seen := make(map[string]struct{})
+	models := make([]string, 0, len(resp.Data))
+	for _, item := range resp.Data {
+		model := strings.TrimSpace(item.Model)
+		if model == "" {
 			continue
 		}
-		txt, _ := c["text"].(string)
-		if txt != "" {
-			parts = append(parts, txt)
+		if _, ok := seen[model]; ok {
+			continue
 		}
+		seen[model] = struct{}{}
+		models = append(models, model)
 	}
-	if len(parts) > 0 {
-		return strings.Join(parts, "\n")
+	if len(models) == 0 {
+		return nil, errors.New("model/list returned no models")
 	}
-	return string(resultRaw)
-}
-
-func codexDynamicToolOutputText(raw json.RawMessage) string {
-	if len(raw) == 0 || string(raw) == "null" {
-		return ""
-	}
-	var items []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return string(raw)
-	}
-	var parts []string
-	for _, it := range items {
-		if strings.EqualFold(it.Type, "inputText") || strings.EqualFold(it.Type, "text") {
-			if it.Text != "" {
-				parts = append(parts, it.Text)
-			}
-		}
-	}
-	if len(parts) > 0 {
-		return strings.Join(parts, "\n")
-	}
-	return string(raw)
-}
-
-func formatCodexPlanUpdate(n codexTurnPlanUpdatedNotification) string {
-	var lines []string
-	if n.Explanation != "" {
-		lines = append(lines, n.Explanation)
-	}
-	for _, step := range n.Plan {
-		lines = append(lines, fmt.Sprintf("- [%s] %s", step.Status, step.Step))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func isAppToolApprovalRequest(questions []struct {
-	ID       string `json:"id"`
-	Header   string `json:"header"`
-	Question string `json:"question"`
-	Options  []struct {
-		ID    string `json:"id"`
-		Label string `json:"label"`
-	} `json:"options"`
-}) bool {
-	if len(questions) == 0 {
-		return false
-	}
-	for _, q := range questions {
-		header := strings.ToLower(strings.TrimSpace(q.Header))
-		prompt := strings.ToLower(strings.TrimSpace(q.Question))
-		if strings.Contains(header, "approve app tool call") ||
-			(strings.Contains(prompt, "allow this action") && strings.Contains(prompt, "tool")) {
-			return true
-		}
-	}
-	return false
-}
-
-func pickApprovalAnswerLabel(options []struct {
-	ID    string `json:"id"`
-	Label string `json:"label"`
-}) string {
-	if len(options) == 0 {
-		return ""
-	}
-	preferred := []string{
-		"approve once",
-		"approve this session",
-		"allow",
-		"yes",
-	}
-	for _, p := range preferred {
-		for _, opt := range options {
-			label := strings.TrimSpace(opt.Label)
-			if label == "" {
-				continue
-			}
-			lower := strings.ToLower(label)
-			if lower == p || strings.Contains(lower, p) {
-				return label
-			}
-		}
-	}
-	// Fallback to first non-empty option.
-	for _, opt := range options {
-		if label := strings.TrimSpace(opt.Label); label != "" {
-			return label
-		}
-	}
-	return ""
+	return models, nil
 }
 
 // buildPrompt constructs the combined prompt.
@@ -938,6 +1042,9 @@ func (a *CodexAgent) buildThreadStartParams(req Request) map[string]interface{} 
 		"approvalPolicy": "never",
 		"sandbox":        "workspace-write",
 	}
+	if req.Model != "" {
+		params["model"] = req.Model
+	}
 	if req.WorkDir != "" {
 		params["cwd"] = req.WorkDir
 	}
@@ -949,6 +1056,9 @@ func (a *CodexAgent) buildThreadResumeParams(req Request) map[string]interface{}
 		"threadId":       req.SessionID,
 		"approvalPolicy": "never",
 		"sandbox":        "workspace-write",
+	}
+	if req.Model != "" {
+		params["model"] = req.Model
 	}
 	if req.WorkDir != "" {
 		params["cwd"] = req.WorkDir

@@ -279,7 +279,7 @@ func (c *CodexAppServerClient) Notify(method string, params interface{}) error {
 	if params != nil {
 		msg["params"] = params
 	}
-	if c.Verbose {
+	if c.Verbose && codexShouldLogNotifyMethods() {
 		log.Printf("[codex-cli] -> notify method=%s", method)
 	}
 	return c.writeJSONLine(msg)
@@ -348,7 +348,7 @@ func (c *CodexAppServerClient) readLoop(stdout io.Reader) {
 		case msg.Method != "" && len(msg.ID) > 0:
 			c.handleServerRequest(msg.ID, msg.Method, msg.Params)
 		case msg.Method != "":
-			if c.Verbose {
+			if c.Verbose && codexShouldLogNotifyMethods() && !codexIsNoisyNotifyMethod(msg.Method) {
 				log.Printf("[codex-cli] <- notify method=%s", msg.Method)
 			}
 			if c.notificationHandler != nil {
@@ -470,4 +470,19 @@ func jsonRawToInterface(raw json.RawMessage) interface{} {
 		return string(raw)
 	}
 	return v
+}
+
+func codexIsNoisyNotifyMethod(method string) bool {
+	switch method {
+	case "item/agentMessage/delta",
+		"codex/event/agent_message_delta",
+		"codex/event/agent_message_content_delta":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexShouldLogNotifyMethods() bool {
+	return strings.TrimSpace(os.Getenv("NEXBOX_CODEX_LOG_NOTIFY")) == "1"
 }
