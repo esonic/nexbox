@@ -20,34 +20,22 @@ RUN apk add --no-cache \
     bash \
     shadow
 
-# Install the official Claude CLI (installs as root, typically to /root/.local/bin/claude)
-RUN curl -fsSL https://claude.ai/install.sh | bash
-
-# Verify the installation
-RUN claude --version
-
-# ---------------------------------------------------------------------------
-# User setup
+# Install the official Claude CLI, move the binary to /usr/local/bin/claude (world-
+# traversable directory), then delete /root/.local to avoid keeping a ~200MB duplicate.
+# All in one RUN so the install artifacts don't survive as a separate layer.
 #
-#   agent (UID 1000)         — default container user; owns /workspace files,
-#                              runs general shell commands
-#   claude-runner (UID 9999) — dedicated user for Claude CLI execution only
-#
-# Two-user model provides /proc isolation: with --cap-drop ALL (no CAP_SYS_PTRACE),
-# UID 1000 cannot read /proc/<pid>/environ of processes owned by UID 9999.
-# The real API key is injected only at `podman exec -u 9999:9999 -e KEY=...`
-# time, so it is never visible to the agent user.
-# ---------------------------------------------------------------------------
-RUN addgroup -g 1001 workspace-users && \
+# Security: binary is chown'd to claude-runner (9999) with chmod 0500 so only
+# UID 9999 can execute it. agent (1000) gets Permission denied.
+RUN curl -fsSL https://claude.ai/install.sh | bash && \
+    CLAUDE_BIN=$(realpath /root/.local/bin/claude) && \
+    /root/.local/bin/claude --version && \
+    mv "$CLAUDE_BIN" /usr/local/bin/claude && \
+    rm -rf /root/.local && \
+    addgroup -g 1001 workspace-users && \
     adduser -D -u 1000 -G workspace-users agent && \
-    adduser -D -u 9999 -G workspace-users claude-runner
-
-# Make Claude CLI executable only by claude-runner (UID 9999).
-# agent (1000) cannot run it directly — the server uses `podman exec -u 9999:9999`.
-# 0500 = read+exec for owner only (needed for both ELF binaries and shell wrappers).
-RUN CLAUDE_BIN=$(which claude 2>/dev/null || echo "/root/.local/bin/claude") && \
-    chown 9999:9999 "$CLAUDE_BIN" && \
-    chmod 0500 "$CLAUDE_BIN"
+    adduser -D -u 9999 -G workspace-users claude-runner && \
+    chown 9999:9999 /usr/local/bin/claude && \
+    chmod 0500 /usr/local/bin/claude
 
 # Default working directory — overridden at runtime via -w /workspace bind-mount
 WORKDIR /workspace

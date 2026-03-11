@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -93,6 +94,19 @@ func NetworkGatewayIP(network string) (string, error) {
 		return "", fmt.Errorf("no gateway found for network %s", network)
 	}
 	return nets[0].Subnets[0].Gateway, nil
+}
+
+// HostOutboundIP returns the host's primary outbound IP address by connecting a
+// UDP socket to a public IP (no packet is actually sent). This is the IP that
+// containers on Podman rootless + pasta networks can use to reach the host when
+// the bridge gateway is virtual and not bound to a real host interface.
+func HostOutboundIP() (string, error) {
+	conn, err := net.Dial("udp", "8.8.8.8:53")
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String(), nil
 }
 
 // SetProxy wires a ContainerProxy into the manager after construction.
@@ -182,7 +196,7 @@ func (m *ContainerManager) EnsureContainer(projectID, repoPath string) (string, 
 	// Determine proxy address for egress routing.
 	proxyEnv := ""
 	if m.proxy != nil {
-		proxyEnv = "http://" + m.proxy.Addr()
+		proxyEnv = "http://" + m.proxy.ContainerAddr()
 	}
 
 	// Build the podman run arguments.

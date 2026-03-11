@@ -306,7 +306,26 @@ func main() {
 
 		containerProxy := agent.NewContainerProxy(proxyAddr, cfg.ProxyAllowedHosts)
 		if err := containerProxy.Start(); err != nil {
-			startupLog.Fatalf("Failed to start egress proxy: %v", err)
+			// In Podman rootless the bridge interface is created lazily (only when
+			// the first container starts), so the gateway IP may not yet be a
+			// local address at server startup time. Fall back to 0.0.0.0 so the
+			// server can start.
+			//
+			// With Podman rootless + pasta networking, the bridge gateway IP is
+			// virtual — containers can only reach the host via its real outbound IP.
+			// Detect that IP and set it as the container-facing proxy address so
+			// HTTP_PROXY env vars injected into containers point to the right host.
+			log.Printf("  Warning: could not bind proxy to %s (%v); retrying on 0.0.0.0:8118", proxyAddr, err)
+			containerProxy = agent.NewContainerProxy("0.0.0.0:8118", cfg.ProxyAllowedHosts)
+			if err2 := containerProxy.Start(); err2 != nil {
+				startupLog.Fatalf("Failed to start egress proxy: %v", err2)
+			}
+			// Set the container-facing address to the host's real outbound IP so
+			// HTTP_PROXY works inside Podman rootless + pasta containers.
+			if hostIP, err3 := agent.HostOutboundIP(); err3 == nil {
+				containerProxy.SetContainerAddr(hostIP + ":8118")
+				log.Printf("  Proxy container address: %s (host outbound IP, Podman rootless fallback)", hostIP+":8118")
+			}
 		}
 		log.Printf("  Egress proxy: %s", containerProxy.Addr())
 

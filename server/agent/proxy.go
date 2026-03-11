@@ -52,10 +52,11 @@ var defaultAllowedHosts = []string{
 // The real API key is never stored here — it is injected directly into the
 // claude-runner process via `podman exec -e` at execution time (see ExecClaudeInContainer).
 type ContainerProxy struct {
-	mu           sync.RWMutex
-	allowedHosts map[string]bool // lowercase hostname → true
-	proxyAddr    string          // listen address: "<ip>:<port>"
-	server       *http.Server
+	mu            sync.RWMutex
+	allowedHosts  map[string]bool // lowercase hostname → true
+	proxyAddr     string          // listen address: "<ip>:<port>"
+	containerAddr string          // address containers should use to reach the proxy
+	server        *http.Server
 }
 
 // NewContainerProxy creates a proxy that enforces the given domain whitelist
@@ -78,6 +79,23 @@ func NewContainerProxy(listenAddr string, extraAllowedHosts []string) *Container
 
 // Addr returns the address the proxy is (or will be) listening on.
 func (p *ContainerProxy) Addr() string {
+	return p.proxyAddr
+}
+
+// SetContainerAddr overrides the address injected into container HTTP_PROXY env
+// vars. Use this when the proxy is bound to 0.0.0.0 but containers must reach
+// it via a specific host IP (e.g. with Podman rootless + pasta networking where
+// the bridge gateway IP is virtual and unreachable from containers).
+func (p *ContainerProxy) SetContainerAddr(addr string) {
+	p.containerAddr = addr
+}
+
+// ContainerAddr returns the address containers should use in HTTP_PROXY env vars.
+// Falls back to Addr() if no explicit container address has been set.
+func (p *ContainerProxy) ContainerAddr() string {
+	if p.containerAddr != "" {
+		return p.containerAddr
+	}
 	return p.proxyAddr
 }
 

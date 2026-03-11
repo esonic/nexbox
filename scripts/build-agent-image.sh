@@ -5,8 +5,9 @@
 # Run this once before enabling podman_enabled: true in config.json.
 #
 # Usage:
-#   ./scripts/build-agent-image.sh              # build with default tag
-#   ./scripts/build-agent-image.sh --push       # build and push to registry
+#   ./scripts/build-agent-image.sh                          # native arch
+#   PLATFORM=linux/amd64 ./scripts/build-agent-image.sh    # cross-build for amd64
+#   ./scripts/build-agent-image.sh --push                  # build and push
 #   REGISTRY=registry.example.com ./scripts/build-agent-image.sh --push
 
 set -euo pipefail
@@ -22,11 +23,20 @@ for arg in "$@"; do
     --push) PUSH=true ;;
     --help)
       echo "Usage: $0 [--push]"
-      echo "  REGISTRY=... $0 --push   # push to a registry"
+      echo "  PLATFORM=linux/amd64 $0   # cross-build (requires qemu-user-static)"
+      echo "  REGISTRY=... $0 --push    # push to a registry"
       exit 0
       ;;
   esac
 done
+
+# PLATFORM defaults to native arch; set PLATFORM=linux/amd64 for production builds
+# on an arm64 dev machine (requires qemu-user-static installed on the host).
+PLATFORM_ARGS=()
+if [ -n "${PLATFORM:-}" ]; then
+  PLATFORM_ARGS=(--platform "${PLATFORM}")
+  echo "    Platform:   ${PLATFORM}"
+fi
 
 echo "==> Building ${FULL_IMAGE}"
 echo "    Dockerfile: Dockerfile.agent"
@@ -34,7 +44,7 @@ echo "    Context:    ${REPO_ROOT}"
 echo ""
 
 podman build \
-  --platform linux/amd64 \
+  "${PLATFORM_ARGS[@]}" \
   -f "${REPO_ROOT}/Dockerfile.agent" \
   -t "${FULL_IMAGE}" \
   "${REPO_ROOT}"
