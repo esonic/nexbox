@@ -45,7 +45,8 @@ func emitCodexItemStarted(item codexThreadItem, cb EventCallback) {
 		})
 
 	case "webSearch":
-		qJSON, _ := json.Marshal(map[string]string{"query": item.Query})
+		query := codexWebSearchQuery(item)
+		qJSON, _ := json.Marshal(map[string]string{"query": query})
 		cb(StreamEvent{
 			Type:     EventToolStart,
 			ToolID:   item.ID,
@@ -300,7 +301,9 @@ func codexIsIgnorableNotification(method string) bool {
 		"codex/event/mcp_tool_call_begin",
 		"codex/event/mcp_tool_call_end",
 		"codex/event/view_image_tool_call",
-		"item/commandExecution/outputDelta":
+		"item/commandExecution/outputDelta",
+		"codex/event/terminal_interaction",
+		"item/commandExecution/terminalInteraction":
 		return true
 	default:
 		return false
@@ -351,6 +354,31 @@ func codexGenericToolOutput(item codexThreadItem) string {
 	}
 	if len(item.Error) > 0 && string(item.Error) != "null" {
 		return string(item.Error)
+	}
+	return ""
+}
+
+func codexWebSearchQuery(item codexThreadItem) string {
+	query := strings.TrimSpace(item.Query)
+	if query != "" {
+		return query
+	}
+	if len(item.Arguments) > 0 && string(item.Arguments) != "null" {
+		if args, ok := parseRawJSONMap(item.Arguments); ok {
+			if q := firstJSONMapStringDeep(args,
+				"query", "searchTerm", "search_term", "term", "q", "url", "text", "input",
+			); strings.TrimSpace(q) != "" {
+				return strings.TrimSpace(q)
+			}
+		}
+	}
+	if strings.TrimSpace(item.Text) != "" {
+		return strings.TrimSpace(item.Text)
+	}
+	for _, c := range item.Content {
+		if strings.TrimSpace(c) != "" {
+			return strings.TrimSpace(c)
+		}
 	}
 	return ""
 }

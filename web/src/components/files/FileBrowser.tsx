@@ -12,6 +12,8 @@ import {
   X,
   FileText,
   FileCode,
+  Eye,
+  Code2,
   Upload,
   Download,
   Trash2,
@@ -21,6 +23,7 @@ import { cn } from "@/lib/utils";
 import { filesApi, type FileEntry, type FileContentResponse, type FileSearchResult } from "@/lib/api";
 import { getLangFromPath, ensureLangRegistered, highlightCode } from "@/lib/highlight";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
+import { MarkdownRenderer, isMarkdownPath } from "@/components/markdown/MarkdownRenderer";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -275,6 +278,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const [loading, setLoading] = useState(true);
   const [fileContent, setFileContent] = useState<FileContentResponse | null>(null);
   const [loadingFile, setLoadingFile] = useState(false);
+  const [markdownMode, setMarkdownMode] = useState<"source" | "rendered">("source");
 
   // Persisted state from store
   const {
@@ -315,6 +319,12 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     loadTree();
   }, [loadTree]);
 
+  const markdownPreviewAvailable = !!selectedPath && !!fileContent && !fileContent.binary && isMarkdownPath(selectedPath);
+  useEffect(() => {
+    if (!markdownPreviewAvailable && markdownMode !== "source") {
+      setMarkdownMode("source");
+    }
+  }, [markdownPreviewAvailable, markdownMode]);
 
   const compactedTree = useMemo(() => compactTree(tree), [tree]);
 
@@ -581,6 +591,36 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               <File className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
               <span className="font-mono truncate text-muted-foreground">{selectedPath}</span>
               <div className="ml-auto flex items-center gap-1.5 shrink-0">
+                {markdownPreviewAvailable && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setMarkdownMode("source")}
+                      className={cn(
+                        "h-6 px-2 rounded border text-[11px] inline-flex items-center gap-1 transition-colors",
+                        markdownMode === "source"
+                          ? "bg-accent text-accent-foreground border-border"
+                          : "text-muted-foreground hover:text-foreground hover:bg-accent/50 border-transparent"
+                      )}
+                      title="View source markdown"
+                    >
+                      <Code2 className="h-3 w-3" />
+                      Source
+                    </button>
+                    <button
+                      onClick={() => setMarkdownMode("rendered")}
+                      className={cn(
+                        "h-6 px-2 rounded border text-[11px] inline-flex items-center gap-1 transition-colors",
+                        markdownMode === "rendered"
+                          ? "bg-accent text-accent-foreground border-border"
+                          : "text-muted-foreground hover:text-foreground hover:bg-accent/50 border-transparent"
+                      )}
+                      title="View rendered markdown"
+                    >
+                      <Eye className="h-3 w-3" />
+                      Rendered
+                    </button>
+                  </div>
+                )}
                 {fileContent && (
                   <span className="text-muted-foreground/40">
                     {formatSize(fileContent.size)}
@@ -633,7 +673,14 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               </div>
             ) : fileContent ? (
               <div className="flex-1 min-h-0">
-                <CodeViewer content={fileContent.content} filepath={selectedPath} />
+                {markdownPreviewAvailable && markdownMode === "rendered" ? (
+                  <MarkdownRenderer
+                    content={fileContent.content}
+                    className="h-full overflow-auto px-4 py-3 markdown-content text-sm"
+                  />
+                ) : (
+                  <CodeViewer content={fileContent.content} filepath={selectedPath} />
+                )}
               </div>
             ) : (
               <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">

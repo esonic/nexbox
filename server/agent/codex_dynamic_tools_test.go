@@ -139,3 +139,14 @@ func TestNormalizeExecCommandText(t *testing.T) {
 		t.Fatalf("unexpected normalized command: %q", got)
 	}
 }
+
+func TestCodexWebSearchQuery_FromArguments(t *testing.T) {
+	item := codexThreadItem{
+		Arguments: json.RawMessage(`{"query":"site:claude.ai code review"}`),
+	}
+	got := codexWebSearchQuery(item)
+	want := "site:claude.ai code review"
+	if got != want {
+		t.Fatalf("unexpected query: %q", got)
+	}
+}

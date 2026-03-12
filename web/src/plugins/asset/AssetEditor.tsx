@@ -17,8 +17,7 @@ import {
 } from "@/components/ui/select";
 import { assetsApi, commentsApi } from "@/lib/api";
 import { assetTypeLabel, formatDate, formatRelativeDate, cn } from "@/lib/utils";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { MarkdownRenderer } from "@/components/markdown/MarkdownRenderer";
 import type { Asset, AssetVersion, DiffResult, DiffLine, ReviewComment } from "@/types";
 
 interface AssetEditorProps {
@@ -387,11 +386,10 @@ export function AssetEditor({ assetId, onClose, onSaved, initialMode, initialLin
             spellCheck={false}
           />
         ) : mode === "preview" ? (
-          <div className="rounded-md border p-3 markdown-content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {content || "*No content yet*"}
-            </ReactMarkdown>
-          </div>
+          <MarkdownRenderer
+            content={content || "*No content yet*"}
+            className="rounded-md border p-3 markdown-content"
+          />
         ) : mode === "review" ? (
           <div className="border rounded-md overflow-hidden">
             <div className="font-mono text-sm">
