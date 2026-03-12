@@ -15,7 +15,7 @@
 7. [数据库](#7-数据库)
 8. [用户与权限管理](#8-用户与权限管理)
 9. [邮件发送（Resend）](#9-邮件发送resend)
-10. [Podman 容器隔离（可选）](#10-podman-容器隔离可选)
+10. [Docker 容器隔离（可选）](#10-docker-容器隔离可选)
 11. [本地开发](#11-本地开发)
 12. [常见问题排查](#12-常见问题排查)
 
@@ -31,7 +31,7 @@ BoxNex 是一个**多用户 AI Agent SaaS 平台**，允许多个用户独立使
 | 前端 | React + TypeScript + Vite，嵌入到 Go 二进制中 |
 | 数据库 | SQLite（开发/单机）或 MySQL 8.x（生产多实例） |
 | AI Agent | Claude CLI，通过 Anthropic API Key 调用 |
-| 容器隔离 | Podman Rootless（可选），每个项目独立沙盒容器 |
+| 容器隔离 | Docker rootless + Sysbox（可选），每个项目独立沙盒容器 |
 
 **两种运行模式：**
 
@@ -55,14 +55,19 @@ BoxNex 是一个**多用户 AI Agent SaaS 平台**，允许多个用户独立使
 | Node.js | 18+ | 编译前端 |
 | npm | 8+ | 前端包管理 |
 
-### 可选软件
+### 可选软件（容器隔离）
 | 软件 | 用途 |
 |------|------|
-| Podman（rootless） | 项目容器隔离（`podman_enabled: true` 时必须） |
+| Docker Engine | 容器运行时（`container_enabled: true` 时必须） |
+| Sysbox | 安全 container runtime，提供 DinD 能力（`--runtime sysbox-runc`） |
+| gcc / build-essential | 编译 inject.so（初次部署及 token 轮换时） |
 | MySQL 8.x | 生产多实例共享数据库 |
 
-> **为什么用 Podman 而不是 Docker？**
-> Podman Rootless 无需 root、无守护进程，用户命名空间隔离开箱即用，内存占用更低，更适合多用户 SaaS 生产部署。Podman 不是 Go 库，BoxNex 通过 `exec.Command("podman", ...)` 调用系统中安装的 podman 二进制，`go.mod` 中不会出现 podman 依赖。
+> **为什么用 Docker + Sysbox 而不是 Podman？**
+> 早期版本使用 Podman Rootless + 自研 egress proxy。当前架构改用 Docker rootless + Sysbox：
+> Sysbox 提供真正的 DinD 能力（不需要 `--privileged`），user namespace 隔离更强；
+> token 注入改用 LD_PRELOAD inject.so，无需在命令行暴露明文 API Key；
+> 自研 proxy 代码复杂度高、维护成本大，已删除。
 
 ### 端口
 - 默认监听：`9040`（可通过 `--port` 参数修改）
@@ -78,15 +83,16 @@ BoxNex 是一个**多用户 AI Agent SaaS 平台**，允许多个用户独立使
 git clone <repo-url> boxnex
 cd boxnex
 
-# 完整安装（Podman + Go + 构建镜像 + 生成 config.json）
+# 完整安装（Docker 镜像 + Go + 生成 config.json）
 bash scripts/setup.sh
 
-# 仅安装 Go，跳过 Podman（不启用容器隔离）
-bash scripts/setup.sh --no-podman
+# 仅安装 Go，跳过 Docker（不启用容器隔离）
+bash scripts/setup.sh --no-docker
 ```
 
 脚本会自动完成：
-- 安装 Podman（rootless 模式，无需 root）
+- 检测 Docker Engine 是否已安装（未安装时给出安装命令）
+- 检测 Sysbox 是否已注册（未安装时给出安装指引）
 - 安装 Go 1.26.1
 - 构建 `boxnex-agent:latest` 容器镜像（使用 `Dockerfile.agent`）
 - 生成 `server/data/config.json`（含随机 JWT secret，权限 0600）
@@ -105,15 +111,17 @@ vi server/data/config.json
   "jwt_secret": "<openssl rand -hex 32 生成>",
   "token_price_per_million": 15,
   "resend_api_key": "re_xxxx",
-  "podman_enabled": true,
-  "claude_auth_token": "<CLAUDE_CODE_OAUTH_TOKEN 或 ANTHROPIC_API_KEY>"
+  "container_enabled": true,
+  "container_image": "boxnex-agent:latest",
+  "container_network": "boxnex-net"
 }
 ```
 
 > `jwt_exp_days` 默认 7 天；`resend_from` 默认 `BoxNex <noreply@box-nex.top>`，如需自定义发件人再添加。
-> `claude_auth_token` 也可不写入 config，改用环境变量 `CLAUDE_CODE_OAUTH_TOKEN` 启动服务（两者取其一）。
 
 > `config.json` 保存时自动设置文件权限 `0600`，防止泄露 secret。
+
+> **Claude OAuth Token** 通过 `inject.so` 注入，不写入 config.json 也不作为环境变量传入（见第 10 节）。
 
 ### 3.3 编译
 
@@ -121,13 +129,13 @@ vi server/data/config.json
 ./build.sh
 ```
 
-产物：`server/boxnex`（单一二进制，前端已嵌入）
+产物：`target/boxnex`（单一二进制，前端已嵌入）
 
 ### 3.4 启动
 
 ```bash
 # 直接启动（前台，适合测试）
-server/boxnex --data-dir server/data --port 9040
+target/boxnex --data-dir server/data --port 9040
 
 # 生产用 systemd（见下方）
 ```
@@ -154,14 +162,11 @@ server/boxnex --data-dir server/data --port 9040
 | `token_price_per_million` | float | `0` | 每百万 token 计费金额（用于余额折算显示） |
 | `resend_api_key` | string | — | Resend API Key，生产发邮件必填；空则验证码打到日志 |
 | `resend_from` | string | `BoxNex <noreply@box-nex.top>` | 发件人地址（需在 Resend 控制台验证域名） |
-| `marketplace_dir` | string | `{datadir}/marketplace` | 本地插件目录路径，支持多种格式（见下方 Marketplace 章节） |
-| `podman_enabled` | bool | `false` | 是否启用 Podman 容器隔离 |
-| `podman_image` | string | `"boxnex-agent:latest"` | 容器镜像名（需提前构建） |
-| `podman_network` | string | `"boxnex-egress"` | Podman 网络名，启动时自动创建 |
-| `claude_auth_token` | string | — | Claude OAuth Token 或 API Key（推荐通过 `CLAUDE_CODE_OAUTH_TOKEN` 环境变量注入，避免写入磁盘） |
-| `proxy_listen_addr` | string | `<网关IP>:8118` | 出口代理监听地址，默认自动绑定到 Podman 网络网关 IP |
-| `proxy_allowed_hosts` | []string | — | 除默认白名单外额外允许的出网域名（见下方说明） |
-| `disk_quota_bytes` | int | `268435456`（256MB） | 容器 workspace 磁盘配额，超出则终止 agent |
+| `marketplace_dir` | string | `{datadir}/marketplace` | 本地插件目录路径 |
+| `container_enabled` | bool | `false` | 是否启用 Docker 容器隔离 |
+| `container_image` | string | `"boxnex-agent:latest"` | 容器镜像名（需提前构建） |
+| `container_network` | string | `"boxnex-net"` | Docker 网络名，启动时自动创建 |
+| `disk_quota_bytes` | int | `1073741824`（1GB） | 容器 workspace 磁盘配额，超出则终止 agent |
 | `cors_origins` | []string | — | 允许的 CORS 源，空则使用内置开发默认值 |
 
 ---
@@ -193,14 +198,6 @@ data/marketplace/
     my-mcp.json                ← 自定义 JSON 插件
 ```
 
-如需覆盖默认路径，在 config.json 中配置：
-
-```json
-{
-  "marketplace_dir": "/opt/boxnex/server/data/marketplace"
-}
-```
-
 初始化和更新：
 
 ```bash
@@ -214,8 +211,6 @@ git clone https://github.com/anthropics/claude-plugins-official
 cd /opt/boxnex/server/data/marketplace/skills && git pull
 cd /opt/boxnex/server/data/marketplace/claude-plugins-official && git pull
 ```
-
-Connector（外部服务连接器，如 GitHub、Slack 等）位于 `claude-plugins-official/external_plugins/` 下，会自动识别并归类到 Marketplace 的 Connectors 标签页。OAuth 类型的 Connector（如 Slack）当前标注为需要 OAuth，暂不支持安装。
 
 ---
 
@@ -233,15 +228,17 @@ After=network.target
 Type=simple
 User=boxnex
 WorkingDirectory=/opt/boxnex
-ExecStart=/opt/boxnex/server/boxnex --data-dir /opt/boxnex/server/data --port 9040
+ExecStart=/opt/boxnex/target/boxnex --data-dir /opt/boxnex/server/data --port 9040
 Restart=on-failure
 RestartSec=5
-# Claude OAuth Token（推荐通过环境变量注入，避免写入 config.json 磁盘）
-Environment=CLAUDE_CODE_OAUTH_TOKEN=<your-oauth-token>
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+> Claude OAuth Token 通过 `inject.so` 注入，**不需要**在 systemd 中设置 `CLAUDE_CODE_OAUTH_TOKEN` 环境变量。
+> 部署步骤：`sudo inject/rotate.sh <token>` → 编译并安装 inject.so 到 `/opt/boxnex/inject.so`。
+> 详见[第 10 节](#10-docker-容器隔离可选)。
 
 ```bash
 sudo systemctl daemon-reload
@@ -283,13 +280,11 @@ server {
 
 ```bash
 tail -f server/data/logs/boxnex.log
-# 或如果 data-dir 是 server/
-tail -f server/logs/boxnex.log
 ```
 
 **开发模式下查看验证码：**（未配置 `resend_api_key` 时验证码打到此日志）
 ```bash
-grep "Verification code" server/logs/boxnex.log | tail -5
+grep "Verification code" server/data/logs/boxnex.log | tail -5
 ```
 
 ### 5.4 升级部署
@@ -300,7 +295,7 @@ git pull
 sudo systemctl restart boxnex
 ```
 
-编译产物 `server/boxnex` 包含嵌入的前端，无需单独部署静态文件。
+编译产物 `target/boxnex` 包含嵌入的前端，无需单独部署静态文件。
 
 ### 5.5 备份
 
@@ -329,7 +324,7 @@ mysqldump -u boxnex -p boxnex > /backup/boxnex-$(date +%Y%m%d).sql
 nginx（反向代理，SSL 终止）
   │
   ▼
-server/boxnex（Go 单二进制）
+target/boxnex（Go 单二进制）
   ├── 嵌入前端（React SPA，路由 /）
   ├── REST API（/api/...）
   │     ├── 公开路由：/api/info, /api/auth/login, /api/auth/register,
@@ -344,9 +339,10 @@ server/boxnex（Go 单二进制）
               │
               ▼
           Claude CLI（agent/claude_cli.go）
-              │  可选 docker exec
+              │  可选 docker exec --runtime sysbox-runc
               ▼
           boxnex-agent 容器（每个 project 一个）
+              LD_PRELOAD=/usr/lib/inject.so → CLAUDE_CODE_OAUTH_TOKEN 注入
 ```
 
 **鉴权流程：**
@@ -430,6 +426,17 @@ Body: {"features": 15}
 
 示例：`features=15`（二进制 `1111`）→ 开放全部功能；`features=0` → 全部关闭（默认）。
 
+### 容器资源配额
+
+管理员可为单个用户设置容器资源上限（覆盖默认值 1 CPU / 2g 内存 / 200 pids）：
+
+```bash
+curl -X PATCH http://localhost:9040/api/admin/users/<userID>/quota \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"quotas": "{\"cpu\":\"2.0\",\"memory\":\"4g\",\"pids\":500}"}'
+```
+
 ### 余额充值
 
 管理员手动给用户充值 Token 额度：
@@ -465,7 +472,7 @@ BoxNex 使用 [Resend](https://resend.com) 发送注册验证码邮件。
 验证码会打印到日志文件，无需真实邮箱：
 
 ```bash
-grep "Verification code" server/logs/boxnex.log | tail -3
+grep "Verification code" server/data/logs/boxnex.log | tail -3
 ```
 
 ### 限流规则
@@ -475,134 +482,119 @@ grep "Verification code" server/logs/boxnex.log | tail -3
 
 ---
 
-## 10. Podman 容器隔离（可选）
+## 10. Docker 容器隔离（可选）
 
-启用后，每个 project 的 AI Agent 运行在独立的 Podman Rootless 容器中，项目间文件完全隔离，并内置出口代理防止 API Key 泄露。
+启用后，每个 project 的 AI Agent 运行在独立的 Docker + Sysbox 容器中，文件系统相互隔离，OAuth Token 通过 LD_PRELOAD inject.so 注入，不暴露在进程参数或 `/proc` 中。
 
-### 安装 Podman（Debian/Ubuntu）
-
-```bash
-# Debian 12 / Ubuntu 22.04+
-sudo apt-get install -y podman
-
-# 验证安装（rootless 模式，不需要 sudo）
-podman info | grep -E "rootless|version"
-```
-
-### 构建 Agent 镜像
+### 10.1 安装 Docker Engine
 
 ```bash
-# 镜像定义在项目根目录 Dockerfile.agent，推荐用脚本构建
-bash scripts/build-agent-image.sh
-
-# 或手动构建
-podman build -t boxnex-agent:latest -f Dockerfile.agent .
+# Debian/Ubuntu
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+newgrp docker       # 或重新登录使 group 生效
 
 # 验证
-podman image ls boxnex-agent
+docker version
 ```
 
-### 配置
+### 10.2 安装 Sysbox
+
+```bash
+# 下载对应发行版的 .deb 包（https://github.com/nestybox/sysbox/releases）
+# 以 Ubuntu 22.04 为例：
+wget https://downloads.nestybox.com/sysbox/releases/v0.6.4/sysbox-ce_0.6.4-0.linux_amd64.deb
+sudo apt-get install -y ./sysbox-ce_0.6.4-0.linux_amd64.deb
+
+# 验证 Sysbox 已注册为 Docker runtime
+docker info | grep sysbox
+```
+
+### 10.3 构建 Agent 镜像
+
+```bash
+bash scripts/build-agent-image.sh
+
+# 验证
+docker image ls boxnex-agent
+```
+
+### 10.4 配置
 
 ```json
 {
-  "podman_enabled": true,
-  "podman_image": "boxnex-agent:latest",
-  "podman_network": "boxnex-egress",
-  "proxy_allowed_hosts": []
+  "container_enabled": true,
+  "container_image": "boxnex-agent:latest",
+  "container_network": "boxnex-net"
 }
 ```
 
-`CLAUDE_CODE_OAUTH_TOKEN` **建议通过环境变量注入**，避免写入 `config.json` 磁盘文件：
+`boxnex-net` Docker 网络在服务启动时自动创建。
 
-```ini
-# /etc/systemd/system/boxnex.service
-[Service]
-Environment=CLAUDE_CODE_OAUTH_TOKEN=<your-oauth-token>
+### 10.5 部署 inject.so（Token 注入）
+
+inject.so 通过 LD_PRELOAD 在 Claude CLI 启动时注入 `CLAUDE_CODE_OAUTH_TOKEN`，token 以 XOR 混淆形式存储在 inject.so 中，不以明文出现在进程参数、日志或 `/proc/environ` 里。
+
+**初次部署 / Token 轮换（一条命令）：**
+
+```bash
+# 需要 root 权限（安装到 /opt/boxnex/inject.so）
+# 需要 gcc（编译 inject.so）
+sudo apt-get install -y build-essential  # 如果未安装
+
+sudo inject/rotate.sh <your_claude_oauth_token>
 ```
 
-### 工作原理
+`rotate.sh` 自动完成 XOR 编码 → 临时 .c 编译 → 安装 → 清理，`inject.c` 本身始终保持 placeholder 状态，token 不入库。
+
+运行中的容器在下次 `docker exec` 时自动使用新 inject.so（bind mount，无需重启容器或重建镜像）。
+
+### 10.6 工作原理
 
 ```
 BoxNex 服务（宿主机）
-  │  podman exec -u 9999:9999 -e CLAUDE_CODE_OAUTH_TOKEN=<真实key> ...
+  │  docker run --runtime sysbox-runc
+  │             -v /opt/boxnex/inject.so:/usr/lib/inject.so:ro
   ▼
-容器内 claude-runner 用户（UID 9999）
-  │  直接持有真实 API Key，连接 api.anthropic.com
-  │  agent 用户（UID 1000）无法通过 /proc 读取（无 CAP_SYS_PTRACE）
+容器启动
+  │  docker exec -e LD_PRELOAD=/usr/lib/inject.so claude ...
   ▼
-Anthropic API
+inject.so constructor 执行
+  │  XOR 解码 enc_token[]
+  │  setenv("CLAUDE_CODE_OAUTH_TOKEN", token, 1)
+  │  memset(token, 0, ...)  ← 立即清零
+  ▼
+Claude CLI 以注入的 token 连接 Anthropic API
 ```
 
-**安全模型说明：**
+**安全属性：**
+- token 不出现在 `/proc/<pid>/cmdline`（进程参数）
+- token 不以明文出现在 `/proc/<pid>/environ`
+- `strings inject.so` 无法提取 token（XOR 混淆）
+- 容器间通过独立 namespace 隔离，无法相互访问
 
-- 容器内有两个用户：`agent`（UID 1000，运行用户命令）和 `claude-runner`（UID 9999，专属运行 Claude CLI）
-- 真实 API Key 仅在 `podman exec -u 9999:9999 -e KEY=...` 时注入，从不写入容器持久环境
-- 容器以 `--cap-drop ALL` 启动，无 `CAP_SYS_PTRACE`，UID 1000 无法读取 UID 9999 进程的 `/proc/<pid>/environ`
-- Claude CLI 二进制权限设为 `0500`，只有 UID 9999 可执行，agent 用户无法直接运行
-- 启动时自动创建 `boxnex-egress` 网络（带 `--opt isolate=true` 阻止容器间直接通信）
-- 出口代理优先绑定到 Podman 网络网关 IP（如 `10.89.0.1:8118`）；若网关 IP 暂未绑定（Podman rootless 懒建桥接口），则 fallback 到 `0.0.0.0:8118`，并通过宿主机出口 IP 告知容器代理地址
-- workspace 磁盘超配额时自动终止 agent
+详细安全分析见 `docs/container_security_plan.md`。
 
-### 出网域名白名单
-
-容器通过出口代理访问外网，只有白名单内的域名可以建立 HTTPS CONNECT 隧道。`api.anthropic.com` 在白名单内，Claude CLI 直接使用由 `podman exec -e` 注入的真实 API Key 连接。
-
-**内置默认白名单**（无需配置，自动放行）：
-
-| 域名 | 用途 |
-|------|------|
-| `api.anthropic.com` | Claude API（Claude CLI 直连，Key 由 podman exec -e 注入） |
-| `statsig.anthropic.com` | Claude CLI 功能开关 |
-| `sentry.io` | Claude CLI 错误上报 |
-| `registry.npmjs.org` / `npmjs.org` | npm 包下载（npx 类 MCP 必须） |
-| `github.com` / `api.github.com` | Git 操作 + GitHub Copilot MCP |
-| `gitlab.com` | Git 操作 + GitLab MCP |
-| `mcp.slack.com` | Slack MCP |
-| `mcp.stripe.com` | Stripe MCP |
-| `mcp.linear.app` | Linear MCP |
-| `mcp.asana.com` | Asana MCP |
-| `api.githubcopilot.com` | GitHub Copilot MCP（REST） |
-| `api.greptile.com` | Greptile MCP |
-| `mcp.supabase.com` | Supabase MCP |
-
-**追加额外域名**（如自建服务、其他 Connector）：
-
-```json
-{
-  "proxy_allowed_hosts": [
-    "your-service.example.com",
-    "api.notion.com"
-  ]
-}
-```
-
-> **注意**：只需填主机名，不需要带协议或端口。允许的是 HTTPS CONNECT 隧道。对于不遵守 `HTTP_PROXY` 环境变量的工具（直接 raw socket），代理无法拦截——这是 Podman Rootless 无 root 权限的结构性限制。
-
-### 常用运维命令
+### 10.7 常用运维命令
 
 ```bash
 # 查看正在运行的 agent 容器
-podman ps --filter "name=boxnex-proj-"
+docker ps --filter "label=boxnex.project"
 
 # 查看某个容器日志
-podman logs boxnex-proj-<name>
+docker logs boxnex-proj-<name>
 
 # 手动停止某个项目的容器
-podman stop boxnex-proj-<project-id>
+docker stop boxnex-proj-<project-id>
 
-# 查看出口网络
-podman network ls
-podman network inspect boxnex-egress
+# 查看 Docker 网络
+docker network ls
+docker network inspect boxnex-net
 
 # 重建镜像后重启（容器会在下次请求时自动用新镜像启动）
 bash scripts/build-agent-image.sh
 sudo systemctl restart boxnex
 ```
-
-### WSL2 开发注意事项
-
-WSL2 下 Podman Rootless 可直接工作，无需处理 iptables 兼容性问题（这是相比 Docker 的优势之一）。
 
 ---
 
@@ -621,7 +613,7 @@ cd server && go run . --data-dir ./data --port 9040
 或用已有脚本一次性编译并运行：
 ```bash
 ./build.sh          # 编译前端 + 后端
-server/boxnex --data-dir server/data --port 9040
+target/boxnex --data-dir server/data --port 9040
 ```
 
 ### 本地开发模式（local mode）
@@ -633,7 +625,7 @@ server/boxnex --data-dir server/data --port 9040
 无 Resend 配置时，验证码出现在日志里：
 
 ```bash
-tail -f server/logs/boxnex.log | grep "Verification code"
+tail -f server/data/logs/boxnex.log | grep "Verification code"
 ```
 
 ### 运行单元测试
@@ -662,7 +654,7 @@ cd server && go test ./...
 
 **检查日志：**
 ```bash
-grep '"GET /ws"' server/logs/boxnex.log | tail -10
+grep '"GET /ws"' server/data/logs/boxnex.log | tail -10
 ```
 
 **解决：** 退出登录重新登录，获取新 token。
@@ -685,20 +677,33 @@ grep '"GET /ws"' server/logs/boxnex.log | tail -10
 
 ---
 
-### 问题：`podman: command not found` 或容器无法启动
+### 问题：`docker: command not found` 或容器无法启动
 
 ```bash
-# 检查 podman 是否安装
-which podman && podman --version
+# 检查 Docker 是否安装
+docker version
 
-# 安装（Debian/Ubuntu）
-sudo apt-get install -y podman
+# 安装（Ubuntu/Debian）
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER && newgrp docker
 
 # 检查镜像是否存在
-podman image ls | grep boxnex-agent
+docker image ls boxnex-agent
 
 # 重新构建镜像
 bash scripts/build-agent-image.sh
+```
+
+---
+
+### 问题：sysbox-runc 不可用
+
+```bash
+# 验证 Sysbox 是否注册
+docker info | grep -i sysbox
+
+# 若未安装，参考 10.2 节安装 Sysbox
+# 安装后无需重启 Docker daemon，Sysbox installer 会自动配置
 ```
 
 ---
@@ -707,36 +712,20 @@ bash scripts/build-agent-image.sh
 
 可能原因：
 
-1. **`CLAUDE_CODE_OAUTH_TOKEN` 未配置或已过期**：检查 systemd 服务的 `Environment=` 行，或确认环境变量已正确注入。Token 过期需在 Anthropic Console 重新生成。
+1. **inject.so 未部署**：检查 `/opt/boxnex/inject.so` 是否存在。
+   ```bash
+   ls -la /opt/boxnex/inject.so
+   ```
+   若不存在，执行 `sudo inject/rotate.sh <token>` 部署。
 
-2. **旧容器残留**：服务重启后旧容器若未停止，下次调用时 BoxNex 会复用旧容器，但注入的是新读取的 Key，一般不会有问题。如仍有异常：
+2. **Token 已过期**：inject.so 中的 token 失效，需重新轮换：
+   ```bash
+   sudo inject/rotate.sh <new_token>
+   # 停止旧容器使其用新 inject.so 重新启动
+   docker stop $(docker ps -q --filter "label=boxnex.project")
+   ```
 
-```bash
-# 手动停止所有 boxnex 容器，下次请求时自动用当前 Key 重启
-podman stop $(podman ps -q --filter "name=boxnex-proj-")
-```
-
-或直接重启服务（`RecoverRunningContainers` 会自动清理旧容器）：
-
-```bash
-sudo systemctl restart boxnex
-```
-
----
-
-### 问题：Connector/MCP 工具无法访问外网
-
-原因：容器出口代理只允许白名单域名，第三方 API 域名未放行。
-
-**解决**：在 `config.json` 的 `proxy_allowed_hosts` 中添加需要的域名：
-
-```json
-{
-  "proxy_allowed_hosts": ["api.github.com", "registry.npmjs.org"]
-}
-```
-
-修改后重启服务生效。如果工具仍然无法访问，可能是该工具不遵守 `HTTP_PROXY` 环境变量（直接 raw socket），属于 Podman Rootless 的结构性限制，无法通过白名单解决。
+3. **旧容器未更新**：inject.so 是 bind mount，容器已运行时不会自动重新加载 SO 文件（SO 在进程启动时加载一次）。需要停止容器，下次请求时自动重启并加载新 inject.so。
 
 ---
 
@@ -767,13 +756,18 @@ sudo systemctl restart boxnex
 
 | 文件/目录 | 说明 |
 |----------|------|
-| `server/boxnex` | 编译后的服务二进制 |
+| `target/boxnex` | 编译后的服务二进制 |
 | `server/data/config.json` | 运行时配置（权限 0600） |
 | `server/data/boxnex.db` | SQLite 数据库 |
 | `server/data/logs/boxnex.log` | 运行日志（滚动，5MB × 5个） |
 | `server/data/marketplace/` | 本地插件 JSON 文件目录 |
+| `/opt/boxnex/inject.so` | LD_PRELOAD token 注入库（部署到宿主机） |
+| `inject/inject.c` | inject.so C 源码（enc_token[] 保持 placeholder） |
+| `inject/rotate.sh` | Token 轮换一键脚本：`sudo inject/rotate.sh <token>` |
+| `inject/Makefile` | 手动编译：`make -C inject/` |
 | `scripts/setup.sh` | 一键环境初始化脚本 |
 | `scripts/build-agent-image.sh` | 构建 Agent 容器镜像脚本 |
 | `scripts/e2e-container-test.sh` | 容器隔离端到端测试套件 |
 | `build.sh` | 编译脚本（前端 + 后端） |
 | `Dockerfile.agent` | Agent 沙盒容器镜像定义 |
+| `docs/container_security_plan.md` | 容器安全设计文档 |

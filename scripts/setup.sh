@@ -5,17 +5,17 @@
 # 适用于：Debian 12 / Ubuntu 22.04+（原生 VPS 或 WSL2）
 #
 # 功能：
-#   1. 安装 Podman（rootless 模式，无需 root）
-#   2. 安装 Go（用于编译 server）
-#   3. 构建 boxnex-agent 镜像
-#   4. 生成初始 data/config.json 模板
+#   1. 检测 Docker Engine（提示安装方式）
+#   2. 检测 Sysbox runtime（提示安装方式）
+#   3. 安装 Go（用于编译 server）
+#   4. 构建 boxnex-agent 镜像
+#   5. 生成初始 data/config.json 模板
 #
 # 用法：
-#   bash scripts/setup.sh                  # 完整安装
-#   bash scripts/setup.sh --skip-podman    # 跳过 Podman 安装（已装好的情况）
+#   bash scripts/setup.sh                  # 完整流程
 #   bash scripts/setup.sh --skip-go        # 跳过 Go 安装
 #   bash scripts/setup.sh --skip-image     # 跳过镜像构建
-#   bash scripts/setup.sh --no-podman      # 不安装 Podman、不构建镜像（纯 Go 环境）
+#   bash scripts/setup.sh --no-docker      # 跳过 Docker/镜像步骤（不启用容器隔离）
 
 set -euo pipefail
 
@@ -32,17 +32,15 @@ warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 die()     { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 # ─── 参数解析 ─────────────────────────────────────────────────────────────────
-SKIP_PODMAN=false
 SKIP_GO=false
 SKIP_IMAGE=false
-NO_PODMAN=false
+NO_DOCKER=false
 
 for arg in "$@"; do
   case "$arg" in
-    --skip-podman) SKIP_PODMAN=true ;;
     --skip-go)     SKIP_GO=true ;;
     --skip-image)  SKIP_IMAGE=true ;;
-    --no-podman)   NO_PODMAN=true; SKIP_PODMAN=true; SKIP_IMAGE=true ;;
+    --no-docker)   NO_DOCKER=true; SKIP_IMAGE=true ;;
     --help)
       grep '^# ' "$0" | sed 's/^# //'
       exit 0
@@ -57,57 +55,55 @@ cd "$REPO_ROOT"
 
 [[ $EUID -eq 0 ]] && die "请不要用 root 直接运行本脚本，用普通用户 + sudo 权限运行"
 
-# 检测是否在 WSL2 内
-IS_WSL=false
-if grep -qi microsoft /proc/version 2>/dev/null; then
-  IS_WSL=true
-  warn "检测到 WSL2 环境"
-  info "Podman Rootless 在 WSL2 下可直接使用，无需处理 iptables 兼容性问题"
-  echo ""
-fi
-
 GO_VERSION="${GO_VERSION:-1.26.1}"
 GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
 GO_DOWNLOAD_URL="https://go.dev/dl/${GO_TARBALL}"
 
-# ─── Step 1：安装 Podman ───────────────────────────────────────────────────────
-install_podman() {
-  info "Step 1/4: 安装 Podman（rootless 模式）"
+# ─── Step 1：检测 Docker ───────────────────────────────────────────────────────
+check_docker() {
+  info "Step 1/5: 检测 Docker Engine"
 
-  if command -v podman &>/dev/null; then
-    success "Podman 已安装：$(podman --version)"
-    return
+  if ! command -v docker &>/dev/null; then
+    warn "Docker 未安装。安装方式："
+    warn "  curl -fsSL https://get.docker.com | sh"
+    warn "  sudo usermod -aG docker \$USER && newgrp docker"
+    warn "安装完成后重新运行本脚本。"
+    return 1
   fi
 
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq podman
+  if ! docker info &>/dev/null; then
+    warn "Docker daemon 未运行或当前用户无权限。检查："
+    warn "  sudo systemctl start docker"
+    warn "  sudo usermod -aG docker \$USER && newgrp docker"
+    return 1
+  fi
 
-  # 确保 newuidmap/newgidmap 可用（rootless 用户命名空间必须）
-  sudo apt-get install -y -qq uidmap 2>/dev/null || true
-
-  success "Podman 安装完成：$(podman --version)"
+  success "Docker $(docker version --format '{{.Client.Version}}' 2>/dev/null || echo '?') 已就绪"
+  return 0
 }
 
-verify_podman_rootless() {
-  # 验证 rootless 子 UID/GID 已分配（/etc/subuid、/etc/subgid）
-  if ! grep -q "^${USER}:" /etc/subuid 2>/dev/null; then
-    info "为用户 $USER 分配 subuid/subgid（rootless 必须）"
-    sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER" 2>/dev/null \
-      || warn "subuid/subgid 分配失败，rootless 容器可能无法启动；请手动执行：
-  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER"
+# ─── Step 2：检测 Sysbox ──────────────────────────────────────────────────────
+check_sysbox() {
+  info "Step 2/5: 检测 Sysbox runtime"
+
+  if docker info 2>/dev/null | grep -q sysbox; then
+    success "sysbox-runc 已注册为 Docker runtime"
+    return 0
   fi
 
-  # 快速冒烟测试
-  if podman run --rm alpine echo ok &>/dev/null; then
-    success "Podman rootless 验证通过"
-  else
-    warn "Podman rootless 冒烟测试失败，请检查 subuid/subgid 配置"
-  fi
+  warn "Sysbox 未安装或未注册。安装方式："
+  warn "  # 下载对应发行版的 .deb（https://github.com/nestybox/sysbox/releases）"
+  warn "  wget https://downloads.nestybox.com/sysbox/releases/v0.6.4/sysbox-ce_0.6.4-0.linux_amd64.deb"
+  warn "  sudo apt-get install -y ./sysbox-ce_0.6.4-0.linux_amd64.deb"
+  warn ""
+  warn "安装完成后 Sysbox 会自动注册到 Docker，无需重启 daemon。"
+  warn "继续：容器将以默认 runc 启动（无 DinD，安全隔离降级）"
+  return 0  # 非致命，继续流程
 }
 
-# ─── Step 2：安装 Go ───────────────────────────────────────────────────────────
+# ─── Step 3：安装 Go ───────────────────────────────────────────────────────────
 install_go() {
-  info "Step 2/4: 安装 Go ${GO_VERSION}"
+  info "Step 3/5: 安装 Go ${GO_VERSION}"
 
   if command -v go &>/dev/null; then
     local installed
@@ -133,18 +129,18 @@ install_go() {
   success "Go 安装完成：$(go version)"
 }
 
-# ─── Step 3：构建 boxnex-agent 镜像 ───────────────────────────────────────────
+# ─── Step 4：构建 boxnex-agent 镜像 ───────────────────────────────────────────
 build_image() {
-  info "Step 3/4: 构建 boxnex-agent 容器镜像"
+  info "Step 4/5: 构建 boxnex-agent 容器镜像"
 
   bash "$REPO_ROOT/scripts/build-agent-image.sh"
 
   success "boxnex-agent:latest 镜像构建完成"
 }
 
-# ─── Step 4：生成初始 config.json ─────────────────────────────────────────────
+# ─── Step 5：生成初始 config.json ─────────────────────────────────────────────
 generate_config() {
-  info "Step 4/4: 生成初始配置文件"
+  info "Step 5/5: 生成初始配置文件"
 
   local data_dir="$REPO_ROOT/server/data"
   mkdir -p "$data_dir"
@@ -160,8 +156,8 @@ generate_config() {
   local jwt_secret
   jwt_secret=$(openssl rand -hex 32 2>/dev/null || cat /dev/urandom | tr -dc 'a-f0-9' | head -c 64)
 
-  local podman_enabled="false"
-  $NO_PODMAN || podman_enabled="true"
+  local container_enabled="false"
+  $NO_DOCKER || container_enabled="true"
 
   cat > "$config_file" <<EOF
 {
@@ -170,9 +166,9 @@ generate_config() {
   "jwt_exp_days": 7,
   "token_price_per_million": 15,
   "marketplace_dir": "${data_dir}/marketplace",
-  "podman_enabled": ${podman_enabled},
-  "podman_image": "boxnex-agent:latest",
-  "podman_network": "boxnex-egress"
+  "container_enabled": ${container_enabled},
+  "container_image": "boxnex-agent:latest",
+  "container_network": "boxnex-net"
 }
 EOF
 
@@ -180,7 +176,6 @@ EOF
   mkdir -p "$data_dir/marketplace"
 
   success "配置文件已生成：$config_file"
-  warn "CLAUDE_CODE_OAUTH_TOKEN 建议通过环境变量注入（systemd Environment= 或 export），不要写入 config.json"
   warn "生产部署时将 store_type 改为 mysql 并填写 mysql_dsn"
 }
 
@@ -191,23 +186,27 @@ echo "  BoxNex 环境初始化"
 echo "========================================"
 echo ""
 
-if ! $SKIP_PODMAN; then
-  install_podman
-  verify_podman_rootless
+DOCKER_OK=false
+if ! $NO_DOCKER; then
+  check_docker && DOCKER_OK=true || true
+  check_sysbox
 else
-  info "Step 1/4: 跳过 Podman 安装"
+  info "Step 1/5: 跳过 Docker 检测（--no-docker）"
+  info "Step 2/5: 跳过 Sysbox 检测（--no-docker）"
 fi
 
 if ! $SKIP_GO; then
   install_go
 else
-  info "Step 2/4: 跳过 Go 安装"
+  info "Step 3/5: 跳过 Go 安装"
 fi
 
-if ! $SKIP_IMAGE; then
+if ! $SKIP_IMAGE && $DOCKER_OK; then
   build_image
+elif $SKIP_IMAGE; then
+  info "Step 4/5: 跳过镜像构建"
 else
-  info "Step 3/4: 跳过镜像构建"
+  warn "Step 4/5: Docker 不可用，跳过镜像构建"
 fi
 
 generate_config
@@ -219,19 +218,18 @@ echo -e "  ${GREEN}环境准备完成${NC}"
 echo "========================================"
 echo ""
 
-if ! $SKIP_GO; then
-  echo "编译 server："
-  echo "  cd server && go build -o boxnex . && ./boxnex --data-dir ./data --port 9040"
-  echo ""
-fi
+echo "编译并启动："
+echo "  ./build.sh"
+echo "  target/boxnex --data-dir server/data --port 9040"
+echo ""
 
 echo "首次部署后设置管理员（SQLite）："
 echo "  sqlite3 server/data/boxnex.db \"UPDATE users SET role='admin' WHERE username='yourname';\""
 echo ""
 
-if ! $NO_PODMAN; then
-  echo "注入 API Key（推荐方式）："
-  echo "  export CLAUDE_CODE_OAUTH_TOKEN=<your-oauth-token>"
-  echo "  # 或写入 systemd service: Environment=CLAUDE_CODE_OAUTH_TOKEN=<your-oauth-token>"
+if ! $NO_DOCKER; then
+  echo "部署 Claude OAuth Token（inject.so 方式，token 不入库）："
+  echo "  sudo apt-get install -y build-essential   # 如未安装 gcc"
+  echo "  sudo inject/rotate.sh <your_claude_oauth_token>"
   echo ""
 fi

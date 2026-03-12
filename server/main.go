@@ -196,82 +196,24 @@ func main() {
 		ChromeManager:    chromeManager,
 	}
 
-	// Wire up Podman rootless container isolation if enabled.
-	if cfg.PodmanEnabled {
-		podmanImage := cfg.PodmanImage
-		if podmanImage == "" {
-			podmanImage = "boxnex-agent:latest"
+	// Wire up Docker rootless + Sysbox container isolation if enabled.
+	if cfg.ContainerEnabled {
+		image := cfg.ContainerImage
+		if image == "" {
+			image = "boxnex-agent:latest"
 		}
-		podmanNetwork := cfg.PodmanNetwork
-		if podmanNetwork == "" {
-			podmanNetwork = "boxnex-egress"
+		network := cfg.ContainerNetwork
+		if network == "" {
+			network = "boxnex-net"
 		}
-
-		// Create the container manager first so we can call EnsureNetwork before
-		// starting the proxy — the proxy listen address depends on the gateway IP
-		// of the Podman network, which must exist before we can inspect it.
-		containerMgr := agent.NewContainerManager(podmanImage, podmanNetwork, nil)
-		containerMgr.DiskQuotaBytes = cfg.DiskQuotaBytes
-		if containerMgr.DiskQuotaBytes == 0 {
-			containerMgr.DiskQuotaBytes = 256 << 20 // 256 MB default
-		}
+		containerMgr := agent.NewContainerManager(image, network)
 		if err := containerMgr.EnsureNetwork(); err != nil {
-			log.Printf("  Warning: could not ensure Podman network %s: %v", podmanNetwork, err)
+			log.Printf("  Warning: could not ensure Docker network %s: %v", network, err)
 		}
-
-		// Bind the proxy to the Podman network gateway IP so it is only reachable
-		// from within the container network, not from external interfaces.
-		// Fall back to 0.0.0.0 (with a warning) if the gateway IP cannot be
-		// determined (e.g. network creation failed above).
-		proxyAddr := cfg.ProxyListenAddr
-		if proxyAddr == "" {
-			gw, err := agent.NetworkGatewayIP(podmanNetwork)
-			if err != nil {
-				log.Printf("  Warning: could not determine network gateway IP (%v); binding proxy to 0.0.0.0:8118", err)
-				proxyAddr = "0.0.0.0:8118"
-			} else {
-				proxyAddr = gw + ":8118"
-			}
-		}
-
-		// Prefer claude_auth_token from config; fall back to CLAUDE_CODE_OAUTH_TOKEN env var.
-		// Stored only in server memory — injected into containers via `podman exec -e` at runtime.
-		realAPIKey := cfg.ClaudeAuthToken
-		if realAPIKey == "" {
-			realAPIKey = os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")
-		}
-		containerMgr.RealAPIKey = realAPIKey
-
-		containerProxy := agent.NewContainerProxy(proxyAddr, cfg.ProxyAllowedHosts)
-		if err := containerProxy.Start(); err != nil {
-			// In Podman rootless the bridge interface is created lazily (only when
-			// the first container starts), so the gateway IP may not yet be a
-			// local address at server startup time. Fall back to 0.0.0.0 so the
-			// server can start.
-			//
-			// With Podman rootless + pasta networking, the bridge gateway IP is
-			// virtual — containers can only reach the host via its real outbound IP.
-			// Detect that IP and set it as the container-facing proxy address so
-			// HTTP_PROXY env vars injected into containers point to the right host.
-			log.Printf("  Warning: could not bind proxy to %s (%v); retrying on 0.0.0.0:8118", proxyAddr, err)
-			containerProxy = agent.NewContainerProxy("0.0.0.0:8118", cfg.ProxyAllowedHosts)
-			if err2 := containerProxy.Start(); err2 != nil {
-				startupLog.Fatalf("Failed to start egress proxy: %v", err2)
-			}
-			// Set the container-facing address to the host's real outbound IP so
-			// HTTP_PROXY works inside Podman rootless + pasta containers.
-			if hostIP, err3 := agent.HostOutboundIP(); err3 == nil {
-				containerProxy.SetContainerAddr(hostIP + ":8118")
-				log.Printf("  Proxy container address: %s (host outbound IP, Podman rootless fallback)", hostIP+":8118")
-			}
-		}
-		log.Printf("  Egress proxy: %s", containerProxy.Addr())
-
-		containerMgr.SetProxy(containerProxy)
 		containerMgr.RecoverRunningContainers()
 		srv.ContainerMgr = containerMgr
 		ca.ContainerMgr = containerMgr
-		log.Printf("  Podman isolation enabled (image: %s, network: %s)", podmanImage, podmanNetwork)
+		log.Printf("  Docker isolation enabled (image: %s, network: %s)", image, network)
 	}
 
 	// Wire up SessionOrchestrator so MCP execute_workflow can create sessions

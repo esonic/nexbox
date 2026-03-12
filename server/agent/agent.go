@@ -54,6 +54,8 @@ type Request struct {
 	UserInputHandler   UserInputHandler  // Optional: handle interactive tool calls (e.g., AskUserQuestion)
 	UserFeatures       int64             // Bitmask of enabled features (store.Feature* constants)
 	TokenBudget        int64             // Max tokens this task may consume; 0 = unlimited
+	UserID             string            // User who owns this session (for home volume mounting)
+	ContainerQuota     *ContainerQuota   // Resource limits; nil = use ContainerManager defaults
 }
 
 // Result contains the outcome of an agent message exchange.

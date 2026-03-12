@@ -17,7 +17,7 @@ type ClaudeAgent struct {
 	MCPToolNames []string          // MCP tool names (e.g. "mcp__boxnex__save_asset"); populated from mcp.Server.ToolNames()
 	DataDir      string            // For isolated session storage
 	Verbose      bool              // Enable verbose logging
-	ContainerMgr *ContainerManager // Optional: run inside Podman container per project
+	ContainerMgr *ContainerManager // Optional: run inside Docker container per project
 }
 
 // NewClaudeAgent creates a new Claude Code agent with default settings.
@@ -60,18 +60,14 @@ func (a *ClaudeAgent) SendMessage(
 	client := NewClaudeClient()
 	client.Verbose = a.Verbose
 
-	// If Podman isolation is enabled, ensure a container is running for this project
-	// and wire it into the client so commands execute inside the container.
+	// Ensure a Docker container is running for this project and wire it into the client.
 	if a.ContainerMgr != nil && req.WorkDir != "" {
-		// Derive a project key from the work directory to identify the container.
-		// req.WorkDir is typically the project's git repo path.
-		containerID, err := a.ContainerMgr.EnsureContainer(req.WorkDir, req.WorkDir)
+		containerID, err := a.ContainerMgr.EnsureContainer(req.WorkDir, req.WorkDir, req.UserID, req.ContainerQuota)
 		if err != nil {
-			log.Printf("[claude-agent] failed to ensure container for %s: %v; falling back to host execution", req.WorkDir, err)
-		} else {
-			client.ContainerMgr = a.ContainerMgr
-			client.ContainerID = containerID
+			return Result{}, fmt.Errorf("ensure container for %s: %w", req.WorkDir, err)
 		}
+		client.ContainerMgr = a.ContainerMgr
+		client.ContainerID = containerID
 	}
 
 	// Build query options (no SystemPrompt - we use BuildPrompt for all context)
@@ -228,11 +224,6 @@ func (a *ClaudeAgent) SendMessage(
 	var accInputTokens, accOutputTokens int
 	var hasPartialText, hasPartialThinking, doneSent bool
 
-	// Start workspace disk-usage monitor so agent tasks cannot write unbounded
-	// data to /workspace via Bash tool (D-01 from container_security_tasks.md).
-	if a.ContainerMgr != nil && req.WorkDir != "" && a.ContainerMgr.DiskQuotaBytes > 0 {
-		a.ContainerMgr.WatchWorkspace(budgetCtx, req.WorkDir, a.ContainerMgr.DiskQuotaBytes, budgetCancel)
-	}
 
 	resultSessionID, err := client.Query(budgetCtx, combinedPrompt, opts, func(msg StreamMessage, parsed *AssistantMessage) {
 		if msg.Type != "stream_event" {

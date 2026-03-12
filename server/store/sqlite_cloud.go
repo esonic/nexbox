@@ -34,8 +34,8 @@ func (s *SQLiteStore) CreateUser(req CreateUserRequest) (*User, error) {
 	}
 	defer tx.Rollback()
 	_, err = tx.Exec(
-		`INSERT INTO users (id, username, password_hash, email, role, features, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO users (id, username, password_hash, email, role, features, quotas, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
 		u.ID, u.Username, u.PasswordHash, u.Email, u.Role, u.Features, u.CreatedAt, u.UpdatedAt,
 	)
 	if err != nil {
@@ -58,7 +58,7 @@ func (s *SQLiteStore) CreateUser(req CreateUserRequest) (*User, error) {
 
 func scanUser(row interface{ Scan(...interface{}) error }) (*User, error) {
 	var u User
-	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Email, &u.Role, &u.Features, &u.CreatedAt, &u.UpdatedAt)
+	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Email, &u.Role, &u.Features, &u.Quotas, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +67,7 @@ func scanUser(row interface{ Scan(...interface{}) error }) (*User, error) {
 
 func (s *SQLiteStore) GetUser(id string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, email, role, features, created_at, updated_at FROM users WHERE id = ?`, id,
+		`SELECT id, username, password_hash, email, role, features, quotas, created_at, updated_at FROM users WHERE id = ?`, id,
 	)
 	u, err := scanUser(row)
 	if err == sql.ErrNoRows {
@@ -78,7 +78,7 @@ func (s *SQLiteStore) GetUser(id string) (*User, error) {
 
 func (s *SQLiteStore) GetUserByUsername(username string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, email, role, features, created_at, updated_at FROM users WHERE username = ?`, username,
+		`SELECT id, username, password_hash, email, role, features, quotas, created_at, updated_at FROM users WHERE username = ?`, username,
 	)
 	u, err := scanUser(row)
 	if err == sql.ErrNoRows {
@@ -89,7 +89,7 @@ func (s *SQLiteStore) GetUserByUsername(username string) (*User, error) {
 
 func (s *SQLiteStore) ListUsers(limit, offset int) ([]User, error) {
 	rows, err := s.db.Query(
-		`SELECT id, username, password_hash, email, role, features, created_at, updated_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		`SELECT id, username, password_hash, email, role, features, quotas, created_at, updated_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 		limit, offset,
 	)
 	if err != nil {
@@ -128,6 +128,11 @@ func (s *SQLiteStore) UpdateUserRole(id string, role string) error {
 		`UPDATE users SET role = ?, updated_at = ? WHERE id = ?`,
 		role, time.Now(), id,
 	)
+	return err
+}
+
+func (s *SQLiteStore) UpdateUserQuotas(id, quotas string) error {
+	_, err := s.db.Exec(`UPDATE users SET quotas = ?, updated_at = ? WHERE id = ?`, quotas, time.Now(), id)
 	return err
 }
 

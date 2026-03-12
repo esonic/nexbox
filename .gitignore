@@ -1,5 +1,8 @@
 # Go
 server/boxnex
+
+# inject.so is a compiled binary — build with: make -C inject/
+inject/*.so
 server/logs/
 *.exe
 proxy/proxy

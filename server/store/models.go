@@ -519,6 +519,7 @@ type User struct {
 	Email        string    `json:"email,omitempty"`
 	Role         string    `json:"role"` // "admin" | "user"
 	Features     int64     `json:"features"` // bitmask of Feature* constants
+	Quotas       string    `json:"quotas,omitempty"` // JSON: {"cpu":"1.0","memory":"2g","pids":200}
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

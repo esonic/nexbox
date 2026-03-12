@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -386,5 +387,23 @@ func (db *DB) migrate() error {
 		}
 	}
 
+	// Column additions for existing deployments (idempotent via helper)
+	if err := addColumnIfNotExists(db.DB, "users", "quotas", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
+		return fmt.Errorf("add users.quotas column: %w", err)
+	}
+
+	return nil
+}
+
+// addColumnIfNotExists runs ALTER TABLE ADD COLUMN and ignores duplicate-column errors.
+func addColumnIfNotExists(db *sql.DB, table, column, definition string) error {
+	_, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition))
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already has column") {
+			return nil
+		}
+		return err
+	}
 	return nil
 }

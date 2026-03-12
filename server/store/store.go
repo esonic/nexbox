@@ -170,6 +170,7 @@ type UserStore interface {
 	UpdateUserFeatures(id string, features int64) error
 	UpdateUserPassword(id string, passwordHash string) error
 	UpdateUserRole(id string, role string) error
+	UpdateUserQuotas(id, quotas string) error
 }
 
 type BalanceStore interface {

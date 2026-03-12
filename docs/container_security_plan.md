@@ -1,223 +1,174 @@
-# 容器安全加固方案
+# BoxNex 容器安全设计
 
-> 基于 security_analysis.md 的分析结果，本文档给出具体实施方案。
+> 本文档描述 BoxNex 当前的容器隔离架构、安全层级、实现细节及已知局限。
+> 早期方案（Podman + UID 隔离 + egress proxy）已废弃，当前使用 Docker rootless + Sysbox。
 
 ---
 
-## 一、Docker 推荐启动参数
+## 架构概览
 
-综合"用户在 workspace 内正常使用"和"不危害宿主/其他用户"两个目标：
-
-```bash
-docker run -d \
-  --name boxnex-proj-<hash> \
-  --rm \
-
-  # ── 资源限制 ──────────────────────────────────────────
-  --memory 2g \
-  --memory-swap 2g \          # 关闭 swap，防止内存压力蔓延到宿主机
-  --cpus 1.0 \
-  --pids-limit 200 \
-
-  # ── 磁盘：tmpfs 覆盖容器内临时区域 ───────────────────
-  # /workspace 是 bind mount，--storage-opt 对它无效（见正文说明）
-  # 用 tmpfs 限制容器内临时文件区域：
-  --tmpfs /tmp:size=256m,noexec \
-  --tmpfs /root:size=64m \    # Claude CLI session 状态（~/.claude）
-
-  # ── 只读系统层 ────────────────────────────────────────
-  # 容器内除 bind mount 和 tmpfs 以外全部只读，
-  # 防止 Claude 修改容器自身的系统文件：
-  --read-only \
-
-  # ── 网络：只放行 Anthropic API（见第二节）───────────
-  --network boxnex-egress \
-
-  # ── 安全加固 ──────────────────────────────────────────
-  --cap-drop ALL \
-  --cap-add CHOWN \
-  --cap-add DAC_OVERRIDE \
-  --cap-add FOWNER \
-  --cap-add SETUID \
-  --cap-add SETGID \
-  --security-opt no-new-privileges \
-
-  # ── 挂载 ──────────────────────────────────────────────
-  -v <repoPath>:/workspace \
-  -w /workspace \
-  boxnex-agent:latest \
-  tail -f /dev/null
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  BoxNex Server (Go)                                              │
+│                                                                  │
+│  ContainerManager ──► docker run                                 │
+│       │                    --runtime sysbox-runc                 │
+│       │                    --memory / --cpus / --pids-limit      │
+│       │                    --network boxnex-net                  │
+│       │                    --label boxnex.project=<projectID>    │
+│       │                    -v <repoPath>:/workspace              │
+│       │                    -v boxnex-home-<userID>:/root         │
+│       │                    -v /opt/boxnex/inject.so:ro           │
+│       │                                                          │
+│       └──► docker exec                                           │
+│                    -e LD_PRELOAD=/usr/lib/inject.so              │
+│                    claude ...                                    │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### 参数说明
+每个项目对应一个独立 Docker 容器，容器生命周期由 ContainerManager 管理。
 
-| 参数 | 作用 |
+---
+
+## 安全层级
+
+### L1 — Sysbox 容器隔离
+
+- `--runtime sysbox-runc`：使用 Sysbox 而非默认 runc
+  - 支持 DinD（Docker-in-Docker），无需 `--privileged`
+  - 独立 user namespace、mount namespace、pid namespace
+  - 容器内无法感知宿主机进程树
+- `--rm`：容器停止时文件系统自动销毁（home volume 保留）
+- `--network boxnex-net`：容器加入专用 Docker 网络，与宿主 bridge 隔离
+
+### L2 — 资源配额
+
+每个容器在 `docker run` 时通过 Docker 参数强制施加资源上限：
+
+| 参数 | 默认值 | 每用户覆盖 |
+|------|--------|-----------|
+| `--memory` | 2g | `users.quotas.memory` |
+| `--memory-swap` | 等于 memory（关闭 swap） | — |
+| `--cpus` | 1.0 | `users.quotas.cpu` |
+| `--pids-limit` | 200 | `users.quotas.pids` |
+| workspace 磁盘 | 1GB（软限制） | `config.disk_quota_bytes` |
+
+管理员通过 `PATCH /api/admin/users/{userID}/quota` 设置用户配额（写入前校验 JSON 合法性）。
+用户可通过 `GET /api/quota` 查询自己的配额。
+
+磁盘配额：每次任务启动前通过 `checkDiskQuota()` 做一次预检查；`WatchWorkspace()` 已实现
+（定期轮询 `du`），待后续接入任务执行中的持续监控（见 [待办](#待办)）。
+
+### L3 — OAuth Token 注入（LD_PRELOAD inject.so）
+
+**问题**：直接用 `docker exec -e CLAUDE_CODE_OAUTH_TOKEN=<token>` 传入，token 以明文
+出现在 `/proc/<pid>/environ`，低权限进程、日志系统或意外泄露途径均可读取。
+
+**方案**：
+
+1. token 以 XOR 混淆形式硬编码在 `inject.so` 中（源码：`inject/inject.c`）
+2. `inject.so` 以 bind mount 方式挂载到容器 `/usr/lib/inject.so:ro`（不内嵌在镜像）
+3. `docker exec` 时设置 `LD_PRELOAD=/usr/lib/inject.so`
+4. Claude CLI 启动时，`inject.so` 的 `__attribute__((constructor))` 函数执行：
+   - 解码 token（XOR 解混淆）
+   - `setenv("CLAUDE_CODE_OAUTH_TOKEN", token, 1)`
+   - `memset(token, 0, ...)` 立即清零 heap 拷贝
+
+**安全属性**：
+
+| 攻击面 | 防护效果 |
+|--------|---------|
+| `/proc/<pid>/cmdline` | ✅ token 不在进程参数中 |
+| `/proc/<pid>/environ` | ✅ token 不以明文出现（constructor 结束后 env 已设置但 SO 不再持有明文） |
+| `strings inject.so` | ✅ XOR 混淆，无法直接提取 |
+| 容器内低权限进程读 `/proc` | ✅ Sysbox namespace 隔离 |
+| 宿主机读 inject.so | ⚠️ 需要 root；可逆向 |
+| 容器内进程内存转储 | ⚠️ token 在 `setenv` 后存在于进程 env block 中 |
+
+**这是深度防御，不是密码学保证。** 核心目标是防止 token 出现在日志和 proc 文件系统中。
+
+**Token 轮换**（一条命令）：
+
+```bash
+sudo inject/rotate.sh <new_token>
+```
+
+`rotate.sh` 自动完成：XOR 编码 → 编译临时 .c → 安装到 `/opt/boxnex/inject.so` → 删除临时文件。
+`inject.c` 本身始终保持 placeholder 状态，token 不入库，不落磁盘明文。
+运行中的容器在下次 `docker exec` 时自动使用新 inject.so（bind mount，无需重启容器或重建镜像）。
+
+**inject.so 不存在时的行为**：
+
+- `EnsureContainer`：跳过 `-v /opt/boxnex/inject.so` 挂载，打印 warning
+- `ExecClaudeInContainer`：同样检查 host 路径，不设置 `LD_PRELOAD`
+- Claude 无法获取 token → 调用失败（预期行为，避免静默降级）
+
+### L4 — 用户 Home Volume 隔离
+
+每个用户拥有独立的 Docker named volume：`boxnex-home-<userID>`，挂载到 `/root`。
+
+- Claude CLI 配置（`~/.claude/`）、工具链缓存持久化
+- 跨容器重建后状态保留（不需要重新初始化 claude）
+- 不同用户 home volume 名称含 userID，严格隔离
+
+### L5 — 容器生命周期
+
+| 事件 | 行为 | 代码位置 |
+|------|------|---------|
+| WebSocket subscribe | 预热启动容器（异步） | `chat.go: warmupContainer()` |
+| 用户发消息 | 重置闲置计时器 | `chat.go → container.go: TouchActivity()` |
+| 闲置超 20 分钟 | 停止容器 | `main.go → StopIdleContainers()` (5min 轮询) |
+| 服务器重启 | 重新注册现有容器（不停止） | `main.go → RecoverRunningContainers()` |
+
+容器检索使用 `--label boxnex.project=<projectID>`，`docker ps --filter label=...`。
+
+---
+
+## 实现文件速查
+
+| 文件 | 职责 |
 |------|------|
-| `--memory 2g --memory-swap 2g` | 限制内存并关闭 swap，防止内存耗尽影响宿主机 |
-| `--cpus 1.0` | 限制 CPU，防止挖矿等高强度计算 |
-| `--pids-limit 200` | 防止 fork 炸弹 |
-| `--tmpfs /tmp:noexec` | 临时目录大小受限，且不可执行二进制（防止写入后执行） |
-| `--read-only` | 容器 rootfs 只读，Claude 无法修改系统文件 |
-| `--cap-drop ALL` + `--cap-add ...` | 最小权限原则，只保留必要的 Linux Capabilities |
-| `--security-opt no-new-privileges` | 禁止进程通过 setuid/setgid 提升权限 |
-| `--network boxnex-egress` | 出站流量受限网络（见第二节） |
-
-### 关于 `--storage-opt size=1g`
-
-**此参数对 bind mount 无效**，`-v <repoPath>:/workspace` 挂载的是宿主机目录，不受容器存储驱动配额控制。Claude 下载的文件写入 `/workspace` 不会被这个参数拦截。workspace 的磁盘配额需依靠应用层检查（见第三节）。
-
----
-
-## 二、网络隔离方案
-
-### 目标
-
-- ✅ 允许：Claude CLI 访问 `api.anthropic.com`（必须，用于调用 API）
-- ✅ 允许：DNS 解析（53/udp）
-- ❌ 拒绝：访问内网（防止横向渗透）
-- ❌ 拒绝：访问任意外网（防止反向 Shell、数据外泄、DDoS 等）
-
-### 方案 A：HTTP 代理 + `--network none`（推荐，无需 iptables 权限）
-
-在宿主机上运行一个只放行 `*.anthropic.com` 的 HTTP 代理，容器完全断网，只能通过代理访问外部。
-
-**1. 使用 tinyproxy 搭建白名单代理**
-
-```bash
-# 安装 tinyproxy
-apt install tinyproxy  # 或 brew install tinyproxy
-
-# 配置 /etc/tinyproxy/tinyproxy.conf
-Port 8888
-Listen 172.17.0.1        # Docker 默认网关地址，容器可访问
-Allow 127.0.0.1
-Allow 172.16.0.0/12      # 允许所有 Docker 子网访问代理
-
-# 白名单：只放行 Anthropic
-Filter "/etc/tinyproxy/filter.txt"
-FilterURLs On
-FilterExtended On
-# filter.txt 内容：
-#   \.anthropic\.com$
-
-systemctl restart tinyproxy
-```
-
-**2. 容器启动参数调整**
-
-```bash
-# 将 --network boxnex-egress 替换为：
---network none \
--e HTTPS_PROXY=http://172.17.0.1:8888 \
--e HTTP_PROXY=http://172.17.0.1:8888 \
--e NO_PROXY=localhost,127.0.0.1 \
-```
-
-**优点：** 不需要 iptables 权限，在容器化部署（如 k8s）环境中也能用，代理日志可审计所有出站请求。
+| `server/agent/container.go` | ContainerManager 核心：EnsureContainer, StopIdleContainers, ExecClaudeInContainer, WatchWorkspace |
+| `server/api/chat.go` | warmupContainer, userQuota, TouchActivity 集成 |
+| `server/api/auth_cloud.go` | PATCH /api/admin/users/{userID}/quota, GET /api/quota |
+| `server/api/router.go` | 路由注册 |
+| `server/store/models.go` | `User.Quotas` 字段 |
+| `server/store/db.go` | `addColumnIfNotExists` 幂等迁移（quotas 列） |
+| `server/config/config.go` | ContainerEnabled, ContainerImage, ContainerNetwork, DiskQuotaBytes |
+| `inject/inject.c` | LD_PRELOAD token 注入 C 源码 |
+| `inject/encode.sh` | 生成 XOR 编码字节数组 |
+| `inject/Makefile` | `make` 编译 inject.so，`make install` 部署到 /opt/boxnex/ |
+| `scripts/build-agent-image.sh` | 构建 boxnex-agent:latest Docker 镜像 |
+| `scripts/e2e-container-test.sh` | 端到端测试（T01–T14） |
 
 ---
 
-### 方案 B：Docker 专用网络 + iptables 白名单
+## 配置示例
 
-**1. 创建专用网络（一次性，服务启动时执行）**
-
-```bash
-docker network create \
-  --driver bridge \
-  boxnex-egress
-```
-
-**2. iptables 规则（宿主机，需要 root）**
-
-```bash
-# 获取 boxnex-egress 对应的网桥名称
-BRIDGE=$(docker network inspect boxnex-egress \
-  --format '{{.Options}}' | grep -o 'com.docker.network.bridge.name:[^ }]*' \
-  | cut -d: -f2)
-# 若未自定义，可用：ip link show | grep br-
-
-# 用 ipset 维护 Anthropic IP 白名单（定时更新）
-ipset create anthropic-ips hash:net 2>/dev/null || ipset flush anthropic-ips
-for ip in $(dig +short api.anthropic.com); do
-  ipset add anthropic-ips $ip
-done
-
-# 放行 DNS
-iptables -I FORWARD -i $BRIDGE -p udp --dport 53 -j ACCEPT
-iptables -I FORWARD -i $BRIDGE -p tcp --dport 53 -j ACCEPT
-
-# 放行已建立的连接（返回包）
-iptables -I FORWARD -i $BRIDGE -m state --state ESTABLISHED,RELATED -j ACCEPT
-
-# 放行 Anthropic IP
-iptables -I FORWARD -i $BRIDGE -m set --match-set anthropic-ips dst -j ACCEPT
-
-# 拒绝其他所有出站
-iptables -A FORWARD -i $BRIDGE -j DROP
-```
-
-**注意：** Anthropic IP 可能变化，需要 cron job 定时刷新 ipset。
-
----
-
-### 方案选择建议
-
-| 场景 | 推荐方案 |
-|------|---------|
-| 普通 Linux 服务器，有 root 权限 | 方案 B（更彻底，规则在内核层生效） |
-| 容器内运行 NexBox（无 iptables 权限） | 方案 A（代理方案，无需特权） |
-| 不需要 WebSearch/WebFetch 工具 | `--network none`（最简单，无需代理） |
-
----
-
-## 三、磁盘配额：运行中检查
-
-### 现状
-
-`chat.go:185` 在每次任务**启动前**检查一次磁盘配额。如果 Claude 在任务执行过程中下载大文件，要等到下次发消息时才会被发现。
-
-### 补充方案：StreamCallback 中的周期性检查
-
-在 Agent 的 StreamCallback 里，每处理 N 条输出消息就做一次 `dirSize` 检查，超限则 cancel context：
-
-```go
-// chat.go，在 StreamCallback 内
-var diskCheckCounter int
-callback := func(msg agent.StreamMessage, parsed *agent.AssistantMessage) {
-    diskCheckCounter++
-    if diskCheckCounter % 50 == 0 {  // 每 50 条消息检查一次
-        if _, _, qErr := s.checkDiskQuota(projectWorkDir); qErr != nil {
-            s.Hub.Emit(sessionID, ChatEvent{
-                Type:    "error",
-                Message: "disk_quota_exceeded: " + qErr.Error(),
-            })
-            cancel()  // 终止 Agent 任务
-            return
-        }
-    }
-    // ... 原有处理逻辑
+`~/.nexbox/config.json`：
+```json
+{
+  "container_enabled": true,
+  "container_image": "boxnex-agent:latest",
+  "container_network": "boxnex-net",
+  "disk_quota_bytes": 1073741824
 }
 ```
 
-**`dirSize` 的性能说明：** 遍历目录树有 I/O 开销，每 50 条消息触发一次在实际场景中频率约为每隔数秒，可以接受。如果目录很大可适当调大间隔（如 100 次）。
+用户配额（管理员设置）：
+```json
+{ "cpu": "2.0", "memory": "4g", "pids": 500 }
+```
 
 ---
 
-## 四、实施优先级
+## 待办
 
-### P0（上线前必须完成）
-
-- [ ] 实现网络隔离（方案 A 或 B 二选一）
-- [ ] 更新 `container.go` 的 `docker run` 参数（`--cap-drop ALL`、`--read-only`、`--tmpfs` 等）
-
-### P1（上线后尽快补齐）
-
-- [ ] StreamCallback 中加磁盘配额周期性检查
-- [ ] 验证 `--read-only` 下 Claude CLI 是否正常工作（重点检查 session 文件写入路径）
-- [ ] 如选方案 B，设置 cron job 定时刷新 ipset（Anthropic IP 会变化）
-
-### P2（中期优化）
-
-- [ ] 评估是否使用非 root 用户运行容器（需要 workspace 目录权限配合）
-- [ ] 配置 seccomp profile，禁用 `ptrace`、`mount` 等高危 syscall
-- [ ] 将空闲容器回收时间从 1 小时缩短至 15-30 分钟
+| 项目 | 优先级 | 说明 |
+|------|--------|------|
+| WatchWorkspace 接入 | P2 | 任务执行中的持续磁盘监控，已实现未接入 |
+| 网络出站过滤 | P2 | boxnex-net 容器目前不限制出站；可用 iptables 白名单或 HTTP 代理实现 |
+| XFS prjquota 磁盘硬限制 | P3 | bind mount workspace 的块级磁盘配额，需要 XFS 文件系统 |
+| inject.so 加密存储 | P3 | 当前 XOR 混淆；可考虑 kernel keyring / Vault / 系统 secret manager |
+| DinD 出站过滤 | P3 | Sysbox 容器内运行 Docker 时的出站限制 |
+| 镜像签名验证 | P3 | 确保 boxnex-agent:latest 未被篡改（Docker Content Trust） |

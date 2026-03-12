@@ -458,6 +458,50 @@ func (s *Server) HandleAdminUpdateUserFeatures(w http.ResponseWriter, r *http.Re
 	json.NewEncoder(w).Encode(u)
 }
 
+// HandleAdminUpdateUserQuota PATCH /api/admin/users/{userID}/quota
+// Admin-only: update a user's container resource quota.
+func (s *Server) HandleAdminUpdateUserQuota(w http.ResponseWriter, r *http.Request) {
+	targetID := chi.URLParam(r, "userID")
+	var req struct {
+		Quotas string `json:"quotas"` // JSON string e.g. {"cpu":"1.0","memory":"2g","pids":200}
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Quotas == "" {
+		req.Quotas = "{}"
+	}
+	if !json.Valid([]byte(req.Quotas)) {
+		http.Error(w, "quotas must be valid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := s.Store.UpdateUserQuotas(targetID, req.Quotas); err != nil {
+		http.Error(w, "failed to update quota: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u, err := s.Store.GetUser(targetID)
+	if err != nil || u == nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(u)
+}
+
+// HandleGetMyQuota GET /api/quota
+// Returns the authenticated user's container resource quota.
+func (s *Server) HandleGetMyQuota(w http.ResponseWriter, r *http.Request) {
+	userID := GetUserID(r)
+	u, err := s.Store.GetUser(userID)
+	if err != nil || u == nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"quotas": u.Quotas})
+}
+
 // HandleAdminListUsers GET /api/admin/users
 func (s *Server) HandleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := s.Store.ListUsers(100, 0)

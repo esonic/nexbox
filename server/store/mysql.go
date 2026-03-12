@@ -317,6 +317,7 @@ func (s *MySQLStore) migrate() error {
 			email         VARCHAR(255) NOT NULL DEFAULT '',
 			role          VARCHAR(50) NOT NULL DEFAULT 'user',
 			features      BIGINT NOT NULL DEFAULT 0,
+			quotas        TEXT NOT NULL DEFAULT '{}',
 			created_at    DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
 			updated_at    DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
 			UNIQUE KEY uq_users_username (username)
@@ -346,5 +347,11 @@ func (s *MySQLStore) migrate() error {
 			return fmt.Errorf("migration failed: %w\nSQL: %s", err, m)
 		}
 	}
+
+	// Idempotent column addition for existing MySQL deployments
+	if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS quotas TEXT NOT NULL DEFAULT '{}'`); err != nil {
+		return fmt.Errorf("add users.quotas column: %w", err)
+	}
+
 	return nil
 }

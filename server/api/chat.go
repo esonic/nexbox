@@ -58,6 +58,9 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 
 		switch chatReq.Type {
 		case "subscribe":
+			if chatReq.SessionID != "" && s.ContainerMgr != nil {
+				go s.warmupContainer(chatReq.SessionID)
+			}
 			continue
 
 		case "unsubscribe":
@@ -179,6 +182,11 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 	projectWorkDir := project.GitRepoPath
 	if projectWorkDir == "" {
 		projectWorkDir = "."
+	}
+
+	// T9: Reset idle timer when user sends a message
+	if s.ContainerMgr != nil && session.ProjectID != "" {
+		s.ContainerMgr.TouchActivity(session.ProjectID)
 	}
 
 	// Check disk quota before invoking Claude
@@ -646,6 +654,8 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				UserInputHandler:   userInputHandler,
 				UserFeatures:       userFeatures,
 				TokenBudget:        tokenBudgetForTask,
+				UserID:             session.UserID,
+				ContainerQuota:     s.userQuota(session.UserID),
 			},
 			eventHandler,
 		)
@@ -688,7 +698,9 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					PluginDirs:         pluginDirs,
 					UserInputHandler:   userInputHandler,
 					UserFeatures:       userFeatures,
-				TokenBudget:        tokenBudgetForTask,
+					TokenBudget:        tokenBudgetForTask,
+					UserID:             session.UserID,
+					ContainerQuota:     s.userQuota(session.UserID),
 				},
 				eventHandler,
 			)
@@ -783,6 +795,38 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 
 		s.processNextQueued(sessionID)
 	}()
+}
+
+// warmupContainer pre-warms the Docker container for a session's project (T8).
+func (s *Server) warmupContainer(sessionID string) {
+	sess, err := s.Store.GetSession(sessionID)
+	if err != nil || sess == nil || sess.ProjectID == "" {
+		return
+	}
+	project, err := s.getProjectWithLocalPath(sess.ProjectID)
+	if err != nil || project == nil || project.GitRepoPath == "" {
+		return
+	}
+	quota := s.userQuota(sess.UserID)
+	if _, err := s.ContainerMgr.EnsureContainer(project.GitRepoPath, project.GitRepoPath, sess.UserID, quota); err != nil {
+		log.Printf("[container] warmup failed for project %s: %v", sess.ProjectID, err)
+	}
+}
+
+// userQuota looks up the container resource quota for a user (T7).
+func (s *Server) userQuota(userID string) *agent.ContainerQuota {
+	if userID == "" {
+		return nil
+	}
+	u, err := s.Store.GetUser(userID)
+	if err != nil || u == nil || u.Quotas == "" || u.Quotas == "{}" {
+		return nil
+	}
+	var q agent.ContainerQuota
+	if err := json.Unmarshal([]byte(u.Quotas), &q); err != nil {
+		return nil
+	}
+	return &q
 }
 
 // resolveImagePaths converts image filenames to absolute paths, filtering out any that don't exist.

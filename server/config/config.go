@@ -35,15 +35,10 @@ type Config struct {
 	// Billing
 	TokenPricePerMillion float64 `json:"token_price_per_million,omitempty"` // currency per 1M tokens
 
-	// Podman rootless container isolation
-	PodmanEnabled bool     `json:"podman_enabled,omitempty"` // enable per-project Podman isolation
-	PodmanImage   string   `json:"podman_image,omitempty"`   // container image (default: "boxnex-agent:latest")
-	PodmanNetwork string   `json:"podman_network,omitempty"` // Podman network name (default: "boxnex-egress")
-
-	// Egress proxy (embedded in server process)
-	ProxyListenAddr   string   `json:"proxy_listen_addr,omitempty"`   // e.g. "0.0.0.0:8118"
-	ClaudeAuthToken   string   `json:"claude_auth_token,omitempty"`   // CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY; never injected directly into containers
-	ProxyAllowedHosts []string `json:"proxy_allowed_hosts,omitempty"` // extra CONNECT-allowed hosts beyond defaults
+	// Docker rootless + Sysbox container isolation
+	ContainerEnabled bool   `json:"container_enabled,omitempty"` // enable per-project Docker container isolation
+	ContainerImage   string `json:"container_image,omitempty"`   // container image (default: "boxnex-agent:latest")
+	ContainerNetwork string `json:"container_network,omitempty"` // Docker network name (default: "boxnex-net")
 
 	// CORS allowed origins (e.g. ["http://localhost:5173"]). Falls back to
 	// built-in dev defaults when empty.

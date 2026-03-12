@@ -34,8 +34,8 @@ func (s *MySQLStore) CreateUser(req CreateUserRequest) (*User, error) {
 	}
 	defer tx.Rollback()
 	_, err = tx.Exec(
-		`INSERT INTO users (id, username, password_hash, email, role, features, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO users (id, username, password_hash, email, role, features, quotas, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
 		u.ID, u.Username, u.PasswordHash, u.Email, u.Role, u.Features, u.CreatedAt, u.UpdatedAt,
 	)
 	if err != nil {
@@ -58,7 +58,7 @@ func (s *MySQLStore) CreateUser(req CreateUserRequest) (*User, error) {
 
 func (s *MySQLStore) GetUser(id string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, email, role, features, created_at, updated_at FROM users WHERE id = ?`, id,
+		`SELECT id, username, password_hash, email, role, features, quotas, created_at, updated_at FROM users WHERE id = ?`, id,
 	)
 	u, err := mysqlScanUser(row)
 	if err == sql.ErrNoRows {
@@ -69,7 +69,7 @@ func (s *MySQLStore) GetUser(id string) (*User, error) {
 
 func (s *MySQLStore) GetUserByUsername(username string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, email, role, features, created_at, updated_at FROM users WHERE username = ?`, username,
+		`SELECT id, username, password_hash, email, role, features, quotas, created_at, updated_at FROM users WHERE username = ?`, username,
 	)
 	u, err := mysqlScanUser(row)
 	if err == sql.ErrNoRows {
@@ -80,7 +80,7 @@ func (s *MySQLStore) GetUserByUsername(username string) (*User, error) {
 
 func (s *MySQLStore) ListUsers(limit, offset int) ([]User, error) {
 	rows, err := s.db.Query(
-		`SELECT id, username, password_hash, email, role, features, created_at, updated_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		`SELECT id, username, password_hash, email, role, features, quotas, created_at, updated_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 		limit, offset,
 	)
 	if err != nil {
@@ -124,11 +124,16 @@ func (s *MySQLStore) UpdateUserRole(id string, role string) error {
 
 func mysqlScanUser(row interface{ Scan(...interface{}) error }) (*User, error) {
 	var u User
-	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Email, &u.Role, &u.Features, &u.CreatedAt, &u.UpdatedAt)
+	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Email, &u.Role, &u.Features, &u.Quotas, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	return &u, nil
+}
+
+func (s *MySQLStore) UpdateUserQuotas(id, quotas string) error {
+	_, err := s.db.Exec(`UPDATE users SET quotas = ?, updated_at = ? WHERE id = ?`, quotas, time.Now(), id)
+	return err
 }
 
 // ---------------------------------------------------------------------------

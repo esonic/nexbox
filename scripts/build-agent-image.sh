@@ -2,7 +2,7 @@
 # scripts/build-agent-image.sh
 #
 # Builds the boxnex-agent container image used for per-project container isolation.
-# Run this once before enabling podman_enabled: true in config.json.
+# Run this once before enabling container_enabled: true in config.json.
 #
 # Usage:
 #   ./scripts/build-agent-image.sh                          # native arch
@@ -43,7 +43,7 @@ echo "    Dockerfile: Dockerfile.agent"
 echo "    Context:    ${REPO_ROOT}"
 echo ""
 
-podman build \
+docker build \
   "${PLATFORM_ARGS[@]}" \
   -f "${REPO_ROOT}/Dockerfile.agent" \
   -t "${FULL_IMAGE}" \
@@ -53,18 +53,18 @@ echo ""
 echo "==> Build complete: ${FULL_IMAGE}"
 
 # Show image size
-podman image ls "${IMAGE_NAME}" --format "    Size: {{.Size}}" | head -1
+docker image ls "${IMAGE_NAME}" --format "    Size: {{.Size}}" | head -1
 
 if [ "$PUSH" = true ]; then
   echo ""
   echo "==> Pushing ${FULL_IMAGE}"
-  podman push "${FULL_IMAGE}"
+  docker push "${FULL_IMAGE}"
   echo "==> Push complete"
 fi
 
 echo ""
 echo "Next steps:"
-echo "  1. Set podman_enabled: true in config.json"
-echo "  2. Set podman_image: \"${FULL_IMAGE}\" in config.json (or leave blank for default)"
-echo "  3. Set CLAUDE_CODE_OAUTH_TOKEN environment variable (do not write to config.json)"
+echo "  1. Set container_enabled: true in config.json"
+echo "  2. Set container_image: \"${FULL_IMAGE}\" in config.json (or leave blank for default)"
+echo "  3. Deploy OAuth token: sudo inject/rotate.sh <your_claude_oauth_token>"
 echo "  4. Restart the boxnex server"
