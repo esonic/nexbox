@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import {
   ChevronRight,
   ChevronDown,
+  ChevronUp,
   File,
   Folder,
   FolderOpen,
@@ -214,9 +215,194 @@ function SearchResults({
   );
 }
 
+// ── In-file search ──
+
+interface LineMatch {
+  start: number;
+  end: number;
+  globalIndex: number;
+}
+
+function computeLineMatches(lines: string[], query: string, caseSensitive: boolean): Map<number, LineMatch[]> {
+  const result = new Map<number, LineMatch[]>();
+  if (!query) return result;
+  const q = caseSensitive ? query : query.toLowerCase();
+  let globalIndex = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const text = caseSensitive ? lines[i] : lines[i].toLowerCase();
+    let pos = 0;
+    while (pos <= text.length - q.length) {
+      const idx = text.indexOf(q, pos);
+      if (idx === -1) break;
+      const arr = result.get(i) ?? [];
+      arr.push({ start: idx, end: idx + q.length, globalIndex });
+      result.set(i, arr);
+      globalIndex++;
+      pos = idx + 1;
+    }
+  }
+  return result;
+}
+
+function HighlightOverlay({ line, matches, currentGlobalIndex }: {
+  line: string;
+  matches: LineMatch[];
+  currentGlobalIndex: number;
+}) {
+  const parts: React.ReactNode[] = [];
+  let pos = 0;
+  for (const m of matches) {
+    if (pos < m.start) {
+      parts.push(<span key={`t${pos}`}>{line.slice(pos, m.start)}</span>);
+    }
+    const isCurrent = m.globalIndex === currentGlobalIndex;
+    parts.push(
+      <mark
+        key={`m${m.start}`}
+        data-match-idx={m.globalIndex}
+        style={{
+          background: isCurrent ? "rgba(255, 160, 0, 0.65)" : "rgba(255, 220, 0, 0.35)",
+          color: "transparent",
+          borderRadius: "2px",
+        }}
+      >
+        {line.slice(m.start, m.end)}
+      </mark>
+    );
+    pos = m.end;
+  }
+  if (pos < line.length) {
+    parts.push(<span key={`t${pos}`}>{line.slice(pos)}</span>);
+  }
+  return (
+    <div
+      className="absolute inset-0 px-3 py-0 whitespace-pre-wrap break-all pointer-events-none select-none"
+      style={{ color: "transparent", fontFamily: "inherit", fontSize: "inherit", lineHeight: "inherit" }}
+      aria-hidden
+    >
+      {parts}
+    </div>
+  );
+}
+
+// ── File search bar (VSCode-style overlay) ──
+
+function FileSearchBar({
+  query,
+  caseSensitive,
+  currentIndex,
+  total,
+  onQueryChange,
+  onCaseSensitiveChange,
+  onPrev,
+  onNext,
+  onClose,
+}: {
+  query: string;
+  caseSensitive: boolean;
+  currentIndex: number;
+  total: number;
+  onQueryChange: (q: string) => void;
+  onCaseSensitiveChange: (v: boolean) => void;
+  onPrev: () => void;
+  onNext: () => void;
+  onClose: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      onClose();
+    } else if (e.key === "Enter") {
+      if (e.shiftKey) onPrev();
+      else onNext();
+    }
+  };
+
+  return (
+    <div className="absolute top-2 right-3 z-50 flex items-center gap-1 bg-popover border border-border rounded-md shadow-lg px-2 py-1.5">
+      <div className="flex items-center gap-1 bg-muted/50 rounded px-1.5 border border-transparent focus-within:border-ring/50">
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={(e) => onQueryChange(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Find in file..."
+          className="bg-transparent text-xs py-0.5 outline-none w-36 placeholder:text-muted-foreground/40"
+        />
+        {query && (
+          <button onClick={() => onQueryChange("")} className="text-muted-foreground/40 hover:text-muted-foreground">
+            <X className="h-3 w-3" />
+          </button>
+        )}
+      </div>
+      <button
+        onClick={() => onCaseSensitiveChange(!caseSensitive)}
+        title="Match Case"
+        className={cn(
+          "h-5 w-6 rounded text-[11px] font-semibold transition-colors border",
+          caseSensitive
+            ? "bg-primary/10 text-primary border-primary/30"
+            : "text-muted-foreground/50 hover:text-muted-foreground border-transparent hover:border-border"
+        )}
+      >
+        Aa
+      </button>
+      <span className={cn(
+        "text-[11px] min-w-[4.5rem] text-center tabular-nums",
+        query && total === 0 ? "text-destructive/70" : "text-muted-foreground/60"
+      )}>
+        {query ? (total === 0 ? "No results" : `${currentIndex + 1} of ${total}`) : ""}
+      </span>
+      <button
+        onClick={onPrev}
+        disabled={total === 0}
+        className="p-0.5 rounded hover:bg-accent text-muted-foreground/60 hover:text-foreground transition-colors disabled:opacity-30"
+        title="Previous match (Shift+Enter)"
+      >
+        <ChevronUp className="h-3.5 w-3.5" />
+      </button>
+      <button
+        onClick={onNext}
+        disabled={total === 0}
+        className="p-0.5 rounded hover:bg-accent text-muted-foreground/60 hover:text-foreground transition-colors disabled:opacity-30"
+        title="Next match (Enter)"
+      >
+        <ChevronDown className="h-3.5 w-3.5" />
+      </button>
+      <button
+        onClick={onClose}
+        className="p-0.5 rounded hover:bg-accent text-muted-foreground/50 hover:text-foreground transition-colors"
+        title="Close (Escape)"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
 // ── Code viewer with highlight.js ──
 
-function CodeViewer({ content, filepath }: { content: string; filepath: string }) {
+function CodeViewer({
+  content,
+  filepath,
+  searchQuery = "",
+  caseSensitive = false,
+  currentMatchIndex = -1,
+  onMatchesFound,
+}: {
+  content: string;
+  filepath: string;
+  searchQuery?: string;
+  caseSensitive?: boolean;
+  currentMatchIndex?: number;
+  onMatchesFound?: (total: number) => void;
+}) {
   const lang = useMemo(() => getLangFromPath(filepath), [filepath]);
   const [langReady, setLangReady] = useState(false);
 
@@ -238,27 +424,60 @@ function CodeViewer({ content, filepath }: { content: string; filepath: string }
 
   const gutterWidth = String(lines.length).length;
 
+  // Compute search matches
+  const lineMatches = useMemo(
+    () => computeLineMatches(lines, searchQuery, caseSensitive),
+    [lines, searchQuery, caseSensitive]
+  );
+
+  const totalMatches = useMemo(() => {
+    let total = 0;
+    lineMatches.forEach((m) => (total += m.length));
+    return total;
+  }, [lineMatches]);
+
+  useEffect(() => {
+    onMatchesFound?.(totalMatches);
+  }, [totalMatches, onMatchesFound]);
+
+  // Scroll current match into view
+  useEffect(() => {
+    if (currentMatchIndex < 0) return;
+    const el = document.querySelector(`[data-match-idx="${currentMatchIndex}"]`);
+    el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [currentMatchIndex]);
+
   return (
     <div className="overflow-auto h-full">
       <table className="w-full text-xs font-mono leading-[1.4]">
         <tbody>
-          {lines.map((line, i) => (
-            <tr key={i} className="hover:bg-accent/30">
-              <td
-                className="px-3 py-0 text-right select-none text-muted-foreground/40 border-r border-border/20 align-top"
-                style={{ minWidth: gutterWidth * 8 + 24 }}
-              >
-                {i + 1}
-              </td>
-              <td className="px-3 py-0 whitespace-pre-wrap break-all">
-                {highlightedLines?.[i] ? (
-                  <span dangerouslySetInnerHTML={{ __html: highlightedLines[i] }} />
-                ) : (
-                  <span>{line}</span>
-                )}
-              </td>
-            </tr>
-          ))}
+          {lines.map((line, i) => {
+            const matches = lineMatches.get(i);
+            return (
+              <tr key={i} className="hover:bg-accent/30">
+                <td
+                  className="px-3 py-0 text-right select-none text-muted-foreground/40 border-r border-border/20 align-top"
+                  style={{ minWidth: gutterWidth * 8 + 24 }}
+                >
+                  {i + 1}
+                </td>
+                <td className="px-3 py-0 whitespace-pre-wrap break-all relative">
+                  {highlightedLines?.[i] ? (
+                    <span dangerouslySetInnerHTML={{ __html: highlightedLines[i] }} />
+                  ) : (
+                    <span>{line}</span>
+                  )}
+                  {matches && matches.length > 0 && (
+                    <HighlightOverlay
+                      line={line}
+                      matches={matches}
+                      currentGlobalIndex={currentMatchIndex}
+                    />
+                  )}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -294,7 +513,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     }
   }, [projectId, ownerProjectId, resetForProject]);
 
-  // Search state
+  // Search state (sidebar)
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchType, setSearchType] = useState<"name" | "content">("name");
@@ -302,6 +521,51 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const [searchLoading, setSearchLoading] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  // In-file search state
+  const [fileSearchVisible, setFileSearchVisible] = useState(false);
+  const [fileSearchQuery, setFileSearchQuery] = useState("");
+  const [fileSearchCaseSensitive, setFileSearchCaseSensitive] = useState(false);
+  const [fileSearchCurrentIndex, setFileSearchCurrentIndex] = useState(0);
+  const [fileSearchTotal, setFileSearchTotal] = useState(0);
+
+  // Reset in-file search when file changes
+  useEffect(() => {
+    setFileSearchVisible(false);
+    setFileSearchQuery("");
+    setFileSearchCurrentIndex(0);
+    setFileSearchTotal(0);
+  }, [selectedPath]);
+
+  // Reset index when query or case sensitivity changes
+  useEffect(() => {
+    setFileSearchCurrentIndex(0);
+  }, [fileSearchQuery, fileSearchCaseSensitive]);
+
+  // Ctrl+F / Cmd+F to open in-file search
+  useEffect(() => {
+    if (!selectedPath) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "f" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        setFileSearchVisible(true);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [selectedPath]);
+
+  const handleFileSearchMatchesFound = useCallback((total: number) => {
+    setFileSearchTotal(total);
+  }, []);
+
+  const handleFileSearchNext = useCallback(() => {
+    setFileSearchCurrentIndex((i) => (fileSearchTotal === 0 ? 0 : (i + 1) % fileSearchTotal));
+  }, [fileSearchTotal]);
+
+  const handleFileSearchPrev = useCallback(() => {
+    setFileSearchCurrentIndex((i) => (fileSearchTotal === 0 ? 0 : (i - 1 + fileSearchTotal) % fileSearchTotal));
+  }, [fileSearchTotal]);
 
   const loadTree = useCallback(async () => {
     setLoading(true);
@@ -672,14 +936,34 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                 {t("files.binary_file", { size: formatSize(fileContent.size) })}
               </div>
             ) : fileContent ? (
-              <div className="flex-1 min-h-0">
+              <div className="flex-1 min-h-0 relative">
+                {fileSearchVisible && (
+                  <FileSearchBar
+                    query={fileSearchQuery}
+                    caseSensitive={fileSearchCaseSensitive}
+                    currentIndex={fileSearchCurrentIndex}
+                    total={fileSearchTotal}
+                    onQueryChange={(q) => { setFileSearchQuery(q); setFileSearchCurrentIndex(0); }}
+                    onCaseSensitiveChange={(v) => { setFileSearchCaseSensitive(v); setFileSearchCurrentIndex(0); }}
+                    onPrev={handleFileSearchPrev}
+                    onNext={handleFileSearchNext}
+                    onClose={() => { setFileSearchVisible(false); setFileSearchQuery(""); }}
+                  />
+                )}
                 {markdownPreviewAvailable && markdownMode === "rendered" ? (
                   <MarkdownRenderer
                     content={fileContent.content}
                     className="h-full overflow-auto px-4 py-3 markdown-content text-sm"
                   />
                 ) : (
-                  <CodeViewer content={fileContent.content} filepath={selectedPath} />
+                  <CodeViewer
+                    content={fileContent.content}
+                    filepath={selectedPath}
+                    searchQuery={fileSearchQuery}
+                    caseSensitive={fileSearchCaseSensitive}
+                    currentMatchIndex={fileSearchCurrentIndex}
+                    onMatchesFound={handleFileSearchMatchesFound}
+                  />
                 )}
               </div>
             ) : (
