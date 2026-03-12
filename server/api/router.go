@@ -260,6 +260,7 @@ func NewRouter(s *Server) *chi.Mux {
 					// File browser
 					r.Get("/files", s.ListProjectFiles)
 					r.Get("/file-content", s.ReadProjectFile)
+					r.Put("/file-content", s.WriteProjectFile)
 					r.Get("/file-search", s.SearchProjectFiles)
 					r.Post("/files/upload", s.UploadProjectFile)
 					r.Get("/files/download", s.DownloadProjectFile)

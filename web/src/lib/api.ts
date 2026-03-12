@@ -396,6 +396,8 @@ export const filesApi = {
     request<FileEntry[]>(`/projects/${projectId}/files${sessionId ? `?session_id=${sessionId}` : ""}`),
   content: (projectId: string, path: string, sessionId?: string) =>
     request<FileContentResponse>(`/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`),
+  writeContent: (projectId: string, path: string, content: string, sessionId?: string) =>
+    request<{ path: string; size: number }>(`/projects/${projectId}/file-content${sessionId ? `?session_id=${sessionId}` : ""}`, { method: "PUT", body: JSON.stringify({ path, content }) }),
   search: (projectId: string, query: string, type: "name" | "content" = "name", sessionId?: string) =>
     request<FileSearchResult[]>(`/projects/${projectId}/file-search?q=${encodeURIComponent(query)}&type=${type}${sessionId ? `&session_id=${sessionId}` : ""}`),
   upload: async (projectId: string, file: File, path: string, sessionId?: string): Promise<{ path: string; size: number }> => {

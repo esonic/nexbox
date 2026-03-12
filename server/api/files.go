@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -298,6 +299,89 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request) {
 		"binary":  false,
 		"size":    info.Size(),
 		"content": string(content),
+	})
+}
+
+// WriteProjectFile writes (creates or updates) a text file in the project directory.
+// PUT /api/projects/{projectId}/file-content[?session_id=xxx]
+// Body: {"path": "relative/path", "content": "file content"}
+func (s *Server) WriteProjectFile(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectId")
+	root, err := s.resolveFilesRoot(r, projectID)
+	if err != nil {
+		if errors.Is(err, errForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+
+	var req struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	// Enforce 2MB content limit
+	const maxSize = 2 * 1024 * 1024
+	if len(req.Content) > maxSize {
+		writeError(w, http.StatusBadRequest, "content too large (max 2MB)")
+		return
+	}
+
+	fullPath, err := resolveSecurePath(root, req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Atomic write: write to a temp file in the same directory, then rename.
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create directory")
+		return
+	}
+	tmp, err := os.CreateTemp(dir, ".nexbox-tmp-*")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create temp file")
+		return
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		tmp.Close()
+		os.Remove(tmpName) // no-op if already renamed
+	}()
+	if _, err := tmp.WriteString(req.Content); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to write content")
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to flush content")
+		return
+	}
+	if err := os.Rename(tmpName, fullPath); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save file")
+		return
+	}
+
+	rel, _ := filepath.Rel(root, fullPath)
+	log.Printf("[api] WriteProjectFile(%s) wrote %s (%d bytes)", projectID, rel, len(req.Content))
+
+	if s.ContainerMgr != nil {
+		s.ContainerMgr.TouchActivity(projectID)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"path": rel,
+		"size": len(req.Content),
 	})
 }
 
