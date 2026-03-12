@@ -218,6 +218,60 @@ func codexPatchResultMessage(toolName, path string) string {
 	}
 }
 
+func codexWebSearchQueryFromPayload(payload map[string]interface{}) string {
+	query := normalizeWebSearchQueryCandidate(firstJSONMapStringDeep(payload,
+		"query", "searchQuery", "search_query", "searchTerm", "search_term", "term", "q", "url",
+	))
+	if query != "" {
+		return query
+	}
+
+	if rawQueries, ok := findJSONValueDeep(payload, "queries"); ok {
+		switch vv := rawQueries.(type) {
+		case []interface{}:
+			for _, entry := range vv {
+				switch ev := entry.(type) {
+				case string:
+					if q := normalizeWebSearchQueryCandidate(ev); q != "" {
+						return q
+					}
+				case map[string]interface{}:
+					if q := normalizeWebSearchQueryCandidate(firstJSONMapStringDeep(ev,
+						"query", "searchQuery", "search_query", "searchTerm", "search_term", "term", "q", "url",
+					)); q != "" {
+						return q
+					}
+				default:
+					if q := normalizeWebSearchQueryCandidate(stringifyJSONValue(ev)); q != "" {
+						return q
+					}
+				}
+			}
+		case []string:
+			for _, entry := range vv {
+				if q := normalizeWebSearchQueryCandidate(entry); q != "" {
+					return q
+				}
+			}
+		}
+	}
+
+	return normalizeWebSearchQueryCandidate(firstJSONMapStringDeep(payload, "input", "text", "prompt", "content"))
+}
+
+func normalizeWebSearchQueryCandidate(value string) string {
+	candidate := strings.TrimSpace(value)
+	candidate = strings.Trim(candidate, "\"")
+	if candidate == "" || candidate == "null" || candidate == "{}" || candidate == "[]" {
+		return ""
+	}
+	if (strings.HasPrefix(candidate, "{") && strings.HasSuffix(candidate, "}")) ||
+		(strings.HasPrefix(candidate, "[") && strings.HasSuffix(candidate, "]")) {
+		return ""
+	}
+	return candidate
+}
+
 func extractPatchChangeFromText(patchText string) (kind string, path string) {
 	lines := strings.Split(patchText, "\n")
 	for _, line := range lines {

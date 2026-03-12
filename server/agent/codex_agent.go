@@ -248,6 +248,10 @@ func (a *CodexAgent) SendMessage(
 		compatExecInputs   = make(map[string]string) // codex/event exec id -> deferred tool input
 		compatExecOutputs  = make(map[string]string) // codex/event exec id -> buffered output delta
 		compatExecSkip     = make(map[string]bool)   // codex/event exec id -> canonical item/* already emitted
+		compatWebTools     = make(map[string]string) // codex/event web search id -> emitted tool id
+		compatWebInputs    = make(map[string]string) // codex/event web search id -> deferred tool input
+		compatWebQueries   = make(map[string]string) // codex/event web search id -> query text
+		compatWebSkip      = make(map[string]bool)   // codex/event web search id -> canonical item/* already emitted
 		compatPatchTools   = make(map[string]string) // codex/event patch id -> emitted tool id
 		compatPatchNames   = make(map[string]string) // codex/event patch id -> Edit/Write/Delete
 		compatPatchPaths   = make(map[string]string) // codex/event patch id -> changed file path
@@ -587,6 +591,25 @@ func (a *CodexAgent) SendMessage(
 				stateMu.Unlock()
 			}
 
+		case "codex/event/terminal_interaction", "item/commandExecution/terminalInteraction":
+			if payload, ok := parseRawJSONMap(params); ok {
+				rawID := firstJSONMapStringDeep(payload, "call_id", "callId", "item_id", "itemId", "id", "tool_call_id", "toolCallId")
+				delta := firstJSONMapStringDeep(payload, "delta", "output", "stdout", "stderr", "text", "content", "prompt")
+				if strings.TrimSpace(delta) == "" {
+					return
+				}
+				stateMu.Lock()
+				if rawID == "" && len(compatExecOutputs) == 1 {
+					for id := range compatExecOutputs {
+						rawID = id
+					}
+				}
+				if _, ok := compatExecOutputs[rawID]; ok {
+					compatExecOutputs[rawID] += delta
+				}
+				stateMu.Unlock()
+			}
+
 		case "codex/event/exec_command_end":
 			if payload, ok := parseRawJSONMap(params); ok {
 				rawID := firstJSONMapStringDeep(payload, "call_id", "callId", "id", "item_id", "itemId", "tool_call_id", "toolCallId")
@@ -618,6 +641,88 @@ func (a *CodexAgent) SendMessage(
 					Type:     EventToolStart,
 					ToolID:   toolID,
 					ToolName: "Bash",
+					Input:    input,
+				})
+				cb(StreamEvent{
+					Type:    EventToolResult,
+					ToolID:  toolID,
+					Output:  output,
+					IsError: isError,
+				})
+			}
+
+		case "codex/event/web_search_begin":
+			if payload, ok := parseRawJSONMap(params); ok {
+				rawID := firstJSONMapStringDeep(payload, "search_id", "searchId", "call_id", "callId", "id", "item_id", "itemId", "tool_call_id", "toolCallId")
+				if rawID == "" {
+					rawID = fmt.Sprintf("web-search:%d", time.Now().UnixNano())
+				}
+				toolID := "compat-web-search:" + rawID
+				query := codexWebSearchQueryFromPayload(payload)
+				input := "{}"
+				if query != "" {
+					qJSON, _ := json.Marshal(map[string]string{"query": query})
+					input = string(qJSON)
+				}
+
+				stateMu.Lock()
+				compatWebTools[rawID] = toolID
+				compatWebInputs[rawID] = input
+				compatWebQueries[rawID] = query
+				compatWebSkip[rawID] = false
+				stateMu.Unlock()
+			}
+
+		case "codex/event/web_search_end":
+			if payload, ok := parseRawJSONMap(params); ok {
+				rawID := firstJSONMapStringDeep(payload, "search_id", "searchId", "call_id", "callId", "id", "item_id", "itemId", "tool_call_id", "toolCallId")
+				stateMu.Lock()
+				if rawID == "" && len(compatWebTools) == 1 {
+					for id := range compatWebTools {
+						rawID = id
+					}
+				}
+				toolID := compatWebTools[rawID]
+				if toolID == "" {
+					toolID = "compat-web-search:" + rawID
+				}
+				input := compatWebInputs[rawID]
+				query := compatWebQueries[rawID]
+				skip := compatWebSkip[rawID]
+				delete(compatWebTools, rawID)
+				delete(compatWebInputs, rawID)
+				delete(compatWebQueries, rawID)
+				delete(compatWebSkip, rawID)
+				stateMu.Unlock()
+				if skip {
+					return
+				}
+
+				if strings.TrimSpace(query) == "" {
+					query = codexWebSearchQueryFromPayload(payload)
+				}
+				if strings.TrimSpace(query) == "" {
+					return
+				}
+				if strings.TrimSpace(input) == "" || input == "{}" {
+					if query != "" {
+						qJSON, _ := json.Marshal(map[string]string{"query": query})
+						input = string(qJSON)
+					} else {
+						input = "{}"
+					}
+				}
+
+				output := firstJSONMapStringDeep(payload, "output", "result", "message", "text", "content")
+				if input == "{}" && strings.TrimSpace(output) == "" {
+					return
+				}
+				success := firstJSONMapBoolDeep(payload, "success")
+				isError := !success && hasJSONMapKeyDeep(payload, "success")
+				cb(StreamEvent{
+					Type:     EventToolStart,
+					ToolID:   toolID,
+					ToolName: "WebSearch",
 					Input:    input,
 				})
 				cb(StreamEvent{
@@ -767,6 +872,44 @@ func (a *CodexAgent) SendMessage(
 					stateMu.Lock()
 					if _, ok := compatExecSkip[n.Item.ID]; ok {
 						compatExecSkip[n.Item.ID] = true
+					}
+					stateMu.Unlock()
+				}
+				if n.Item.Type == "webSearch" {
+					stateMu.Lock()
+					matchID := ""
+					if _, ok := compatWebSkip[n.Item.ID]; ok {
+						matchID = n.Item.ID
+					}
+					if matchID == "" && strings.TrimSpace(n.Item.Query) != "" {
+						for id, q := range compatWebQueries {
+							if strings.EqualFold(strings.TrimSpace(q), strings.TrimSpace(n.Item.Query)) {
+								matchID = id
+								break
+							}
+						}
+					}
+					if matchID == "" && len(compatWebSkip) == 1 {
+						for id := range compatWebSkip {
+							matchID = id
+						}
+					}
+					if matchID == "" {
+						for id, skipped := range compatWebSkip {
+							if !skipped {
+								matchID = id
+								break
+							}
+						}
+					}
+					if matchID != "" {
+						compatWebSkip[matchID] = true
+						if strings.TrimSpace(n.Item.Query) == "" {
+							n.Item.Query = compatWebQueries[matchID]
+						}
+					}
+					if strings.TrimSpace(codexWebSearchQuery(n.Item)) == "" && n.Item.ID != "" {
+						requestToolEmitted[n.Item.ID] = struct{}{}
 					}
 					stateMu.Unlock()
 				}
