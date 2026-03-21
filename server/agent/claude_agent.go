@@ -13,8 +13,9 @@ import (
 // It spawns a claude subprocess with stream-json I/O for each message exchange.
 type ClaudeAgent struct {
 	CLIPath      string            // Path to claude CLI binary (default: "claude")
-	MCPServerURL string            // Optional: URL of the BoxNex MCP server
-	MCPToolNames []string          // MCP tool names (e.g. "mcp__boxnex__save_asset"); populated from mcp.Server.ToolNames()
+	MCPServerURL      string   // Optional: URL of the BoxNex MCP server
+	MCPToolNames      []string // MCP tool names (e.g. "mcp__boxnex__save_asset"); populated from mcp.Server.ToolNames()
+	AlwaysOnMCPToolNames []string // Tool names always included regardless of user features; from mcp.Server.AlwaysOnToolNames()
 	DataDir      string            // For isolated session storage
 	Verbose      bool              // Enable verbose logging
 	ContainerMgr *ContainerManager // Optional: run inside Docker container per project
@@ -116,6 +117,7 @@ func (a *ClaudeAgent) SendMessage(
 		}
 
 		opts.AllowedTools = append(opts.AllowedTools, filterMCPTools(a.MCPToolNames, req.UserFeatures)...)
+		opts.AllowedTools = append(opts.AllowedTools, a.AlwaysOnMCPToolNames...)
 
 		if hasFeature(req.Features, "chrome_devtools") && req.ChromeMCPURL != "" {
 			servers["chrome"] = map[string]interface{}{

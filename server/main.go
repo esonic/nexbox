@@ -144,6 +144,7 @@ func main() {
 	ca := agent.NewClaudeAgent()
 	ca.MCPServerURL = mcpServer.URL()
 	ca.MCPToolNames = mcpServer.ToolNames()
+	ca.AlwaysOnMCPToolNames = mcpServer.AlwaysOnToolNames()
 	ca.DataDir = *dataDir
 	allAgents["claude"] = ca
 

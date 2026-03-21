@@ -50,6 +50,7 @@ type Server struct {
 	listener         net.Listener
 	httpSrv          *http.Server
 	toolNames        []string
+	alwaysOnToolNames []string
 	changeNotifier   ChangeNotifier
 	orchestrator     SessionOrchestrator
 	workflowExecutor WorkflowExecutor
@@ -186,6 +187,14 @@ func (s *Server) URL() string {
 func (s *Server) ToolNames() []string {
 	out := make([]string, len(s.toolNames))
 	copy(out, s.toolNames)
+	return out
+}
+
+// AlwaysOnToolNames returns tool names that must always be included in
+// allowed_tools regardless of user feature flags.
+func (s *Server) AlwaysOnToolNames() []string {
+	out := make([]string, len(s.alwaysOnToolNames))
+	copy(out, s.alwaysOnToolNames)
 	return out
 }
 
@@ -329,6 +338,14 @@ func (s *Server) registerTools() {
 		),
 	)
 
+	// addAlwaysOnTool registers a tool that is always included in allowed_tools,
+	// regardless of user feature flags. Use for tools that every session needs.
+	addAlwaysOnTool := func(tool gomcp.Tool, handler server.ToolHandlerFunc) {
+		name := tool.Name
+		s.mcpServer.AddTool(tool, handler)
+		s.alwaysOnToolNames = append(s.alwaysOnToolNames, "mcp__boxnex__"+name)
+	}
+
 	addTool := func(tool gomcp.Tool, handler server.ToolHandlerFunc) {
 		name := tool.Name
 		wrapped := func(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
@@ -447,8 +464,8 @@ func (s *Server) registerTools() {
 	addTool(listWorkflowsTool, s.handleListWorkflows)
 	addTool(getWorkflowTool, s.handleGetWorkflow)
 	addTool(executeWorkflowTool, s.handleExecuteWorkflow)
-	addTool(visualizeReadMeTool, s.handleVisualizeReadMe)
-	addTool(visualizeShowWidgetTool, s.handleVisualizeShowWidget)
+	addAlwaysOnTool(visualizeReadMeTool, s.handleVisualizeReadMe)
+	addAlwaysOnTool(visualizeShowWidgetTool, s.handleVisualizeShowWidget)
 }
 
 // resolveProject returns the project ID to use for a tool call.
