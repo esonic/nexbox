@@ -38,6 +38,7 @@ const AGENT_LABELS: Record<string, string> = {
 };
 
 const MODEL_OPTIONS: { value: string; label: string }[] = [
+  { value: "opus", label: "Opus" },
   { value: "sonnet", label: "Sonnet" },
   { value: "haiku", label: "Haiku" },
 ];
@@ -734,7 +735,7 @@ export function ChatInput({
     onChangeModel(model);
   };
 
-  const currentModelLabel = MODEL_LABELS[modelName] || MODEL_LABELS["haiku"];
+  const currentModelLabel = MODEL_LABELS[modelName] || MODEL_LABELS["opus"];
 
   return (
     <div className="shrink-0">
@@ -1021,11 +1022,11 @@ export function ChatInput({
                             onClick={() => handleModelChange(opt.value)}
                             className={cn(
                               "w-full flex items-center justify-between px-3 py-1.5 text-xs hover:bg-accent transition-colors",
-                              (modelName || "haiku") === opt.value && "bg-accent/50 font-medium"
+                              (modelName || "opus") === opt.value && "bg-accent/50 font-medium"
                             )}
                           >
                             <span>{opt.label}</span>
-                            {(modelName || "haiku") === opt.value && <Check className="h-3 w-3 text-primary" />}
+                            {(modelName || "opus") === opt.value && <Check className="h-3 w-3 text-primary" />}
                           </button>
                         ))}
                       </div>
