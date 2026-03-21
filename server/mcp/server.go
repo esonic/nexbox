@@ -178,6 +178,10 @@ func (s *Server) URL() string {
 		host = "127.0.0.1" + host
 	} else if strings.HasPrefix(host, "0.0.0.0:") {
 		host = "127.0.0.1" + host[len("0.0.0.0"):]
+	} else if strings.HasPrefix(host, "[::]:") {
+		host = "127.0.0.1" + host[len("[::]"):]
+	} else if strings.HasPrefix(host, "[::1]:") {
+		host = "127.0.0.1" + host[len("[::1]"):]
 	}
 	return fmt.Sprintf("http://%s/mcp", host)
 }

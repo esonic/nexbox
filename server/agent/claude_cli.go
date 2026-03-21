@@ -207,6 +207,10 @@ func (c *ClaudeClient) Query(
 		if opts.IncludePartialMessages {
 			cmd.Env = append(cmd.Env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1")
 		}
+		// Ensure localhost connections (MCP server) bypass any HTTP_PROXY set in
+		// the parent process environment — without this, Claude Code would try to
+		// reach the local MCP server through the external proxy and fail.
+		cmd.Env = append(cmd.Env, "NO_PROXY=localhost,127.0.0.1,::1")
 	}
 
 	stdin, err := cmd.StdinPipe()
