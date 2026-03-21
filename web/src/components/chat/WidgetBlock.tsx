@@ -58,6 +58,7 @@ export function WidgetBlock({ title, widgetCode, loadingMessages }: WidgetBlockP
 <html${isDark ? ' class="dark"' : ""} style="color-scheme: ${isDark ? "dark" : "light"}">
 <head>
 <meta charset="utf-8">
+<base href="${window.location.origin}/">
 <style>
 :root { ${cssVars} }
 *, *::before, *::after { box-sizing: border-box; }

@@ -124,12 +124,11 @@ Output streams token-by-token. Structure code so useful content appears early.
 - **Icon sizing**: 16px for inline icons, 24px max for decorative icons.
 - No tabs, carousels, or display: none sections during streaming.
 - No nested scrolling — auto-fit height.
-- Scripts execute after streaming — load libraries from local vendor path.
-- **Available libraries** (pre-bundled, load via <script src="/vendor/...">):
-  - Chart.js: /vendor/chart.umd.js
-  - D3.js: /vendor/d3.min.js
-  - TopoJSON: /vendor/topojson.min.js
-- Do NOT use external CDN URLs — they are blocked. Always use the /vendor/ paths above.
+- Scripts execute after streaming — load libraries from CDN.
+- **Available libraries** (load via CDN):
+  - Chart.js: https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js
+  - D3.js: https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js
+  - TopoJSON: https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js
 
 ### CSS Variables
 **Backgrounds**: --color-bg-primary (white), --color-bg-secondary (surfaces), --color-bg-tertiary (page bg)
@@ -234,7 +233,7 @@ const visualizeChartDoc = `
 <div style="position: relative; width: 100%; height: 300px;">
   <canvas id="myChart"></canvas>
 </div>
-<script src="/vendor/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
   new Chart(document.getElementById('myChart'), {
     type: 'bar',
@@ -247,15 +246,15 @@ const visualizeChartDoc = `
 - Canvas cannot resolve CSS variables. Use hardcoded hex.
 - Wrap <canvas> in <div> with explicit height and position: relative.
 - Set height ONLY on the wrapper div, never on the canvas.
-- Load via <script src="/vendor/chart.umd.js"></script> (do NOT use CDN).
+- Load via <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>.
 - Multiple charts: use unique IDs.
 - Always disable default legend and build custom HTML legend.
 
 ## Geographic Maps (D3 Choropleth)
 
-Load D3 and TopoJSON from local vendor:
-<script src="/vendor/d3.min.js"></script>
-<script src="/vendor/topojson.min.js"></script>
+Load D3 and TopoJSON from CDN:
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
 
 Topology data sources (these require network access):
 - US states: https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json
