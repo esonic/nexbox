@@ -433,6 +433,17 @@ func (s *SQLiteStore) PurgeExpiredSessions(olderThan time.Time) ([]string, error
 	return ids, nil
 }
 
+// Vacuum checkpoints the WAL and then rebuilds the database to reclaim disk space.
+func (s *SQLiteStore) Vacuum() error {
+	if _, err := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return fmt.Errorf("wal_checkpoint: %w", err)
+	}
+	if _, err := s.db.Exec(`VACUUM`); err != nil {
+		return fmt.Errorf("vacuum: %w", err)
+	}
+	return nil
+}
+
 func (s *SQLiteStore) ReorderSessions(sessionIDs []string) error {
 	tx, err := s.db.Begin()
 	if err != nil {

@@ -154,7 +154,8 @@ export interface ChatEvent {
     | "user_input_request"
     | "subtask_start"
     | "subtask_progress"
-    | "subtask_done";
+    | "subtask_done"
+    | "widget";
   session_id?: string;
   content?: string;
   tool?: string;
@@ -164,6 +165,10 @@ export interface ChatEvent {
   output?: string;
   is_error?: boolean;
   message?: string;
+  // Widget (visualize_show_widget)
+  widget_title?: string;
+  widget_code?: string;
+  loading_messages?: string[];
   stats?: ExecutionStats;
 }
 
@@ -188,7 +193,8 @@ export type MessagePart =
   | { type: "task_ref"; taskId: string; task: Task }
   | { type: "asset_ref"; assetId: string; title: string; assetType: AssetType }
   | { type: "workflow_ref"; workflowId: string; name: string; nodeCount?: number; edgeCount?: number }
-  | { type: "image"; url: string; filename: string };
+  | { type: "image"; url: string; filename: string }
+  | { type: "widget"; title: string; widgetCode: string; loadingMessages?: string[] };
 
 export interface MessageMetadata {
   sessionId?: string;

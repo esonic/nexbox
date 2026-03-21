@@ -63,6 +63,7 @@ interface AppState {
   addNestedToolStart: (sessionId: string, agentToolCallId: string, toolCallId: string, toolName: string, input: string) => void;
   updateNestedToolInput: (sessionId: string, toolCallId: string, inputDelta: string) => void;
   addNestedToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
+  addWidgetPart: (sessionId: string, title: string, widgetCode: string, loadingMessages?: string[]) => void;
 
   finishStreaming: (sessionId: string, stats?: ExecutionStats) => void;
   clearChatMessages: (sessionId: string) => void;
@@ -306,6 +307,14 @@ export const useAppStore = create<AppState>()(
         }
         return parts;
       })
+    ),
+
+  addWidgetPart: (sessionId, title, widgetCode, loadingMessages) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) => {
+        parts.push({ type: "widget", title, widgetCode, loadingMessages });
+        return parts;
+      }),
     ),
 
   finishStreaming: (sessionId, stats?) =>

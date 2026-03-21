@@ -243,30 +243,10 @@ func main() {
 	go func() {
 		runTrashCleanup := func() {
 			cutoff := time.Now().Add(-trashTTL)
-
-			// Collect worktree paths before purging so we can clean them up.
-			worktreePaths, _ := dataStore.GetExpiredSessionWorktrees(cutoff)
-
-			ids, err := dataStore.PurgeExpiredSessions(cutoff)
-			if err != nil {
+			if n, err := srv.PurgeTrash(cutoff); err != nil {
 				log.Printf("[trash] Failed to purge expired sessions: %v", err)
-				return
-			}
-			for _, id := range ids {
-				dir := filepath.Join(*dataDir, "sessions", id)
-				if err := os.RemoveAll(dir); err != nil {
-					log.Printf("[trash] Failed to remove session dir %s: %v", dir, err)
-				} else {
-					log.Printf("[trash] Purged expired session %s", id)
-				}
-			}
-			// Remove git worktrees for purged sessions.
-			for _, wtPath := range worktreePaths {
-				if err := api.RemoveWorktree(wtPath); err != nil {
-					log.Printf("[trash] Failed to remove worktree %s: %v", wtPath, err)
-				} else {
-					log.Printf("[trash] Removed worktree %s", wtPath)
-				}
+			} else if n > 0 {
+				log.Printf("[trash] Purged %d expired sessions", n)
 			}
 
 			// Purge changes older than 7 days

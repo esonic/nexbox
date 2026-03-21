@@ -4,7 +4,8 @@ import remarkGfm from "remark-gfm";
 import { Loader2, Sparkles, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, ChevronDown, ChevronRight } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
-import { ToolCallCard, TODO_TOOLS } from "@/components/chat/ToolCallCard";
+import { ToolCallCard, TODO_TOOLS, HIDDEN_TOOLS } from "@/components/chat/ToolCallCard";
+import { WidgetBlock } from "@/components/chat/WidgetBlock";
 import { ThinkingBlock } from "@/components/chat/ThinkingBlock";
 import { IssueRow } from "@/plugins/task/IssueRow";
 import { messagesApi } from "@/lib/api";
@@ -42,6 +43,11 @@ interface ImagesGroup {
   parts: MessagePart[];
 }
 
+interface WidgetGroup {
+  type: "widget";
+  parts: MessagePart[];
+}
+
 interface StepsGroup {
   type: "steps";
   subGroups: (ThinkingGroup | ToolsGroup)[];
@@ -49,7 +55,7 @@ interface StepsGroup {
   thinkingCount: number;
 }
 
-type PartGroup = TextGroup | ThinkingGroup | ToolsGroup | ImagesGroup | StepsGroup;
+type PartGroup = TextGroup | ThinkingGroup | ToolsGroup | ImagesGroup | WidgetGroup | StepsGroup;
 
 function groupParts(parts: MessagePart[]): PartGroup[] {
   const groups: PartGroup[] = [];
@@ -77,6 +83,10 @@ function groupParts(parts: MessagePart[]): PartGroup[] {
     } else if (part.type === "image") {
       flushTools();
       currentImageGroup.push(part);
+    } else if (part.type === "widget") {
+      flushTools();
+      flushImages();
+      groups.push({ type: "widget", parts: [part] });
     } else {
       flushTools();
       flushImages();
@@ -120,7 +130,7 @@ function collapseSteps(groups: PartGroup[]): PartGroup[] {
     for (const sg of subGroups) {
       if (sg.type === "tools") {
         toolCallCount += sg.parts.filter(
-          (p): p is ToolUsePart => p.type === "tool_use" && !TODO_TOOLS.has((p as ToolUsePart).toolName)
+          (p): p is ToolUsePart => p.type === "tool_use" && !TODO_TOOLS.has((p as ToolUsePart).toolName) && !HIDDEN_TOOLS.has((p as ToolUsePart).toolName)
         ).length;
       } else {
         thinkingCount += 1;
@@ -200,7 +210,7 @@ function CollapsibleToolSteps({ parts }: { parts: MessagePart[] }) {
   }, [parts]);
 
   type ToolUsePart = Extract<MessagePart, { type: "tool_use" }>;
-  const toolUses = parts.filter((p): p is ToolUsePart => p.type === "tool_use" && !TODO_TOOLS.has((p as ToolUsePart).toolName));
+  const toolUses = parts.filter((p): p is ToolUsePart => p.type === "tool_use" && !TODO_TOOLS.has((p as ToolUsePart).toolName) && !HIDDEN_TOOLS.has((p as ToolUsePart).toolName));
 
   if (toolUses.length === 0) return null;
 
@@ -539,6 +549,17 @@ export function ChatMessage({ message }: ChatMessageProps) {
                       <div key={gi} className="my-1">
                         <ImageThumbnails parts={group.parts} />
                       </div>
+                    );
+                  case "widget":
+                    return group.parts.map((part, pi) =>
+                      part.type === "widget" ? (
+                        <WidgetBlock
+                          key={`${gi}-${pi}`}
+                          title={part.title}
+                          widgetCode={part.widgetCode}
+                          loadingMessages={part.loadingMessages}
+                        />
+                      ) : null
                     );
                   case "tools":
                     return (

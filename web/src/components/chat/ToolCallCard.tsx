@@ -553,6 +553,14 @@ export const TODO_TOOLS = new Set([
   "updateTodosToolCall", "readTodosToolCall", "todoWriteToolCall",
 ]);
 
+/** Tools whose UI is rendered by dedicated components (not as a tool card). */
+export const HIDDEN_TOOLS = new Set([
+  "mcp__boxnex__visualize_show_widget",
+  "mcp__boxnex__visualize_read_me",
+  "boxnex/visualize_show_widget",
+  "boxnex/visualize_read_me",
+]);
+
 export const ToolCallCard = memo(function ToolCallCard({
   toolName,
   input,

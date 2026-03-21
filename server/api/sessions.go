@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -276,6 +279,51 @@ func (s *Server) RestoreSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sess)
+}
+
+// PurgeTrash purges trashed sessions older than cutoff, removes their on-disk
+// data (session dirs + worktrees), and runs VACUUM to reclaim space.
+// Used by both the periodic 7-day cleanup goroutine and the EmptyTrash handler.
+func (s *Server) PurgeTrash(cutoff time.Time) (int, error) {
+	worktreePaths, _ := s.Store.GetExpiredSessionWorktrees(cutoff)
+
+	ids, err := s.Store.PurgeExpiredSessions(cutoff)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, id := range ids {
+		dir := filepath.Join(s.DataDir, "sessions", id)
+		if err := os.RemoveAll(dir); err != nil {
+			log.Printf("[trash] Failed to remove session dir %s: %v", dir, err)
+		}
+	}
+	for _, wtPath := range worktreePaths {
+		if err := RemoveWorktree(wtPath); err != nil {
+			log.Printf("[trash] Failed to remove worktree %s: %v", wtPath, err)
+		}
+	}
+	if len(ids) > 0 {
+		if err := s.Store.Vacuum(); err != nil {
+			log.Printf("[trash] VACUUM failed: %v", err)
+		}
+	}
+	return len(ids), nil
+}
+
+// EmptyTrash is the HTTP handler that immediately purges all trashed sessions.
+func (s *Server) EmptyTrash(w http.ResponseWriter, r *http.Request) {
+	farFuture := time.Now().Add(100 * 365 * 24 * time.Hour)
+	n, err := s.PurgeTrash(farFuture)
+	if err != nil {
+		log.Printf("[trash] Failed to empty trash: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to empty trash")
+		return
+	}
+	log.Printf("[trash] Emptied trash: %d sessions purged", n)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"purged": n,
+	})
 }
 
 // ListSessionMessages returns messages for a session.

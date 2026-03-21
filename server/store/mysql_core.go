@@ -420,6 +420,10 @@ func (s *MySQLStore) PurgeExpiredSessions(olderThan time.Time) ([]string, error)
 	return ids, nil
 }
 
+func (s *MySQLStore) Vacuum() error {
+	return nil
+}
+
 func (s *MySQLStore) ReorderSessions(sessionIDs []string) error {
 	tx, err := s.db.Begin()
 	if err != nil {

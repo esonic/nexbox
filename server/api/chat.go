@@ -478,6 +478,32 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					Input:  event.Input,
 				})
 
+				// Intercept visualize_show_widget: parse input and emit a widget event + part.
+				if strings.HasSuffix(event.ToolName, "visualize_show_widget") && event.Input != "" {
+					var widgetInput struct {
+						Title           string   `json:"title"`
+						WidgetCode      string   `json:"widget_code"`
+						LoadingMessages []string `json:"loading_messages"`
+					}
+					if err := json.Unmarshal([]byte(event.Input), &widgetInput); err == nil && widgetInput.WidgetCode != "" {
+						mu.Lock()
+						msgParts = append(msgParts, MessagePart{
+							Type:            "widget",
+							Title:           widgetInput.Title,
+							WidgetCode:      widgetInput.WidgetCode,
+							LoadingMessages: widgetInput.LoadingMessages,
+						})
+						dirty = true
+						mu.Unlock()
+						s.Hub.Emit(sessionID, ChatEvent{
+							Type:            "widget",
+							WidgetTitle:     widgetInput.Title,
+							WidgetCode:      widgetInput.WidgetCode,
+							LoadingMessages: widgetInput.LoadingMessages,
+						})
+					}
+				}
+
 			case agent.EventToolResult:
 				mu.Lock()
 				for i := range msgParts {

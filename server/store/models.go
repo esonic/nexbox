@@ -270,6 +270,9 @@ type MessagePart struct {
 	Title      string      `json:"title,omitempty"`
 	AssetType  string      `json:"assetType,omitempty"`
 	WorkflowID string      `json:"workflowId,omitempty"`
+	// Widget (visualize_show_widget)
+	WidgetCode      string   `json:"widgetCode,omitempty"`
+	LoadingMessages []string `json:"loadingMessages,omitempty"`
 }
 
 type MessageMetadata struct {

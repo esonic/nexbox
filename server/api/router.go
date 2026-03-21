@@ -205,6 +205,7 @@ func NewRouter(s *Server) *chi.Mux {
 				r.Post("/", s.CreateSession)
 				r.Put("/reorder", s.ReorderSessions)
 				r.Get("/trash", s.ListTrashedSessions)
+				r.Delete("/trash", s.EmptyTrash)
 				r.Route("/{sessionId}", func(r chi.Router) {
 					r.Get("/", s.GetSession)
 					r.Put("/", s.UpdateSession)

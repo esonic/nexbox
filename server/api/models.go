@@ -78,6 +78,11 @@ type ChatEvent struct {
 	Message   string `json:"message,omitempty"`
 	TaskID    string `json:"task_id,omitempty"`
 
+	// Widget (visualize_show_widget)
+	WidgetTitle     string   `json:"widget_title,omitempty"`
+	WidgetCode      string   `json:"widget_code,omitempty"`
+	LoadingMessages []string `json:"loading_messages,omitempty"`
+
 	Stats *ExecutionStats `json:"stats,omitempty"`
 }
 

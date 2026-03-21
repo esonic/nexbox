@@ -438,6 +438,12 @@ export function useChatSession({ session }: UseChatSessionOptions) {
           });
         }
         break;
+      case "widget":
+        if (event.widget_code) {
+          ensureStreaming();
+          gs().addWidgetPart(sid, event.widget_title || "", event.widget_code, event.loading_messages);
+        }
+        break;
       case "done":
         setPendingUserInput(null);
         gs().setStreamingSession(sid, false);

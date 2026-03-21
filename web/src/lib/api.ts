@@ -188,6 +188,8 @@ export const sessionsApi = {
     request<{ sessions: Session[]; active_session_ids: string[] | null }>("/sessions"),
   listTrashed: () =>
     request<{ sessions: Session[] }>("/sessions/trash"),
+  emptyTrash: () =>
+    request<{ purged: number }>("/sessions/trash", { method: "DELETE" }),
   get: (id: string) =>
     request<Session>(`/sessions/${id}`),
   create: (data: { name?: string; project_id?: string; agent?: string; model?: string }) =>

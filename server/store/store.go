@@ -85,6 +85,7 @@ type SessionStore interface {
 	DeleteSession(id string) error   // soft delete (move to trash)
 	RestoreSession(id string) error  // restore from trash
 	PurgeExpiredSessions(olderThan time.Time) ([]string, error) // hard delete, returns session IDs
+	Vacuum() error                                             // reclaim disk space
 	ReorderSessions(sessionIDs []string) error
 }
 

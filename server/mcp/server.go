@@ -396,6 +396,46 @@ func (s *Server) registerTools() {
 		),
 	)
 
+	// --- Visualize tools ---
+
+	visualizeReadMeTool := gomcp.NewTool("visualize_read_me",
+		gomcp.WithDescription(
+			"Returns required context for visualize_show_widget (CSS variables, colors, typography, layout rules, examples). "+
+				"Call once before your first visualize_show_widget call. "+
+				"Do NOT mention or narrate this call to the user — it is an internal setup step. "+
+				"Call it silently and proceed directly to the visualization in your response."),
+		gomcp.WithArray("modules",
+			gomcp.Description("Which module(s) to load. Pick all that fit: diagram, mockup, interactive, data_viz, art, chart"),
+		),
+	)
+
+	visualizeShowWidgetTool := gomcp.NewTool("visualize_show_widget",
+		gomcp.WithDescription(
+			"Show visual content — SVG graphics, diagrams, charts, or interactive HTML widgets — that renders inline alongside your text response.\n"+
+				"Use for flowcharts, architecture diagrams, dashboards, forms, calculators, data tables, games, illustrations, or any visual content.\n"+
+				"The code is auto-detected: starts with <svg = SVG mode, otherwise HTML mode.\n"+
+				"A global sendPrompt(text) function is available — it sends a message to chat as if the user typed it.\n"+
+				"IMPORTANT: Call visualize_read_me once before your first visualize_show_widget call, then set 'i_have_seen_read_me: true'. "+
+				"Do NOT narrate or mention the visualize_read_me call to the user — call it silently, then respond as if you went straight to building the visualization.\n\n"+
+				"This tool renders an interactive UI in the chat. Prefer it over text output when displaying data from other tools."),
+		gomcp.WithBoolean("i_have_seen_read_me",
+			gomcp.Required(),
+			gomcp.Description("Confirm whether you have already called visualize_read_me in this conversation."),
+		),
+		gomcp.WithArray("loading_messages",
+			gomcp.Required(),
+			gomcp.Description("1–4 loading messages shown to the user while the visual renders, each roughly 5 words long. Write them in the same language the user is using."),
+		),
+		gomcp.WithString("title",
+			gomcp.Required(),
+			gomcp.Description("Short snake_case identifier for this visual. Must be specific and disambiguating."),
+		),
+		gomcp.WithString("widget_code",
+			gomcp.Required(),
+			gomcp.Description("SVG or HTML code to render. For SVG: raw SVG code starting with <svg> tag. For HTML: raw HTML content, do NOT include DOCTYPE, <html>, <head>, or <body> tags. Use CSS variables for theming. Keep background transparent."),
+		),
+	)
+
 	addTool(saveAssetTool, s.handleSaveAsset)
 	addTool(getAssetContentTool, s.handleGetAssetContent)
 	addTool(listAssetsTool, s.handleListAssets)
@@ -407,6 +447,8 @@ func (s *Server) registerTools() {
 	addTool(listWorkflowsTool, s.handleListWorkflows)
 	addTool(getWorkflowTool, s.handleGetWorkflow)
 	addTool(executeWorkflowTool, s.handleExecuteWorkflow)
+	addTool(visualizeReadMeTool, s.handleVisualizeReadMe)
+	addTool(visualizeShowWidgetTool, s.handleVisualizeShowWidget)
 }
 
 // resolveProject returns the project ID to use for a tool call.
