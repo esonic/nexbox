@@ -54,13 +54,16 @@ type Server struct {
 	changeNotifier   ChangeNotifier
 	orchestrator     SessionOrchestrator
 	workflowExecutor WorkflowExecutor
+	userFeatures     int64 // bitmask controlling which tool groups are registered
 }
 
-// NewServer creates a new MCP server with asset management tools
-func NewServer(s store.Store, addr string) *Server {
+// NewServer creates a new MCP server with asset management tools.
+// userFeatures controls which tool groups are registered (0 = all).
+func NewServer(s store.Store, addr string, userFeatures int64) *Server {
 	srv := &Server{
-		store: s,
-		addr:  addr,
+		store:        s,
+		addr:         addr,
+		userFeatures: userFeatures,
 	}
 
 	// Create MCP server
@@ -457,17 +460,28 @@ func (s *Server) registerTools() {
 		),
 	)
 
-	addTool(saveAssetTool, s.handleSaveAsset)
-	addTool(getAssetContentTool, s.handleGetAssetContent)
-	addTool(listAssetsTool, s.handleListAssets)
-	addTool(listAssetCommentsTool, s.handleListAssetComments)
-	addTool(createTaskTool, s.handleCreateTask)
-	addTool(getTaskTool, s.handleGetTask)
-	addTool(listTasksTool, s.handleListTasks)
-	addTool(updateTaskTool, s.handleUpdateTask)
-	addTool(listWorkflowsTool, s.handleListWorkflows)
-	addTool(getWorkflowTool, s.handleGetWorkflow)
-	addTool(executeWorkflowTool, s.handleExecuteWorkflow)
+	// Helper: check if a feature is enabled (0 means all features).
+	has := func(bit int64) bool {
+		return s.userFeatures == 0 || (s.userFeatures&bit) != 0
+	}
+
+	if has(store.FeatureAsset) {
+		addTool(saveAssetTool, s.handleSaveAsset)
+		addTool(getAssetContentTool, s.handleGetAssetContent)
+		addTool(listAssetsTool, s.handleListAssets)
+		addTool(listAssetCommentsTool, s.handleListAssetComments)
+	}
+	if has(store.FeatureTask) {
+		addTool(createTaskTool, s.handleCreateTask)
+		addTool(getTaskTool, s.handleGetTask)
+		addTool(listTasksTool, s.handleListTasks)
+		addTool(updateTaskTool, s.handleUpdateTask)
+	}
+	if has(store.FeatureWorkflow) {
+		addTool(listWorkflowsTool, s.handleListWorkflows)
+		addTool(getWorkflowTool, s.handleGetWorkflow)
+		addTool(executeWorkflowTool, s.handleExecuteWorkflow)
+	}
 	addAlwaysOnTool(visualizeReadMeTool, s.handleVisualizeReadMe)
 	addAlwaysOnTool(visualizeShowWidgetTool, s.handleVisualizeShowWidget)
 }

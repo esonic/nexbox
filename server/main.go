@@ -123,7 +123,11 @@ func main() {
 
 	// Start MCP server for AI asset tools (auto-assign port with :0)
 	mcpAddr := fmt.Sprintf("%s:%d", *listen, 0)
-	mcpServer := nexmcp.NewServer(dataStore, mcpAddr)
+	var mcpFeatures int64
+	if cfg.Features != nil {
+		mcpFeatures = *cfg.Features
+	}
+	mcpServer := nexmcp.NewServer(dataStore, mcpAddr, mcpFeatures)
 	if err := mcpServer.Listen(); err != nil {
 		startupLog.Fatalf("MCP server listen failed: %v", err)
 	}

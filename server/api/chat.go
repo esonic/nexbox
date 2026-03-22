@@ -400,6 +400,11 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		if session.UserID != "" {
 			if u, err := s.Store.GetUser(session.UserID); err == nil && u != nil {
 				userFeatures = u.Features
+			} else if cfg := s.Config.Get(); cfg.Features != nil {
+				// Local mode: no user in DB, fall back to config features.
+				userFeatures = *cfg.Features
+			} else {
+				userFeatures = 0xFF // default: all features
 			}
 		}
 
