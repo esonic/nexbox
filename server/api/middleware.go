@@ -16,11 +16,16 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Local mode: no JWT secret configured → skip auth, inject default user.
 		if s.Config.Get().JWTSecret == "" {
+			cfg := s.Config.Get()
+			features := int64(0xFF)
+			if cfg.Features != nil {
+				features = *cfg.Features
+			}
 			ctx := r.Context()
 			ctx = context.WithValue(ctx, ContextKeyUserID, "local")
 			ctx = context.WithValue(ctx, ContextKeyUsername, "local")
 			ctx = context.WithValue(ctx, ContextKeyRole, "admin")
-			ctx = context.WithValue(ctx, ContextKeyFeatures, int64(0xFF))
+			ctx = context.WithValue(ctx, ContextKeyFeatures, features)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -163,11 +168,16 @@ func (s *Server) WSAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Local mode: skip auth, inject default user.
 		if s.Config.Get().JWTSecret == "" {
+			cfg := s.Config.Get()
+			features := int64(0xFF)
+			if cfg.Features != nil {
+				features = *cfg.Features
+			}
 			ctx := r.Context()
 			ctx = context.WithValue(ctx, ContextKeyUserID, "local")
 			ctx = context.WithValue(ctx, ContextKeyUsername, "local")
 			ctx = context.WithValue(ctx, ContextKeyRole, "admin")
-			ctx = context.WithValue(ctx, ContextKeyFeatures, int64(0xFF))
+			ctx = context.WithValue(ctx, ContextKeyFeatures, features)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}

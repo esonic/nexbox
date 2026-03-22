@@ -40,6 +40,9 @@ type Config struct {
 	ContainerImage   string `json:"container_image,omitempty"`   // container image (default: "boxnex-agent:latest")
 	ContainerNetwork string `json:"container_network,omitempty"` // Docker network name (default: "boxnex-net")
 
+	// Local-mode feature flags (bitmask). When nil, defaults to 0xFF (all features).
+	Features *int64 `json:"features,omitempty"`
+
 	// CORS allowed origins (e.g. ["http://localhost:5173"]). Falls back to
 	// built-in dev defaults when empty.
 	CORSOrigins []string `json:"cors_origins,omitempty"`
