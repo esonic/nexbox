@@ -622,10 +622,10 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			}
 		}
 
-		// Default model to opus when the session has no explicit model set.
+		// Default model to sonnet when the session has no explicit model set.
 		sessionModel := session.Model
 		if sessionModel == "" {
-			sessionModel = "opus"
+			sessionModel = "sonnet"
 		}
 
 		// Build the UserInputHandler for interactive tool support (AskUserQuestion).
