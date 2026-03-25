@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { gitApi, type GitBranchResponse } from "@/lib/api";
+import { useAppStore } from "@/stores/app";
 
 export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel, onNavigate }: {
   projectId: string;
@@ -22,7 +23,12 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
   navLabel?: string;
   onNavigate?: (direction: "prev" | "next") => void;
 }) {
-  const [branchData, setBranchData] = useState<GitBranchResponse | null>(null);
+  // Primary source: store (managed by SessionWorkspace's unified polling).
+  // Falls back to local state for mutations and standalone use.
+  const storeBranchData = useAppStore((s) => s.gitBranchData);
+  const setGitBranchData = useAppStore((s) => s.setGitBranchData);
+  const [localBranchData, setLocalBranchData] = useState<GitBranchResponse | null>(null);
+  const branchData = storeBranchData ?? localBranchData;
   const [showDropdown, setShowDropdown] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newBranchName, setNewBranchName] = useState("");
@@ -35,13 +41,19 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
   const loadBranches = useCallback(async () => {
     try {
       const data = await gitApi.branches(projectId, sessionId);
-      setBranchData(data);
+      // Update store so all consumers see the latest data immediately.
+      setGitBranchData(data);
+      setLocalBranchData(data);
     } catch (e) {
       console.error("Failed to load branches:", e);
     }
-  }, [projectId, sessionId]);
+  }, [projectId, sessionId, setGitBranchData]);
 
-  useEffect(() => { loadBranches(); }, [loadBranches]);
+  // Only do an initial local load if the store is empty (e.g. standalone use).
+  useEffect(() => {
+    if (!storeBranchData) loadBranches();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {

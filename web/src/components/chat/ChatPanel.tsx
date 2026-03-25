@@ -180,14 +180,8 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
     }
   }, [projectId, projectGitRepo, worktreeSessionId, setGitDiffStats]);
 
-  useEffect(() => {
-    if (!hasGitRepo) { setGitDiffStats(null); return; }
-    fetchDiffStats();
-    const interval = setInterval(fetchDiffStats, 30_000);
-    return () => clearInterval(interval);
-  }, [hasGitRepo, fetchDiffStats, setGitDiffStats]);
-
-  // Refresh diff stats when streaming stops (agent may have changed files)
+  // Polling is handled by SessionWorkspace (panel-aware interval).
+  // Here we only trigger a refresh when streaming stops (agent may have changed files).
   const prevStreaming = useRef(isStreaming);
   useEffect(() => {
     if (prevStreaming.current && !isStreaming) {

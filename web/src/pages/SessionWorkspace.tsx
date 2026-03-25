@@ -25,7 +25,7 @@ import {
   Pencil,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { sessionsApi, projectsApi, diffApi, gitlabApi, type DiffResponse, type CreateMRResponse } from "@/lib/api";
+import { sessionsApi, projectsApi, diffApi, gitApi, gitlabApi, type DiffResponse, type CreateMRResponse } from "@/lib/api";
 import { TaskPlugin } from "@/plugins/task/TaskPlugin";
 import { AssetPanel } from "@/plugins/asset/AssetPanel";
 import { WorkflowPanel } from "@/components/workflow/WorkflowPanel";
@@ -266,7 +266,7 @@ export function SessionWorkspace() {
   const {
     sessions, setSessions, activeSessionId,
     setCurrentSession, setCurrentProject, sessionTotalDuration,
-    projects, setProjects, setGitDiffStats,
+    projects, setProjects, setGitDiffStats, setGitBranchData,
     currentUser,
   } = useAppStore();
   const userFeatures = currentUser?.features ?? 0;
@@ -396,36 +396,66 @@ export function SessionWorkspace() {
 
   const worktreeSessionId = activeSession?.worktree_mode === "worktree" ? activeSession.id : undefined;
 
-  // Reset built-in panel data when the bound project changes
+  // ── Unified git polling ──────────────────────────────────────────────────
+  // When git panel is open: refresh stats + branches every 15s.
+  // When git panel is closed: refresh stats only every 30s (for badge).
+  // Project change: clear stale data immediately.
+  const gitPanelOpen = rightPanel === "git";
+
+  const fetchGitStats = useCallback(async () => {
+    if (!boundProject?.git_repo_path || !boundProject?.id) return;
+    try {
+      const data = await diffApi.stats(boundProject.id, worktreeSessionId);
+      setGitDiffStats(data);
+    } catch { /* silent – badge stays stale at most one interval */ }
+  }, [boundProject?.id, boundProject?.git_repo_path, worktreeSessionId, setGitDiffStats]);
+
+  const fetchGitBranches = useCallback(async () => {
+    if (!boundProject?.git_repo_path || !boundProject?.id) return;
+    try {
+      const data = await gitApi.branches(boundProject.id, worktreeSessionId);
+      setGitBranchData(data);
+    } catch { /* silent */ }
+  }, [boundProject?.id, boundProject?.git_repo_path, worktreeSessionId, setGitBranchData]);
+
+  const fetchGitAll = useCallback(async () => {
+    await Promise.allSettled([fetchGitStats(), fetchGitBranches()]);
+  }, [fetchGitStats, fetchGitBranches]);
+
+  // Reset state when project changes, then kick off an immediate fetch.
   const prevProjectIdRef = useRef(boundProject?.id);
   useEffect(() => {
     if (prevProjectIdRef.current !== boundProject?.id) {
       prevProjectIdRef.current = boundProject?.id;
       setGitDiffStats(null);
-      if (rightPanel === "git" && boundProject?.git_repo_path) {
-        setLoadingGitDiff(true);
-        diffApi.stats(boundProject.id)
-          .then(setGitDiffStats)
-          .catch((e) => console.error("Failed to load git diff:", e))
-          .finally(() => setLoadingGitDiff(false));
-      }
+      setGitBranchData(null);
     }
-  }, [boundProject, rightPanel, setGitDiffStats]);
+  }, [boundProject?.id, setGitDiffStats, setGitBranchData]);
+
+  // Polling: fast (15s) when panel open, slow (30s) when closed.
+  useEffect(() => {
+    if (!boundProject?.git_repo_path) return;
+    const fetch = gitPanelOpen ? fetchGitAll : fetchGitStats;
+    const interval = gitPanelOpen ? 15_000 : 30_000;
+    fetch();
+    const timer = setInterval(fetch, interval);
+    return () => clearInterval(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gitPanelOpen, boundProject?.id, boundProject?.git_repo_path, worktreeSessionId]);
 
   const handleOpenGit = useCallback(async () => {
     if (!boundProject) return;
     setRightPanel("git");
+    // Fetch immediately so panel content is ready without waiting for interval.
     setLoadingGitDiff(true);
     try {
-      const data = await diffApi.stats(boundProject.id, worktreeSessionId);
-      setGitDiffStats(data);
+      await fetchGitAll();
     } catch (e) {
-      console.error("Failed to load git diff:", e);
       toast.error("Failed to load git diff", { description: String(e) });
     } finally {
       setLoadingGitDiff(false);
     }
-  }, [boundProject, worktreeSessionId, setGitDiffStats]);
+  }, [boundProject, fetchGitAll]);
 
   // Allow other components to open the Git panel via custom event
   useEffect(() => {
@@ -466,13 +496,12 @@ export function SessionWorkspace() {
   const refreshGitReview = useCallback(async () => {
     if (!boundProject) return;
     try {
-      const data = await diffApi.stats(boundProject.id, worktreeSessionId);
-      setGitDiffStats(data);
+      await fetchGitAll();
     } catch (e) {
       console.error("Failed to refresh git:", e);
       toast.error("Failed to refresh git", { description: String(e) });
     }
-  }, [boundProject, worktreeSessionId, setGitDiffStats]);
+  }, [boundProject, fetchGitAll]);
 
   // Right panel resize handler
   const handleMouseDown = useCallback((e: React.MouseEvent) => {

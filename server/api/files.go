@@ -502,7 +502,7 @@ func searchFileContents(root, current, query string, maxResults int) []contentMa
 				results = append(results, contentMatch{
 					Path:    rel,
 					Line:    lineNum,
-					Content: fmt.Sprintf("%d: %s", lineNum, strings.TrimSpace(preview)),
+					Content: strings.TrimSpace(preview),
 				})
 				if len(results) >= maxResults {
 					return filepath.SkipDir

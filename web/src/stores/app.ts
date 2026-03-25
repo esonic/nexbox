@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { DiffResponse, AuthUser } from "@/lib/api";
+import type { DiffResponse, AuthUser, GitBranchResponse } from "@/lib/api";
 import type { Project, Session, ChatMessage, MessagePart, Task, AssetType, ExecutionStats } from "../types";
 
 export interface PickedAsset {
@@ -116,6 +116,10 @@ interface AppState {
   // Git diff stats (shared between ChatPanel badge and Git panel)
   gitDiffStats: DiffResponse | null;
   setGitDiffStats: (stats: DiffResponse | null) => void;
+
+  // Git branch data (shared, polled by SessionWorkspace)
+  gitBranchData: GitBranchResponse | null;
+  setGitBranchData: (data: GitBranchResponse | null) => void;
 
   // Marketplace update badge (packages with newer version available)
   marketplaceUpdateCount: number;
@@ -536,6 +540,9 @@ export const useAppStore = create<AppState>()(
 
   gitDiffStats: null,
   setGitDiffStats: (stats) => set({ gitDiffStats: stats }),
+
+  gitBranchData: null,
+  setGitBranchData: (data) => set({ gitBranchData: data }),
 
   marketplaceUpdateCount: 0,
   setMarketplaceUpdateCount: (count) => set({ marketplaceUpdateCount: count }),

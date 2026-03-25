@@ -87,13 +87,21 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
     gitApi.status(projectId, sessionId).then(setGitStatus).catch(() => setGitStatus(null));
   }, [projectId, sessionId]);
 
+  // Build a stable key that changes whenever file content changes.
+  // In lazy mode diffText is undefined so we use fileStats metrics instead.
+  const fileStatsKey = fileStats
+    ? `${fileStats.length}:${fileStats.reduce((s, f) => s + f.insertions + f.deletions, 0)}`
+    : `text:${diffText?.length ?? 0}`;
+
   const gitStatusKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    const key = `${projectId}:${diffText?.length ?? 0}:${statusTick}`;
+    const key = `${projectId}:${fileStatsKey}:${statusTick}`;
     if (!projectId || gitStatusKeyRef.current === key) return;
     gitStatusKeyRef.current = key;
     gitApi.status(projectId, sessionId).then(setGitStatus).catch(() => setGitStatus(null));
-  }, [projectId, sessionId, diffText, statusTick]);
+  // fileStatsKey is derived from fileStats/diffText — listing it directly causes lint warning
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, sessionId, fileStatsKey, statusTick]);
 
   const fileCategoryMap = useMemo(() => {
     const map = new Map<string, FileCategory>();
@@ -171,6 +179,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
     try {
       await gitApi.commit(projectId, { file_paths: commitFilePaths, message: commitMsg.trim() }, sessionId);
       setCommitMsg("");
+      setStatusTick((t) => t + 1); // refresh gitStatus so file counts update immediately
       onCommitted?.();
     } catch (e) { console.error("Failed to commit:", e); toast.error("Commit failed", { description: String(e) }); }
     finally { setCommitting(false); }

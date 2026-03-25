@@ -100,6 +100,39 @@ function compactTree(entries: FileEntry[]): FileEntry[] {
   });
 }
 
+// ── Monaco scroll + highlight helper ──
+
+function applyScrollAndHighlight(
+  editor: MonacoEditorNS.IStandaloneCodeEditor,
+  monaco: any,
+  decorationsRef: { current: any },
+  lineNumber: number,
+  query: string,
+) {
+  editor.revealLineInCenter(lineNumber);
+  editor.setPosition({ lineNumber, column: 1 });
+  const model = editor.getModel();
+  if (!model) return;
+  const lineContent = model.getLineContent(lineNumber);
+  const lowerLine = lineContent.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  const newDecorations: any[] = [];
+  let idx = lowerLine.indexOf(lowerQuery);
+  while (idx !== -1) {
+    newDecorations.push({
+      range: new monaco.Range(lineNumber, idx + 1, lineNumber, idx + 1 + query.length),
+      options: { inlineClassName: "search-match-highlight" },
+    });
+    idx = lowerLine.indexOf(lowerQuery, idx + 1);
+  }
+  if (decorationsRef.current) {
+    decorationsRef.current.clear();
+  }
+  if (newDecorations.length > 0) {
+    decorationsRef.current = editor.createDecorationsCollection(newDecorations);
+  }
+}
+
 // ── File tree item ──
 
 function FileTreeItem({
@@ -171,16 +204,41 @@ function FileTreeItem({
 
 // ── Search results ──
 
+function HighlightedSnippet({ content, query }: { content: string; query: string }) {
+  const lowerContent = content.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  const idx = lowerContent.indexOf(lowerQuery);
+  if (idx === -1) {
+    const display = content.length > 80 ? content.slice(0, 80) + "…" : content;
+    return <span>{display}</span>;
+  }
+  const CONTEXT = 35;
+  const start = Math.max(0, idx - CONTEXT);
+  const end = Math.min(content.length, idx + query.length + CONTEXT);
+  const prefix = (start > 0 ? "…" : "") + content.slice(start, idx);
+  const match = content.slice(idx, idx + query.length);
+  const suffix = content.slice(idx + query.length, end) + (end < content.length ? "…" : "");
+  return (
+    <span>
+      {prefix}
+      <span className="text-orange-400 font-semibold">{match}</span>
+      {suffix}
+    </span>
+  );
+}
+
 function SearchResults({
   results,
   loading,
   searchType,
+  searchQuery,
   onSelect,
 }: {
   results: FileSearchResult[];
   loading: boolean;
   searchType: "name" | "content";
-  onSelect: (path: string) => void;
+  searchQuery: string;
+  onSelect: (path: string, line?: number) => void;
 }) {
   const { t } = useTranslation();
   if (loading) {
@@ -220,10 +278,10 @@ function SearchResults({
             {matches.map((m, i) => (
               <div
                 key={i}
-                className="px-3 py-1 text-[11px] text-muted-foreground hover:bg-accent/30 cursor-pointer truncate font-mono"
-                onClick={() => onSelect(m.path)}
+                className="px-3 py-1 text-[11px] text-muted-foreground hover:bg-accent/30 cursor-pointer font-mono overflow-hidden"
+                onClick={() => onSelect(m.path, m.line)}
               >
-                {m.content}
+                <HighlightedSnippet content={m.content ?? ""} query={searchQuery} />
               </div>
             ))}
           </div>
@@ -290,6 +348,9 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const [isDirty, setIsDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
+  const monacoRef = useRef<any>(null);
+  const decorationsRef = useRef<any>(null);
+  const scrollTargetRef = useRef<{ line: number; query: string } | null>(null);
   const [monacoTheme, setMonacoTheme] = useState(getMonacoTheme);
 
   // Sync Monaco theme when the app's dark/light class changes on document.body
@@ -337,6 +398,15 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
         if (!cancelled) {
           setFileContent(data);
           setEditorContent(data.binary ? "" : data.content);
+          const target = scrollTargetRef.current;
+          if (target && editorRef.current && monacoRef.current) {
+            scrollTargetRef.current = null;
+            requestAnimationFrame(() => {
+              if (editorRef.current && monacoRef.current) {
+                applyScrollAndHighlight(editorRef.current, monacoRef.current, decorationsRef, target.line, target.query);
+              }
+            });
+          }
         }
       })
       .catch(() => {
@@ -346,10 +416,19 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     return () => { cancelled = true; };
   }, [selectedPath, projectId, sessionId]);
 
-  const handleSelectFile = useCallback((path: string) => {
+  const handleSelectFile = useCallback((path: string, line?: number) => {
+    if (line !== undefined) {
+      scrollTargetRef.current = { line, query: searchQuery };
+    } else {
+      scrollTargetRef.current = null;
+      if (decorationsRef.current) {
+        decorationsRef.current.clear();
+        decorationsRef.current = null;
+      }
+    }
     setSelectedPath(path);
     setShowDeleteConfirm(false);
-  }, [setSelectedPath]);
+  }, [setSelectedPath, searchQuery]);
 
   const handleSave = useCallback(async () => {
     if (!selectedPath || !isDirty || saving) return;
@@ -528,7 +607,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
 
         <div className="flex-1 overflow-y-auto">
           {showSearch && searchQuery ? (
-            <SearchResults results={searchResults} loading={searchLoading} searchType={searchType} onSelect={handleSelectFile} />
+            <SearchResults results={searchResults} loading={searchLoading} searchType={searchType} searchQuery={searchQuery} onSelect={handleSelectFile} />
           ) : loading ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
@@ -650,11 +729,20 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                       }}
                       onMount={(editor, monaco) => {
                         editorRef.current = editor;
+                        monacoRef.current = monaco;
                         // Ctrl+S / Cmd+S to save
                         editor.addCommand(
                           monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
                           () => handleSave(),
                         );
+                        // Apply pending scroll target if file already loaded
+                        const target = scrollTargetRef.current;
+                        if (target) {
+                          scrollTargetRef.current = null;
+                          requestAnimationFrame(() => {
+                            applyScrollAndHighlight(editor, monaco, decorationsRef, target.line, target.query);
+                          });
+                        }
                       }}
                       options={{
                         fontSize: 13,
