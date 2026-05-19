@@ -19,9 +19,40 @@ export function TerminalPanel({ sessionId, visible = true, onExited }: TerminalP
   const connectedRef = useRef(false);
   const unmountingRef = useRef(false);
   const onExitedRef = useRef(onExited);
+  const visibleRef = useRef(visible);
 
   sessionIdRef.current = sessionId;
   onExitedRef.current = onExited;
+  visibleRef.current = visible;
+
+  const fitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // safeFit avoids calling fitAddon.fit() while the container is hidden via
+  // a parent's display:none — at that point the container measures 0×0 and
+  // fit() would call term.resize(cols=0, rows=0), which throws away the
+  // bottom rows of the active buffer. That's why repeatedly hide/show used
+  // to trim a few lines off the tail each cycle.
+  const safeFit = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    if (!visibleRef.current) return;
+    if (el.clientWidth <= 0 || el.clientHeight <= 0) return;
+    try { fitAddonRef.current?.fit(); } catch { /* ignore */ }
+  }, []);
+
+  // debouncedFit coalesces a burst of ResizeObserver callbacks (which happen
+  // during a hide→show transition because the panel briefly takes
+  // intermediate sizes while the layout settles) into one fit call. Without
+  // this, on slow links the terminal can be sized down to ~3 rows mid-
+  // transition before the panel reaches its final height, and any active-
+  // buffer content past those 3 rows is trimmed.
+  const debouncedFit = useCallback(() => {
+    if (fitTimerRef.current) clearTimeout(fitTimerRef.current);
+    fitTimerRef.current = setTimeout(() => {
+      fitTimerRef.current = null;
+      safeFit();
+    }, 80);
+  }, [safeFit]);
 
   const connect = useCallback(() => {
     if (!containerRef.current || connectedRef.current) return;
@@ -50,7 +81,7 @@ export function TerminalPanel({ sessionId, visible = true, onExited }: TerminalP
     term.open(containerRef.current);
 
     requestAnimationFrame(() => {
-      try { fitAddon.fit(); } catch { /* ignore */ }
+      safeFit();
       term.focus();
     });
 
@@ -91,6 +122,12 @@ export function TerminalPanel({ sessionId, visible = true, onExited }: TerminalP
     });
 
     term.onResize(({ cols, rows }) => {
+      // Belt-and-suspenders: even if fit() somehow produces tiny dims (e.g.
+      // a 1-row clamp from the lib), don't ask the server PTY to resize
+      // below a sane minimum — a SIGWINCH to 1×1 makes most shells trim/
+      // redraw the visible window and is what was eating trailing prompt
+      // lines on slow links.
+      if (cols < 2 || rows < 2) return;
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "resize", cols, rows }));
       }
@@ -108,15 +145,19 @@ export function TerminalPanel({ sessionId, visible = true, onExited }: TerminalP
   useEffect(() => {
     if (!visible || !termRef.current) return;
     requestAnimationFrame(() => {
-      try { fitAddonRef.current?.fit(); } catch { /* ignore */ }
+      safeFit();
       termRef.current?.focus();
     });
-  }, [visible]);
+  }, [visible, safeFit]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       unmountingRef.current = true;
+      if (fitTimerRef.current) {
+        clearTimeout(fitTimerRef.current);
+        fitTimerRef.current = null;
+      }
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -129,16 +170,16 @@ export function TerminalPanel({ sessionId, visible = true, onExited }: TerminalP
     };
   }, []);
 
-  // Observe container resize to re-fit terminal
+  // Observe container resize to re-fit terminal. The visibility + zero-size
+  // guard inside safeFit(), combined with the debounced wrapper, is what
+  // keeps hide/show cycles from truncating the bottom of the buffer.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => {
-      try { fitAddonRef.current?.fit(); } catch { /* ignore */ }
-    });
+    const ro = new ResizeObserver(() => debouncedFit());
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [debouncedFit]);
 
   // Watch for theme changes
   useEffect(() => {
