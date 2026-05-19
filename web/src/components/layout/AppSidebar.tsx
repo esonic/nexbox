@@ -10,6 +10,7 @@ import {
   ChevronDown,
   Plus,
   FolderOpen,
+  FolderPlus,
   Settings,
   Cloud,
   CloudOff,
@@ -814,7 +815,7 @@ export function AppSidebar() {
               className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
               title="New project"
             >
-              <Plus className="h-3.5 w-3.5" />
+              <FolderPlus className="h-3.5 w-3.5" />
             </button>
             <button
               onClick={handleOpenTrash}
