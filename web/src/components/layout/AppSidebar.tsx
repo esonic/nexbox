@@ -706,22 +706,6 @@ export function AppSidebar() {
             )}
           </button>
           <button
-            onClick={() => navigate("/connect")}
-            className={cn(
-              "p-1.5 rounded transition-colors",
-              location.pathname === "/connect"
-                ? "bg-accent text-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-accent"
-            )}
-            title={connectStatus === "connected" ? "Cloud" : "Local"}
-          >
-            {connectStatus === "connected" ? (
-              <Cloud className="h-4 w-4 text-green-500" />
-            ) : (
-              <CloudOff className="h-4 w-4" />
-            )}
-          </button>
-          <button
             onClick={() => navigate("/settings")}
             className={cn(
               "p-1.5 rounded transition-colors",
@@ -824,13 +808,22 @@ export function AppSidebar() {
         {/* ── Sessions section header ── */}
         <div className="flex items-center justify-between pl-4 pr-3 pt-2 pb-1.5 relative" ref={trashRef}>
           <span className="text-[13px] font-medium text-muted-foreground/60">Sessions</span>
-          <button
-            onClick={handleOpenTrash}
-            className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-            title="Recently deleted"
-          >
-            <History className="h-3.5 w-3.5" />
-          </button>
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={() => { setEditingProject(null); setProjectDialogOpen(true); }}
+              className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+              title="New project"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={handleOpenTrash}
+              className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+              title="Recently deleted"
+            >
+              <History className="h-3.5 w-3.5" />
+            </button>
+          </div>
           {/* Trash popover */}
           {showTrash && (
             <div className="absolute left-0 right-0 top-full z-50 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
@@ -948,11 +941,7 @@ export function AppSidebar() {
                   >
                     <FolderOpen className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
                     <span className="text-[13px] text-muted-foreground truncate">
-                      {group.project?.name === UNASSIGNED_PROJECT ? "Unassigned" : (
-                        group.project?.namespace_id
-                          ? `${group.project.namespace_id}/${group.project.name}`
-                          : (group.project?.name || "Unassigned")
-                      )}
+                      {group.project?.name === UNASSIGNED_PROJECT ? "Unassigned" : (group.project?.name || "Unassigned")}
                     </span>
                     <span className="text-[11px] text-muted-foreground/30 tabular-nums ml-1.5 shrink-0">
                       {group.sessions.length}
@@ -1037,36 +1026,6 @@ export function AppSidebar() {
               </button>
             </div>
           )}
-        </div>
-
-        {/* ── Cloud / Local ── */}
-        <div className="px-2 pb-1 shrink-0">
-          <button
-            onClick={() => navigate("/connect")}
-            className={cn(
-              "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors",
-              location.pathname === "/connect"
-                ? "bg-accent text-foreground font-medium"
-                : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
-            )}
-          >
-            <div className="relative shrink-0">
-              {connectStatus === "connected" ? (
-                <Cloud className="h-4 w-4 text-green-500" />
-              ) : (
-                <CloudOff className="h-4 w-4" />
-              )}
-              {notificationUnread && connectStatus === "connected" && (
-                <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-red-500" />
-              )}
-            </div>
-            <span>{connectStatus === "connected" ? "Cloud" : "Local"}</span>
-            {connectStatus === "connected" && cloudInfo?.user_name && (
-              <span className="ml-auto text-[11px] text-muted-foreground/50 truncate max-w-[50%]">
-                {cloudInfo.user_name}
-              </span>
-            )}
-          </button>
         </div>
 
         {/* ── Bottom nav ── */}

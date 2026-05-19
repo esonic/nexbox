@@ -31,6 +31,17 @@ func (s *Server) projectWorkDir(username, projectName string) string {
 	return filepath.Join(s.DataDir, "users", username, projectName)
 }
 
+// markGitRepoStatus stamps IsGitRepo on a project by checking for .git in its
+// working dir. Cheap stat, suitable to call on every project we return.
+func markGitRepoStatus(p *store.Project) {
+	if p == nil || p.GitRepoPath == "" {
+		return
+	}
+	if info, err := os.Stat(filepath.Join(p.GitRepoPath, ".git")); err == nil && (info.IsDir() || info.Mode().IsRegular()) {
+		p.IsGitRepo = true
+	}
+}
+
 // ListProjects returns the projects owned by the authenticated user.
 func (s *Server) ListProjects(w http.ResponseWriter, r *http.Request) {
 	a := s.requireAuthUser(w, r)
@@ -44,6 +55,9 @@ func (s *Server) ListProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	if projects == nil {
 		projects = []Project{}
+	}
+	for i := range projects {
+		markGitRepoStatus(&projects[i])
 	}
 	writeJSON(w, http.StatusOK, projects)
 }
@@ -120,6 +134,7 @@ func (s *Server) GetProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
+	markGitRepoStatus(project)
 	writeJSON(w, http.StatusOK, project)
 }
 

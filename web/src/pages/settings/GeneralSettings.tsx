@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { serverApi, authApi } from "@/lib/api";
-import { ChevronDown, LogOut, Loader2 } from "lucide-react";
+import { ChevronDown, LogOut, Loader2, User as UserIcon } from "lucide-react";
 
 const AGENT_LABELS: Record<string, string> = {
   codex: "Codex",
@@ -16,6 +16,7 @@ export function GeneralSettings() {
   const [chromeHeadless, setChromeHeadless] = useState(true);
   const [enableFileEdit, setEnableFileEdit] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const [currentUser, setCurrentUser] = useState<string>("");
 
   useEffect(() => {
     serverApi.availableAgents()
@@ -31,6 +32,10 @@ export function GeneralSettings() {
         setEnableFileEdit(!!data.enable_file_edit);
       })
       .catch((e) => console.error("Failed to load settings:", e));
+
+    authApi.me()
+      .then((data) => setCurrentUser(data.username))
+      .catch(() => { /* ignore — boot guard already covered the unauth case */ });
   }, []);
 
   const handleChromeHeadlessChange = async (next: boolean) => {
@@ -167,8 +172,17 @@ export function GeneralSettings() {
         </div>
       </div>
 
-      {/* Sign out — visually distinct, last item */}
-      <div className="flex justify-end pt-4">
+      {/* Account — signed-in user + sign out */}
+      <div className="flex items-center justify-between pt-4 border-t">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="flex items-center justify-center h-7 w-7 rounded-full bg-muted text-muted-foreground shrink-0">
+            <UserIcon className="h-3.5 w-3.5" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[11px] text-muted-foreground/70 uppercase tracking-wide">Signed in as</div>
+            <div className="text-sm font-medium truncate">{currentUser || "…"}</div>
+          </div>
+        </div>
         <button
           type="button"
           onClick={handleSignOut}

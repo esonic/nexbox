@@ -16,6 +16,7 @@ type Project struct {
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
 	GitRepoPath string    `json:"git_repo_path"`
+	IsGitRepo   bool      `json:"is_git_repo"` // transient: true if <GitRepoPath>/.git exists
 	CreatedBy   string    `json:"created_by"`
 	Version     int       `json:"version"`
 	CreatedAt   time.Time `json:"created_at"`

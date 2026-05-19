@@ -481,7 +481,29 @@ export function SessionWorkspace() {
           )}
         </div>
 
-        {/* Tasks & Assets panel buttons */}
+        {/* Panel toggles — order: Files, Terminal, Task, Workflow, Git */}
+        {isRealProject && (
+          <Button
+            variant={rightPanel === "files" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 text-xs gap-1"
+            onClick={() => setRightPanelExclusive(rightPanel === "files" ? null : "files")}
+          >
+            <FolderCode className="h-3.5 w-3.5" />
+            Files
+          </Button>
+        )}
+        {isRealProject && (
+          <Button
+            variant={showingTerminalInRightSlot ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 text-xs gap-1"
+            onClick={() => activeSessionId && setTerminalShowExclusive(activeSessionId, !showTerminal)}
+          >
+            <TerminalSquare className="h-3.5 w-3.5" />
+            Terminal
+          </Button>
+        )}
         <Button
           variant={rightPanel === "task" ? "secondary" : "ghost"}
           size="sm"
@@ -492,17 +514,6 @@ export function SessionWorkspace() {
           Task
         </Button>
         <Button
-          variant={rightPanel === "asset" ? "secondary" : "ghost"}
-          size="sm"
-          className="h-7 text-xs gap-1"
-          onClick={() => setRightPanelExclusive(rightPanel === "asset" ? null : "asset")}
-        >
-          <FileText className="h-3.5 w-3.5" />
-          Asset
-        </Button>
-
-        {/* Workflows button */}
-        <Button
           variant={rightPanel === "workflow" ? "secondary" : "ghost"}
           size="sm"
           className="h-7 text-xs gap-1"
@@ -511,7 +522,20 @@ export function SessionWorkspace() {
           <Workflow className="h-3.5 w-3.5" />
           Workflow
         </Button>
-
+        {isRealProject && boundProject?.is_git_repo && (
+          <Button
+            variant={rightPanel === "git" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 text-xs gap-1 relative"
+            onClick={() => rightPanel === "git" ? setRightPanelExclusive(null) : handleOpenGit()}
+          >
+            <GitBranch className="h-3.5 w-3.5" />
+            Git
+            {gitDiffData && (gitDiffData.insertions > 0 || gitDiffData.deletions > 0) && (
+              <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-blue-500" />
+            )}
+          </Button>
+        )}
       </div>
 
       {/* Main content */}
@@ -724,48 +748,6 @@ export function SessionWorkspace() {
             </div>
           )}
 
-          {/* Right activity bar — always visible */}
-          {isRealProject && (
-            <div className="flex flex-col items-center gap-3 px-1 py-3 border-l bg-muted/10 shrink-0">
-              {boundProject?.git_repo_path && (
-                <button
-                  onClick={() => setRightPanelExclusive(rightPanel === "files" ? null : "files")}
-                  className={cn(
-                    "p-1.5 rounded transition-colors",
-                    rightPanel === "files" ? "bg-accent text-accent-foreground" : "text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent/50"
-                  )}
-                  title="Files"
-                >
-                  <FolderCode className="h-4 w-4" />
-                </button>
-              )}
-              <button
-                onClick={() => activeSessionId && setTerminalShowExclusive(activeSessionId, !showTerminal)}
-                className={cn(
-                  "p-1.5 rounded transition-colors",
-                  showTerminal ? "bg-accent text-accent-foreground" : "text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent/50"
-                )}
-                title="Terminal"
-              >
-                <TerminalSquare className="h-4 w-4" />
-              </button>
-              {boundProject?.git_repo_path && (
-                <button
-                  onClick={() => rightPanel === "git" ? setRightPanelExclusive(null) : handleOpenGit()}
-                  className={cn(
-                    "relative p-1.5 rounded transition-colors",
-                    rightPanel === "git" ? "bg-accent text-accent-foreground" : "text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent/50"
-                  )}
-                  title="Git"
-                >
-                  <GitBranch className="h-4 w-4" />
-                  {gitDiffData && (gitDiffData.insertions > 0 || gitDiffData.deletions > 0) && (
-                    <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-blue-500" />
-                  )}
-                </button>
-              )}
-            </div>
-          )}
         </div>
 
         {/* Session info */}
