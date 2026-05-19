@@ -22,7 +22,7 @@ const (
 	downloadTimeout = 5 * time.Minute
 )
 
-// Updater manages background self-update for the beehub binary.
+// Updater manages background self-update for the nexbox binary.
 type Updater struct {
 	localVersion string
 	dataDir      string
@@ -156,18 +156,18 @@ func (u *Updater) downloadAndReplace() error {
 	url := fmt.Sprintf("%s/rca/api/v1/oss/get_nexbox?platform=%s&arch=%s",
 		adminDomain, runtime.GOOS, runtime.GOARCH)
 
-	tmpDir := filepath.Join(u.dataDir, fmt.Sprintf("beehub-update-%d", time.Now().UnixNano()))
+	tmpDir := filepath.Join(u.dataDir, fmt.Sprintf("nexbox-update-%d", time.Now().UnixNano()))
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	gzPath := filepath.Join(tmpDir, "beehub.gz")
+	gzPath := filepath.Join(tmpDir, "nexbox.gz")
 	if err := u.downloadFile(url, gzPath); err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
 
-	newPath := filepath.Join(tmpDir, "beehub")
+	newPath := filepath.Join(tmpDir, "nexbox")
 	if err := decompressGzip(gzPath, newPath); err != nil {
 		return fmt.Errorf("decompress: %w", err)
 	}

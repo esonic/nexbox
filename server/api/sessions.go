@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/nexbox/agent"
+	"github.com/esonic/nexbox/agent"
 )
 
 // wfPrefixRegex matches the WF[xxxxx] prefix that orchestrator.go writes onto
@@ -312,7 +312,7 @@ type ForkSessionRequest struct {
 	// is the durable identity of a turn — it's emitted by the agent and
 	// persisted alongside the message, so it survives across reloads and
 	// across the gap between local streaming and the first history fetch.
-	// BeeHub-side message row ids are deliberately not part of this API:
+	// Nexbox-side message row ids are deliberately not part of this API:
 	// during that gap the frontend only has a client-side uuid that never
 	// reached the DB.
 	SDKMessageUUID string `json:"sdk_message_uuid"`
@@ -325,7 +325,7 @@ type ForkSessionRequest struct {
 // because the CLI-level fork mechanism is Claude-specific (`--fork-session` +
 // `--resume-session-at`).
 //
-// On success, the new session is fully populated in the BeeHub DB (with a
+// On success, the new session is fully populated in the Nexbox DB (with a
 // copy of the parent's messages up to the cut point) but its
 // `agent_session_id` is empty: the actual CLI fork happens lazily on the
 // first chat turn, when chat.go sees `forked_from_session_id != ""` and

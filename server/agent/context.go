@@ -44,8 +44,8 @@ type MindmapRef struct {
 func BuildStaticContext(project ProjectInfo, sessionID string) string {
 	var sb strings.Builder
 
-	sb.WriteString("[BeeHub Platform Context]\n")
-	sb.WriteString("You are working within the BeeHub development platform.\n\n")
+	sb.WriteString("[Nexbox Platform Context]\n")
+	sb.WriteString("You are working within the Nexbox development platform.\n\n")
 
 	sb.WriteString(fmt.Sprintf("Project: %s\n", project.Name))
 	if project.Description != "" {
@@ -58,7 +58,7 @@ func BuildStaticContext(project ProjectInfo, sessionID string) string {
 	sb.WriteString(fmt.Sprintf("Working Directory: %s\n", project.GitRepoPath))
 
 	sb.WriteString("\n[Guidelines]\n")
-	sb.WriteString(fmt.Sprintf("- Use BeeHub MCP tools for asset/task management (project_id: %s)\n", project.ID))
+	sb.WriteString(fmt.Sprintf("- Use Nexbox MCP tools for asset/task management (project_id: %s)\n", project.ID))
 	sb.WriteString("- Respond in user's language\n")
 	sb.WriteString("- Work within the project directory\n")
 
@@ -116,7 +116,7 @@ func BuildDynamicContext(project *ProjectInfo, refTasks []TaskRef, refAssets []A
 // When the message begins with a slash command (e.g. "/review"), we bypass
 // context/image wrapping so the underlying CLI (Claude/Codex) sees the command
 // as the raw first character and can route it through its own slash-command
-// handler instead of treating the BeeHub context preamble as plain text.
+// handler instead of treating the Nexbox context preamble as plain text.
 func BuildPrompt(staticContext, dynamicContext, message string, isNewSession bool, images []string) string {
 	if isSlashCommand(message) {
 		return message
@@ -161,7 +161,7 @@ func isSlashCommand(message string) bool {
 func BuildBrainstormPrompt(project *ProjectInfo, mindmap *MindmapRef) string {
 	var sb strings.Builder
 
-	sb.WriteString("[BeeHub Brainstorm Mode]\n")
+	sb.WriteString("[Nexbox Brainstorm Mode]\n")
 	sb.WriteString("You are a brainstorming partner helping to explore, analyze and expand ideas from a mindmap.\n\n")
 
 	if project != nil {

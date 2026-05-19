@@ -10,8 +10,8 @@ import (
 	"sync"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/nexbox/gitlab"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/gitlab"
+	"github.com/esonic/nexbox/store"
 )
 
 // migratingProjects prevents concurrent migrations for the same project.

@@ -41,7 +41,7 @@ const MonacoFileEditor = lazy(() => import("./MonacoFileEditor"));
 // MIME type detection by extension for the drag-source marker. The exact value
 // is irrelevant; only the presence of this marker distinguishes internal moves
 // from OS file drops.
-const INTERNAL_DRAG_TYPE = "application/x-beehub-files";
+const INTERNAL_DRAG_TYPE = "application/x-nexbox-files";
 
 function dirnameOf(p: string): string {
   if (!p) return "";

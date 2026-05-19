@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
-	"gitlab.okg.com/sre_ai/nexbox/ws"
+	"github.com/esonic/nexbox/ws"
 )
 
 // TaggedEvent is a ChatEvent annotated with session_id for WS routing.

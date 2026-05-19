@@ -34,7 +34,7 @@ export function LoginModal() {
     <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-background">
       <div className="flex flex-col items-center gap-5 w-full max-w-md px-6">
         <div className="text-center">
-          <h2 className="text-lg font-semibold">Sign in to BeeHub Cloud</h2>
+          <h2 className="text-lg font-semibold">Sign in to Nexbox Cloud</h2>
           <p className="text-sm text-muted-foreground mt-1">
             Log in with your OKG account to access shared resources.
           </p>

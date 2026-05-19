@@ -9,11 +9,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"gitlab.okg.com/sre_ai/nexbox/agent"
-	"gitlab.okg.com/sre_ai/nexbox/config"
-	chromemcp "gitlab.okg.com/sre_ai/nexbox/mcp/chrome"
-	"gitlab.okg.com/sre_ai/nexbox/store"
-	"gitlab.okg.com/sre_ai/nexbox/updater"
+	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/config"
+	chromemcp "github.com/esonic/nexbox/mcp/chrome"
+	"github.com/esonic/nexbox/store"
+	"github.com/esonic/nexbox/updater"
 )
 
 // Server holds all API dependencies

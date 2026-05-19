@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/store"
 )
 
 // testTempDir creates a temporary directory that works in the sandbox environment.

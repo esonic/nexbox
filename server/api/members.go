@@ -3,7 +3,7 @@ package api
 import (
 	"net/http"
 
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/store"
 )
 
 // SearchMembers proxies fuzzy member search to the remote service.

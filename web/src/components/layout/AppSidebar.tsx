@@ -764,8 +764,8 @@ export function AppSidebar() {
             onClick={() => navigate("/")}
             className="flex items-center gap-2 font-bold text-lg hover:opacity-80"
           >
-            <img src="/favicon.svg" alt="BeeHub" className="w-7 h-7" aria-hidden="true" />
-            BeeHub
+            <img src="/favicon.svg" alt="Nexbox" className="w-7 h-7" aria-hidden="true" />
+            Nexbox
           </button>
           <div className="flex items-center gap-0.5">
             <ThemeToggle />

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/store"
 )
 
 // ---------------------------------------------------------------------------

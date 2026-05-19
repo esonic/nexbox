@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"gitlab.okg.com/sre_ai/nexbox/agent"
-	"gitlab.okg.com/sre_ai/nexbox/gitlab"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/gitlab"
+	"github.com/esonic/nexbox/store"
 )
 
 var upgrader = websocket.Upgrader{

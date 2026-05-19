@@ -1,4 +1,4 @@
-module gitlab.okg.com/sre_ai/nexbox
+module github.com/esonic/nexbox
 
 go 1.24.0
 

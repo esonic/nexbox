@@ -79,7 +79,7 @@ func (s *Server) handleVisualizeShowWidget(ctx context.Context, request gomcp.Ca
 // Design system documentation constants
 // ---------------------------------------------------------------------------
 
-const visualizeCoreDoc = `# BeeHub Visual Creation Suite
+const visualizeCoreDoc = `# Nexbox Visual Creation Suite
 
 ## Modules
 Call visualize_read_me again with the modules parameter to load detailed guidance:

@@ -4,7 +4,7 @@ import (
 	"log"
 	"sync"
 
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/store"
 )
 
 // ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@ import WorkflowRunsView from './WorkflowRunsView';
 import { formatRelativeDate } from '@/lib/utils';
 import { globalWS } from '@/lib/ws';
 
-const CLIPBOARD_WORKFLOW_TYPE = 'beehub-workflow';
+const CLIPBOARD_WORKFLOW_TYPE = 'nexbox-workflow';
 const CLIPBOARD_WORKFLOW_VERSION = 1;
 
 interface WorkflowClipboardPayload {

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/store"
 )
 
 // NodeExecutor defines the interface for executing different node types

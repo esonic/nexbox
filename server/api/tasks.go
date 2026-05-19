@@ -7,8 +7,8 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/nexbox/gitlab"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/gitlab"
+	"github.com/esonic/nexbox/store"
 )
 
 func (s *Server) ListTasks(w http.ResponseWriter, r *http.Request) {

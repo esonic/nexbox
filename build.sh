@@ -13,5 +13,5 @@ cp -r web/dist server/webdist
 # Build Go server with embedded frontend
 cd server
 VERSION=$(date +%Y%m%d%H%M)
-go build -o ../target/boxnex -ldflags "-s -w -X main.Version=${VERSION}"
-echo "Built boxnex version ${VERSION}"
+go build -o ../target/nexbox -ldflags "-s -w -X main.Version=${VERSION}"
+echo "Built nexbox version ${VERSION}"

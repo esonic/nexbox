@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-	agentpkg "gitlab.okg.com/sre_ai/nexbox/agent"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	agentpkg "github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/store"
 )
 
 // ---------------------------------------------------------------------------

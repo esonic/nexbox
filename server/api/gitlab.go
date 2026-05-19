@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/nexbox/gitlab"
+	"github.com/esonic/nexbox/gitlab"
 )
 
 // CreateMR creates a GitLab merge request for a project

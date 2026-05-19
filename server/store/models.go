@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"gitlab.okg.com/sre_ai/nexbox/config"
+	"github.com/esonic/nexbox/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -176,7 +176,7 @@ type Session struct {
 	WorktreeMode   string     `json:"worktree_mode"` // "local" | "worktree"
 	WorktreePath   string     `json:"worktree_path"` // empty until worktree is created
 	// Fork lineage. When this session was created via fork from another
-	// session, these record the parent and the BeeHub message at which the
+	// session, these record the parent and the Nexbox message at which the
 	// fork was taken. ForkedAtAgentMsgUUID is the parent's CLI-side message
 	// UUID (Claude SDK message UUID), passed to `--resume-session-at` on the
 	// first turn of this forked session.

@@ -8,8 +8,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/nexbox/config"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/config"
+	"github.com/esonic/nexbox/store"
 )
 
 // injectProjectOKOne injects the okone config from config.json into the project (transient field).

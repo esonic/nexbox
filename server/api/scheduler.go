@@ -6,7 +6,7 @@ import (
 	"log"
 	"time"
 
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/store"
 )
 
 // StartWorkflowScheduler checks every minute if any scheduled workflow is due to run.

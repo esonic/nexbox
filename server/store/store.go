@@ -137,7 +137,7 @@ type MessageStore interface {
 	GetMessage(id string) (*ChatMessage, error)
 	// GetMessageBySDKUUID looks up a message within a session by the
 	// CLI-side message UUID stored in its metadata. Used by the fork API
-	// to anchor on a turn even when the caller's BeeHub message id is a
+	// to anchor on a turn even when the caller's Nexbox message id is a
 	// pre-persistence client-side UUID. Returns (nil, nil) when not found.
 	GetMessageBySDKUUID(sessionID, sdkUUID string) (*ChatMessage, error)
 	ListMessages(sessionID string) ([]ChatMessage, error)

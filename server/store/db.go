@@ -163,7 +163,7 @@ func New(dataDir string) (*DB, error) {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 
-	dbPath := filepath.Join(dataDir, "beehub.db")
+	dbPath := filepath.Join(dataDir, "nexbox.db")
 	dsn := dbPath + "?_journal_mode=WAL&_busy_timeout=5000"
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {

@@ -26,18 +26,18 @@ echo "Copying web dist to server..."
 rm -rf "$SCRIPT_DIR/server/webdist"
 cp -r "$SCRIPT_DIR/web/dist" "$SCRIPT_DIR/server/webdist"
 
-# Function to build, compress, split and upload boxnex binary
+# Function to build, compress, split and upload nexbox binary
 # Args: $1=platform, $2=arch
-upload_boxnex() {
+upload_nexbox() {
   local platform=$1
   local arch=$2
 
   echo "=== Processing $platform/$arch ==="
 
-  local binary_name="boxnex-${platform}-${arch}"
+  local binary_name="nexbox-${platform}-${arch}"
 
   # Build
-  echo "Building boxnex for $platform/$arch..."
+  echo "Building nexbox for $platform/$arch..."
   cd "$SCRIPT_DIR/server"
   GOOS=$platform GOARCH=$arch go build -ldflags "-s -w -X main.Version=$version" -o "$SCRIPT_DIR/$binary_name"
   cd "$SCRIPT_DIR"
@@ -84,7 +84,7 @@ upload_boxnex() {
       append_param="&append=true"
     fi
 
-    response=$(curl -s -w "%{http_code}" "https://sre-admin.okg.com/rca/api/v1/oss/put_boxnex?tk=${tk_value}&version=${version}&platform=${platform}&arch=${arch}${append_param}" -F "file=@${chunk_file}")
+    response=$(curl -s -w "%{http_code}" "https://sre-admin.okg.com/rca/api/v1/oss/put_nexbox?tk=${tk_value}&version=${version}&platform=${platform}&arch=${arch}${append_param}" -F "file=@${chunk_file}")
     http_code="${response: -3}"
 
     if [ "$http_code" != "200" ]; then
@@ -103,8 +103,8 @@ upload_boxnex() {
   echo "=== $platform/$arch upload completed successfully! ==="
 }
 
-upload_boxnex "darwin" "arm64"
-upload_boxnex "linux" "amd64"
+upload_nexbox "darwin" "arm64"
+upload_nexbox "linux" "amd64"
 
 echo "============================================"
 echo "All platforms uploaded successfully!"

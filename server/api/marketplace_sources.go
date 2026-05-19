@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -262,7 +262,7 @@ func CloneOfficialMarketplaceRepos(dataDir string, ls *store.SQLiteStore) {
 		url  string
 		name string
 	}{
-		{"git@gitlab.okg.com:beehub/plugin-marketplace.git", "sre-plugin-marketplace"},
+		{"git@gitlab.okg.com:nexbox/plugin-marketplace.git", "sre-plugin-marketplace"},
 	}
 
 	for _, repo := range repos {

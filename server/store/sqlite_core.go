@@ -431,7 +431,7 @@ func (s *SQLiteStore) UpdateSession(id string, req UpdateSessionRequest) (*Sessi
 //
 // Messages are copied in chronological order until the row whose id matches
 // atMessageID is hit (inclusive), then the iteration stops. Each copy gets a
-// fresh BeeHub message id but keeps role/parts/metadata/created_at, so the
+// fresh Nexbox message id but keeps role/parts/metadata/created_at, so the
 // UI renders the forked prefix immediately and the parent is left untouched.
 //
 // Returns the newly created Session.

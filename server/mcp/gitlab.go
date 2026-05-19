@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"regexp"
 
-	"gitlab.okg.com/sre_ai/nexbox/gitlab"
+	"github.com/esonic/nexbox/gitlab"
 )
 
 // parseMRURL extracts the GitLab host, project path, and MR IID from a URL like:

@@ -413,15 +413,15 @@ func TestBuildStaticContext_Full(t *testing.T) {
 	ctx := BuildStaticContext(project, "sess-001")
 
 	mustContain := []string{
-		"BeeHub Platform Context",
-		"You are working within the BeeHub development platform.",
+		"Nexbox Platform Context",
+		"You are working within the Nexbox development platform.",
 		"Project: Order Service",
 		"Project Description: E-commerce order system",
 		"Project ID: proj-001",
 		"Session ID: sess-001",
 		"Working Directory: /home/dev/order-service",
 		"[Guidelines]",
-		"Use BeeHub MCP tools for asset/task management (project_id: proj-001)",
+		"Use Nexbox MCP tools for asset/task management (project_id: proj-001)",
 		"Respond in user's language",
 		"Work within the project directory",
 	}
@@ -646,7 +646,7 @@ func TestBuildBrainstormPrompt(t *testing.T) {
 	prompt := BuildBrainstormPrompt(project, mindmap)
 
 	mustContain := []string{
-		"BeeHub Brainstorm Mode",
+		"Nexbox Brainstorm Mode",
 		"brainstorming partner",
 		"Project: Research Project",
 		"Project Description: AI research",

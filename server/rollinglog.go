@@ -9,12 +9,12 @@ import (
 
 // rollingLog is an io.WriteCloser that writes to a rolling set of log files.
 // When the active file exceeds maxBytes it is rotated: existing backups are
-// shifted one position (beehub.log → beehub.log.1 → beehub.log.2 …) and a
+// shifted one position (nexbox.log → nexbox.log.1 → nexbox.log.2 …) and a
 // fresh file is opened.  Files beyond maxFiles are deleted so that total disk
 // usage stays bounded to roughly maxFiles × maxBytes.
 type rollingLog struct {
 	dir      string
-	base     string // e.g. "beehub.log"
+	base     string // e.g. "nexbox.log"
 	maxBytes int64
 	maxFiles int
 	mu       sync.Mutex

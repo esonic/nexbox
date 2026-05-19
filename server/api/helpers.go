@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.okg.com/sre_ai/nexbox/agent"
-	"gitlab.okg.com/sre_ai/nexbox/config"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/config"
+	"github.com/esonic/nexbox/store"
 )
 
 // getDefaultAgent reads the persisted default agent from config, falling back to in-memory value.

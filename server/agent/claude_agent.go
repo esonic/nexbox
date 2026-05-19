@@ -146,7 +146,7 @@ func (a *ClaudeAgent) SendMessage(
 		mcpConfig := map[string]interface{}{"mcpServers": servers}
 		mcpConfigBytes, _ := json.Marshal(mcpConfig)
 
-		tmpFile, err := os.CreateTemp(a.DataDir, "beehub-mcp-*.json")
+		tmpFile, err := os.CreateTemp(a.DataDir, "nexbox-mcp-*.json")
 		if err != nil {
 			return Result{}, fmt.Errorf("create MCP config temp file: %w", err)
 		}
@@ -191,7 +191,7 @@ func (a *ClaudeAgent) SendMessage(
 
 	// Build the combined prompt. A fork inherits the parent's context, so
 	// it's effectively a resume — the new session is "new" only on the
-	// BeeHub side, not in terms of model context.
+	// Nexbox side, not in terms of model context.
 	isNewSession := req.SessionID == "" && req.ForkFromAgentSessionID == ""
 	combinedPrompt := BuildPrompt(req.StaticContext, req.DynamicContext, req.Message, isNewSession, req.Images)
 
@@ -225,7 +225,7 @@ func (a *ClaudeAgent) SendMessage(
 	// Last assistant-line UUID seen during the turn. Each assistant content
 	// block (text / thinking / tool_use) is its own JSONL line with its own
 	// uuid; we keep the latest because Claude's `--resume-session-at` cuts
-	// inclusively, so forking at the end of a BeeHub turn requires the last
+	// inclusively, so forking at the end of a Nexbox turn requires the last
 	// assistant uuid of that turn.
 	var lastAssistantUUID string
 

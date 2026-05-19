@@ -28,9 +28,9 @@ if [[ -z "${BASE_URL:-}" ]]; then
   mkdir -p "$DATA_DIR"
 
   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-  BINARY="$SCRIPT_DIR/beehub"
+  BINARY="$SCRIPT_DIR/nexbox"
   if [[ ! -x "$BINARY" ]]; then
-    echo "beehub binary not found at $BINARY — run: cd server && go build -o beehub ." >&2
+    echo "nexbox binary not found at $BINARY — run: cd server && go build -o nexbox ." >&2
     exit 1
   fi
 

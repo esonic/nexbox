@@ -14,8 +14,8 @@ import (
 	"regexp"
 	"strings"
 
-	"gitlab.okg.com/sre_ai/nexbox/config"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/config"
+	"github.com/esonic/nexbox/store"
 )
 
 // GetAuthLoginURL returns the patrol login URL for the frontend to open in a popup.

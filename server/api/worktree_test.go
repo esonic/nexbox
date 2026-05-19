@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/store"
 )
 
 // newWorktreeServer creates a minimal Server backed by an in-memory SQLite store.

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.okg.com/sre_ai/nexbox/agent"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/store"
 )
 
 // ---------------------------------------------------------------------------

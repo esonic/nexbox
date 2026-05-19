@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"gitlab.okg.com/sre_ai/nexbox/plugins/okone"
+	"github.com/esonic/nexbox/plugins/okone"
 )
 
 func main() {

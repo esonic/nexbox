@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/store"
 )
 
 var hexPrefixRe = regexp.MustCompile(`^[0-9a-fA-F]{8}$`)
@@ -96,7 +96,7 @@ func (s *Server) HandleLarkChat(ch store.Change) {
 
 	const maxLarkLen = 14000
 	if len(reply) > maxLarkLen {
-		reply = reply[:maxLarkLen] + "\n\n...(truncated, full response available in BeeHub)"
+		reply = reply[:maxLarkLen] + "\n\n...(truncated, full response available in Nexbox)"
 	}
 
 	if err := rs.SendLarkReply(userName, reply); err != nil {
@@ -115,7 +115,7 @@ func (s *Server) parseLarkChatMessage(text string) (string, string) {
 	projects := s.Config.Get().Projects
 	log.Printf("[lark-chat] user=%s, local projects=%d", userName, len(projects))
 	if len(projects) == 0 {
-		s.larkReply(rs, userName, "No projects configured locally. Please add a project in BeeHub first.")
+		s.larkReply(rs, userName, "No projects configured locally. Please add a project in Nexbox first.")
 		return "", ""
 	}
 

@@ -13,8 +13,8 @@ import (
 
 	gomcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"gitlab.okg.com/sre_ai/nexbox/gitlab"
-	"gitlab.okg.com/sre_ai/nexbox/store"
+	"github.com/esonic/nexbox/gitlab"
+	"github.com/esonic/nexbox/store"
 )
 
 // TerminalWriter abstracts writing commands to a session's terminal.
@@ -85,7 +85,7 @@ func NewServer(s store.Store, addr string) *Server {
 
 	// Create MCP server
 	srv.mcpServer = server.NewMCPServer(
-		"BeeHub Asset Manager",
+		"Nexbox Asset Manager",
 		"1.0.0",
 		server.WithToolCapabilities(true),
 		server.WithRecovery(),
@@ -218,7 +218,7 @@ func (s *Server) registerTools() {
 	// save_asset: Create or update an asset in a project
 	saveAssetTool := gomcp.NewTool("save_asset",
 		gomcp.WithDescription(
-			"Save a document/asset to the BeeHub platform. "+
+			"Save a document/asset to the Nexbox platform. "+
 				"If an asset with the same title already exists in the project, "+
 				"a new version is created. Otherwise, a new asset is created. "+
 				"Use this tool whenever you produce a document such as a requirement doc, "+
@@ -301,9 +301,9 @@ func (s *Server) registerTools() {
 	// create_task: Create a new task
 	createTaskTool := gomcp.NewTool("create_task",
 		gomcp.WithDescription(
-			"Create a new task (like a Jira ticket) in BeeHub. "+
+			"Create a new task (like a Jira ticket) in Nexbox. "+
 				"Use this when the user asks to create a task, track a piece of work. "+
-				"If you know the current project_id (from BeeHub context), pass it; otherwise omit it."),
+				"If you know the current project_id (from Nexbox context), pass it; otherwise omit it."),
 		gomcp.WithString("project_id",
 			gomcp.Description("Optional project ID to associate the task with"),
 		),
@@ -340,7 +340,7 @@ func (s *Server) registerTools() {
 	// list_tasks: List tasks (top 20, most recent first)
 	listTasksTool := gomcp.NewTool("list_tasks",
 		gomcp.WithDescription(
-			"List tasks in BeeHub. Returns top 20 tasks sorted by most recently updated. "+
+			"List tasks in Nexbox. Returns top 20 tasks sorted by most recently updated. "+
 				"Returns task metadata (id, title, status, priority, assignee). "+
 				"Use this to see existing tasks or find tasks to reference."),
 		gomcp.WithString("status",

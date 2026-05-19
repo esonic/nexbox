@@ -14,7 +14,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMPDIR_BASE=$(mktemp -d)
 DATA_DIR="$TMPDIR_BASE/data"
-SERVER_BIN="$TMPDIR_BASE/beehub"
+SERVER_BIN="$TMPDIR_BASE/nexbox"
 WSCLIENT_BIN="$TMPDIR_BASE/wsclient"
 SERVER_LOG="$TMPDIR_BASE/server.log"
 GIT_REPO_DIR="$TMPDIR_BASE/test-repo"

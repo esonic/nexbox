@@ -14,7 +14,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMPDIR_BASE=$(mktemp -d)
 DATA_DIR="$TMPDIR_BASE/data"
-BINARY="$TMPDIR_BASE/beehub"
+BINARY="$TMPDIR_BASE/nexbox"
 SERVER_LOG="$TMPDIR_BASE/server.log"
 PORT=47321
 MCP_PORT=47322
