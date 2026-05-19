@@ -228,9 +228,12 @@
   box-shadow: 0 0 0 3px hsl(var(--ring) / 0.3);
 }
 
-/* Monaco editor search match highlight */
-.search-match-highlight {
-  background-color: rgba(234, 88, 12, 0.35);
-  border-radius: 2px;
+/* Monaco editor: hide the custom hover tooltips that appear on find-widget
+   action buttons (Find in Selection, Close, etc.). These tooltips render
+   over the buttons they describe — overlapping causes flicker and blocks
+   clicks because Monaco's hover widget calls stopPropagation on mousedown.
+   The button icons are self-explanatory; aria-label still works for a11y. */
+.workbench-hover-container {
+  display: none !important;
 }
 

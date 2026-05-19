@@ -203,6 +203,10 @@ func TestBuildArgs_FirstTurn(t *testing.T) {
 
 	expected := map[string]bool{
 		"--output-format": false,
+		"--input-format":  false,
+		"--verbose":       false,
+		"--tools":         false,
+		"default":         false,
 		"stream-json":     false,
 		"--session-id":    false,
 		"sess-123":        false,
@@ -257,6 +261,91 @@ func TestBuildArgs_ResumeTurn(t *testing.T) {
 	}
 }
 
+// TestBuildArgs_ForkSession verifies the CLI flag plumbing for forking:
+// --fork-session must accompany --resume, and --resume-session-at must
+// follow with the chosen assistant uuid. The resume-session-at flag is
+// hidden in claude --help but accepted by the parser; this test guards
+// against the order/name regressing.
+func TestBuildArgs_ForkSession(t *testing.T) {
+	c := NewClaudeClient()
+	args := c.buildArgs(QueryOptions{
+		Resume:              "parent-sid",
+		ForkSession:         true,
+		ResumeAtMessageUUID: "msg-uuid-1",
+	})
+
+	// Build a position map for easy assertions.
+	pos := map[string]int{}
+	for i, a := range args {
+		pos[a] = i
+	}
+	for _, want := range []string{"--resume", "--fork-session", "--resume-session-at"} {
+		if _, ok := pos[want]; !ok {
+			t.Errorf("missing %q in args: %v", want, args)
+		}
+	}
+	if pos["--resume"] >= pos["--fork-session"] {
+		t.Errorf("--fork-session must come after --resume; got order: %v", args)
+	}
+	if pos["--fork-session"] >= pos["--resume-session-at"] {
+		t.Errorf("--resume-session-at must come after --fork-session; got order: %v", args)
+	}
+	// Verify the values follow the flags.
+	if i := pos["--resume"]; i+1 >= len(args) || args[i+1] != "parent-sid" {
+		t.Errorf("expected --resume parent-sid; got: %v", args)
+	}
+	if i := pos["--resume-session-at"]; i+1 >= len(args) || args[i+1] != "msg-uuid-1" {
+		t.Errorf("expected --resume-session-at msg-uuid-1; got: %v", args)
+	}
+}
+
+// TestBuildArgs_ForkSessionWithoutAtMessage covers the degenerate case where
+// the caller asked to fork but didn't specify a cut point. The CLI should
+// still receive --fork-session (which forks at the current end), and no
+// --resume-session-at flag.
+func TestBuildArgs_ForkSessionWithoutAtMessage(t *testing.T) {
+	c := NewClaudeClient()
+	args := c.buildArgs(QueryOptions{
+		Resume:      "parent-sid",
+		ForkSession: true,
+	})
+
+	hasResumeAt := false
+	hasFork := false
+	for _, a := range args {
+		if a == "--resume-session-at" {
+			hasResumeAt = true
+		}
+		if a == "--fork-session" {
+			hasFork = true
+		}
+	}
+	if !hasFork {
+		t.Errorf("expected --fork-session in args: %v", args)
+	}
+	if hasResumeAt {
+		t.Errorf("--resume-session-at must not appear when ResumeAtMessageUUID is empty: %v", args)
+	}
+}
+
+// TestBuildArgs_ForkSessionRequiresResume verifies that ForkSession alone
+// (without Resume) does not produce --fork-session. The CLI rejects
+// --fork-session without a resume target, so we mirror that constraint
+// at the build-args layer.
+func TestBuildArgs_ForkSessionRequiresResume(t *testing.T) {
+	c := NewClaudeClient()
+	args := c.buildArgs(QueryOptions{
+		SessionID:           "new-sid",
+		ForkSession:         true,
+		ResumeAtMessageUUID: "msg-uuid-1",
+	})
+	for _, a := range args {
+		if a == "--fork-session" || a == "--resume-session-at" {
+			t.Errorf("fork flags must not be emitted without --resume: %v", args)
+		}
+	}
+}
+
 func TestBuildArgs_AllowedTools(t *testing.T) {
 	c := NewClaudeClient()
 	args := c.buildArgs(QueryOptions{
@@ -264,26 +353,22 @@ func TestBuildArgs_AllowedTools(t *testing.T) {
 		AllowedTools: []string{"Bash", "Read", "Write", "Edit", "Grep", "Glob"},
 	})
 
-	found := false
-	for i, arg := range args {
+	hasAllowedTools := false
+	toolSet := make(map[string]bool)
+	for _, arg := range args {
 		if arg == "--allowed-tools" {
-			found = true
-			// Remaining args after --allowed-tools should be the tools
-			tools := args[i+1:]
-			toolSet := make(map[string]bool)
-			for _, tool := range tools {
-				toolSet[tool] = true
-			}
-			for _, tool := range []string{"Bash", "Read", "Write", "Edit", "Grep", "Glob"} {
-				if !toolSet[tool] {
-					t.Errorf("missing tool %q in allowed-tools args: %v", tool, tools)
-				}
-			}
-			break
+			hasAllowedTools = true
+			continue
 		}
+		toolSet[arg] = true
 	}
-	if !found {
+	if !hasAllowedTools {
 		t.Error("expected --allowed-tools in args")
+	}
+	for _, tool := range []string{"Bash", "Read", "Write", "Edit", "Grep", "Glob"} {
+		if !toolSet[tool] {
+			t.Errorf("missing tool %q in args: %v", tool, args)
+		}
 	}
 }
 
@@ -322,15 +407,23 @@ func TestBuildStaticContext_Full(t *testing.T) {
 		ID:          "proj-001",
 		Name:        "Order Service",
 		Description: "E-commerce order system",
+		GitRepoPath: "/home/dev/order-service",
 	}
 
 	ctx := BuildStaticContext(project, "sess-001")
 
 	mustContain := []string{
-		"BoxNex AI platform",
+		"BeeHub Platform Context",
+		"You are working within the BeeHub development platform.",
 		"Project: Order Service",
 		"Project Description: E-commerce order system",
 		"Project ID: proj-001",
+		"Session ID: sess-001",
+		"Working Directory: /home/dev/order-service",
+		"[Guidelines]",
+		"Use BeeHub MCP tools for asset/task management (project_id: proj-001)",
+		"Respond in user's language",
+		"Work within the project directory",
 	}
 
 	for _, s := range mustContain {
@@ -342,8 +435,9 @@ func TestBuildStaticContext_Full(t *testing.T) {
 
 func TestBuildStaticContext_NoDescription(t *testing.T) {
 	project := ProjectInfo{
-		ID:   "proj-002",
-		Name: "Simple App",
+		ID:          "proj-002",
+		Name:        "Simple App",
+		GitRepoPath: "/tmp/app",
 	}
 
 	ctx := BuildStaticContext(project, "")
@@ -361,18 +455,18 @@ func TestBuildStaticContext_NoDescription(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildDynamicContext_Empty(t *testing.T) {
-	ctx := BuildDynamicContext(nil, nil, nil, nil)
+	ctx := BuildDynamicContext(nil, nil, nil)
 	if ctx != "" {
 		t.Errorf("expected empty string for no refs, got %q", ctx)
 	}
 }
 
 func TestBuildDynamicContext_ProjectOnly(t *testing.T) {
-	proj := &ProjectInfo{ID: "proj-1", Name: "My Project"}
-	ctx := BuildDynamicContext(proj, nil, nil, nil)
+	proj := &ProjectInfo{ID: "proj-1", Name: "My Project", GitRepoPath: "/tmp/proj"}
+	ctx := BuildDynamicContext(proj, nil, nil)
 
 	mustContain := []string{
-		"[Project: My Project | ID: proj-1]",
+		"[Project: My Project | ID: proj-1 | Dir: /tmp/proj]",
 	}
 	for _, s := range mustContain {
 		if !containsString(ctx, s) {
@@ -390,7 +484,7 @@ func TestBuildDynamicContext_TasksOnly(t *testing.T) {
 		{ID: "task-2", Title: "Add feature", Priority: "medium", Status: "in_progress"},
 	}
 
-	ctx := BuildDynamicContext(nil, tasks, nil, nil)
+	ctx := BuildDynamicContext(nil, tasks, nil)
 
 	mustContain := []string{
 		"[Session References]",
@@ -416,7 +510,7 @@ func TestBuildDynamicContext_AssetsOnly(t *testing.T) {
 		{ID: "a-2", Type: "code_change", Title: "auth.go", Status: "approved"},
 	}
 
-	ctx := BuildDynamicContext(nil, nil, assets, nil)
+	ctx := BuildDynamicContext(nil, nil, assets)
 
 	mustContain := []string{
 		"[Session References]",
@@ -444,7 +538,7 @@ func TestBuildDynamicContext_Both(t *testing.T) {
 		{ID: "a-1", Type: "design_doc", Title: "API Design", Status: "draft"},
 	}
 
-	ctx := BuildDynamicContext(nil, tasks, assets, nil)
+	ctx := BuildDynamicContext(nil, tasks, assets)
 
 	mustContain := []string{
 		"[Session References]",
@@ -533,6 +627,51 @@ func TestBuildPrompt_EmptyStatic(t *testing.T) {
 	}
 	if !containsString(prompt, msg) {
 		t.Error("should contain message")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BuildBrainstormPrompt
+// ---------------------------------------------------------------------------
+
+func TestBuildBrainstormPrompt(t *testing.T) {
+	project := &ProjectInfo{
+		Name:        "Research Project",
+		Description: "AI research",
+	}
+	mindmap := &MindmapRef{
+		Title: "Feature Ideas",
+	}
+
+	prompt := BuildBrainstormPrompt(project, mindmap)
+
+	mustContain := []string{
+		"BeeHub Brainstorm Mode",
+		"brainstorming partner",
+		"Project: Research Project",
+		"Project Description: AI research",
+		"Mindmap: Feature Ideas",
+		"Brainstorming Approach",
+		"Response Style",
+	}
+
+	for _, s := range mustContain {
+		if !containsString(prompt, s) {
+			t.Errorf("brainstorm prompt missing: %q", s)
+		}
+	}
+}
+
+func TestBuildBrainstormPrompt_NilProject(t *testing.T) {
+	mindmap := &MindmapRef{Title: "Ideas"}
+
+	prompt := BuildBrainstormPrompt(nil, mindmap)
+
+	if containsString(prompt, "Project:") {
+		t.Error("should not contain project section when nil")
+	}
+	if !containsString(prompt, "Mindmap: Ideas") {
+		t.Error("should contain mindmap")
 	}
 }
 

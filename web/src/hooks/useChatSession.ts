@@ -7,17 +7,32 @@ import { useAppStore } from "@/stores/app";
 import {
   parseAskQuestionInput,
 } from "@/components/chat/QuestionCard";
-import {
-  parseTodoOutput,
-  parseTodoInput,
-} from "@/components/chat/ToolCallCard";
+import { TODO_TOOLS, parseTodoOutput, parseTodoInput } from "@/components/chat/ToolCallCard";
 import type { AttachedImage } from "@/components/chat/ChatInput";
 import { uuid } from "@/lib/utils";
-import type { Session, Task, ChatEvent, ChatMessage as ChatMessageType } from "@/types";
+import type { Session, Task, ChatEvent, ChatMessage as ChatMessageType, ModelInfo } from "@/types";
 import type { PickedAsset, PickedWorkflow, RichQueuedMessage } from "@/stores/app";
 
 export type { QueuedMessage } from "@/lib/api";
 export type { RichQueuedMessage } from "@/stores/app";
+
+const LAST_MODEL_KEY_PREFIX = "nexbox-last-model:";
+const LAST_EFFORT_KEY_PREFIX = "nexbox-last-effort:";
+
+// Effort is stored per (agent, model) because supported_efforts varies by model
+// (e.g. Claude Opus accepts "xhigh"/"max", Sonnet may not).
+function lastEffortKey(agent: string, model: string) {
+  return `${LAST_EFFORT_KEY_PREFIX}${agent}:${model}`;
+}
+
+// Stable empty-array constants so Zustand selectors don't trigger re-renders
+// when a session key is missing (undefined ?? EMPTY gives a stable reference).
+const EMPTY_MESSAGES: ChatMessageType[] = [];
+const EMPTY_TASKS: Task[] = [];
+const EMPTY_ASSETS: PickedAsset[] = [];
+const EMPTY_WORKFLOWS: PickedWorkflow[] = [];
+const EMPTY_COMMENTS: RichQueuedMessage["pickedComments"] = [];
+const EMPTY_RICH_QUEUE: RichQueuedMessage[] = [];
 
 /** Serialize inline comments into a compact text block for the AI. */
 function serializeComments(comments: RichQueuedMessage["pickedComments"]): string {
@@ -60,13 +75,19 @@ function sendRichQueuedMessageDirect(sid: string, msg: RichQueuedMessage) {
   gs.setStreamingSession(sid, true);
 }
 
-function buildSessionTitle(message: string): string {
-  const cleaned = message.replace(/\s+/g, " ").trim();
-  if (!cleaned) return "New Session";
-  return (cleaned.split(/[.!?。！？\n]/)[0]?.trim() || cleaned).slice(0, 48) || "New Session";
-}
+// WF[xxxxx] prefix written by the workflow orchestrator. We preserve it
+// when checking for "default" names so workflow sessions also receive an
+// auto-generated title — the backend re-applies the prefix on save.
+const WF_PREFIX_RE = /^WF\[[A-Fa-f0-9]+\]\s*/;
 
-/** Auto-rename session with a title derived from the first user message (if still default-named). */
+/**
+ * Kick off backend auto-title generation for the first user message.
+ *
+ * Skips when the user has manually named the session (anything that isn't the
+ * placeholder name or a WF-prefixed orchestrator name). The backend pins
+ * Claude+Haiku and handles the WF prefix server-side; we just push the raw
+ * first message and update local store when the response lands.
+ */
 function autoRenameSession(
   sessionId: string,
   sessionName: string,
@@ -74,18 +95,24 @@ function autoRenameSession(
   pickedTasks: Task[],
   pickedAssets: PickedAsset[],
 ) {
-  const name = (sessionName || "").trim();
-  const isDefault = !name || name === "New Session" || /^Session\s+\d+$/i.test(name);
-  if (!isDefault) return;
-  const title = buildSessionTitle(
-    firstText || pickedTasks[0]?.title || pickedAssets[0]?.title || "New Session",
-  );
-  sessionsApi.update(sessionId, { name: title })
-    .then(() => {
+  const raw = (sessionName || "").trim();
+  const hasWFPrefix = WF_PREFIX_RE.test(raw);
+  const withoutPrefix = raw.replace(WF_PREFIX_RE, "").trim();
+  // WF-prefixed sessions always trigger — backend keeps the prefix and only
+  // replaces the workflow/node label after it. Non-WF sessions trigger only
+  // when still on the placeholder name; never overwrite a user-edited title.
+  const shouldRename = hasWFPrefix || !withoutPrefix || withoutPrefix === "New Session" || /^Session\s+\d+$/i.test(withoutPrefix);
+  if (!shouldRename) return;
+
+  const message = (firstText || pickedTasks[0]?.title || pickedAssets[0]?.title || "").trim();
+  if (!message) return;
+
+  sessionsApi.autoTitle(sessionId, message)
+    .then((updated) => {
       const { sessions, setSessions } = useAppStore.getState();
-      setSessions(sessions.map((s) => (s.id === sessionId ? { ...s, name: title } : s)));
+      setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
     })
-    .catch((err) => console.error("[autoRename] Failed to rename session:", err));
+    .catch((err) => console.error("[autoRename] Failed to generate session title:", err));
 }
 
 interface UseChatSessionOptions {
@@ -103,47 +130,50 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   const [hasMore, setHasMore] = useState(false);
   const [serverAgent, setServerAgent] = useState<string>("");
   const [availableAgents, setAvailableAgents] = useState<string[]>([]);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [availableModelInfos, setAvailableModelInfos] = useState<ModelInfo[]>([]);
+  // Which agent the currently held available models belong to. Used to guard
+  // against the race where `agentName` updates instantly but the async fetch
+  // of the new agent's model list hasn't landed yet — in that window we must
+  // not write an old-agent model into the new session.
+  const [modelsAgent, setModelsAgent] = useState<string>("");
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
 
   const agentName = session.agent || serverAgent;
+  const modelName = session.model || (availableModels[0] || "");
   const sessionId = session.id;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
-  const {
-    chatMessages,
-    setChatMessages,
-    addChatMessage,
-    finishStreaming,
-    streamingSessions,
-    setStreamingSession,
-    pickedTasks: allPickedTasks,
-    addPickedTask: storeAddPickedTask,
-    removePickedTask: storeRemovePickedTask,
-    clearPickedTasks,
-    pickedAssets: allPickedAssets,
-    addPickedAsset: storeAddPickedAsset,
-    removePickedAsset: storeRemovePickedAsset,
-    clearPickedAssets,
-    pickedWorkflows: allPickedWorkflows,
-    addPickedWorkflow: storeAddPickedWorkflow,
-    removePickedWorkflow: storeRemovePickedWorkflow,
-    clearPickedWorkflows,
-    pickedComments: allPickedComments,
-    clearPickedComments,
-    clientQueue: allClientQueue,
-    enqueueRichMessage,
-    dequeueRichMessage,
-    updateRichQueuedText,
-  } = useAppStore();
+  // Use fine-grained selectors to avoid re-renders from unrelated store changes.
+  // IMPORTANT: selectors must return the stored reference directly (not `|| []`)
+  // because `|| []` creates a new array each render, defeating Zustand's Object.is check.
+  const messages = useAppStore((s) => s.chatMessages[sessionId]) ?? EMPTY_MESSAGES;
+  const isStreaming = useAppStore((s) => !!s.streamingSessions[sessionId]);
+  const pickedTasks = useAppStore((s) => s.pickedTasks[sessionId]) ?? EMPTY_TASKS;
+  const pickedAssets = useAppStore((s) => s.pickedAssets[sessionId]) ?? EMPTY_ASSETS;
+  const pickedWorkflows = useAppStore((s) => s.pickedWorkflows[sessionId]) ?? EMPTY_WORKFLOWS;
+  const pickedComments = useAppStore((s) => s.pickedComments[sessionId]) ?? EMPTY_COMMENTS;
+  const richQueue = useAppStore((s) => s.clientQueue[sessionId]) ?? EMPTY_RICH_QUEUE;
 
-  const isStreaming = !!streamingSessions[sessionId];
-  const messages = chatMessages[sessionId] || [];
-  const pickedTasks = allPickedTasks[sessionId] || [];
-  const pickedAssets = allPickedAssets[sessionId] || [];
-  const pickedWorkflows = allPickedWorkflows[sessionId] || [];
-  const pickedComments = allPickedComments[sessionId] || [];
-  const richQueue = allClientQueue[sessionId] || [];
+  // Action selectors (stable references — these never cause re-renders)
+  const setChatMessages = useAppStore((s) => s.setChatMessages);
+  const addChatMessage = useAppStore((s) => s.addChatMessage);
+  const setStreamingSession = useAppStore((s) => s.setStreamingSession);
+  const storeAddPickedTask = useAppStore((s) => s.addPickedTask);
+  const storeRemovePickedTask = useAppStore((s) => s.removePickedTask);
+  const clearPickedTasks = useAppStore((s) => s.clearPickedTasks);
+  const storeAddPickedAsset = useAppStore((s) => s.addPickedAsset);
+  const storeRemovePickedAsset = useAppStore((s) => s.removePickedAsset);
+  const clearPickedAssets = useAppStore((s) => s.clearPickedAssets);
+  const storeAddPickedWorkflow = useAppStore((s) => s.addPickedWorkflow);
+  const storeRemovePickedWorkflow = useAppStore((s) => s.removePickedWorkflow);
+  const clearPickedWorkflows = useAppStore((s) => s.clearPickedWorkflows);
+  const clearPickedComments = useAppStore((s) => s.clearPickedComments);
+  const enqueueRichMessage = useAppStore((s) => s.enqueueRichMessage);
+  const dequeueRichMessage = useAppStore((s) => s.dequeueRichMessage);
+  const updateRichQueuedText = useAppStore((s) => s.updateRichQueuedText);
+
   const sessionHasMessages = messages.length > 0;
 
   // Fetch queue from server
@@ -159,7 +189,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     refreshQueue(sessionId);
   }, [sessionId, refreshQueue]);
 
-  // Detect pending ask_question (MCP structured questions)
+  // Detect pending ask_question
   const pendingQuestion = useMemo(() => {
     if (isStreaming) return null;
     const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
@@ -173,43 +203,42 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     return parseAskQuestionInput(askToolPart.input);
   }, [messages, isStreaming]);
 
+  // Track pending interactive tool calls (AskUserQuestion from Claude CLI).
+  // These arrive as user_input_request events DURING streaming.
+  const [pendingUserInput, setPendingUserInput] = useState<{
+    toolUseId: string;
+    toolName: string;
+    input: string;
+  } | null>(null);
+
   // Detect pending todos (TodoWrite tool) — only during streaming.
   // Cleared automatically when streaming ends, so it never gets stuck.
   const pendingTodo = useMemo(() => {
     if (!isStreaming) return null;
+    type ToolUsePart = Extract<ChatMessageType["parts"][number], { type: "tool_use" }>;
+    type ToolResultPart = Extract<ChatMessageType["parts"][number], { type: "tool_result" }>;
 
-    const TODO_TOOLS_SET = new Set(["TodoWrite", "UpdateTodos", "ReadTodos", "updateTodosToolCall", "readTodosToolCall", "todoWriteToolCall"]);
-
-    // Walk backwards through messages until we hit a user message
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
-      if (msg.role === "user") break; // stop at user turn boundary
-
+      if (msg.role === "user") break;
       if (msg.role !== "assistant") continue;
 
       const todoCalls = msg.parts.filter(
-        (p) => p.type === "tool_use" && TODO_TOOLS_SET.has((p as any).toolName)
+        (p): p is ToolUsePart => p.type === "tool_use" && TODO_TOOLS.has(p.toolName)
       );
       if (todoCalls.length === 0) continue;
 
       const lastTodoCall = todoCalls[todoCalls.length - 1];
-      if (lastTodoCall.type !== "tool_use") continue;
 
-      // Prefer input over output: parseTodoOutput only works when the server
-      // returns {success:{todos:[...]}}; if it fails we fall back to the input
-      // which is always available and has the full list.
       const result = msg.parts.find(
-        (p) => p.type === "tool_result" && (p as any).toolCallId === lastTodoCall.toolCallId
+        (p): p is ToolResultPart => p.type === "tool_result" && p.toolCallId === lastTodoCall.toolCallId
       );
 
-      const outputTodos = result ? parseTodoOutput((result as any).output) : [];
+      const outputTodos = result ? parseTodoOutput(result.output) : [];
       const todos = outputTodos.length > 0 ? outputTodos : parseTodoInput(lastTodoCall.input);
-
       if (todos.length === 0) continue;
 
       const isPending = msg.isStreaming || lastTodoCall.state === "streaming" || lastTodoCall.state === "running";
-
-      // All tasks done/cancelled — mission complete, close the panel
       const allDone = todos.every(
         (t) => t.status === "completed" || t.status === "TODO_STATUS_COMPLETED" ||
                t.status === "cancelled" || t.status === "TODO_STATUS_CANCELLED"
@@ -220,15 +249,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     }
 
     return null;
-  }, [messages]);
-
-  // Track pending interactive tool calls (AskUserQuestion from Claude CLI).
-  // These arrive as user_input_request events DURING streaming.
-  const [pendingUserInput, setPendingUserInput] = useState<{
-    toolUseId: string;
-    toolName: string;
-    input: string;
-  } | null>(null);
+  }, [messages, isStreaming]);
 
   // Fetch server default agent and available agents
   useEffect(() => {
@@ -236,16 +257,96 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     serverApi.availableAgents().then((data) => setAvailableAgents(data.agents || [])).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    if (!agentName) {
+      setAvailableModels([]);
+      setAvailableModelInfos([]);
+      setModelsAgent("");
+      return;
+    }
+    // Clear immediately so effects that depend on the list don't act on
+    // stale data while the new agent's list is being fetched.
+    setAvailableModels([]);
+    setAvailableModelInfos([]);
+    setModelsAgent("");
+    let cancelled = false;
+    // Both Claude and Codex emit label/description + supported_efforts directly.
+    // No client-side massaging — if the list is empty (CLI not reachable), show empty.
+    serverApi.availableModels(agentName).then((data) => {
+      if (cancelled) return;
+      setAvailableModels(data.models || []);
+      setAvailableModelInfos(data.models_info || []);
+      setModelsAgent(agentName);
+    }).catch(() => {
+      if (cancelled) return;
+      setAvailableModels([]);
+      setAvailableModelInfos([]);
+      setModelsAgent(agentName);
+    });
+    return () => { cancelled = true; };
+  }, [agentName]);
+
+  // When a session has no model set, apply the last-used model for this agent.
+  // Guarded on `modelsAgent === agentName` so we never write an old-agent
+  // default into a freshly switched session.
+  useEffect(() => {
+    if (!agentName || modelsAgent !== agentName) return;
+    if (availableModels.length === 0 || session.model) return;
+    let defaultModel = availableModels[0];
+    try {
+      const stored = localStorage.getItem(LAST_MODEL_KEY_PREFIX + agentName);
+      if (stored && availableModels.includes(stored)) defaultModel = stored;
+    } catch { /* ignore */ }
+    sessionsApi.update(session.id, { model: defaultModel }).then((updated) => {
+      const { sessions, setSessions } = useAppStore.getState();
+      setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
+    }).catch(() => {});
+  }, [agentName, modelsAgent, availableModels, session.model, session.id]);
+
+  // Apply the model's default effort when the session is missing one, or
+  // clear the stored effort if the current model doesn't accept it. Models
+  // that don't support effort at all (empty supported_efforts) drop the
+  // effort back to the empty string. Guarded on `modelsAgent === agentName`
+  // so we don't validate a Claude effort against a Codex model list (or
+  // vice-versa) during an agent switch.
+  useEffect(() => {
+    if (!session.model || availableModelInfos.length === 0) return;
+    if (modelsAgent !== agentName) return;
+    const info = availableModelInfos.find((m) => m.id === session.model);
+    if (!info) return;
+    const efforts = info.supported_efforts || [];
+    let target: string;
+    if (efforts.length === 0) {
+      target = "";
+    } else if (session.effort && efforts.includes(session.effort)) {
+      return; // already valid
+    } else {
+      let stored = "";
+      try { stored = localStorage.getItem(lastEffortKey(agentName, session.model)) || ""; } catch { /* ignore */ }
+      target = (stored && efforts.includes(stored)) ? stored : (info.default_effort || efforts[0] || "");
+    }
+    if (target === (session.effort || "")) return;
+    sessionsApi.update(session.id, { effort: target }).then((updated) => {
+      const { sessions, setSessions } = useAppStore.getState();
+      setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
+    }).catch(() => {});
+  }, [session.id, session.model, session.effort, availableModelInfos, modelsAgent, agentName]);
+
   // Load persisted chat history (initial load with pagination)
   useEffect(() => {
     if (!sessionId) return;
-    if (chatMessages[sessionId]?.length) return;
+    if (useAppStore.getState().chatMessages[sessionId]?.length) return;
 
     let cancelled = false;
     setLoadingHistory(true);
 
     messagesApi.list(sessionId, 20).then(({ messages: persisted, active, has_more }) => {
       if (cancelled) return;
+      const liveMessages = useAppStore.getState().chatMessages[sessionId] || [];
+      if (liveMessages.length > 0) {
+        setHasMore(has_more || false);
+        return;
+      }
       const mapped: ChatMessageType[] = (persisted || [])
         .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))
         .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
@@ -298,10 +399,11 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   // seenDisconnect tracks whether we actually experienced a disconnection.
   // onConnection() fires immediately on registration even when WS is already connected,
   // and we must not treat that initial fire as a reconnection (it would reset streaming state).
-  // Track the currently-running Agent/Task tool so sub-tool events can be nested inside it
-  const activeAgentToolIdRef = useRef<string | null>(null);
+  // nestedToolIdsRef tracks which tool_use_ids belong to a sub-agent so
+  // their tool_input_delta / tool_result events can be routed to the
+  // nested-tool helpers. Populated at tool_start from parent_tool_id and
+  // drained on tool_result.
   const nestedToolIdsRef = useRef<Set<string>>(new Set());
-
   const seenDisconnectRef = useRef(false);
   useEffect(() => {
     seenDisconnectRef.current = false;
@@ -395,10 +497,14 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       case "tool_start":
         if (event.tool && event.tool_id) {
           ensureStreaming();
-          if (activeAgentToolIdRef.current) {
-            // Nested sub-tool: add inside the agent card instead of as a sibling
+          if (event.parent_tool_id) {
+            // Sub-agent call: nest under the parent Task tool identified
+            // by parent_tool_id. This works correctly even when several
+            // sub-agents run in parallel, because each event carries its
+            // own parent reference rather than relying on a shared
+            // "currently active agent" pointer.
             nestedToolIdsRef.current.add(event.tool_id);
-            gs().addNestedToolStart(sid, activeAgentToolIdRef.current, event.tool_id, event.tool, event.input || "");
+            gs().addNestedToolStart(sid, event.parent_tool_id, event.tool_id, event.tool, event.input || "");
           } else {
             gs().addToolStart(sid, event.tool_id, event.tool, event.input);
           }
@@ -415,14 +521,12 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         break;
       case "tool_result":
         if (event.tool_id) {
-          if (nestedToolIdsRef.current.has(event.tool_id)) {
+          const isNested = !!event.parent_tool_id || nestedToolIdsRef.current.has(event.tool_id);
+          if (isNested) {
             gs().addNestedToolResult(sid, event.tool_id, event.output || "", event.is_error);
+            nestedToolIdsRef.current.delete(event.tool_id);
           } else {
             gs().addToolResult(sid, event.tool_id, event.output || "", event.is_error);
-            if (event.tool_id === activeAgentToolIdRef.current) {
-              activeAgentToolIdRef.current = null;
-              nestedToolIdsRef.current.clear();
-            }
           }
         }
         break;
@@ -444,10 +548,19 @@ export function useChatSession({ session }: UseChatSessionOptions) {
           gs().addWidgetPart(sid, event.widget_title || "", event.widget_code, event.loading_messages);
         }
         break;
+      case "context_usage":
+        if (event.context_usage) {
+          gs().setSessionContextUsage(sid, event.context_usage);
+        }
+        break;
+      case "session_info":
+        // Currently surfaced only as a debug log; could be used to
+        // display the CLI-resolved model slug, cwd, etc. in the UI.
+        break;
       case "done":
         setPendingUserInput(null);
         gs().setStreamingSession(sid, false);
-        gs().finishStreaming(sid, event.stats || undefined);
+        gs().finishStreaming(sid, event.stats || undefined, event.sdk_message_uuid);
         if (event.stats?.duration_ms) {
           gs().addSessionDuration(sid, event.stats.duration_ms);
         }
@@ -464,9 +577,6 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         break;
       case "error":
         setPendingUserInput(null);
-        if (event.message?.startsWith("disk_quota_exceeded:")) {
-          toast.error("Disk quota exceeded", { description: event.message.replace("disk_quota_exceeded: ", "") });
-        }
         if (event.message) { ensureStreaming(); gs().appendTextDelta(sid, `\n\n**Error:** ${event.message}`); }
         gs().setStreamingSession(sid, false);
         gs().finishStreaming(sid);
@@ -474,27 +584,19 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         break;
       case "subtask_start": {
         ensureStreaming();
-        // Find the last running tool_use — that's the Agent card to nest sub-tools into
-        const msgs = gs().chatMessages[sid] || [];
-        const lastMsg = msgs[msgs.length - 1];
-        if (lastMsg?.role === "assistant") {
-          for (let i = lastMsg.parts.length - 1; i >= 0; i--) {
-            const p = lastMsg.parts[i];
-            if (p.type === "tool_use" && (p.state === "running" || p.state === "streaming")) {
-              activeAgentToolIdRef.current = p.toolCallId;
-              break;
-            }
-          }
-        }
-        if (event.content) gs().setAgentToolSummary(sid, event.content);
+        // task_id is the tool_use_id of the Task tool that launched this
+        // sub-agent — pass it through so the summary lands on the right
+        // Agent card when multiple sub-agents are running in parallel.
+        if (event.content) gs().setAgentToolSummary(sid, event.content, event.task_id);
         break;
       }
       case "subtask_progress":
-        // Ignore: real tool_start events carry the same info with proper toolName/input
+        // Ignore: real tool_start events carry the same info with proper toolName/input.
         break;
       case "subtask_done":
-        activeAgentToolIdRef.current = null;
-        nestedToolIdsRef.current.clear();
+        // No-op: nesting is driven by parent_tool_id on tool_start /
+        // tool_result. The Agent tool_use itself completes via its own
+        // tool_result event.
         break;
       case "system":
         if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, `\n\n_[System: ${event.content}]_\n\n`); }
@@ -600,9 +702,17 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     addChatMessage(sessionId, { id: uuid(), session_id: sessionId, role: "user", parts, metadata: {}, created_at: now });
     addChatMessage(sessionId, { id: uuid(), session_id: sessionId, role: "assistant", parts: [], metadata: {}, created_at: now, isStreaming: true });
 
-    globalWS.send(sessionId, finalMessage, parts, imageFilenames.length > 0 ? imageFilenames : undefined, features);
+    // A hidden ("scratch") session gets promoted server-side (is_hidden=0)
+    // when the user's first message is persisted, and the server then
+    // broadcasts a session change that triggers a loadSessions refetch in
+    // AppSidebar — that's what drives the session into the sidebar list.
+    // We deliberately don't flip is_hidden locally here: if the WS send
+    // ever fails silently, the server never promotes, and a subsequent
+    // loadSessions would see a non-hidden local session that's missing
+    // from the server response and drop it from the merge — taking the
+    // user's active session with it.
 
-    for (const t of pickedTasks) tasksApi.incrementRefCount(t.id).catch(() => {});
+    globalWS.send(sessionId, finalMessage, parts, imageFilenames.length > 0 ? imageFilenames : undefined, features);
 
     clearPickedTasks(sessionId);
     clearPickedAssets(sessionId);
@@ -614,10 +724,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   const handleStop = useCallback(() => {
     globalWS.stop(sessionId);
     setPendingUserInput(null);
-    // Do NOT immediately finishStreaming here — let the backend's "done" event do it.
-    // The backend suppresses intermediate events after cancel, then sends a final
-    // "done" with token stats. Calling finishStreaming early causes the message to
-    // split into two bubbles (ensureStreaming creates a new one for late events).
+    // Do NOT immediately finishStreaming here — let backend final events settle state.
     window.dispatchEvent(new Event('workflow-stop'));
   }, [sessionId]);
 
@@ -652,11 +759,11 @@ export function useChatSession({ session }: UseChatSessionOptions) {
 
   const sendRichQueuedNow = useCallback((msgId: string) => {
     if (isStreaming) return; // stay in queue while streaming
-    const item = (allClientQueue[sessionId] || []).find((m) => m.id === msgId);
+    const item = (useAppStore.getState().clientQueue[sessionId] || []).find((m: RichQueuedMessage) => m.id === msgId);
     if (!item) return;
     dequeueRichMessage(sessionId, msgId);
     sendRichQueuedMessageDirect(sessionId, item);
-  }, [sessionId, isStreaming, allClientQueue, dequeueRichMessage]);
+  }, [sessionId, isStreaming, dequeueRichMessage]);
 
   const removeRichQueued = useCallback((msgId: string) => {
     dequeueRichMessage(sessionId, msgId);
@@ -669,7 +776,10 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   const handleChangeAgent = useCallback(async (newAgent: string) => {
     if (sessionHasMessages) return;
     try {
-      const updated = await sessionsApi.update(session.id, { agent: newAgent });
+      // Clear both model and effort: each agent has a different effort vocabulary
+      // (e.g. Claude accepts "max", Codex doesn't). The auto-apply effects pick
+      // fresh defaults once the new agent's model list is loaded.
+      const updated = await sessionsApi.update(session.id, { agent: newAgent, model: "", effort: "" });
       const { sessions, setSessions } = useAppStore.getState();
       setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
     } catch (e) {
@@ -680,14 +790,42 @@ export function useChatSession({ session }: UseChatSessionOptions) {
 
   const handleChangeModel = useCallback(async (newModel: string) => {
     try {
-      const updated = await sessionsApi.update(session.id, { model: newModel });
+      // When switching models, re-align effort with what the new model accepts.
+      const info = availableModelInfos.find((m) => m.id === newModel);
+      const update: { model: string; effort?: string } = { model: newModel };
+      if (info) {
+        const efforts = info.supported_efforts || [];
+        if (efforts.length === 0) {
+          update.effort = ""; // new model doesn't support effort at all
+        } else if (!session.effort || !efforts.includes(session.effort)) {
+          let stored = "";
+          try { stored = localStorage.getItem(lastEffortKey(agentName, newModel)) || ""; } catch { /* ignore */ }
+          update.effort = (stored && efforts.includes(stored)) ? stored : (info.default_effort || efforts[0] || "");
+        }
+      }
+      const updated = await sessionsApi.update(session.id, update);
+      try { localStorage.setItem(LAST_MODEL_KEY_PREFIX + agentName, newModel); } catch { /* ignore */ }
       const { sessions, setSessions } = useAppStore.getState();
       setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
     } catch (e) {
       console.error("Failed to update session model:", e);
       toast.error("Failed to change model", { description: String(e) });
     }
-  }, [session.id]);
+  }, [session.id, session.effort, agentName, availableModelInfos]);
+
+  const handleChangeEffort = useCallback(async (newEffort: string) => {
+    try {
+      const updated = await sessionsApi.update(session.id, { effort: newEffort });
+      if (session.model && newEffort) {
+        try { localStorage.setItem(lastEffortKey(agentName, session.model), newEffort); } catch { /* ignore */ }
+      }
+      const { sessions, setSessions } = useAppStore.getState();
+      setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
+    } catch (e) {
+      console.error("Failed to update session effort:", e);
+      toast.error("Failed to change effort", { description: String(e) });
+    }
+  }, [session.id, session.model, agentName]);
 
   const addPickedTask = useCallback((task: Task) => {
     storeAddPickedTask(sessionId, task);
@@ -724,8 +862,8 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       const { messages: olderMessages, has_more } = await messagesApi.list(sessionId, 20, oldestMessage.id);
       if (olderMessages && olderMessages.length > 0) {
         const mapped: ChatMessageType[] = olderMessages
-          .filter((m) => m.role === "user" || (m.role === "assistant" && m.parts.length > 0))
-          .map((m) => ({ ...m, isStreaming: false }));
+          .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))
+          .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
 
         // Prepend older messages to existing ones
         const currentMessages = useAppStore.getState().chatMessages[sessionId] || [];
@@ -765,7 +903,6 @@ export function useChatSession({ session }: UseChatSessionOptions) {
           description: "",
           status: (detail.status as Task["status"]) || "open",
           priority: "medium",
-          ref_count: 0,
           comment_count: 0,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -788,8 +925,11 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     pendingUserInput,
     sendToolResponse,
     agentName,
-    modelName: session.model || "",
+    modelName,
+    effort: session.effort || "",
     availableAgents,
+    availableModels,
+    availableModelInfos,
     pickedTasks,
     pickedAssets,
     pickedWorkflows,
@@ -801,6 +941,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     handleStop,
     handleChangeAgent,
     handleChangeModel,
+    handleChangeEffort,
     sendQueuedNow,
     removeQueued,
     editQueued,

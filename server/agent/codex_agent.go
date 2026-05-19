@@ -25,12 +25,10 @@ type CodexAgent struct {
 	urlMCPSupport bool
 
 	modelMu           sync.RWMutex
-	supportedModels   []string
-	supportedModelSrc string // dynamic | fallback
+	supportedModels   []ModelInfo
+	supportedModelSrc string // dynamic | fallback | none
 	modelsLoaded      bool
 }
-
-var codexFallbackModels = []string{"ops", "sonnet", "haiku"}
 
 // NewCodexAgent creates a Codex agent with default settings.
 func NewCodexAgent() *CodexAgent {
@@ -146,8 +144,9 @@ type codexThreadTokenUsageUpdatedNotification struct {
 }
 
 type codexThreadTokenUsage struct {
-	Last  codexTokenUsageBreakdown `json:"last"`
-	Total codexTokenUsageBreakdown `json:"total"`
+	Last               codexTokenUsageBreakdown `json:"last"`
+	Total              codexTokenUsageBreakdown `json:"total"`
+	ModelContextWindow *int64                   `json:"modelContextWindow,omitempty"`
 }
 
 type codexTokenUsageBreakdown struct {
@@ -174,6 +173,10 @@ type codexThreadItem struct {
 	Result           json.RawMessage   `json:"result,omitempty"`
 	Error            json.RawMessage   `json:"error,omitempty"`
 	Query            string            `json:"query,omitempty"`
+	// Action is the webSearch action descriptor introduced in codex-cli 0.124.0.
+	// Shape varies by `action.type`: "search" (queries[], query), "openPage" (url),
+	// "findInPage" (pattern, url), "other".
+	Action           json.RawMessage   `json:"action,omitempty"`
 	Content          []string          `json:"content,omitempty"`
 	Summary          []string          `json:"summary,omitempty"`
 	ContentItems     json.RawMessage   `json:"contentItems,omitempty"` // dynamicToolCall result content
@@ -183,8 +186,29 @@ type codexThreadItem struct {
 }
 
 type codexFileChange struct {
-	Path string `json:"path"`
-	Kind string `json:"kind"` // add | update | delete
+	Path    string              `json:"path"`
+	KindRaw json.RawMessage     `json:"kind"`
+}
+
+// Kind returns the normalized kind string ("add", "update", "delete").
+// The wire format may be a plain string or an object {"type": "...", "move_path": ...}.
+func (c codexFileChange) Kind() string {
+	if len(c.KindRaw) == 0 {
+		return ""
+	}
+	// Try plain string first: "update"
+	var s string
+	if err := json.Unmarshal(c.KindRaw, &s); err == nil {
+		return strings.ToLower(strings.TrimSpace(s))
+	}
+	// Object form: {"type": "update", "move_path": null}
+	var obj struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(c.KindRaw, &obj); err == nil {
+		return strings.ToLower(strings.TrimSpace(obj.Type))
+	}
+	return ""
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -258,6 +282,10 @@ func (a *CodexAgent) SendMessage(
 		compatPatchInputs  = make(map[string]string) // codex/event patch id -> buffered input for delayed start
 		compatPatchOutputs = make(map[string]string) // codex/event patch id -> buffered delta/message
 		compatPatchStarted = make(map[string]bool)   // codex/event patch id -> whether tool_start emitted
+		// webSearchDeferStart tracks webSearch items whose item/started arrived with an empty query
+		// (codex-cli >= 0.124.0 only fills `query` and `action` at item/completed). For these, we
+		// suppress tool_start at started and emit it on completion alongside tool_result.
+		webSearchDeferStart = make(map[string]bool)
 		streamedAgentText  = make(map[string]bool)
 		streamedReasoning  = make(map[string]bool)
 		latestTokenUsage   *codexThreadTokenUsageUpdatedNotification
@@ -280,7 +308,14 @@ func (a *CodexAgent) SendMessage(
 		if usage != nil {
 			metadata["inputTokens"] = int(usage.TokenUsage.Last.InputTokens)
 			metadata["outputTokens"] = int(usage.TokenUsage.Last.OutputTokens)
-			metadata["cachedInputTokens"] = int(usage.TokenUsage.Last.CachedInputTokens)
+			// Publish cached tokens under BOTH names: `cachedInputTokens` is
+			// the historical Codex key, `cacheReadInputTokens` is the unified
+			// name read by chat.go's done-event handler (matches Claude's
+			// usage naming). Keeping both keeps any downstream reader that
+			// still looks up the old name working.
+			cached := int(usage.TokenUsage.Last.CachedInputTokens)
+			metadata["cachedInputTokens"] = cached
+			metadata["cacheReadInputTokens"] = cached
 			metadata["reasoningOutputTokens"] = int(usage.TokenUsage.Last.ReasoningOutputTokens)
 			metadata["totalTokens"] = int(usage.TokenUsage.Last.TotalTokens)
 		}
@@ -908,15 +943,20 @@ func (a *CodexAgent) SendMessage(
 							n.Item.Query = compatWebQueries[matchID]
 						}
 					}
+					// codex-cli 0.124.0+ sends item/started with an empty query/action;
+					// the real query and action arrive at item/completed. Defer
+					// tool_start so we don't emit a blank "Searched web" placeholder
+					// (and so completion emits both tool_start and tool_result).
 					if strings.TrimSpace(codexWebSearchQuery(n.Item)) == "" && n.Item.ID != "" {
-						requestToolEmitted[n.Item.ID] = struct{}{}
+						webSearchDeferStart[n.Item.ID] = true
 					}
 					stateMu.Unlock()
 				}
 				stateMu.Lock()
 				_, skip := requestToolEmitted[n.Item.ID]
+				_, deferStart := webSearchDeferStart[n.Item.ID]
 				stateMu.Unlock()
-				if skip {
+				if skip || deferStart {
 					return
 				}
 				emitCodexItemStarted(n.Item, cb)
@@ -930,9 +970,16 @@ func (a *CodexAgent) SendMessage(
 				if skip {
 					delete(requestToolEmitted, n.Item.ID)
 				}
+				deferStart := webSearchDeferStart[n.Item.ID]
+				if deferStart {
+					delete(webSearchDeferStart, n.Item.ID)
+				}
 				stateMu.Unlock()
 				if skip {
 					return
+				}
+				if deferStart {
+					emitCodexItemStarted(n.Item, cb)
 				}
 				stateMu.Lock()
 				agentStreamed := streamedAgentText[n.Item.ID]
@@ -973,6 +1020,29 @@ func (a *CodexAgent) SendMessage(
 				stateMu.Lock()
 				latestTokenUsage = &n
 				stateMu.Unlock()
+
+				// Empirical verification (codex-cli 0.124.0):
+				//   totalTokens ≈ inputTokens + outputTokens
+				// i.e. `cachedInputTokens` is a subset of `inputTokens`
+				// (same semantics as OpenAI's usage.prompt_tokens /
+				// cached_tokens), and `reasoningOutputTokens` is a subset
+				// of `outputTokens`. So "context window occupancy" == the
+				// prompt size == `Last.InputTokens`; do NOT add cached.
+				meta := map[string]interface{}{
+					"model":                 req.Model,
+					"inputTokens":           int(n.TokenUsage.Last.InputTokens),
+					"cachedInputTokens":     int(n.TokenUsage.Last.CachedInputTokens),
+					"outputTokens":          int(n.TokenUsage.Last.OutputTokens),
+					"reasoningOutputTokens": int(n.TokenUsage.Last.ReasoningOutputTokens),
+					"totalTokens":           int(n.TokenUsage.Last.TotalTokens),
+					"totalInputTokens":      int(n.TokenUsage.Total.InputTokens),
+					"totalOutputTokens":     int(n.TokenUsage.Total.OutputTokens),
+					"usedTokens":            int(n.TokenUsage.Last.InputTokens),
+				}
+				if n.TokenUsage.ModelContextWindow != nil {
+					meta["contextWindow"] = int(*n.TokenUsage.ModelContextWindow)
+				}
+				cb(StreamEvent{Type: EventContextUsage, Metadata: meta})
 			}
 
 		case "error":
@@ -1078,12 +1148,14 @@ func (a *CodexAgent) WarmupSupportedModels(ctx context.Context) {
 	_, _ = a.ListSupportedModels(ctx)
 }
 
-// ListSupportedModels returns codex model IDs. It prefers dynamic discovery via
-// app-server model/list and falls back to a fixed tier list.
-func (a *CodexAgent) ListSupportedModels(ctx context.Context) ([]string, string) {
+// ListSupportedModels returns the full codex model catalog discovered via
+// `codex app-server`'s `model/list` RPC. Fields (displayName, description,
+// supportedReasoningEfforts, defaultReasoningEffort) are passed through
+// unchanged from the RPC response.
+func (a *CodexAgent) ListSupportedModels(ctx context.Context) ([]ModelInfo, string) {
 	a.modelMu.RLock()
 	if a.modelsLoaded {
-		models := append([]string(nil), a.supportedModels...)
+		models := append([]ModelInfo(nil), a.supportedModels...)
 		source := a.supportedModelSrc
 		a.modelMu.RUnlock()
 		return models, source
@@ -1097,19 +1169,17 @@ func (a *CodexAgent) ListSupportedModels(ctx context.Context) ([]string, string)
 	models, source := a.detectSupportedModels(ctx)
 
 	a.modelMu.Lock()
-	if !a.modelsLoaded {
-		a.supportedModels = append([]string(nil), models...)
+	if !a.modelsLoaded && source == "dynamic" {
+		a.supportedModels = append([]ModelInfo(nil), models...)
 		a.supportedModelSrc = source
 		a.modelsLoaded = true
 	}
-	models = append([]string(nil), a.supportedModels...)
-	source = a.supportedModelSrc
 	a.modelMu.Unlock()
 
 	return models, source
 }
 
-func (a *CodexAgent) detectSupportedModels(ctx context.Context) ([]string, string) {
+func (a *CodexAgent) detectSupportedModels(ctx context.Context) ([]ModelInfo, string) {
 	models, err := a.listModelsViaAppServer(ctx)
 	if err == nil && len(models) > 0 {
 		if a.Verbose {
@@ -1118,12 +1188,31 @@ func (a *CodexAgent) detectSupportedModels(ctx context.Context) ([]string, strin
 		return models, "dynamic"
 	}
 	if a.Verbose && err != nil {
-		log.Printf("[codex-agent] model/list failed, fallback to static models: %v", err)
+		log.Printf("[codex-agent] model/list failed: %v", err)
 	}
-	return append([]string(nil), codexFallbackModels...), "fallback"
+	return nil, "none"
 }
 
-func (a *CodexAgent) listModelsViaAppServer(ctx context.Context) ([]string, error) {
+// codexRPCModel mirrors the `Model` shape from the codex app-server protocol
+// (see `codex app-server generate-ts` output, `v2/Model.ts`). We keep the JSON
+// keys in sync with the wire format so the decoder is tolerant to unknown
+// additions.
+type codexRPCModel struct {
+	ID                    string `json:"id"`
+	Model                 string `json:"model"`
+	DisplayName           string `json:"displayName"`
+	Description           string `json:"description"`
+	Hidden                bool   `json:"hidden"`
+	IsDefault             bool   `json:"isDefault"`
+	DefaultReasoningEffort string `json:"defaultReasoningEffort"`
+	SupportedReasoningEfforts []struct {
+		ReasoningEffort string `json:"reasoningEffort"`
+		Description     string `json:"description,omitempty"`
+	} `json:"supportedReasoningEfforts"`
+	SupportsPersonality bool `json:"supportsPersonality"`
+}
+
+func (a *CodexAgent) listModelsViaAppServer(ctx context.Context) ([]ModelInfo, error) {
 	client := NewCodexAppServerClient(a.CLIPath, a.buildAppServerArgs(Request{}))
 	client.Verbose = false
 
@@ -1137,9 +1226,7 @@ func (a *CodexAgent) listModelsViaAppServer(ctx context.Context) ([]string, erro
 	}
 
 	var resp struct {
-		Data []struct {
-			Model string `json:"model"`
-		} `json:"data"`
+		Data []codexRPCModel `json:"data"`
 	}
 	if err := client.Request(ctx, "model/list", map[string]interface{}{
 		"includeHidden": false,
@@ -1148,22 +1235,46 @@ func (a *CodexAgent) listModelsViaAppServer(ctx context.Context) ([]string, erro
 	}
 
 	seen := make(map[string]struct{})
-	models := make([]string, 0, len(resp.Data))
+	out := make([]ModelInfo, 0, len(resp.Data))
 	for _, item := range resp.Data {
-		model := strings.TrimSpace(item.Model)
-		if model == "" {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			id = strings.TrimSpace(item.Model)
+		}
+		if id == "" {
 			continue
 		}
-		if _, ok := seen[model]; ok {
+		if _, dup := seen[id]; dup {
 			continue
 		}
-		seen[model] = struct{}{}
-		models = append(models, model)
+		seen[id] = struct{}{}
+
+		efforts := make([]string, 0, len(item.SupportedReasoningEfforts))
+		for _, e := range item.SupportedReasoningEfforts {
+			if s := strings.TrimSpace(e.ReasoningEffort); s != "" {
+				efforts = append(efforts, s)
+			}
+		}
+
+		label := item.DisplayName
+		if label == "" {
+			label = id
+		}
+
+		out = append(out, ModelInfo{
+			ID:               id,
+			Label:            label,
+			Description:      item.Description,
+			SupportedEfforts: efforts,
+			DefaultEffort:    item.DefaultReasoningEffort,
+			IsDefault:        item.IsDefault,
+			Hidden:           item.Hidden,
+		})
 	}
-	if len(models) == 0 {
+	if len(out) == 0 {
 		return nil, errors.New("model/list returned no models")
 	}
-	return models, nil
+	return out, nil
 }
 
 // buildPrompt constructs the combined prompt.
@@ -1183,13 +1294,16 @@ func (a *CodexAgent) buildAppServerArgs(req Request) []string {
 func (a *CodexAgent) buildThreadStartParams(req Request) map[string]interface{} {
 	params := map[string]interface{}{
 		"approvalPolicy": "never",
-		"sandbox":        "workspace-write",
+		"sandbox":        "danger-full-access",
 	}
 	if req.Model != "" {
 		params["model"] = req.Model
 	}
 	if req.WorkDir != "" {
 		params["cwd"] = req.WorkDir
+	}
+	if cfg := a.buildCodexConfigOverrides(req); len(cfg) > 0 {
+		params["config"] = cfg
 	}
 	return params
 }
@@ -1198,7 +1312,7 @@ func (a *CodexAgent) buildThreadResumeParams(req Request) map[string]interface{}
 	params := map[string]interface{}{
 		"threadId":       req.SessionID,
 		"approvalPolicy": "never",
-		"sandbox":        "workspace-write",
+		"sandbox":        "danger-full-access",
 	}
 	if req.Model != "" {
 		params["model"] = req.Model
@@ -1206,7 +1320,56 @@ func (a *CodexAgent) buildThreadResumeParams(req Request) map[string]interface{}
 	if req.WorkDir != "" {
 		params["cwd"] = req.WorkDir
 	}
+	if cfg := a.buildCodexConfigOverrides(req); len(cfg) > 0 {
+		params["config"] = cfg
+	}
 	return params
+}
+
+// buildCodexConfigOverrides translates request-level preferences into the
+// `config` map that `thread/start` / `thread/resume` accept. Codex's
+// ReasoningEffort enum accepts: none, minimal, low, medium, high, xhigh —
+// notably NOT "max" (which Claude supports). This method validates the
+// requested effort against the live model catalog before forwarding it,
+// dropping invalid values rather than letting the CLI reject the whole
+// thread/start call.
+func (a *CodexAgent) buildCodexConfigOverrides(req Request) map[string]interface{} {
+	cfg := map[string]interface{}{}
+	if eff := a.validateEffort(req.Model, req.Effort); eff != "" {
+		cfg["model_reasoning_effort"] = eff
+	}
+	return cfg
+}
+
+// validateEffort drops the requested effort level if the live catalog says
+// the chosen model doesn't accept it. When the cache is empty (no dynamic
+// lookup has succeeded yet), we pass the effort through and let the CLI
+// decide.
+func (a *CodexAgent) validateEffort(model, effort string) string {
+	if effort == "" {
+		return ""
+	}
+	a.modelMu.RLock()
+	models := a.supportedModels
+	loaded := a.modelsLoaded
+	a.modelMu.RUnlock()
+	if !loaded || len(models) == 0 {
+		return effort
+	}
+	for _, m := range models {
+		if m.ID != model {
+			continue
+		}
+		for _, allowed := range m.SupportedEfforts {
+			if allowed == effort {
+				return effort
+			}
+		}
+		log.Printf("[codex-agent] dropping unsupported effort %q for model %q (allowed: %v)",
+			effort, model, m.SupportedEfforts)
+		return ""
+	}
+	return effort
 }
 
 func isCodexSessionExpiredError(err error) bool {
@@ -1264,7 +1427,7 @@ func (a *CodexAgent) buildConfigOverrides(req Request) []string {
 	var cfg []string
 	cfg = a.appendNexboxMCPConfig(cfg, req.ConversationID)
 	cfg = a.appendChromeMCPConfig(cfg, req)
-	cfg = a.appendExtraMCPConfig(cfg, req.ExtraMCPServers)
+	cfg = a.appendExtraMCPConfig(cfg, req.ExtraMCPServers, req.ConversationID)
 	// Prefer ask_question MCP flow over app-server request_user_input so we can
 	// reuse the existing frontend Q&A interaction loop.
 	cfg = append(cfg, "features.default_mode_request_user_input=false")
@@ -1300,28 +1463,46 @@ func (a *CodexAgent) appendChromeMCPConfig(cfg []string, req Request) []string {
 	return cfg
 }
 
-func (a *CodexAgent) appendExtraMCPConfig(cfg []string, extras []MCPServerEntry) []string {
+// tomlKey quotes a TOML key if it contains characters that require quoting.
+// TOML bare keys may contain ASCII letters, digits, dashes, and underscores
+// ([A-Za-z0-9_-]). Keys with other characters must be quoted.
+func tomlKey(k string) string {
+	for _, c := range k {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			return fmt.Sprintf("%q", k)
+		}
+	}
+	return k
+}
+
+func (a *CodexAgent) appendExtraMCPConfig(cfg []string, extras []MCPServerEntry, conversationID string) []string {
 	supportsURL := a.supportsURLMCP()
 	for _, mcp := range extras {
+		key := tomlKey(mcp.Key)
 		switch {
 		case mcp.URL != "":
 			if !supportsURL {
 				log.Printf("[codex-agent] skip HTTP MCP %s: codex version does not support URL MCPs", mcp.Key)
 				continue
 			}
-			cfg = append(cfg, fmt.Sprintf("mcp_servers.%s.url=%q", mcp.Key, mcp.URL))
+			mcpURL := mcp.URL
+			if mcp.AppendSessionURL && conversationID != "" {
+				mcpURL += "?session=" + conversationID
+			}
+			cfg = append(cfg, fmt.Sprintf("mcp_servers.%s.url=%q", key, mcpURL))
 			for hk, hv := range mcp.Headers {
-				cfg = append(cfg, fmt.Sprintf("mcp_servers.%s.http_headers.%s=%q", mcp.Key, hk, hv))
+				cfg = append(cfg, fmt.Sprintf("mcp_servers.%s.http_headers.%s=%q", key, hk, hv))
 			}
 		case mcp.Cmd != "":
-			cfg = append(cfg, fmt.Sprintf("mcp_servers.%s.command=%q", mcp.Key, mcp.Cmd))
+			cfg = append(cfg, fmt.Sprintf("mcp_servers.%s.command=%q", key, mcp.Cmd))
 			for i, arg := range mcp.Args {
-				cfg = append(cfg, fmt.Sprintf("mcp_servers.%s.args.%d=%q", mcp.Key, i, arg))
+				cfg = append(cfg, fmt.Sprintf("mcp_servers.%s.args.%d=%q", key, i, arg))
 			}
 			for ek, ev := range mcp.Env {
-				cfg = append(cfg, fmt.Sprintf("mcp_servers.%s.env.%s=%q", mcp.Key, ek, ev))
+				cfg = append(cfg, fmt.Sprintf("mcp_servers.%s.env.%s=%q", key, ek, ev))
 			}
 		}
+		log.Printf("[codex-agent] extra MCP %s configured (key=%s)", mcp.Key, key)
 	}
 	return cfg
 }

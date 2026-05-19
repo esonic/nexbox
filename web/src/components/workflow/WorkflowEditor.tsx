@@ -22,11 +22,8 @@ import HumanNode from './nodes/HumanNode';
 import StartNode from './nodes/StartNode';
 import MapNode from './nodes/MapNode';
 import ReduceNode from './nodes/ReduceNode';
-import MultiSelectInput from './MultiSelectInput';
-
 import { workflowApi, Workflow, WorkflowDefinition, HookConfig } from '@/lib/workflowApi';
-import { tasksApi, assetsApi, serverApi } from '@/lib/api';
-import type { Task, Asset } from '@/types';
+import { serverApi } from '@/lib/api';
 
 export const nodeTypes = {
   start: StartNode,
@@ -56,8 +53,6 @@ function WorkflowEditorInner({ workflowId, projectId, workflowName: externalName
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [saving, setSaving] = useState(false);
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [assets, setAssets] = useState<Asset[]>([]);
   const [availableAgents, setAvailableAgents] = useState<string[]>([]);
   const [defaultAgent, setDefaultAgent] = useState<string>('');
   const [isDirty, setIsDirty] = useState(false);
@@ -72,13 +67,6 @@ function WorkflowEditorInner({ workflowId, projectId, workflowName: externalName
       setDefaultAgent(data.default || '');
     }).catch(() => {});
   }, []);
-
-  useEffect(() => {
-    if (projectId) {
-      tasksApi.list(100, 0, projectId).then(setTasks).catch(() => {});
-      assetsApi.list(projectId, 100, 0).then(setAssets).catch(() => {});
-    }
-  }, [projectId]);
 
   useEffect(() => {
     hasLoadedRef.current = false;
@@ -430,42 +418,31 @@ function WorkflowEditorInner({ workflowId, projectId, workflowName: externalName
                       onChange={(value) => updateNodeData(selectedNode.id, 'prompt', value)}
                     />
                   </Field>
-                  <Field label="Task Reference">
-                    <MultiSelectInput
-                      items={tasks}
-                      selectedIds={selectedNode.data.config?.taskRef || []}
-                      onSelect={(taskId) => {
-                        const arr = Array.isArray(selectedNode.data.config?.taskRef) ? selectedNode.data.config.taskRef : [];
-                        if (!arr.includes(taskId)) {
-                          updateNodeData(selectedNode.id, 'taskRef', [...arr, taskId]);
-                        }
-                      }}
-                      onRemove={(taskId) => {
-                        updateNodeData(selectedNode.id, 'taskRef',
-                          (selectedNode.data.config?.taskRef || []).filter((id: string) => id !== taskId));
-                      }}
-                      placeholder="Click to select tasks"
-                      itemType="task"
+                </section>
+              )}
+
+              {/* Reset session on entry — only for AI nodes */}
+              {selectedNode.type === 'ai' && (
+                <section className="space-y-2.5">
+                  <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Session</div>
+                  <label className="flex items-center gap-2 cursor-pointer py-0.5">
+                    <input
+                      type="checkbox"
+                      checked={!!selectedNode.data.config?.resetOnEntry}
+                      onChange={(e) => updateNodeData(selectedNode.id, 'resetOnEntry', e.target.checked)}
+                      className="rounded border-border accent-primary h-3.5 w-3.5"
                     />
-                  </Field>
-                  <Field label="Asset Reference">
-                    <MultiSelectInput
-                      items={assets}
-                      selectedIds={selectedNode.data.config?.assetRef || []}
-                      onSelect={(assetId) => {
-                        const arr = Array.isArray(selectedNode.data.config?.assetRef) ? selectedNode.data.config.assetRef : [];
-                        if (!arr.includes(assetId)) {
-                          updateNodeData(selectedNode.id, 'assetRef', [...arr, assetId]);
-                        }
-                      }}
-                      onRemove={(assetId) => {
-                        updateNodeData(selectedNode.id, 'assetRef',
-                          (selectedNode.data.config?.assetRef || []).filter((id: string) => id !== assetId));
-                      }}
-                      placeholder="Click to select assets"
-                      itemType="asset"
+                    <span className="text-[11px] text-muted-foreground">Reset session on entry</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer py-0.5">
+                    <input
+                      type="checkbox"
+                      checked={!!selectedNode.data.config?.enableE2E}
+                      onChange={(e) => updateNodeData(selectedNode.id, 'enableE2E', e.target.checked)}
+                      className="rounded border-border accent-primary h-3.5 w-3.5"
                     />
-                  </Field>
+                    <span className="text-[11px] text-muted-foreground">Enable Browser Control</span>
+                  </label>
                 </section>
               )}
 
@@ -495,7 +472,7 @@ function WorkflowEditorInner({ workflowId, projectId, workflowName: externalName
                           nodeId={selectedNode.id}
                           value={selectedNode.data.config?.hook?.prompt || ''}
                           onChange={(v) => updateNodeData(selectedNode.id, 'hook', { ...selectedNode.data.config.hook, prompt: v })}
-                          placeholder="Describe what to verify. The hook agent will check the output and respond with {&quot;ok&quot;: true} or {&quot;ok&quot;: false, &quot;reason&quot;: &quot;...&quot;}"
+                          placeholder="Describe what to verify. Supports {{env_xxx}} workflow params; the node's output is auto-included (no need for env_prev_node_output)."
                           rows={4}
                           className="field-input resize-none font-mono text-[10px]"
                         />
@@ -649,7 +626,7 @@ function PromptInput({ nodeId, value, onChange }: { nodeId: string; value: strin
         if (timeoutRef.current) clearTimeout(timeoutRef.current);
         onChange(v);
       }}
-      placeholder="Enter AI prompt"
+      placeholder={'Enter AI prompt. Use {{env_xxx}} to reference variables; {{env_prev_node_output}} pulls upstream outputs.'}
       rows={5}
       className="field-input resize-y font-mono min-h-[80px]"
     />

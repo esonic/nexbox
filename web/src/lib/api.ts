@@ -1,30 +1,19 @@
 import type {
   Task, Project, Session, Asset, AssetVersion,
   ReviewComment, DiffResult, ChatMessage, MessagePart,
-  TaskAsset, TaskLabel, TaskComment, ReactionSummary,
+  TaskLabel, TaskComment, ModelInfo,
 } from "@/types";
 
 const API_BASE = "/api";
 
-const TOKEN_KEY = "boxnex_jwt";
-export function getToken(): string | null { return localStorage.getItem(TOKEN_KEY); }
-export function setToken(t: string): void  { localStorage.setItem(TOKEN_KEY, t); }
-export function clearToken(): void         { localStorage.removeItem(TOKEN_KEY); }
-
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const token = getToken();
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options?.headers,
     },
   });
-  if (res.status === 401) {
-    clearToken();
-    window.dispatchEvent(new Event("boxnex:logout"));
-  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || res.statusText);
@@ -40,10 +29,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 function createTasksApi(prefix: string) {
   return {
-    list: (limit = 30, offset = 0, projectId?: string, q?: string) => {
+    list: (limit = 30, offset = 0, projectId?: string, q?: string, source?: string) => {
       let url = `${prefix}/tasks?limit=${limit}&offset=${offset}`;
       if (projectId) url += `&project_id=${projectId}`;
       if (q) url += `&q=${encodeURIComponent(q)}`;
+      if (source) url += `&source=${source}`;
       return request<Task[]>(url);
     },
     get: (id: string) =>
@@ -60,18 +50,10 @@ function createTasksApi(prefix: string) {
       }),
     delete: (id: string) =>
       request<void>(`${prefix}/tasks/${id}`, { method: "DELETE" }),
-    incrementRefCount: (taskId: string) =>
-      request<void>(`${prefix}/tasks/${taskId}/ref-count`, { method: "POST" }),
-    // Task-Asset associations
-    listAssets: (taskId: string) =>
-      request<Asset[]>(`${prefix}/tasks/${taskId}/assets`),
-    linkAsset: (taskId: string, assetId: string) =>
-      request<TaskAsset>(`${prefix}/tasks/${taskId}/assets`, {
-        method: "POST",
-        body: JSON.stringify({ asset_id: assetId }),
-      }),
-    unlinkAsset: (taskId: string, assetId: string) =>
-      request<void>(`${prefix}/tasks/${taskId}/assets/${assetId}`, { method: "DELETE" }),
+    setParent: (taskId: string, parentId: string) =>
+      request<void>(`${prefix}/tasks/${taskId}/parent`, { method: "PUT", body: JSON.stringify({ parent_id: parentId }) }),
+    removeParent: (taskId: string) =>
+      request<void>(`${prefix}/tasks/${taskId}/parent`, { method: "DELETE" }),
     // Task comments
     listComments: (taskId: string) =>
       request<TaskComment[]>(`${prefix}/tasks/${taskId}/comments`),
@@ -123,6 +105,21 @@ function createAssetsApi(prefix: string) {
       request<AssetVersion[]>(`${prefix}/assets/${id}/versions`),
     diff: (id: string, v1: number, v2: number) =>
       request<DiffResult>(`${prefix}/assets/${id}/diff?v1=${v1}&v2=${v2}`),
+    larkFetch: (url: string) =>
+      request<{ title: string; content: string }>(`${prefix}/assets/lark-fetch`, {
+        method: "POST",
+        body: JSON.stringify({ url }),
+      }),
+    publishToLark: (id: string, title?: string) =>
+      request<{ url: string }>(`${prefix}/assets/${id}/publish-to-lark`, {
+        method: "POST",
+        body: JSON.stringify({ title }),
+      }),
+    setLarkDoc: (id: string, url: string) =>
+      request<void>(`${prefix}/assets/${id}/lark-doc`, {
+        method: "PUT",
+        body: JSON.stringify({ lark_doc_url: url }),
+      }),
   };
 }
 
@@ -148,6 +145,7 @@ export const projectsApi = {
     }),
   update: (id: string, data: Partial<{
     name: string; description: string; git_repo_path: string;
+    okone: Project["okone"];
   }>) =>
     request<Project>(`/projects/${id}`, {
       method: "PUT",
@@ -180,6 +178,17 @@ export const projectsApi = {
       method: "PUT",
       body: JSON.stringify({ git_repo_path: "" }),
     }),
+  getMigrationStatus: (id: string) =>
+    request<{ needs_migration: boolean; task_count: number; reason?: string }>(`/projects/${id}/migration-status`),
+  migrateTasks: (id: string) =>
+    request<{ migrated: number; failed: number; errors?: string[] }>(`/projects/${id}/migrate-tasks`, { method: "POST" }),
+  // Returns the per-project hidden "scratch" session, creating it on first
+  // call. Used by the sidebar when the user clicks a project row to open a
+  // new-chat surface without committing to a real session — the server
+  // promotes it (is_hidden -> false) automatically as soon as the user sends
+  // the first message.
+  scratchSession: (id: string) =>
+    request<Session>(`/projects/${id}/scratch-session`),
 };
 
 // Sessions
@@ -188,16 +197,14 @@ export const sessionsApi = {
     request<{ sessions: Session[]; active_session_ids: string[] | null }>("/sessions"),
   listTrashed: () =>
     request<{ sessions: Session[] }>("/sessions/trash"),
-  emptyTrash: () =>
-    request<{ purged: number }>("/sessions/trash", { method: "DELETE" }),
   get: (id: string) =>
     request<Session>(`/sessions/${id}`),
-  create: (data: { name?: string; project_id?: string; agent?: string; model?: string }) =>
+  create: (data: { name?: string; project_id?: string; agent?: string; model?: string; effort?: string }) =>
     request<Session>("/sessions", {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  update: (id: string, data: Partial<{ name: string; project_id: string; agent: string; model: string }>) =>
+  update: (id: string, data: Partial<{ name: string; project_id: string; agent: string; model: string; effort: string }>) =>
     request<Session>(`/sessions/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
@@ -206,6 +213,8 @@ export const sessionsApi = {
     request<void>(`/sessions/${id}`, { method: "DELETE" }),
   restore: (id: string) =>
     request<Session>(`/sessions/${id}/restore`, { method: "POST" }),
+  emptyTrash: () =>
+    request<{ purged: number }>("/sessions/trash", { method: "DELETE" }),
   reorder: (sessionIds: string[]) =>
     request<void>("/sessions/reorder", {
       method: "PUT",
@@ -218,6 +227,16 @@ export const sessionsApi = {
     }),
   getWorktreeStatus: (id: string) =>
     request<{ dirty: boolean; worktree_path?: string }>(`/sessions/${id}/worktree-status`),
+  fork: (id: string, sdkMessageUuid: string, name?: string) =>
+    request<Session>(`/sessions/${id}/fork`, {
+      method: "POST",
+      body: JSON.stringify({ sdk_message_uuid: sdkMessageUuid, name }),
+    }),
+  autoTitle: (id: string, message: string) =>
+    request<Session>(`/sessions/${id}/auto-title`, {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    }),
 };
 
 // Chat Messages (per session)
@@ -287,6 +306,7 @@ export interface GitStatusResponse {
   staged: GitFileEntry[];
   unstaged: GitFileEntry[];
   untracked: GitFileEntry[];
+  ahead?: number;
 }
 
 export interface GitCommitInfo {
@@ -375,6 +395,7 @@ export interface FileEntry {
   name: string;
   path: string;
   is_dir: boolean;
+  is_symlink?: boolean;
   size?: number;
   children?: FileEntry[];
 }
@@ -394,35 +415,66 @@ export interface FileSearchResult {
 }
 
 export const filesApi = {
-  tree: (projectId: string, sessionId?: string) =>
-    request<FileEntry[]>(`/projects/${projectId}/files${sessionId ? `?session_id=${sessionId}` : ""}`),
+  // List immediate children of a directory. Pass empty path for the project root.
+  list: (projectId: string, path: string, sessionId?: string) => {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    if (sessionId) params.set("session_id", sessionId);
+    const qs = params.toString();
+    return request<FileEntry[]>(`/projects/${projectId}/files${qs ? `?${qs}` : ""}`);
+  },
+  // Flat list of files (not directories) — used by the chat file picker.
+  flat: (projectId: string, sessionId?: string) =>
+    request<FileEntry[]>(`/projects/${projectId}/files-flat${sessionId ? `?session_id=${sessionId}` : ""}`),
   content: (projectId: string, path: string, sessionId?: string) =>
     request<FileContentResponse>(`/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`),
-  writeContent: (projectId: string, path: string, content: string, sessionId?: string) =>
-    request<{ path: string; size: number }>(`/projects/${projectId}/file-content${sessionId ? `?session_id=${sessionId}` : ""}`, { method: "PUT", body: JSON.stringify({ path, content }) }),
   search: (projectId: string, query: string, type: "name" | "content" = "name", sessionId?: string) =>
     request<FileSearchResult[]>(`/projects/${projectId}/file-search?q=${encodeURIComponent(query)}&type=${type}${sessionId ? `&session_id=${sessionId}` : ""}`),
-  upload: async (projectId: string, file: File, path: string, sessionId?: string): Promise<{ path: string; size: number }> => {
+  save: (projectId: string, path: string, content: string, sessionId?: string) =>
+    request<{ path: string; size?: number }>(
+      `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,
+      { method: "PUT", body: JSON.stringify({ content }) },
+    ),
+  delete: (projectId: string, path: string, sessionId?: string) =>
+    request<void>(
+      `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,
+      { method: "DELETE" },
+    ),
+  upload: async (
+    projectId: string,
+    directory: string,
+    file: File,
+    options?: { overwrite?: boolean; sessionId?: string },
+  ): Promise<{ path: string; name: string; size: number } | { conflict: true; name: string; directory: string }> => {
+    const params = new URLSearchParams();
+    if (directory) params.set("path", directory);
+    if (options?.overwrite) params.set("overwrite", "true");
+    if (options?.sessionId) params.set("session_id", options.sessionId);
     const form = new FormData();
     form.append("file", file);
-    form.append("path", path);
-    const url = `${API_BASE}/projects/${projectId}/files/upload${sessionId ? `?session_id=${sessionId}` : ""}`;
-    const token = getToken();
-    const res = await fetch(url, {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/file-upload${params.toString() ? `?${params}` : ""}`, {
       method: "POST",
       body: form,
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
+    if (res.status === 409) {
+      const body = await res.json().catch(() => ({}));
+      return { conflict: true, name: body.name ?? file.name, directory: body.directory ?? directory };
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
       throw new Error(err.error || res.statusText);
     }
     return res.json();
   },
-  downloadUrl: (projectId: string, path: string, sessionId?: string): string =>
-    `${API_BASE}/projects/${projectId}/files/download?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,
-  delete: (projectId: string, path: string, sessionId?: string) =>
-    request<{ deleted: string }>(`/projects/${projectId}/files/delete?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`, { method: "DELETE" }),
+  downloadUrl: (projectId: string, path: string, sessionId?: string) =>
+    `${API_BASE}/projects/${projectId}/file-download?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,
+  serveUrl: (projectId: string, path: string, sessionId?: string) =>
+    `${API_BASE}/projects/${projectId}/file-serve?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,
+  move: (projectId: string, from: string, to: string, sessionId?: string) =>
+    request<{ from: string; to: string }>(
+      `/projects/${projectId}/file-move${sessionId ? `?session_id=${sessionId}` : ""}`,
+      { method: "POST", body: JSON.stringify({ from, to }) },
+    ),
 };
 
 export const diffApi = {
@@ -430,8 +482,8 @@ export const diffApi = {
     request<DiffResponse>(`/projects/${projectId}/diff${sid(sessionId)}`),
   stats: (projectId: string, sessionId?: string) =>
     request<DiffResponse>(`/projects/${projectId}/diff-stats${sid(sessionId)}`),
-  fileDiff: (projectId: string, path: string, full?: boolean, sessionId?: string) =>
-    request<{ diff: string }>(`/projects/${projectId}/file-diff?path=${encodeURIComponent(path)}${full ? "&full=true" : ""}${sidAmp(sessionId)}`),
+  fileDiff: (projectId: string, path: string, full?: boolean, sessionId?: string, staged?: boolean) =>
+    request<{ diff: string }>(`/projects/${projectId}/file-diff?path=${encodeURIComponent(path)}${full ? "&full=true" : ""}${staged ? "&staged=true" : ""}${sidAmp(sessionId)}`),
 };
 
 // GitLab integration
@@ -458,21 +510,6 @@ export const labelsApi = {
     }),
   delete: (projectId: string, id: string) =>
     request<void>(`/projects/${projectId}/labels/${id}`, { method: "DELETE" }),
-};
-
-// Reactions (generic)
-export const reactionsApi = {
-  get: (targetType: string, targetId: string) =>
-    request<ReactionSummary[]>(`/reactions/${targetType}/${targetId}`),
-  add: (targetType: string, targetId: string, emoji: string) =>
-    request<void>(`/reactions/${targetType}/${targetId}`, {
-      method: "POST",
-      body: JSON.stringify({ emoji }),
-    }),
-  remove: (targetType: string, targetId: string, emoji: string) =>
-    request<void>(`/reactions/${targetType}/${targetId}?emoji=${encodeURIComponent(emoji)}`, {
-      method: "DELETE",
-    }),
 };
 
 // Comments
@@ -567,14 +604,15 @@ export interface ServerInfo {
 export const serverApi = {
   info: () => request<ServerInfo>("/info"),
   availableAgents: () => request<{ agents: string[]; default: string }>("/available-agents"),
+  availableModels: (agent: string) => request<{ agent: string; models: string[]; models_info?: ModelInfo[]; source: string }>(`/available-models?agent=${encodeURIComponent(agent)}`),
   setDefaultAgent: (agent: string) =>
     request<{ default: string }>("/default-agent", {
       method: "PUT",
       body: JSON.stringify({ agent }),
     }),
   getSettings: () =>
-    request<{ default_agent: string; has_token: boolean; masked_token: string; has_gitlab_token: boolean; masked_gitlab_token: string; disable_cloud: boolean }>("/settings"),
-  updateSettings: (data: { default_agent?: string; token?: string; gitlab_token?: string; disable_cloud?: boolean }) =>
+    request<{ default_agent: string; has_token: boolean; masked_token: string; has_gitlab_token: boolean; masked_gitlab_token: string; disable_cloud: boolean; chrome_headless: boolean; enable_file_edit: boolean }>("/settings"),
+  updateSettings: (data: { default_agent?: string; token?: string; gitlab_token?: string; disable_cloud?: boolean; chrome_headless?: boolean }) =>
     request<void>("/settings", {
       method: "PUT",
       body: JSON.stringify(data),
@@ -588,18 +626,6 @@ export interface CloudInfo extends ServerInfo {
   namespace?: string;
   user_name?: string;
 }
-
-export interface BalanceInfo {
-  user_id: string;
-  balance_tokens: number;
-  reserved_tokens: number;
-  total_recharged: number;
-  balance_cny: number;
-}
-
-export const balanceApi = {
-  get: () => request<BalanceInfo>("/balance"),
-};
 
 export const updateApi = {
   status: () => request<{ state: string; remote_version?: string }>("/update/status"),
@@ -627,33 +653,39 @@ export const membersApi = {
 // Marketplace
 // ---------------------------------------------------------------------------
 
-// Local plugin (admin-managed, from marketplace_dir — supports JSON, SKILL.md, and .claude-plugin formats)
+
+// Local plugin (from marketplace directory — supports JSON, SKILL.md, and .claude-plugin formats)
 export interface LocalPlugin {
   id: string;
   name: string;
   description: string;
-  type: string;       // "mcp", "skill", "plugin", or "lsp"
-  version: string;
+  type: string;       // "mcp", "skill", "plugin", "lsp"
+  version?: string;
   command?: string;
   args?: string[];
   env_vars?: string[];
-  icon_url?: string;
-  author?: string;       // from plugin.json author.name
+  author?: string;
   source?: string;       // "custom", "skill", "plugin", "connector"
   mcp_config?: string;   // raw .mcp.json content
   lsp_config?: string;   // raw .lsp.json content
-  auth_type?: string;    // "oauth", "apikey", "none"
-  install_path?: string; // absolute path on disk (for plugin/skill install)
+  auth_type?: string;    // "oauth", "apikey", "oauth_discovery", "none"
+  install_path?: string; // absolute path on disk
+  category?: string;
+  homepage?: string;
+  components?: string[];
+  source_label?: string; // short display label, e.g. "anthropics/skills"
+  source_full?: string;  // full path or git URL for tooltip
 }
 
 export interface InstalledMCP {
   name: string;
-  project_id: string;
+  project_id: string;   // "" = global, else project-scoped
   package_id: string;
   version: string;
   mcp_key: string;
   manifest: string;
-  env_values: string;
+  env_values: string;   // JSON: user-provided env secrets
+  auth_type: string;    // "none", "apikey", "oauth_discovery", "oauth"
   installed_at: number;
 }
 
@@ -673,11 +705,32 @@ export interface InstalledPluginEntry {
   installed_at: number;
 }
 
+export interface MarketplaceSource {
+  id: string;
+  type: string;   // "local" or "git"
+  url: string;
+  path: string;
+  name: string;
+  added_at: number;
+}
+
 export const marketplaceApi = {
-  // Local plugins (admin-managed directory)
+  // Local plugins (directory-based)
   listPlugins: () => request<LocalPlugin[]>("/marketplace/plugins"),
 
   getPlugin: (id: string) => request<LocalPlugin>(`/marketplace/plugins/${id}`),
+
+  // Marketplace sources (Add Marketplace)
+  listSources: () => request<MarketplaceSource[]>("/marketplace/sources"),
+
+  addSource: (input: string) =>
+    request<MarketplaceSource>("/marketplace/sources", {
+      method: "POST",
+      body: JSON.stringify({ input }),
+    }),
+
+  removeSource: (id: string) =>
+    request<void>(`/marketplace/sources/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   // Installed MCPs
   listInstalledMCPs: (projectId?: string) => {
@@ -688,7 +741,7 @@ export const marketplaceApi = {
   installMCP: (body: { name: string; package_id?: string; version?: string; mcp_key: string; manifest: object; env?: Record<string, string>; project_id?: string; auth_type?: string }) =>
     request<InstalledMCP>("/marketplace/installed-mcps", {
       method: "POST",
-      body: JSON.stringify({ ...body, manifest: JSON.stringify(body.manifest) }),
+      body: JSON.stringify(body),
     }),
 
   uninstallMCP: (name: string, projectId?: string) => {
@@ -745,37 +798,12 @@ export const marketplaceApi = {
       method: "POST",
     });
   },
-};
 
-// JWT-based auth (cloud/SaaS mode)
-export interface AuthUser {
-  id: string;
-  username: string;
-  email?: string;
-  role: string;
-  features: number;
-}
-export interface AuthResponse {
-  token: string;
-  user: AuthUser;
-}
-export const authCloudApi = {
-  register: (email: string, password: string, code: string) =>
-    request<AuthResponse>("/auth/register", {
-      method: "POST",
-      body: JSON.stringify({ email, password, code }),
-    }),
-  login: (email: string, password: string) =>
-    request<AuthResponse>("/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
-    }),
-  sendVerification: (email: string) =>
-    request<{ ok: boolean }>("/auth/send-verification", {
-      method: "POST",
-      body: JSON.stringify({ email }),
-    }),
-  logout: () =>
-    request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
-  me: () => request<AuthUser>("/auth/me"),
+  // Probe an installed MCP to detect whether OAuth is required.
+  // If the upstream returns 401, the server broadcasts connector:needs_auth via
+  // WebSocket so the frontend's existing "Authorize" toast is shown automatically.
+  probeMCP: (name: string, projectId?: string) => {
+    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return request<void>(`/connectors/${encodeURIComponent(name)}/probe${qs}`, { method: "POST" });
+  },
 };

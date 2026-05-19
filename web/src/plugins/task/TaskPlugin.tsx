@@ -6,6 +6,7 @@ import { TaskDetail } from "./TaskDetail";
 export function TaskPlugin({ projectId }: { projectId: string }) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [initialCommentId, setInitialCommentId] = useState<string | undefined>(undefined);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [searchParams, setSearchParams] = useSearchParams();
 
   useEffect(() => {
@@ -29,12 +30,13 @@ export function TaskPlugin({ projectId }: { projectId: string }) {
           embedded
           onSelectTask={(id) => { setSelectedTaskId(id); setInitialCommentId(undefined); }}
           currentProjectId={projectId}
+          refreshKey={refreshKey}
         />
       </div>
       {selectedTaskId && (
         <TaskDetail
           taskId={selectedTaskId}
-          onBack={() => setSelectedTaskId(null)}
+          onBack={() => { setRefreshKey((k) => k + 1); setSelectedTaskId(null); }}
           initialCommentId={initialCommentId}
         />
       )}

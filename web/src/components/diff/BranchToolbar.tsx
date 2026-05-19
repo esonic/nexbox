@@ -14,21 +14,16 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { gitApi, type GitBranchResponse } from "@/lib/api";
-import { useAppStore } from "@/stores/app";
 
-export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel, onNavigate }: {
+export function BranchToolbar({ projectId, sessionId, onBranchChanged, aheadCount, navLabel, onNavigate }: {
   projectId: string;
   sessionId?: string;
   onBranchChanged?: () => void;
+  aheadCount?: number;
   navLabel?: string;
   onNavigate?: (direction: "prev" | "next") => void;
 }) {
-  // Primary source: store (managed by SessionWorkspace's unified polling).
-  // Falls back to local state for mutations and standalone use.
-  const storeBranchData = useAppStore((s) => s.gitBranchData);
-  const setGitBranchData = useAppStore((s) => s.setGitBranchData);
-  const [localBranchData, setLocalBranchData] = useState<GitBranchResponse | null>(null);
-  const branchData = storeBranchData ?? localBranchData;
+  const [branchData, setBranchData] = useState<GitBranchResponse | null>(null);
   const [showDropdown, setShowDropdown] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newBranchName, setNewBranchName] = useState("");
@@ -41,19 +36,13 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
   const loadBranches = useCallback(async () => {
     try {
       const data = await gitApi.branches(projectId, sessionId);
-      // Update store so all consumers see the latest data immediately.
-      setGitBranchData(data);
-      setLocalBranchData(data);
+      setBranchData(data);
     } catch (e) {
       console.error("Failed to load branches:", e);
     }
-  }, [projectId, sessionId, setGitBranchData]);
+  }, [projectId, sessionId]);
 
-  // Only do an initial local load if the store is empty (e.g. standalone use).
-  useEffect(() => {
-    if (!storeBranchData) loadBranches();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(() => { loadBranches(); }, [loadBranches]);
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -111,6 +100,7 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
       await gitApi.push(projectId, sessionId);
       toast.success("Pushed to remote");
       await loadBranches();
+      onBranchChanged?.();
     } catch (e) {
       toast.error("Push failed", { description: String(e) });
     } finally {
@@ -145,11 +135,8 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
         >
           <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           <span className="truncate font-medium">{branchData?.current || "..."}</span>
-          {currentBranch && (currentBranch.ahead || 0) > 0 && (
-            <span className="text-[10px] text-blue-500">{currentBranch.ahead}↑</span>
-          )}
-          {currentBranch && (currentBranch.behind || 0) > 0 && (
-            <span className="text-[10px] text-orange-500">{currentBranch.behind}↓</span>
+          {(aheadCount ?? 0) > 0 && (
+            <span className="text-[10px] text-blue-500">{aheadCount}↑</span>
           )}
         </button>
 

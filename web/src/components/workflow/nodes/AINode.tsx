@@ -6,8 +6,6 @@ import { NodeStatusBadge, getStatusRing } from './NodeStatusBadge';
 export default memo(({ data, selected }: NodeProps) => {
   const agent = data.config?.agent;
   const prompt = data.config?.prompt;
-  const taskCount = data.config?.taskRef?.length || 0;
-  const assetCount = data.config?.assetRef?.length || 0;
   const statusRing = getStatusRing(data._status);
 
   return (
@@ -42,21 +40,7 @@ export default memo(({ data, selected }: NodeProps) => {
               ✓ Prompt configured
             </div>
           )}
-          {(taskCount > 0 || assetCount > 0) && (
-            <div className="flex items-center gap-2 pt-0.5">
-              {taskCount > 0 && (
-                <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-500 text-[10px] font-medium">
-                  {taskCount} task{taskCount > 1 ? 's' : ''}
-                </span>
-              )}
-              {assetCount > 0 && (
-                <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-500 text-[10px] font-medium">
-                  {assetCount} asset{assetCount > 1 ? 's' : ''}
-                </span>
-              )}
-            </div>
-          )}
-          {!agent && !prompt && taskCount === 0 && assetCount === 0 && (
+          {!agent && !prompt && (
             <span className="text-muted-foreground/40">Not configured</span>
           )}
         </div>

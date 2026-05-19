@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	gomcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -28,6 +30,8 @@ type Server struct {
 	screenshotDir string
 	toolNames     []string
 
+	lastUsedNano atomic.Int64
+
 	mu        sync.Mutex
 	started   bool
 	parentCtx context.Context
@@ -37,12 +41,26 @@ type Server struct {
 // NewServer creates a Chrome MCP server. Call EnsureStarted() to launch Chrome
 // and start serving. Use addr "127.0.0.1:0" for automatic port assignment.
 func NewServer(addr, screenshotDir string, browserOpts ...BrowserOptions) *Server {
-	return &Server{
+	s := &Server{
 		addr:          addr,
 		screenshotDir: screenshotDir,
 		browser:       NewBrowserManager(browserOpts...),
 		snapshot:      NewSnapshotManager(),
 	}
+	s.lastUsedNano.Store(time.Now().UnixNano())
+	return s
+}
+
+// Touch resets the idle clock — call when the session is observed to be active
+// (e.g. the manager handed out the server for a new chat message).
+func (s *Server) Touch() {
+	s.lastUsedNano.Store(time.Now().UnixNano())
+}
+
+// LastUsed returns the most recent time a tool was invoked or the server was
+// touched. Used by the manager's idle reaper.
+func (s *Server) LastUsed() time.Time {
+	return time.Unix(0, s.lastUsedNano.Load())
 }
 
 // EnsureStarted starts the MCP HTTP server if not already done.
@@ -191,6 +209,7 @@ func (s *Server) registerTools() {
 	add := func(tool gomcp.Tool, handler server.ToolHandlerFunc) {
 		name := tool.Name
 		wrapped := func(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+			s.Touch()
 			log.Printf("[chrome-mcp] >> %s", name)
 			return handler(ctx, req)
 		}

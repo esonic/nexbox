@@ -55,6 +55,7 @@ export function assetTypeLabel(type: string): string {
     code_change: "Code Change",
     unit_test: "Unit Test",
     test_case: "Test Case",
+    lark_doc: "Lark Doc",
   };
   return labels[type] || type;
 }

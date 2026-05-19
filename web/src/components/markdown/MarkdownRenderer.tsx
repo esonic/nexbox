@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
 import { cn } from "@/lib/utils";
 
 type MermaidRenderer = {
@@ -202,18 +203,22 @@ interface MarkdownRendererProps {
   content: string;
   className?: string;
   enableMermaid?: boolean;
+  components?: Record<string, React.ElementType>;
 }
 
 export function MarkdownRenderer({
   content,
   className,
   enableMermaid = true,
+  components,
 }: MarkdownRendererProps) {
   return (
     <div className={cn(className)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw]}
         components={{
+          ...components,
           code({ className: codeClassName, children, ...props }) {
             const lang = codeClassName?.replace("language-", "").toLowerCase() || "";
             const text = String(children ?? "").replace(/\n$/, "");

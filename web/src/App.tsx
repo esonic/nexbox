@@ -11,9 +11,8 @@ import { WorkflowEditorPage } from "@/pages/WorkflowEditorPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { MarketplacePage } from "@/pages/MarketplacePage";
 import { UpdateBanner } from "@/components/ui/UpdateBanner";
-import LoginModal from "@/components/ui/LoginModal";
-import { serverApi, authCloudApi, getToken, clearToken } from "@/lib/api";
-import { useAppStore } from "@/stores/app";
+import { LoginModal } from "@/components/ui/LoginModal";
+import { serverApi } from "@/lib/api";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -26,42 +25,9 @@ const queryClient = new QueryClient({
 
 function AppLayout() {
   const [mode, setMode] = useState<string | null>(null);
-  const { setCurrentUser } = useAppStore();
 
   useEffect(() => {
-    async function init() {
-      try {
-        const info = await serverApi.info();
-        if (info.mode === "needs_login") {
-          const token = getToken();
-          if (token) {
-            try {
-              const user = await authCloudApi.me(); // validates token
-              setCurrentUser(user);
-              setMode("local");        // token valid, show app
-              return;
-            } catch {
-              clearToken();            // token invalid/expired
-            }
-          }
-          setMode("needs_login");
-          return;
-        }
-        // Local mode: fetch user context (features, role) from /auth/me.
-        try {
-          const user = await authCloudApi.me();
-          setCurrentUser(user);
-        } catch { /* features default to 0 */ }
-        setMode(info.mode);
-      } catch {
-        setMode("local");
-      }
-    }
-    init();
-
-    const handleLogout = () => { setCurrentUser(null); setMode("needs_login"); };
-    window.addEventListener("boxnex:logout", handleLogout);
-    return () => window.removeEventListener("boxnex:logout", handleLogout);
+    serverApi.info().then((info) => setMode(info.mode)).catch(() => setMode("local"));
   }, []);
 
   if (mode === null) {
@@ -69,13 +35,7 @@ function AppLayout() {
   }
 
   if (mode === "needs_login") {
-    return <LoginModal onSuccess={async () => {
-      try {
-        const user = await authCloudApi.me();
-        setCurrentUser(user);
-      } catch {}
-      setMode("local");
-    }} />;
+    return <LoginModal />;
   }
 
   return (

@@ -40,6 +40,7 @@ export function DiffFileCard({
   fullFile,
   onChangeCount,
   refreshKey,
+  staged,
 }: {
   file: ParsedDiffFile;
   isViewed: boolean;
@@ -54,6 +55,7 @@ export function DiffFileCard({
   fullFile?: boolean;
   onChangeCount?: (count: number) => void;
   refreshKey?: number;
+  staged?: boolean;
 }) {
   const totalChanges = file.additions + file.deletions;
   const isLarge = totalChanges > LARGE_DIFF_THRESHOLD;
@@ -63,23 +65,23 @@ export function DiffFileCard({
 
   const effectiveDiffText = lazyLoad ? lazyDiffText : file.diffText;
 
-  // When refreshKey changes, clear stale cached diff so it gets re-fetched
+  // When refreshKey or staged changes, clear stale cached diff so it gets re-fetched
   useEffect(() => {
     setLazyDiffText(null);
-  }, [refreshKey]);
+  }, [refreshKey, staged]);
 
   useEffect(() => {
     if (!lazyLoad || !projectId || (isLarge && !defaultExpanded)) return;
     const filePath = getFilePath(file);
     setLoadingDiff(true);
-    diffApi.fileDiff(projectId, filePath, fullFile, sessionId).then((result) => {
+    diffApi.fileDiff(projectId, filePath, fullFile, sessionId, staged).then((result) => {
       setLazyDiffText(result.diff);
     }).catch((e) => {
       console.error("Failed to auto-load file diff:", e);
     }).finally(() => {
       setLoadingDiff(false);
     });
-  }, [lazyLoad, isLarge, projectId, refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [lazyLoad, isLarge, projectId, refreshKey, staged]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleExpand = async () => {
     if (expanded) {
@@ -91,7 +93,7 @@ export function DiffFileCard({
       const filePath = getFilePath(file);
       setLoadingDiff(true);
       try {
-        const result = await diffApi.fileDiff(projectId, filePath, fullFile, sessionId);
+        const result = await diffApi.fileDiff(projectId, filePath, fullFile, sessionId, staged);
         setLazyDiffText(result.diff);
       } catch (e) {
         console.error("Failed to load file diff:", e);
@@ -454,6 +456,7 @@ function DiffLines({ diffText, filename, hideHeaders, onChangeCount }: {
                   line.type === "deletion" && "bg-red-500/15 dark:bg-red-500/10 hover:bg-red-500/25 dark:hover:bg-red-500/20",
                   line.type === "context" && "hover:bg-muted/40"
                 )}
+                data-line-type={line.type}
                 {...(line.changeIdx != null ? { "data-change-idx": line.changeIdx } : {})}
               >
                 {/* Old line number — comment anchor for deletion lines */}

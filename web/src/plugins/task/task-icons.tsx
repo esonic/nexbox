@@ -65,14 +65,30 @@ export const PriorityCritical = ({ className }: { className?: string }) => (
   </svg>
 );
 
+// ── Type icons (Issue vs Task) ──
+
+/** Issue icon — like GitLab's issue icon (circle with dot) */
+export const TypeIssue = ({ className }: { className?: string }) => (
+  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className={className}>
+    <circle cx="7" cy="7" r="6" stroke="currentColor" strokeWidth="1.5" />
+    <circle cx="7" cy="7" r="2" fill="currentColor" />
+  </svg>
+);
+
+/** Task icon — like GitLab's task icon (checkbox) */
+export const TypeTask = ({ className }: { className?: string }) => (
+  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className={className}>
+    <rect x="1.5" y="1.5" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.5" />
+    <path d="M4.5 7.5L6.25 9.25L9.75 4.75" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 // ── Icon maps (status value → component) ──
 
 import type { TaskStatus, TaskPriority } from "./task-config";
 
 export const STATUS_ICONS: Record<TaskStatus, React.FC<{ className?: string }>> = {
   open: StatusOpen,
-  in_progress: StatusInProgress,
-  done: StatusDone,
   closed: StatusClosed,
 };
 

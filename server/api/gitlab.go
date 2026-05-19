@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/boxnex/gitlab"
+	"gitlab.okg.com/sre_ai/nexbox/gitlab"
 )
 
 // CreateMR creates a GitLab merge request for a project
@@ -74,6 +74,25 @@ func extractGitLabURL(dir string) (string, error) {
 	}
 
 	return normalizeGitLabURL(raw)
+}
+
+// gitlabNamespaceFromURL returns the first path segment of a normalized GitLab URL.
+// e.g. "https://gitlab.okg.com/sre/sre-ai/foo" → "sre"
+// Returns "" if the URL has no path segments.
+func gitlabNamespaceFromURL(gitlabURL string) string {
+	// URL is already normalized: https://host/seg1/seg2/...
+	idx := strings.Index(gitlabURL, "://")
+	if idx < 0 {
+		return ""
+	}
+	afterScheme := gitlabURL[idx+3:]
+	slashIdx := strings.Index(afterScheme, "/")
+	if slashIdx < 0 {
+		return ""
+	}
+	path := afterScheme[slashIdx+1:]
+	parts := strings.SplitN(path, "/", 2)
+	return parts[0]
 }
 
 // normalizeGitLabURL converts any git remote URL to a canonical HTTPS form.

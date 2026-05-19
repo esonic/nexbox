@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.okg.com/sre_ai/boxnex/agent"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"gitlab.okg.com/sre_ai/nexbox/agent"
+	"gitlab.okg.com/sre_ai/nexbox/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ func newSchedulerServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { db.Close() })
 	return &Server{
-		Store: store.NewSQLiteStore(db.DB),
+		Store: store.NewSQLiteStore(db),
 		Hub:   NewChatHub(),
 	}
 }
@@ -183,7 +183,7 @@ func TestBuildLevels_Diamond(t *testing.T) {
 func TestFilterAINodes(t *testing.T) {
 	nodes := []store.WorkflowNode{
 		makeAINode("ai-prompt", "do stuff"),
-		makeAINode("ai-empty", ""),    // empty prompt → excluded
+		makeAINode("ai-empty", ""), // empty prompt → excluded
 		makeNode("human1", "human"),
 		makeNode("start1", "start"),
 	}
@@ -210,9 +210,9 @@ func TestFilterPassNodes(t *testing.T) {
 	// pass-through: start nodes, ai nodes with no prompt
 	nodes := []store.WorkflowNode{
 		makeAINode("ai-with-prompt", "do stuff"), // excluded: ai + prompt
-		makeAINode("ai-no-prompt", ""),            // included: ai without prompt
-		makeNode("human1", "human"),               // excluded: human
-		makeNode("start1", "start"),               // included: start
+		makeAINode("ai-no-prompt", ""),           // included: ai without prompt
+		makeNode("human1", "human"),              // excluded: human
+		makeNode("start1", "start"),              // included: start
 	}
 	got := filterPassNodes(nodes)
 	if len(got) != 2 {
@@ -256,77 +256,82 @@ func TestTruncateStr(t *testing.T) {
 // buildNodePrompt
 // ---------------------------------------------------------------------------
 
-func TestBuildNodePrompt_PromptOnly(t *testing.T) {
+func TestBuildNodePrompt_NoTokens(t *testing.T) {
 	node := makeAINode("n1", "Do the thing")
-	out := buildNodePrompt(node, "Do the thing", "", nil, nil, map[string][]string{}, map[string]string{}, false, nil)
+	out := buildNodePrompt(node, "Do the thing", nil, map[string][]string{}, nil, nil, nil)
 	if out != "Do the thing" {
 		t.Errorf("want %q, got %q", "Do the thing", out)
 	}
 }
 
-func TestBuildNodePrompt_InjectUserContext(t *testing.T) {
-	node := makeAINode("n1", "Do the thing")
-	out := buildNodePrompt(node, "Do the thing", "user context here", nil, nil,
-		map[string][]string{"n1": {}}, map[string]string{"n1": "n1"}, true, nil)
-	if !strings.Contains(out, "[User Context]") {
-		t.Error("expected [User Context] section when injectContext=true")
-	}
-	if !strings.Contains(out, "user context here") {
-		t.Error("expected user context content")
-	}
-	if !strings.Contains(out, "Do the thing") {
-		t.Error("expected original prompt")
+func TestBuildNodePrompt_EnvVarSubstitution(t *testing.T) {
+	node := makeAINode("n1", "Analyze {{env_target}} for {{env_goal}}")
+	env := map[string]string{"target": "api/users", "goal": "perf issues"}
+	out := buildNodePrompt(node, "Analyze {{env_target}} for {{env_goal}}", nil, map[string][]string{"n1": {}}, nil, env, nil)
+	if out != "Analyze api/users for perf issues" {
+		t.Errorf("unexpected substitution: %q", out)
 	}
 }
 
-func TestBuildNodePrompt_NoContextWhenFlagFalse(t *testing.T) {
-	node := makeAINode("n1", "Do the thing")
-	out := buildNodePrompt(node, "Do the thing", "user context here", nil, nil,
-		map[string][]string{"n1": {}}, map[string]string{"n1": "n1"}, false, nil)
-	if strings.Contains(out, "[User Context]") {
-		t.Error("should not inject [User Context] when injectContext=false")
+func TestBuildNodePrompt_UnknownEnvBecomesEmpty(t *testing.T) {
+	node := makeAINode("n1", "Got [{{env_missing}}] here")
+	out := buildNodePrompt(node, "Got [{{env_missing}}] here", nil, map[string][]string{"n1": {}}, nil, nil, nil)
+	if out != "Got [] here" {
+		t.Errorf("unknown env token should expand to empty, got %q", out)
 	}
 }
 
-func TestBuildNodePrompt_UpstreamOutput(t *testing.T) {
-	node := makeAINode("n2", "Next step")
+func TestBuildNodePrompt_PrevNodeOutput(t *testing.T) {
+	node := makeAINode("n2", "Continue from: {{env_prev_node_output}}")
 	parentMap := map[string][]string{"n2": {"n1"}}
-	nodeLabels := map[string]string{"n1": "Step One", "n2": "Step Two"}
 	nodeOutputs := map[string]string{"n1": "output from step one"}
-	out := buildNodePrompt(node, "Next step", "", nil, nodeOutputs, parentMap, nodeLabels, false, nil)
+	nodeLabels := map[string]string{"n1": "Step One"}
+	out := buildNodePrompt(node, "Continue from: {{env_prev_node_output}}", nodeOutputs, parentMap, nodeLabels, nil, nil)
 	if !strings.Contains(out, "output from step one") {
-		t.Error("expected upstream output injected into prompt")
+		t.Errorf("expected prev_node_output injected, got %q", out)
 	}
-	if !strings.Contains(out, "Step One") {
-		t.Error("expected upstream node label in prompt")
-	}
-	if !strings.Contains(out, "[Context from previous steps]") {
-		t.Error("expected [Context from previous steps] header")
+	if !strings.Contains(out, "## Step One") {
+		t.Errorf("expected upstream node label, got %q", out)
 	}
 }
 
-func TestBuildNodePrompt_UpstreamOutputSkippedWhenNil(t *testing.T) {
-	// When nodeOutputs is nil (serial chain reuse), upstream context is not injected.
-	node := makeAINode("n2", "Next step")
-	out := buildNodePrompt(node, "Next step", "", nil, nil,
-		map[string][]string{"n2": {"n1"}}, map[string]string{"n1": "Step One"}, false, nil)
-	if strings.Contains(out, "[Context from previous steps]") {
-		t.Error("should not inject upstream context when nodeOutputs is nil")
+func TestBuildNodePrompt_PrevNodeOutputMultipleParents(t *testing.T) {
+	node := makeAINode("n3", "All: {{env_prev_node_output}}")
+	parentMap := map[string][]string{"n3": {"n1", "n2"}}
+	nodeOutputs := map[string]string{"n1": "first", "n2": "second"}
+	nodeLabels := map[string]string{"n1": "First Node", "n2": "Second Node"}
+	out := buildNodePrompt(node, "All: {{env_prev_node_output}}", nodeOutputs, parentMap, nodeLabels, nil, nil)
+	if !strings.Contains(out, "first") || !strings.Contains(out, "second") {
+		t.Errorf("expected both parents' outputs, got %q", out)
+	}
+	if !strings.Contains(out, "## First Node") || !strings.Contains(out, "## Second Node") {
+		t.Errorf("expected parent labels, got %q", out)
+	}
+	if !strings.Contains(out, "---") {
+		t.Errorf("expected separator between parent outputs, got %q", out)
 	}
 }
 
-func TestBuildNodePrompt_TaskContext(t *testing.T) {
-	node := makeAINode("n1", "Handle task")
-	tasks := []store.Task{
-		{ID: "t1", Title: "Fix bug", Status: "open", Priority: "high"},
+func TestBuildNodePrompt_PrevNodeOutputEmptyWhenNoParents(t *testing.T) {
+	node := makeAINode("n1", "Prefix: {{env_prev_node_output}} suffix")
+	out := buildNodePrompt(node, "Prefix: {{env_prev_node_output}} suffix", nil, map[string][]string{"n1": {}}, nil, nil, nil)
+	if out != "Prefix:  suffix" {
+		t.Errorf("expected empty prev_node_output, got %q", out)
 	}
-	out := buildNodePrompt(node, "Handle task", "", tasks, nil,
-		map[string][]string{"n1": {}}, map[string]string{"n1": "n1"}, true, nil)
-	if !strings.Contains(out, "[Task Context]") {
-		t.Error("expected [Task Context] header")
+}
+
+func TestBuildNodePrompt_PrevNodeOutputReserved(t *testing.T) {
+	// prev_node_output is reserved; a user-supplied env value cannot shadow it.
+	node := makeAINode("n2", "X: {{env_prev_node_output}}")
+	parentMap := map[string][]string{"n2": {"n1"}}
+	nodeOutputs := map[string]string{"n1": "real upstream"}
+	env := map[string]string{"prev_node_output": "FAKE"}
+	out := buildNodePrompt(node, "X: {{env_prev_node_output}}", nodeOutputs, parentMap, nil, env, nil)
+	if !strings.Contains(out, "real upstream") {
+		t.Errorf("expected real upstream to win over user-supplied value, got %q", out)
 	}
-	if !strings.Contains(out, "Fix bug") {
-		t.Error("expected task title in prompt")
+	if strings.Contains(out, "FAKE") {
+		t.Errorf("user-supplied prev_node_output should not have leaked through, got %q", out)
 	}
 }
 
@@ -836,6 +841,27 @@ func TestBuildHookPrompt_OutputBeforePrompt(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// substituteEnvVars (shared by node prompts and hook prompts)
+// ---------------------------------------------------------------------------
+
+func TestSubstituteEnvVars_BasicAndUnknown(t *testing.T) {
+	env := map[string]string{"target": "api/users"}
+	got := substituteEnvVars("hit {{env_target}} via {{env_missing}}", env)
+	if got != "hit api/users via " {
+		t.Errorf("unexpected: %q", got)
+	}
+}
+
+func TestSubstituteEnvVars_NoPrevNodeOutputForHooks(t *testing.T) {
+	// Hook prompts pass req.Env directly without prev_node_output, so the
+	// token must expand to empty even though it'd normally be reserved.
+	got := substituteEnvVars("before [{{env_prev_node_output}}] after", map[string]string{})
+	if got != "before [] after" {
+		t.Errorf("expected empty expansion for hook context, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Hook: runEphemeralAgent
 // ---------------------------------------------------------------------------
 
@@ -938,7 +964,6 @@ func (b *blockingAgent) SendMessage(ctx context.Context, _ agent.Request, _ agen
 	<-ctx.Done()
 	return agent.Result{}, ctx.Err()
 }
-
 
 // ---------------------------------------------------------------------------
 // Hook: hookResult JSON parsing

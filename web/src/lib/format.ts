@@ -59,3 +59,22 @@ export function formatShortDate(dateStr: string): string {
     return dateStr;
   }
 }
+
+/**
+ * Format a date string as MM/DD HH:mm in the user's local timezone.
+ * e.g. "2026-05-14T13:21:00Z" → "05/14 13:21"
+ */
+export function formatMessageTime(dateStr: string | undefined): string {
+  if (!dateStr) return "";
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return "";
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    return `${mm}/${dd} ${hh}:${mi}`;
+  } catch {
+    return "";
+  }
+}

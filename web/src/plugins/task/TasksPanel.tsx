@@ -1,8 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Plus,
-  ChevronRight,
-  ChevronDown,
   Loader2,
   Search,
   SlidersHorizontal,
@@ -84,39 +82,16 @@ interface DisplayTask {
   isExpanded: boolean;
 }
 
-function buildFlatList(tasks: Task[], expandedIds: Set<string>): DisplayTask[] {
-  const childrenMap = new Map<string, Task[]>();
-  const roots: Task[] = [];
-  for (const t of tasks) {
-    if (t.parent_id && tasks.some((p) => p.id === t.parent_id)) {
-      const arr = childrenMap.get(t.parent_id) || [];
-      arr.push(t);
-      childrenMap.set(t.parent_id, arr);
-    } else {
-      roots.push(t);
-    }
-  }
-
-  function walk(list: Task[], depth: number): DisplayTask[] {
-    const out: DisplayTask[] = [];
-    for (const task of list) {
-      const children = childrenMap.get(task.id) || [];
-      const isExpanded = expandedIds.has(task.id);
-      out.push({
-        task,
-        status: normalizeStatus(task.status),
-        priority: normalizePriority(task.priority),
-        depth,
-        hasChildren: children.length > 0,
-        childCount: children.length,
-        isExpanded,
-      });
-      if (children.length > 0 && isExpanded) out.push(...walk(children, depth + 1));
-    }
-    return out;
-  }
-
-  return walk(roots, 0);
+function buildFlatList(tasks: Task[]): DisplayTask[] {
+  return tasks.map((task) => ({
+    task,
+    status: normalizeStatus(task.status),
+    priority: normalizePriority(task.priority),
+    depth: 0,
+    hasChildren: false,
+    childCount: 0,
+    isExpanded: false,
+  }));
 }
 
 interface GroupData {
@@ -129,11 +104,10 @@ interface GroupData {
 
 function buildGroupedList(
   tasks: Task[],
-  expandedIds: Set<string>,
   groupBy: GroupBy,
   searchQuery: string
 ): GroupData[] {
-  const all = buildFlatList(tasks, expandedIds);
+  const all = buildFlatList(tasks);
 
   const filtered = searchQuery.trim()
     ? all.filter((d) => {
@@ -242,7 +216,6 @@ function NewIssueForm({
   defaultStatus,
   defaultPriority,
   defaultProjectId,
-  projects,
   onSubmit,
   onCancel,
 }: {
@@ -250,7 +223,6 @@ function NewIssueForm({
   defaultStatus?: TaskStatus;
   defaultPriority?: TaskPriority;
   defaultProjectId?: string;
-  projects: Project[];
   onSubmit: (title: string, parentId: string | null, status?: TaskStatus, priority?: TaskPriority, description?: string, projectId?: string, assigner?: string) => void;
   onCancel: () => void;
 }) {
@@ -318,18 +290,6 @@ function NewIssueForm({
             <option key={p.value} value={p.value}>{p.label}</option>
           ))}
         </select>
-        {projects.length > 0 && (
-          <select
-            value={projectId}
-            onChange={(e) => setProjectId(e.target.value)}
-            className="text-xs bg-background border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring"
-          >
-            <option value="">No project</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-        )}
         <UserPicker
           value={assigner}
           onChange={(val) => setAssigner(val)}
@@ -366,10 +326,9 @@ function NewIssueForm({
 // Main TasksPage
 // ═══════════════════════════════════════════════════════════════════════════
 
-export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentProjectId }: { embedded?: boolean; onPickTask?: (task: Task) => void; onSelectTask?: (taskId: string) => void; currentProjectId?: string } = {}) {
+export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentProjectId, refreshKey }: { embedded?: boolean; onPickTask?: (task: Task) => void; onSelectTask?: (taskId: string) => void; currentProjectId?: string; refreshKey?: number } = {}) {
   const [tasks, setTasks]                     = useState<Task[]>([]);
   const [loading, setLoading]                 = useState(true);
-  const [expanded, setExpanded]               = useState<Set<string>>(new Set());
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [groupBy, setGroupBy]                 = useState<GroupBy>("none");
   const [searchQuery, setSearchQuery]         = useState("");
@@ -385,7 +344,7 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
   const [loadingMore, setLoadingMore] = useState(false);
   const PAGE_SIZE = 100;
   const [activeTab, setActiveTab]             = useState<"active" | "completed">("active");
-
+  const migratingRef = useRef(false);
   const projectNameMap = useMemo(() => {
     const m = new Map<string, string>();
     for (const p of projects) m.set(p.id, p.name);
@@ -405,6 +364,30 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
 
   const load = useCallback(async () => {
     try {
+      // Auto-migrate local tasks to GitLab if needed (guard against concurrent calls)
+      if (currentProjectId && !migratingRef.current) {
+        try {
+          const migration = await projectsApi.getMigrationStatus(currentProjectId);
+          if (migration?.needs_migration) {
+            migratingRef.current = true;
+            try {
+              const result = await projectsApi.migrateTasks(currentProjectId);
+              if (result.failed > 0) {
+                toast.warning(`Migrated ${result.migrated} tasks, ${result.failed} failed`, {
+                  description: result.errors?.join("; "),
+                });
+              } else if (result.migrated > 0) {
+                toast.success(`Auto-migrated ${result.migrated} tasks to GitLab`);
+              }
+            } catch (e) {
+              toast.error("Auto-migration failed", { description: String(e) });
+            } finally {
+              migratingRef.current = false;
+            }
+          }
+        } catch { /* ignore */ }
+      }
+
       const [taskList, projList] = await Promise.all([
         tasksApi.list(PAGE_SIZE, 0, currentProjectId || undefined),
         projectsApi.list(),
@@ -439,6 +422,30 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
     serverApi.info().then((info: any) => {
       if (info.user_name) setCurrentUser(info.user_name);
     }).catch(() => {});
+  }, [load]);
+
+  // Reload when returning from detail view
+  useEffect(() => {
+    if (refreshKey) load();
+  }, [refreshKey]);
+
+  // Poll for updates every 60s so changes from other users (e.g. on GitLab) are visible
+  // Pauses when the tab is hidden to avoid unnecessary API calls
+  useEffect(() => {
+    let id: ReturnType<typeof setInterval> | null = setInterval(load, 60_000);
+    const onVisibility = () => {
+      if (document.hidden) {
+        if (id) { clearInterval(id); id = null; }
+      } else {
+        load();
+        id = setInterval(load, 60_000);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      if (id) clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [load]);
 
   useEffect(() => {
@@ -488,9 +495,9 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
 
     // Filter by tab (active vs completed)
     if (activeTab === "active") {
-      result = result.filter((t) => t.status !== "done" && t.status !== "closed");
+      result = result.filter((t) => t.status !== "closed");
     } else {
-      result = result.filter((t) => t.status === "done" || t.status === "closed");
+      result = result.filter((t) => t.status === "closed");
     }
 
     // Filter by assigner
@@ -514,18 +521,14 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
   }, [tasks, activeTab, filterAssigner, filterLabels, currentUser]);
 
   const groups = useMemo(
-    () => buildGroupedList(filteredTasks, expanded, groupBy, searchQuery),
-    [filteredTasks, expanded, groupBy, searchQuery]
+    () => buildGroupedList(filteredTasks, groupBy, searchQuery),
+    [filteredTasks, groupBy, searchQuery]
   );
 
   const totalCount = tasks.length;
 
   // ── Callbacks ──
 
-  const toggleExpand = useCallback(
-    (id: string) => setExpanded((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; }),
-    []
-  );
   const toggleGroup = useCallback(
     (key: string) => setCollapsedGroups((p) => { const n = new Set(p); n.has(key) ? n.delete(key) : n.add(key); return n; }),
     []
@@ -533,7 +536,6 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
 
   const handleAddChild = useCallback(
     (parentId: string) => {
-      setExpanded((p) => new Set(p).add(parentId));
       setNewIssue({ parentId });
     },
     []
@@ -596,15 +598,6 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
     },
     []
   );
-  const handleDelete = useCallback(
-    async (id: string) => {
-      try {
-        await tasksApi.delete(id);
-        setTasks((p) => p.filter((t) => t.id !== id && t.parent_id !== id));
-      } catch (e) { console.error(e); toast.error("Failed to delete task", { description: String(e) }); }
-    },
-    []
-  );
   const handleTitle = useCallback(
     async (id: string, title: string) => {
       try {
@@ -625,8 +618,8 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
     );
   }
 
-  const activeCount = tasks.filter((t) => t.status !== "done" && t.status !== "closed").length;
-  const completedCount = tasks.filter((t) => t.status === "done" || t.status === "closed").length;
+  const activeCount = tasks.filter((t) => t.status !== "closed").length;
+  const completedCount = tasks.filter((t) => t.status === "closed").length;
 
   return (
     <div className="flex flex-col h-full">
@@ -656,7 +649,7 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
-              Completed
+              Closed
               <span className="ml-1.5 text-[10px] tabular-nums opacity-70">{completedCount}</span>
             </button>
           </div>
@@ -806,7 +799,6 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
           defaultStatus={newIssue.defaultStatus}
           defaultPriority={newIssue.defaultPriority}
           defaultProjectId={currentProjectId}
-          projects={projects}
           onSubmit={handleCreate}
           onCancel={() => setNewIssue(undefined)}
         />
@@ -830,14 +822,8 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
                   <IssueRow
                     key={item.task.id}
                     task={item.task}
-                    depth={item.depth}
-                    hasChildren={item.hasChildren}
-                    childCount={item.childCount}
                     grouped={groupBy !== "none"}
-                    isExpanded={item.isExpanded}
-                    onToggle={toggleExpand}
-                    onAddChild={item.task.parent_id ? undefined : handleAddChild}
-                    onDelete={handleDelete}
+                    onAddChild={!item.task.parent_id ? handleAddChild : undefined}
                     onStatusChange={handleStatus}
                     onPriorityChange={handlePriority}
                     onTitleChange={handleTitle}

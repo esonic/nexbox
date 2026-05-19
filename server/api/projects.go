@@ -6,12 +6,24 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"gitlab.okg.com/sre_ai/nexbox/config"
+	"gitlab.okg.com/sre_ai/nexbox/store"
 )
+
+// injectProjectOKOne injects the okone config from config.json into the project (transient field).
+func (s *Server) injectProjectOKOne(p *store.Project) {
+	if p == nil {
+		return
+	}
+	for _, m := range s.Config.Get().Projects {
+		if m.RemoteID == p.ID {
+			p.OKOne = m.OKOne
+			return
+		}
+	}
+}
 
 func (s *Server) ListProjects(w http.ResponseWriter, r *http.Request) {
 	projects, err := s.Store.ListProjects()
@@ -23,16 +35,21 @@ func (s *Server) ListProjects(w http.ResponseWriter, r *http.Request) {
 		projects = []Project{}
 	}
 
-	// Filter by owner unless admin
-	if GetUserRole(r) != "admin" {
-		userID := GetUserID(r)
-		filtered := projects[:0]
-		for _, p := range projects {
-			if p.OwnerID == userID {
-				filtered = append(filtered, p)
+	// Patch local git paths from config (cloud mode only)
+	if s.StoreMode == "remote" {
+		pathMap := make(map[string]string)
+		for _, m := range s.Config.Get().Projects {
+			pathMap[m.RemoteID] = m.GitRepoPath
+		}
+		for i := range projects {
+			if lp, ok := pathMap[projects[i].ID]; ok {
+				projects[i].GitRepoPath = lp
 			}
 		}
-		projects = filtered
+	}
+
+	for i := range projects {
+		s.injectProjectOKOne(&projects[i])
 	}
 
 	writeJSON(w, http.StatusOK, projects)
@@ -48,30 +65,35 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if len([]rune(req.Name)) > 20 {
-		writeError(w, http.StatusBadRequest, "name must be less than 20 characters")
-		return
-	}
-	if len([]rune(req.Description)) > 100 {
-		writeError(w, http.StatusBadRequest, "description must be less than 100 characters")
+
+	if err := validateGitRepoPath(req.GitRepoPath); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Set owner from authenticated user
-	req.OwnerID = GetUserID(r)
+	localPath := req.GitRepoPath
+	req.GitRepoPath = "" // local path is never sent to the remote
 
-	// If no git_repo_path provided, auto-create workspace directory
-	if req.GitRepoPath == "" && s.DataDir != "" {
-		// Will be set after project creation (need project ID for directory name)
-	} else if req.GitRepoPath != "" {
-		if err := validateGitRepoPath(req.GitRepoPath); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
+	if s.StoreMode == "remote" && localPath != "" {
+		// Best-effort: try to extract GitLab URL from the local repo.
+		// If successful, also override namespace_id with the first path segment of the
+		// GitLab URL (e.g. "sre" for https://gitlab.okg.com/sre/sre-ai/...) so that
+		// all users who add the same repo always land in the same project regardless of
+		// what they typed in the namespace field.
+		if gitlabURL, err := extractGitLabURL(localPath); err == nil {
+			req.GitLabRepoURL = gitlabURL
+			if ns := gitlabNamespaceFromURL(gitlabURL); ns != "" {
+				req.NamespaceID = ns
+			}
 		}
 	}
 
 	project, err := s.Store.CreateProject(req)
 	if err != nil {
+		if ae, ok := err.(*store.ApiError); ok && ae.StatusCode == http.StatusConflict {
+			writeError(w, http.StatusConflict, "project name already exists")
+			return
+		}
 		if errors.Is(err, store.ErrVersionConflict) {
 			writeError(w, http.StatusConflict, "project name already exists")
 			return
@@ -80,25 +102,28 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-create workspace directory if none was provided
-	if req.GitRepoPath == "" && s.DataDir != "" {
-		shortID := project.ID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
-		}
-		wsDir := filepath.Join(s.DataDir, "workspaces", shortID)
-		if err := os.MkdirAll(wsDir, 0755); err != nil {
-			log.Printf("[projects] failed to create workspace dir %s: %v", wsDir, err)
-		} else {
-			// Update project with the workspace path
-			gitPath := wsDir
-			if _, err := s.Store.UpdateProject(project.ID, store.UpdateProjectRequest{
-				GitRepoPath: &gitPath,
-			}); err != nil {
-				log.Printf("[projects] failed to update project git_repo_path: %v", err)
+	// Save local git path mapping when in cloud mode
+	if s.StoreMode == "remote" && localPath != "" {
+		if err := s.Config.Update(func(cfg *config.Config) {
+			for _, m := range cfg.Projects {
+				if m.RemoteID == project.ID && m.GitRepoPath == localPath {
+					return // already mapped
+				}
 			}
-			project.GitRepoPath = wsDir
+			cfg.Projects = append(cfg.Projects, config.ProjectMapping{
+				RemoteID:    project.ID,
+				GitRepoPath: localPath,
+			})
+		}); err != nil {
+			log.Printf("[projects] failed to save local config mapping: %v", err)
 		}
+		project.GitRepoPath = localPath
+	}
+
+	// Copy global skills and plugins into the new project's .claude/ directory
+	if project.GitRepoPath != "" && s.LocalStore != nil {
+		s.copyGlobalSkillsToProject(project.GitRepoPath)
+		s.copyGlobalPluginsToProject(project.GitRepoPath)
 	}
 
 	writeJSON(w, http.StatusCreated, project)
@@ -115,12 +140,42 @@ func (s *Server) GetProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
-	if GetUserRole(r) != "admin" && project.OwnerID != GetUserID(r) {
-		writeError(w, http.StatusForbidden, "access denied")
+
+	s.injectProjectOKOne(project)
+	writeJSON(w, http.StatusOK, project)
+}
+
+// GetOrCreateScratchSession returns the project's hidden "scratch" session,
+// creating it on first request. Used by the sidebar when the user clicks a
+// project row to open a new-chat surface without committing to a real session;
+// the session gets promoted (is_hidden -> 0) as soon as a user message is
+// persisted to it (see chat.go).
+func (s *Server) GetOrCreateScratchSession(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectId")
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, "projectId required")
 		return
 	}
-
-	writeJSON(w, http.StatusOK, project)
+	// Guard against orphan scratch sessions for non-existent project IDs.
+	project, err := s.Store.GetProject(projectID)
+	if err != nil {
+		log.Printf("[scratch-session] GetProject(%s) failed: %v", projectID, err)
+		writeError(w, http.StatusInternalServerError, "failed to load project")
+		return
+	}
+	if project == nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	sess, err := s.Store.GetOrCreateScratchSession(projectID)
+	if writeStoreError(w, err, "GetOrCreateScratchSession", "failed to get or create scratch session") {
+		return
+	}
+	// Fill in default agent if empty so the UI has a starting selection.
+	if sess.Agent == "" {
+		sess.Agent = s.getDefaultAgent()
+	}
+	writeJSON(w, http.StatusOK, sess)
 }
 
 func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request) {
@@ -131,37 +186,56 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Name != nil && len([]rune(*req.Name)) > 20 {
-		writeError(w, http.StatusBadRequest, "name must be less than 20 characters")
-		return
-	}
-	if req.Description != nil && len([]rune(*req.Description)) > 100 {
-		writeError(w, http.StatusBadRequest, "description must be less than 100 characters")
-		return
-	}
-
-	if req.GitRepoPath != nil {
+	// In cloud mode, git_repo_path is stored in local config (not sent to remote).
+	// This allows "Add to Sidebar" (non-empty path) and "Remove from Sidebar" (empty path).
+	localPathOnly := false
+	if s.StoreMode == "remote" && req.GitRepoPath != nil {
+		localPath := *req.GitRepoPath
+		if localPath != "" {
+			if err := validateGitRepoPath(localPath); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		_ = s.Config.Update(func(cfg *config.Config) {
+			filtered := cfg.Projects[:0]
+			for _, m := range cfg.Projects {
+				if m.RemoteID != id {
+					filtered = append(filtered, m)
+				}
+			}
+			cfg.Projects = filtered
+			if localPath != "" {
+				cfg.Projects = append(cfg.Projects, config.ProjectMapping{
+					RemoteID:    id,
+					GitRepoPath: localPath,
+				})
+			}
+		})
+		req.GitRepoPath = nil // do not forward local path to remote
+		// If git_repo_path was the only field, skip the remote API call entirely
+		localPathOnly = req.Name == nil && req.Description == nil && req.GitLabRepoURL == nil && req.ExpectedVersion == nil
+	} else if req.GitRepoPath != nil {
 		if err := validateGitRepoPath(*req.GitRepoPath); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
 
-	// Ownership check before update
-	if GetUserRole(r) != "admin" {
-		existing, err := s.Store.GetProject(id)
+	// If only git_repo_path was provided and it was intercepted, fetch and return current project
+	if localPathOnly {
+		project, err := s.getProjectWithLocalPath(id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if existing == nil {
+		if project == nil {
 			writeError(w, http.StatusNotFound, "project not found")
 			return
 		}
-		if existing.OwnerID != GetUserID(r) {
-			writeError(w, http.StatusForbidden, "access denied")
-			return
-		}
+		s.injectProjectOKOne(project)
+		writeJSON(w, http.StatusOK, project)
+		return
 	}
 
 	project, err := s.Store.UpdateProject(id, req)
@@ -178,56 +252,45 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Patch local path back into the response (cloud mode)
+	if s.StoreMode == "remote" {
+		for _, m := range s.Config.Get().Projects {
+			if m.RemoteID == project.ID {
+				project.GitRepoPath = m.GitRepoPath
+				break
+			}
+		}
+	}
+
+	s.injectProjectOKOne(project)
 	writeJSON(w, http.StatusOK, project)
 }
 
 func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "projectId")
 
-	// Fetch project before deletion so we can clean up its workspace directory.
-	existing, err := s.Store.GetProject(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if existing == nil {
-		writeError(w, http.StatusNotFound, "project not found")
-		return
-	}
-
-	// Ownership check before delete
-	if GetUserRole(r) != "admin" && existing.OwnerID != GetUserID(r) {
-		writeError(w, http.StatusForbidden, "access denied")
-		return
-	}
+	// Always remove local git path mapping when present
+	_ = s.Config.Update(func(cfg *config.Config) {
+		filtered := cfg.Projects[:0]
+		for _, m := range cfg.Projects {
+			if m.RemoteID != id {
+				filtered = append(filtered, m)
+			}
+		}
+		cfg.Projects = filtered
+	})
 
 	if err := s.Store.DeleteProject(id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "project not found")
 			return
 		}
+		if ae, ok := err.(*store.ApiError); ok && ae.StatusCode == http.StatusNotFound {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
-	}
-
-	// Stop the per-project Docker container if container isolation is enabled.
-	if s.ContainerMgr != nil {
-		if err := s.ContainerMgr.StopContainer(id); err != nil {
-			log.Printf("[projects] failed to stop container for project %s: %v", id, err)
-		}
-	}
-
-	// T3.4 + T9.4: Clean up the workspace directory on the host.
-	// Only remove directories under DataDir/workspaces/ (auto-created workspaces).
-	if s.DataDir != "" && existing.GitRepoPath != "" {
-		wsRoot := filepath.Join(s.DataDir, "workspaces")
-		if isSubPath(wsRoot, existing.GitRepoPath) {
-			if err := os.RemoveAll(existing.GitRepoPath); err != nil {
-				log.Printf("[projects] failed to remove workspace dir %s: %v", existing.GitRepoPath, err)
-			} else {
-				log.Printf("[projects] removed workspace dir %s for project %s", existing.GitRepoPath, id)
-			}
-		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -271,7 +334,30 @@ func (s *Server) CheckProjectByGitDir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// List all projects and match by GitLabRepoURL
+	// In cloud mode, use the dedicated remote query that searches all projects
+	// regardless of the caller's membership (Java supports ?gitlabUrl= for this).
+	if s.StoreMode == "remote" && s.Cloud != nil {
+		p, err := s.Cloud.FindProjectByGitLabURL(gitlabURL)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if p == nil {
+			writeError(w, http.StatusNotFound, "no matching project found")
+			return
+		}
+		// Patch local path if already mapped
+		for _, m := range s.Config.Get().Projects {
+			if m.RemoteID == p.ID {
+				p.GitRepoPath = m.GitRepoPath
+				break
+			}
+		}
+		writeJSON(w, http.StatusOK, *p)
+		return
+	}
+
+	// Local mode: list all projects and match by GitLabRepoURL
 	projects, err := s.Store.ListProjects()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -289,3 +375,82 @@ func (s *Server) CheckProjectByGitDir(w http.ResponseWriter, r *http.Request) {
 
 // ── Project Members (cloud mode only) ──
 
+func (s *Server) ListProjectMembers(w http.ResponseWriter, r *http.Request) {
+	if s.Cloud == nil {
+		writeJSON(w, http.StatusOK, []store.ProjectMember{})
+		return
+	}
+	id := chi.URLParam(r, "projectId")
+	members, err := s.Cloud.ListProjectMembers(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if members == nil {
+		members = []store.ProjectMember{}
+	}
+	writeJSON(w, http.StatusOK, members)
+}
+
+func (s *Server) AddProjectMember(w http.ResponseWriter, r *http.Request) {
+	if s.Cloud == nil {
+		writeError(w, http.StatusBadRequest, "project members require cloud mode")
+		return
+	}
+	id := chi.URLParam(r, "projectId")
+	var body struct {
+		UserName string `json:"user_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserName == "" {
+		writeError(w, http.StatusBadRequest, "user_name is required")
+		return
+	}
+	if err := s.Cloud.AddProjectMember(id, body.UserName); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (s *Server) RemoveProjectMember(w http.ResponseWriter, r *http.Request) {
+	if s.Cloud == nil {
+		writeError(w, http.StatusBadRequest, "project members require cloud mode")
+		return
+	}
+	id := chi.URLParam(r, "projectId")
+	userName := chi.URLParam(r, "userName")
+	if err := s.Cloud.RemoveProjectMember(id, userName); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// LeaveProject removes the current user from a project's member list (non-owner only)
+// and also removes the local config mapping if present.
+func (s *Server) LeaveProject(w http.ResponseWriter, r *http.Request) {
+	if s.Cloud == nil {
+		writeError(w, http.StatusBadRequest, "leaving a project requires cloud mode")
+		return
+	}
+	id := chi.URLParam(r, "projectId")
+	if err := s.Cloud.LeaveProject(id); err != nil {
+		if ae, ok := err.(*store.ApiError); ok {
+			writeError(w, ae.StatusCode, ae.Message)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Remove local config mapping if present
+	_ = s.Config.Update(func(cfg *config.Config) {
+		filtered := cfg.Projects[:0]
+		for _, m := range cfg.Projects {
+			if m.RemoteID != id {
+				filtered = append(filtered, m)
+			}
+		}
+		cfg.Projects = filtered
+	})
+	w.WriteHeader(http.StatusNoContent)
+}

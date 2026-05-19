@@ -9,10 +9,8 @@ import (
 
 // clientConn wraps a WebSocket connection with its own write mutex
 type clientConn struct {
-	conn     *websocket.Conn
-	writeMu  sync.Mutex
-	IP       string // client remote address
-	Username string // authenticated user (email)
+	conn    *websocket.Conn
+	writeMu sync.Mutex
 }
 
 // Hub is the base WebSocket hub that manages client connections and
@@ -31,25 +29,20 @@ func NewHub(label string) Hub {
 	}
 }
 
-// AddClient registers a new WebSocket connection with optional identity info.
-func (h *Hub) AddClient(conn *websocket.Conn, ip, username string) {
+// AddClient registers a new WebSocket connection.
+func (h *Hub) AddClient(conn *websocket.Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.clients[conn] = &clientConn{conn: conn, IP: ip, Username: username}
-	log.Printf("[%s] Client added (ip=%s user=%s, %d total)", h.Label, ip, username, len(h.clients))
+	h.clients[conn] = &clientConn{conn: conn}
+	log.Printf("[%s] Client added (%d total)", h.Label, len(h.clients))
 }
 
 // RemoveClient unregisters a WebSocket connection.
 func (h *Hub) RemoveClient(conn *websocket.Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	c := h.clients[conn]
 	delete(h.clients, conn)
-	if c != nil {
-		log.Printf("[%s] Client removed (ip=%s user=%s, %d remaining)", h.Label, c.IP, c.Username, len(h.clients))
-	} else {
-		log.Printf("[%s] Client removed (%d remaining)", h.Label, len(h.clients))
-	}
+	log.Printf("[%s] Client removed (%d remaining)", h.Label, len(h.clients))
 }
 
 // ClientCount returns the number of connected clients.

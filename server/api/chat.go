@@ -14,8 +14,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"gitlab.okg.com/sre_ai/boxnex/agent"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"gitlab.okg.com/sre_ai/nexbox/agent"
+	"gitlab.okg.com/sre_ai/nexbox/gitlab"
+	"gitlab.okg.com/sre_ai/nexbox/store"
 )
 
 var upgrader = websocket.Upgrader{
@@ -36,9 +37,7 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	clientIP := r.RemoteAddr
-	username, _ := r.Context().Value(ContextKeyUsername).(string)
-	s.Hub.AddClient(conn, clientIP, username)
+	s.Hub.AddClient(conn)
 	defer s.Hub.RemoveClient(conn)
 
 	for {
@@ -58,9 +57,6 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 
 		switch chatReq.Type {
 		case "subscribe":
-			if chatReq.SessionID != "" && s.ContainerMgr != nil {
-				go s.warmupContainer(chatReq.SessionID)
-			}
 			continue
 
 		case "unsubscribe":
@@ -116,15 +112,24 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		return
 	}
 
-	// Resolve inline task/asset/workflow refs from this message's parts
+	// Resolve inline task/asset refs from this message's parts.
 	var refTasks []agent.TaskRef
 	var refAssets []agent.AssetRef
-	var refWorkflows []agent.WorkflowRef
 	for _, p := range parts {
 		switch p.Type {
 		case "task_ref":
 			if p.TaskID != "" {
-				if info, err := store.GetTaskInfo(s.Store, p.TaskID); err == nil && info != nil {
+				if gitlab.IsGitLabTaskID(p.TaskID) {
+					// Fetch from GitLab API
+					if info, iid, err := s.resolveGitLabTask(p.TaskID); err == nil {
+						projectID, _, _ := gitlab.ParseTaskID(p.TaskID)
+						if t, err := s.gitlabGetTask(context.Background(), info, projectID, iid); err == nil {
+							refTasks = append(refTasks, agent.TaskRef{
+								ID: t.ID, Title: t.Title, Description: t.Description, Status: t.Status, Priority: t.Priority,
+							})
+						}
+					}
+				} else if info, err := store.GetTaskInfo(s.Store, p.TaskID); err == nil && info != nil {
 					refTasks = append(refTasks, agent.TaskRef{
 						ID: info.ID, Title: info.Title, Description: info.Description, Status: info.Status, Priority: info.Priority,
 					})
@@ -138,26 +143,16 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					})
 				}
 			}
-		case "workflow_ref":
-			if p.WorkflowID != "" {
-				if wf, err := s.Store.GetWorkflow(p.WorkflowID); err == nil && wf != nil {
-					var def store.WorkflowDefinition
-					nodeCount, edgeCount := 0, 0
-					if err := json.Unmarshal(wf.Definition, &def); err == nil {
-						nodeCount = len(def.Nodes)
-						edgeCount = len(def.Edges)
-					}
-					refWorkflows = append(refWorkflows, agent.WorkflowRef{
-						ID: wf.ID, Name: wf.Name, Status: wf.Status,
-						NodeCount: nodeCount, EdgeCount: edgeCount,
-					})
-				}
-			}
 		}
 	}
 
-	// If no project bound, bind to the system "Unassigned" project.
+	// If no project bound, bind to the system "Unassigned" project (local mode only).
+	// Cloud mode requires every session to have a project.
 	if session.ProjectID == "" {
+		if s.StoreMode == "remote" {
+			s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "session must be bound to a project in cloud mode"})
+			return
+		}
 		unassignedProject, err := s.getOrCreateUnassignedProject()
 		if err != nil {
 			log.Printf("[chat] Failed to get/create unassigned project: %v", err)
@@ -184,31 +179,26 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		projectWorkDir = "."
 	}
 
-	// T9: Reset idle timer when user sends a message
-	if s.ContainerMgr != nil && session.ProjectID != "" {
-		s.ContainerMgr.TouchActivity(session.ProjectID)
-	}
-
-	// Check disk quota before invoking Claude
-	if _, _, qErr := s.checkDiskQuota(projectWorkDir); qErr != nil {
-		s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "disk_quota_exceeded: " + qErr.Error()})
-		return
-	}
-
 	// Create worktree on first message if requested (worktree_mode="worktree", path not yet set).
 	workDir := s.ensureWorktree(sessionID, session, projectWorkDir)
 	if workDir == "" {
 		workDir = projectWorkDir
 	}
 
-	// Build contexts
+	// Build contexts. A forked session on its very first turn has no
+	// AgentSessionID yet but inherits its parent's history (and therefore
+	// the static context that was injected on the parent's first turn) via
+	// the CLI fork. So treat fork-first-turn as a continuation, not a new
+	// session, and skip re-injecting the static context.
 	var staticContext string
-	isNewSession := session.AgentSessionID == ""
+	isFirstForkTurn := session.AgentSessionID == "" && session.ForkedFromSessionID != ""
+	isNewSession := session.AgentSessionID == "" && !isFirstForkTurn
 	if isNewSession {
 		staticContext = agent.BuildStaticContext(agent.ProjectInfo{
 			ID:          project.ID,
 			Name:        project.Name,
 			Description: project.Description,
+			GitRepoPath: workDir,
 		}, sessionID)
 	}
 
@@ -216,59 +206,15 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		ID:          project.ID,
 		Name:        project.Name,
 		Description: project.Description,
-	}, refTasks, refAssets, refWorkflows)
+		GitRepoPath: workDir,
+	}, refTasks, refAssets)
 
-	log.Printf("[chat] Agent request for session %s (project: %s, new: %v, refs: %d tasks, %d assets, %d workflows)",
-		sessionID, project.Name, isNewSession, len(refTasks), len(refAssets), len(refWorkflows))
+	log.Printf("[chat] Agent request for session %s (project: %s, new: %v, refs: %d tasks, %d assets)",
+		sessionID, project.Name, isNewSession, len(refTasks), len(refAssets))
 
 	if s.SessionManager.IsActive(sessionID) {
 		s.enqueueMessage(sessionID, message, imageFilenames)
 		return
-	}
-
-	// Token billing: reserve estimated tokens before starting the agent.
-	// estimated = rough heuristic (message chars / 4 * 5, min 1000).
-	// Only applies to cloud users (session.UserID != "") who are not privileged.
-	var estimatedTokens int64
-	var tokenBudgetForTask int64
-	if session.UserID != "" {
-		// Privileged users bypass billing entirely (unlimited usage).
-		// Local mode (no JWTSecret) and the special esonice account are both privileged.
-		isPrivileged := s.Config.Get().JWTSecret == ""
-		if !isPrivileged {
-			if u, err := s.Store.GetUser(session.UserID); err == nil && u != nil {
-				isPrivileged = u.Email == "esonice@gmail.com"
-			}
-		}
-
-		if !isPrivileged {
-			// Snapshot balance before reserving — used as the per-task token budget.
-			var tokenBudget int64
-			if bal, err := s.Store.GetBalance(session.UserID); err == nil && bal != nil {
-				tokenBudget = bal.BalanceTokens
-			}
-			if tokenBudget <= 0 {
-				log.Printf("[chat] Insufficient balance for user %s (balance=0)", session.UserID)
-				s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "insufficient_balance"})
-				return
-			}
-			est := int64(len(message)/4) * 5
-			if est < 1000 {
-				est = 1000
-			}
-			if est > tokenBudget {
-				est = tokenBudget
-			}
-			estimatedTokens = est
-			if err := s.Store.ReserveTokens(session.UserID, estimatedTokens); err != nil {
-				log.Printf("[chat] Insufficient balance for user %s: %v", session.UserID, err)
-				s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "insufficient_balance"})
-				return
-			}
-			// Pass the full pre-task balance as the runtime budget so the agent
-			// can self-cancel when actual usage approaches this limit.
-			tokenBudgetForTask = tokenBudget
-		}
 	}
 
 	s.SessionManager.SetActive(sessionID, true)
@@ -284,6 +230,18 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			log.Printf("[chat] Failed to persist user message: %v", err)
 		}
 	}
+	// Promote a scratch (hidden) session in place when the user sends their
+	// first message. Broadcast a session change so every connected client
+	// pulls the freshly-visible session into their sidebar list.
+	if promoted, err := s.Store.UnhideSession(sessionID); err != nil {
+		log.Printf("[chat] Failed to unhide session %s: %v", sessionID, err)
+	} else if promoted {
+		s.Hub.NotifyChange("session", sessionID, "unhidden")
+	}
+	if s.MarketplaceStats != nil {
+		s.MarketplaceStats.RecordMessage()
+	}
+
 	// Notify browsers about new user message (needed for Lark-injected messages;
 	// harmless for UI-sent messages since the frontend already has them locally)
 	s.Hub.Emit(sessionID, ChatEvent{Type: "user_message", Content: message})
@@ -308,32 +266,26 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		}()
 		s.SessionManager.SetCancel(sessionID, cancel)
 
-		// Create an empty assistant message upfront so partial progress survives a process restart.
+		isRemote := s.StoreMode == "remote"
+
+		// For local stores, create an empty assistant message upfront so partial
+		// progress survives a process restart. Remote stores don't support
+		// message updates, so we only call CreateMessage once at the end.
 		var assistantMsgID string
-		assistantMsg, err := s.Store.CreateMessage(sessionID, "assistant", []MessagePart{}, MessageMetadata{})
-		if err != nil {
-			log.Printf("[chat] Failed to create assistant message: %v", err)
-			s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "failed to create message"})
-			return
+		if !isRemote {
+			assistantMsg, err := s.Store.CreateMessage(sessionID, "assistant", []MessagePart{}, MessageMetadata{})
+			if err != nil {
+				log.Printf("[chat] Failed to create assistant message: %v", err)
+				s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "failed to create message"})
+				return
+			}
+			assistantMsgID = assistantMsg.ID
 		}
-		assistantMsgID = assistantMsg.ID
 
 		var mu sync.Mutex
 		var msgParts []MessagePart
 		var metadata MessageMetadata
 		dirty := false
-
-		// Settle token billing when the agent goroutine exits (normal or cancelled).
-		if session.UserID != "" && estimatedTokens > 0 {
-			defer func() {
-				mu.Lock()
-				actualTokens := int64(metadata.InputTokens + metadata.OutputTokens)
-				mu.Unlock()
-				if err := s.Store.SettleTokens(session.UserID, sessionID, estimatedTokens, actualTokens); err != nil {
-					log.Printf("[chat] Failed to settle tokens for user %s: %v", session.UserID, err)
-				}
-			}()
-		}
 
 		startTime := time.Now()
 		toolCallCount := 0
@@ -395,19 +347,6 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		// Merge session-level features with message features.
 		activeFeatures := s.mergeSessionFeatures(sessionID, features)
 
-		// Look up user feature bits to filter MCP tools.
-		var userFeatures int64
-		if session.UserID != "" {
-			if u, err := s.Store.GetUser(session.UserID); err == nil && u != nil {
-				userFeatures = u.Features
-			} else if cfg := s.Config.Get(); cfg.Features != nil {
-				// Local mode: no user in DB, fall back to config features.
-				userFeatures = *cfg.Features
-			} else {
-				userFeatures = 0xFF // default: all features
-			}
-		}
-
 		// E2E testing: ensure per-session Chrome MCP is started and agent supports it.
 		var chromeMCPURL string
 		var chromeMCPToolNames []string
@@ -436,22 +375,13 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 
 		// Collect installed MCP servers and key→package map in a single store query.
 		// Pass session.ProjectID so project-specific MCPs take precedence over global ones.
-		extraMCPs, _ := s.resolveInstalledMCPsAndMap(session.ProjectID)
-		// Collect installed plugin directories for --plugin-dir injection.
-		// Pass the project's repo path so container-mode paths can be translated.
-		pluginDirs := s.resolveInstalledPluginDirs(session.ProjectID, project.GitRepoPath)
+		extraMCPs, mcpKeyToPkg := s.resolveInstalledMCPsAndMap(session.ProjectID)
+		pluginDirs := s.resolveInstalledPluginDirs(session.ProjectID)
 		// toolIDToName maps tool_id → tool_name for EventToolStart events so that
 		// EventToolResult (which carries only tool_id) can look up the name.
 		toolIDToName := make(map[string]string)
 
 		eventHandler := func(event agent.StreamEvent) {
-			// When user stopped (context cancelled), suppress intermediate events so the
-			// frontend doesn't create a second assistant bubble. EventDone still passes
-			// through so token metadata gets captured for the final billing done event.
-			if ctx.Err() != nil && event.Type != agent.EventDone {
-				return
-			}
-
 			switch event.Type {
 			case agent.EventTextDelta:
 				appendText(event.Content)
@@ -464,11 +394,12 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				mu.Lock()
 				toolCallCount++
 				msgParts = append(msgParts, MessagePart{
-					Type:       "tool_use",
-					ToolCallID: event.ToolID,
-					ToolName:   event.ToolName,
-					Input:      event.Input,
-					State:      "running",
+					Type:         "tool_use",
+					ToolCallID:   event.ToolID,
+					ToolName:     event.ToolName,
+					Input:        event.Input,
+					State:        "running",
+					ParentToolID: event.ParentToolID,
 				})
 				// Record tool_id → tool_name so EventToolResult can attribute the call
 				if event.ToolID != "" && event.ToolName != "" {
@@ -477,10 +408,11 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				dirty = true
 				mu.Unlock()
 				s.Hub.Emit(sessionID, ChatEvent{
-					Type:   "tool_start",
-					Tool:   event.ToolName,
-					ToolID: event.ToolID,
-					Input:  event.Input,
+					Type:         "tool_start",
+					Tool:         event.ToolName,
+					ToolID:       event.ToolID,
+					Input:        event.Input,
+					ParentToolID: event.ParentToolID,
 				})
 
 				// Intercept visualize_show_widget: parse input and emit a widget event + part.
@@ -522,13 +454,27 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					Output:     event.Output,
 					IsError:    event.IsError,
 				})
+				// Track MCP call stats: mcp__<key>__<tool_name> → package name
+				if !event.IsError && s.MarketplaceStats != nil && len(mcpKeyToPkg) > 0 {
+					if toolName, ok := toolIDToName[event.ToolID]; ok {
+						if strings.HasPrefix(toolName, "mcp__") {
+							parts := strings.SplitN(toolName, "__", 3)
+							if len(parts) >= 2 {
+								if pkgName, ok := mcpKeyToPkg[parts[1]]; ok {
+									s.MarketplaceStats.RecordCall(pkgName, "mcp")
+								}
+							}
+						}
+					}
+				}
 				dirty = true
 				mu.Unlock()
 				s.Hub.Emit(sessionID, ChatEvent{
-					Type:    "tool_result",
-					ToolID:  event.ToolID,
-					Output:  event.Output,
-					IsError: event.IsError,
+					Type:         "tool_result",
+					ToolID:       event.ToolID,
+					Output:       event.Output,
+					IsError:      event.IsError,
+					ParentToolID: event.ParentToolID,
 				})
 
 			case agent.EventThinking:
@@ -591,6 +537,57 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					Content: event.Content,
 				})
 
+			case agent.EventContextUsage:
+				usage := &ContextUsage{}
+				m := event.Metadata
+				if v, ok := m["model"].(string); ok {
+					usage.Model = v
+				}
+				intField := func(k string) int {
+					if v, ok := m[k].(int); ok {
+						return v
+					}
+					return 0
+				}
+				usage.UsedTokens = intField("usedTokens")
+				usage.InputTokens = intField("inputTokens")
+				usage.OutputTokens = intField("outputTokens")
+				if v := intField("cacheReadInputTokens"); v > 0 {
+					usage.CachedInputTokens = v
+				} else if v := intField("cachedInputTokens"); v > 0 {
+					usage.CachedInputTokens = v
+				}
+				usage.ReasoningOutputTokens = intField("reasoningOutputTokens")
+				usage.ContextWindow = intField("contextWindow")
+				usage.MaxOutputTokens = intField("maxOutputTokens")
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:         "context_usage",
+					ContextUsage: usage,
+				})
+
+			case agent.EventSessionInfo:
+				info := &SessionInfo{}
+				m := event.Metadata
+				if v, ok := m["model"].(string); ok {
+					info.Model = v
+				}
+				if v, ok := m["permissionMode"].(string); ok {
+					info.PermissionMode = v
+				}
+				if v, ok := m["cwd"].(string); ok {
+					info.Cwd = v
+				}
+				if v, ok := m["version"].(string); ok {
+					info.Version = v
+				}
+				if v, ok := m["outputStyle"].(string); ok {
+					info.OutputStyle = v
+				}
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:        "session_info",
+					SessionInfo: info,
+				})
+
 			case agent.EventError:
 				log.Printf("[chat] Error event: %s", event.Content)
 				s.Hub.Emit(sessionID, ChatEvent{
@@ -602,6 +599,9 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				mu.Lock()
 				metadata.SessionID = event.SessionID
 				if event.Metadata != nil {
+					if v, ok := event.Metadata["lastAssistantUuid"].(string); ok && v != "" {
+						metadata.SDKMessageUUID = v
+					}
 					if v, ok := event.Metadata["inputTokens"].(int); ok {
 						metadata.InputTokens = v
 					}
@@ -611,21 +611,16 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					if v, ok := event.Metadata["totalCostUsd"].(float64); ok {
 						metadata.TotalCostUSD = v
 					}
-				}
-				// If Claude didn't provide a cost (e.g. cancelled before result message),
-				// calculate it from token counts using the configured price.
-				if metadata.TotalCostUSD == 0 && metadata.InputTokens+metadata.OutputTokens > 0 {
-					metadata.TotalCostUSD = s.tokensToMoney(int64(metadata.InputTokens + metadata.OutputTokens))
+					if v, ok := event.Metadata["cacheReadInputTokens"].(int); ok {
+						metadata.CacheReadInputTokens = v
+					}
+					if v, ok := event.Metadata["cacheCreationInputTokens"].(int); ok {
+						metadata.CacheCreationInputTokens = v
+					}
 				}
 				dirty = true
 				mu.Unlock()
 			}
-		}
-
-		// Default model to sonnet when the session has no explicit model set.
-		sessionModel := session.Model
-		if sessionModel == "" {
-			sessionModel = "sonnet"
 		}
 
 		// Build the UserInputHandler for interactive tool support (AskUserQuestion).
@@ -636,7 +631,6 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		userInputHandler := func(requestID, toolName, input string) (string, error) {
 			log.Printf("[chat] Interactive tool request: session=%s tool=%s id=%s", sessionID, toolName, requestID)
 
-			// Emit user_input_request event to frontend
 			s.Hub.Emit(sessionID, ChatEvent{
 				Type:   "user_input_request",
 				ToolID: requestID,
@@ -644,9 +638,6 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				Input:  input,
 			})
 
-			// Create response channel and wait for user response.
-			// Use a 5-minute timeout so that if the user disconnects (e.g. page refresh)
-			// without sending a response, we don't block forever.
 			responseCh := make(chan string, 1)
 			setToolResponseChan(sessionID, responseCh)
 			defer removeToolResponseChan(sessionID)
@@ -666,30 +657,71 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			}
 		}
 
-		agentResult, agentErr := sessionAgent.SendMessage(
-			ctx,
-			agent.Request{
-				ConversationID:     sessionID,
-				SessionID:          session.AgentSessionID,
-				WorkDir:            workDir,
-				Model:              sessionModel,
-				StaticContext:      staticContext,
-				DynamicContext:     dynamicContext,
-				Message:            message,
-				Images:             imagePaths,
-				Features:           activeFeatures,
-				ChromeMCPURL:       chromeMCPURL,
-				ChromeMCPToolNames: chromeMCPToolNames,
-				ExtraMCPServers:    extraMCPs,
-				PluginDirs:         pluginDirs,
-				UserInputHandler:   userInputHandler,
-				UserFeatures:       userFeatures,
-				TokenBudget:        tokenBudgetForTask,
-				UserID:             session.UserID,
-				ContainerQuota:     s.userQuota(session.UserID),
-			},
-			eventHandler,
+		// On the very first turn of a forked session, build the agent-level
+		// fork hints from the parent's persisted CLI session id and the cut
+		// point recorded at fork-creation time. Once the CLI returns the new
+		// session id, AgentSessionID gets populated and subsequent turns
+		// take the normal resume path.
+		//
+		// If the parent's CLI session id is no longer available (parent
+		// purged, or its agent_session_id got cleared by an expiry retry),
+		// surface a synthetic error through the normal agentErr path —
+		// which writes the error text to the assistant stub message and
+		// emits an error event — instead of silently dropping the fork
+		// (the static context built above is empty, so a "fresh new
+		// session" fallback would produce a model with no project context).
+		var (
+			forkFromAgentSID, forkAtAgentUUID string
+			forkPreflightErr                  error
 		)
+		if isFirstForkTurn {
+			parentSess, perr := s.Store.GetSession(session.ForkedFromSessionID)
+			switch {
+			case perr != nil:
+				log.Printf("[chat] Fork %s: failed to load parent %s: %v", sessionID, session.ForkedFromSessionID, perr)
+				forkPreflightErr = fmt.Errorf("fork failed: could not load parent session: %w", perr)
+			case parentSess == nil:
+				log.Printf("[chat] Fork %s: parent %s no longer exists", sessionID, session.ForkedFromSessionID)
+				forkPreflightErr = fmt.Errorf("fork failed: parent session no longer exists")
+			case parentSess.AgentSessionID == "":
+				log.Printf("[chat] Fork %s: parent %s has no agent_session_id (likely cleared by expiry retry)",
+					sessionID, session.ForkedFromSessionID)
+				forkPreflightErr = fmt.Errorf("fork failed: parent session has no active CLI session to fork from")
+			default:
+				forkFromAgentSID = parentSess.AgentSessionID
+				forkAtAgentUUID = session.ForkedAtAgentMsgUUID
+			}
+		}
+
+		var agentResult agent.Result
+		var agentErr error
+		if forkPreflightErr != nil {
+			agentErr = forkPreflightErr
+		} else {
+			agentResult, agentErr = sessionAgent.SendMessage(
+				ctx,
+				agent.Request{
+					ConversationID:         sessionID,
+					SessionID:              session.AgentSessionID,
+					WorkDir:                workDir,
+					Model:                  session.Model,
+					Effort:                 session.Effort,
+					StaticContext:          staticContext,
+					DynamicContext:         dynamicContext,
+					Message:                message,
+					Images:                 imagePaths,
+					Features:               activeFeatures,
+					ChromeMCPURL:           chromeMCPURL,
+					ChromeMCPToolNames:     chromeMCPToolNames,
+					ExtraMCPServers:        extraMCPs,
+					PluginDirs:             pluginDirs,
+					UserInputHandler:       agent.UserInputHandler(userInputHandler),
+					ForkFromAgentSessionID: forkFromAgentSID,
+					ForkAtAgentMsgUUID:     forkAtAgentUUID,
+				},
+				eventHandler,
+			)
+		}
 
 		// Auto-retry with a fresh session when the stored agent session has expired
 		if errors.Is(agentErr, agent.ErrSessionExpired) && session.AgentSessionID != "" {
@@ -709,6 +741,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				ID:          project.ID,
 				Name:        project.Name,
 				Description: project.Description,
+				GitRepoPath: workDir,
 			}, sessionID)
 
 			agentResult, agentErr = sessionAgent.SendMessage(
@@ -717,7 +750,8 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					ConversationID:     sessionID,
 					SessionID:          "",
 					WorkDir:            workDir,
-					Model:              sessionModel,
+					Model:              session.Model,
+					Effort:             session.Effort,
 					StaticContext:      newStaticContext,
 					DynamicContext:     dynamicContext,
 					Message:            message,
@@ -727,11 +761,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					ChromeMCPToolNames: chromeMCPToolNames,
 					ExtraMCPServers:    extraMCPs,
 					PluginDirs:         pluginDirs,
-					UserInputHandler:   userInputHandler,
-					UserFeatures:       userFeatures,
-					TokenBudget:        tokenBudgetForTask,
-					UserID:             session.UserID,
-					ContainerQuota:     s.userQuota(session.UserID),
+					UserInputHandler:   agent.UserInputHandler(userInputHandler),
 				},
 				eventHandler,
 			)
@@ -744,17 +774,10 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		durationMs := time.Since(startTime).Milliseconds()
 
 		if agentErr != nil {
-			switch {
-			case errors.Is(agentErr, agent.ErrInsufficientBalance):
-				// Token budget exceeded mid-task: the agent already settled billing
-				// via synthetic EventDone. Notify the user.
-				log.Printf("[chat] Agent stopped: token budget exceeded for user %s", session.UserID)
-				appendText("\n\n*[Stopped: 余额不足]*")
-				s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "insufficient_balance"})
-			case ctx.Err() != nil:
+			if ctx.Err() != nil {
 				log.Printf("[chat] Agent stopped by user")
 				appendText("\n\n*[Stopped]*")
-			default:
+			} else {
 				log.Printf("[chat] Agent error: %v", agentErr)
 				s.Hub.Emit(sessionID, ChatEvent{
 					Type:    "error",
@@ -791,20 +814,35 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		mu.Unlock()
 
 		// Final persist: save full parts to the main message table.
-		// Update the pre-created message so it is never left in an un-finalized
-		// state that shows as "Thinking" after reload.
+		// Always update the pre-created message (even if empty) so it is never
+		// left in an un-finalized state that shows as "Thinking" after reload.
 		if assistantMsgID != "" {
 			if err := s.Store.UpdateMessageParts(assistantMsgID, finalParts, finalMeta); err != nil {
 				log.Printf("[chat] Failed to persist final assistant message: %v", err)
 			}
+			if s.MarketplaceStats != nil && len(finalParts) > 0 {
+				s.MarketplaceStats.RecordMessage()
+			}
+		} else if len(finalParts) > 0 {
+			msg, err := s.Store.CreateMessage(sessionID, "assistant", finalParts, finalMeta)
+			if err != nil {
+				log.Printf("[chat] Failed to create final assistant message: %v", err)
+			} else {
+				assistantMsgID = msg.ID
+			}
+			if s.MarketplaceStats != nil {
+				s.MarketplaceStats.RecordMessage()
+			}
 		}
 
 		stats := &ExecutionStats{
-			DurationMs:   durationMs,
-			ToolCalls:    toolCallCount,
-			InputTokens:  metadata.InputTokens,
-			OutputTokens: metadata.OutputTokens,
-			TotalCostUSD: metadata.TotalCostUSD,
+			DurationMs:               durationMs,
+			ToolCalls:                toolCallCount,
+			InputTokens:              metadata.InputTokens,
+			OutputTokens:             metadata.OutputTokens,
+			CacheReadInputTokens:     metadata.CacheReadInputTokens,
+			CacheCreationInputTokens: metadata.CacheCreationInputTokens,
+			TotalCostUSD:             metadata.TotalCostUSD,
 		}
 
 		log.Printf("[chat] Completed: %.1fs, %d tool calls, %d in/%d out tokens, $%.4f",
@@ -812,52 +850,22 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			metadata.InputTokens, metadata.OutputTokens, metadata.TotalCostUSD)
 
 		s.Hub.Emit(sessionID, ChatEvent{
-			Type:      "done",
-			SessionID: session.AgentSessionID,
-			Stats:     stats,
+			Type:           "done",
+			SessionID:      session.AgentSessionID,
+			SDKMessageUUID: finalMeta.SDKMessageUUID,
+			Stats:          stats,
 		})
 
 		// Release active state before processing next queued item.
 		s.SessionManager.SetActive(sessionID, false)
 		s.Hub.ClearActive(sessionID)
+		s.Hub.NotifyChange("session", sessionID, "done")
 		s.SessionManager.RemoveCancel(sessionID)
 		cancel()
 		released = true
 
 		s.processNextQueued(sessionID)
 	}()
-}
-
-// warmupContainer pre-warms the Docker container for a session's project (T8).
-func (s *Server) warmupContainer(sessionID string) {
-	sess, err := s.Store.GetSession(sessionID)
-	if err != nil || sess == nil || sess.ProjectID == "" {
-		return
-	}
-	project, err := s.getProjectWithLocalPath(sess.ProjectID)
-	if err != nil || project == nil || project.GitRepoPath == "" {
-		return
-	}
-	quota := s.userQuota(sess.UserID)
-	if _, err := s.ContainerMgr.EnsureContainer(project.GitRepoPath, project.GitRepoPath, sess.UserID, quota); err != nil {
-		log.Printf("[container] warmup failed for project %s: %v", sess.ProjectID, err)
-	}
-}
-
-// userQuota looks up the container resource quota for a user (T7).
-func (s *Server) userQuota(userID string) *agent.ContainerQuota {
-	if userID == "" {
-		return nil
-	}
-	u, err := s.Store.GetUser(userID)
-	if err != nil || u == nil || u.Quotas == "" || u.Quotas == "{}" {
-		return nil
-	}
-	var q agent.ContainerQuota
-	if err := json.Unmarshal([]byte(u.Quotas), &q); err != nil {
-		return nil
-	}
-	return &q
 }
 
 // resolveImagePaths converts image filenames to absolute paths, filtering out any that don't exist.
@@ -979,37 +987,6 @@ func (s *Server) pollQueues() {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Interactive tool response channels
-// ---------------------------------------------------------------------------
-// When the agent calls an interactive tool (e.g., AskUserQuestion), the
-// UserInputHandler blocks on a channel waiting for the user's response.
-// The WS handler writes the response to the channel when it receives a
-// tool_response message.
-
-var (
-	toolResponseMu    sync.Mutex
-	toolResponseChans = make(map[string]chan string) // sessionID -> response channel
-)
-
-func setToolResponseChan(sessionID string, ch chan string) {
-	toolResponseMu.Lock()
-	defer toolResponseMu.Unlock()
-	toolResponseChans[sessionID] = ch
-}
-
-func removeToolResponseChan(sessionID string) {
-	toolResponseMu.Lock()
-	defer toolResponseMu.Unlock()
-	delete(toolResponseChans, sessionID)
-}
-
-func getToolResponseChan(sessionID string) chan string {
-	toolResponseMu.Lock()
-	defer toolResponseMu.Unlock()
-	return toolResponseChans[sessionID]
-}
-
 // priority items — per-session in-memory override for RunQueuedNow
 var (
 	priorityMu    sync.Mutex
@@ -1044,7 +1021,7 @@ func (s *Server) getOrCreateUnassignedProject() (*Project, error) {
 		}
 	}
 
-	tmpDir := filepath.Join(s.DataDir, "boxnex-unassigned")
+	tmpDir := filepath.Join(s.DataDir, "nexbox-unassigned")
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
 		return nil, err
 	}
@@ -1098,4 +1075,35 @@ func containsFeature(features []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// Interactive tool response channels
+// ---------------------------------------------------------------------------
+// When the agent calls an interactive tool (e.g., AskUserQuestion), the
+// UserInputHandler blocks on a channel waiting for the user's response.
+// The WS handler writes the response to the channel when it receives a
+// tool_response message.
+
+var (
+	toolResponseMu    sync.Mutex
+	toolResponseChans = make(map[string]chan string) // sessionID -> response channel
+)
+
+func setToolResponseChan(sessionID string, ch chan string) {
+	toolResponseMu.Lock()
+	defer toolResponseMu.Unlock()
+	toolResponseChans[sessionID] = ch
+}
+
+func removeToolResponseChan(sessionID string) {
+	toolResponseMu.Lock()
+	defer toolResponseMu.Unlock()
+	delete(toolResponseChans, sessionID)
+}
+
+func getToolResponseChan(sessionID string) chan string {
+	toolResponseMu.Lock()
+	defer toolResponseMu.Unlock()
+	return toolResponseChans[sessionID]
 }

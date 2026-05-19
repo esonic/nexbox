@@ -37,7 +37,16 @@ import type { ToolUseState, NestedTool } from "@/types";
 
 // ── Helpers ──
 
-function parseJSON(s: string): Record<string, unknown> {
+const COMMAND_PREVIEW_MAX = 90;
+
+function asText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  return String(value);
+}
+
+function parseJSON(s: string | undefined): Record<string, unknown> {
+  if (!s) return {};
   try { return JSON.parse(s); } catch { return {}; }
 }
 
@@ -45,8 +54,69 @@ function baseName(p: string): string {
   return p ? (p.split(/[/\\]/).pop() || p) : "";
 }
 
-function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max - 3) + "..." : s;
+function truncate(s: string | undefined, max: number): string {
+  const text = asText(s);
+  return text.length > max ? text.slice(0, max - 3) + "..." : text;
+}
+
+function isShellProgram(program: string): boolean {
+  const base = program.split(/[/\\]/).pop() || program;
+  return ["bash", "sh", "zsh", "dash", "fish"].includes(base);
+}
+
+function unquoteShellWord(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length < 2) return trimmed;
+
+  if (trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed.slice(1, -1).replace(/'"'"'/g, "'");
+  }
+
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed.slice(1, -1).replace(/\\(["\\$`])/g, "$1");
+  }
+
+  return trimmed;
+}
+
+function unwrapShellCommand(raw: string): string {
+  const command = raw.trim();
+  if (!command) return command;
+
+  try {
+    const parsed = JSON.parse(command);
+    if (Array.isArray(parsed) && parsed.every((part) => typeof part === "string")) {
+      if (parsed.length >= 3 && isShellProgram(parsed[0]) && (parsed[1] === "-lc" || parsed[1] === "-c")) {
+        return (parsed[2] as string).trim();
+      }
+      if (parsed.length >= 4 && parsed[0] === "/usr/bin/env" && isShellProgram(parsed[1]) && (parsed[2] === "-lc" || parsed[2] === "-c")) {
+        return (parsed[3] as string).trim();
+      }
+      return parsed.join(" ").trim();
+    }
+  } catch {
+    // Not a JSON argv array; fall through to the rendered command form.
+  }
+
+  const shellMatch = command.match(/^(?:\/[^\s'"]+\/)?(?:bash|sh|zsh|dash|fish)\s+-(?:lc|c)\s+([\s\S]+)$/);
+  if (shellMatch) {
+    return unquoteShellWord(shellMatch[1]);
+  }
+
+  const envShellMatch = command.match(/^\/usr\/bin\/env\s+(?:\/[^\s'"]+\/)?(?:bash|sh|zsh|dash|fish)\s+-(?:lc|c)\s+([\s\S]+)$/);
+  if (envShellMatch) {
+    return unquoteShellWord(envShellMatch[1]);
+  }
+
+  return command;
+}
+
+function commandFromInput(input: string | undefined): string {
+  const parsed = parseJSON(input);
+  const raw = ((parsed.command as string) || (parsed.cmd as string) || (parsed.input as string) || (Object.keys(parsed).length === 0 ? asText(input) : ""))
+    .replace(/\\\s*\n\s*/g, " ")
+    .trim();
+  return unwrapShellCommand(raw);
 }
 
 function pathField(field: string) {
@@ -62,7 +132,7 @@ function tense(done: string, active: string) {
 // ── Reusable render blocks ──
 
 function CommandBlock({ input }: { input: string }) {
-  const cmd = (parseJSON(input).command as string) || input;
+  const cmd = commandFromInput(input) || input;
   return (
     <pre className="text-[11px] font-mono bg-neutral-900 text-neutral-200 dark:bg-neutral-950 rounded p-2 overflow-x-auto max-h-[120px] overflow-y-auto whitespace-pre-wrap break-all">
       <span className="text-neutral-500 select-none">$ </span>{cmd}
@@ -70,8 +140,9 @@ function CommandBlock({ input }: { input: string }) {
   );
 }
 
-function TerminalOutput({ output, isError }: { output: string; isError?: boolean }) {
-  const text = output.length > 2000 ? output.slice(0, 2000) + "\n... (truncated)" : output;
+function TerminalOutput({ output, isError }: { output?: string; isError?: boolean }) {
+  const safeOutput = asText(output);
+  const text = safeOutput.length > 2000 ? safeOutput.slice(0, 2000) + "\n... (truncated)" : safeOutput;
   return (
     <pre className={cn(
       "text-[11px] font-mono rounded p-2 overflow-x-auto max-h-[200px] overflow-y-auto whitespace-pre-wrap break-all",
@@ -142,8 +213,9 @@ function RawJSON({ input }: { input: string }) {
   );
 }
 
-function RawOutput({ output, isError }: { output: string; isError?: boolean }) {
-  const text = output.length > 2000 ? output.slice(0, 2000) + "\n... (truncated)" : output;
+function RawOutput({ output, isError }: { output?: string; isError?: boolean }) {
+  const safeOutput = asText(output);
+  const text = safeOutput.length > 2000 ? safeOutput.slice(0, 2000) + "\n... (truncated)" : safeOutput;
   return (
     <pre className={cn(
       "text-[11px] rounded p-1.5 overflow-x-auto max-h-[160px] overflow-y-auto whitespace-pre-wrap break-all",
@@ -185,50 +257,19 @@ export function parseTodoInput(input: string): TodoItem[] {
 
 export function StandaloneTodoList({ todos, isPending }: { todos: TodoItem[]; isPending: boolean }) {
   if (todos.length === 0) return null;
-  const completedCount = todos.filter(t => t.status === "TODO_STATUS_COMPLETED" || t.status === "completed").length;
-  const totalCount = todos.length;
-  const progressPercent = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
-
   return (
-    <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-3 my-2 space-y-2">
-      {/* Progress header */}
-      <div className="flex items-center justify-between mb-1">
-        <div className="flex items-center gap-2">
-          <ListChecks className="h-4 w-4 text-blue-500" />
-          <span className="text-sm font-medium text-foreground">跟踪任务</span>
-        </div>
-        <span className="text-xs text-muted-foreground">{completedCount}/{totalCount}</span>
-      </div>
-
-      {/* Progress bar */}
-      <div className="w-full bg-muted/40 rounded-full h-1.5">
-        <div
-          className="bg-green-500 h-1.5 rounded-full transition-all duration-300"
-          style={{ width: `${progressPercent}%` }}
-        />
-      </div>
-
-      {/* Task list */}
-      <div className="space-y-1">
-        {todos.map((t) => {
-          const { icon: S, color } = TODO_ICONS[t.status] ?? { icon: CircleDashed, color: "text-muted-foreground/40" };
-          const done = t.status === "TODO_STATUS_COMPLETED" || t.status === "completed";
-          return (
-            <div key={t.id} className="flex items-start gap-2 text-xs">
-              <S className={cn("h-4 w-4 shrink-0 mt-0.5", color)} />
-              <span className={cn("min-w-0 break-words", done && "line-through text-muted-foreground/50")}>{t.content}</span>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Loading indicator */}
-      {isPending && (
-        <div className="flex items-center gap-2 text-xs text-blue-500 mt-2 pt-2 border-t border-blue-500/10">
-          <Loader2 className="h-3 w-3 animate-spin" />
-          <span>正在执行任务...</span>
-        </div>
-      )}
+    <div className="space-y-px py-0.5">
+      {todos.map((t) => {
+        const { icon: S, color } = TODO_ICONS[t.status] ?? { icon: CircleDashed, color: "text-muted-foreground/40" };
+        const done = t.status === "TODO_STATUS_COMPLETED" || t.status === "completed";
+        return (
+          <div key={t.id} className="flex items-start gap-1.5 py-px text-[11px]">
+            <S className={cn("h-3.5 w-3.5 shrink-0 mt-px", color)} />
+            <span className={cn("min-w-0", done && "line-through text-muted-foreground/50")}>{t.content}</span>
+          </div>
+        );
+      })}
+      {isPending && <Loader2 className="h-3 w-3 animate-spin text-blue-500 mt-0.5" />}
     </div>
   );
 }
@@ -237,40 +278,19 @@ export function StandaloneTodoList({ todos, isPending }: { todos: TodoItem[]; is
 
 interface AskQuestion { id: string; prompt: string; options: { id: string; label: string }[]; allow_multiple?: boolean }
 
-function normalizeQuestion(raw: Record<string, unknown>): AskQuestion | null {
-  // Our MCP format: {id, prompt, options: [{id, label}], allow_multiple}
-  // Claude CLI AskUserQuestion format: {header, multiSelect, options: [{description, label}]}
-  const prompt = (raw.prompt as string) || (raw.header as string) || "";
-  const allowMultiple = (raw.allow_multiple as boolean) ?? (raw.multiSelect as boolean) ?? false;
-  const rawOptions = Array.isArray(raw.options) ? raw.options : [];
-  if (!prompt && rawOptions.length === 0) return null;
-  const options = rawOptions.map((o: Record<string, unknown>, i: number) => ({
-    id: (o.id as string) || `opt_${i}`,
-    label: (o.label as string) || (o.description as string) || `Option ${i + 1}`,
-  }));
-  return {
-    id: (raw.id as string) || "",
-    prompt,
-    options,
-    allow_multiple: allowMultiple,
-  };
-}
-
 function parseQuestions(input: string): { title?: string; questions: AskQuestion[] } | null {
   try {
     const parsed = parseJSON(input);
-    const title = (parsed.title as string) || (parsed.question as string) || undefined;
-    let rawQuestions: Record<string, unknown>[];
+    const title = parsed.title as string | undefined;
+    let questions: AskQuestion[];
     if (typeof parsed.questions === "string") {
-      rawQuestions = JSON.parse(parsed.questions as string);
+      questions = JSON.parse(parsed.questions as string);
     } else if (Array.isArray(parsed.questions)) {
-      rawQuestions = parsed.questions as Record<string, unknown>[];
+      questions = parsed.questions as AskQuestion[];
     } else {
       return null;
     }
-    if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) return null;
-    const questions = rawQuestions.map(normalizeQuestion).filter((q): q is AskQuestion => q !== null);
-    if (questions.length === 0) return null;
+    if (!Array.isArray(questions) || questions.length === 0) return null;
     return { title, questions };
   } catch { return null; }
 }
@@ -346,10 +366,7 @@ const toolRegistry: Record<string, ToolMeta> = {
   Shell: {
     icon: Terminal, label: () => "",
     subtitle: (i) => {
-      const parsed = parseJSON(i);
-      const cmd = ((parsed.command as string) || (parsed.cmd as string) || (parsed.input as string) || (Object.keys(parsed).length === 0 ? i : ""))
-        .replace(/\\\s*\n\s*/g, " ").trim();
-      return truncate(cmd, 60);
+      return truncate(commandFromInput(i), COMMAND_PREVIEW_MAX);
     },
     renderInput: (i) => <CommandBlock input={i} />,
     renderOutput: (o, err) => <TerminalOutput output={o} isError={err} />,
@@ -357,9 +374,7 @@ const toolRegistry: Record<string, ToolMeta> = {
   Bash: {
     icon: Terminal, label: () => "",
     subtitle: (i) => {
-      const parsed = parseJSON(i);
-      const cmd = ((parsed.command as string) || "").replace(/\\\s*\n\s*/g, " ").trim();
-      return truncate(cmd, 60);
+      return truncate(commandFromInput(i), COMMAND_PREVIEW_MAX);
     },
     renderInput: (i) => <CommandBlock input={i} />,
     renderOutput: (o, err) => <TerminalOutput output={o} isError={err} />,
@@ -420,15 +435,7 @@ const toolRegistry: Record<string, ToolMeta> = {
   ReadMcpResource:  { icon: FileText,     label: tense("Read MCP resource", "Reading MCP resource"),     subtitle: textField("uri") },
   FetchMcpResource: { icon: FileText,     label: tense("Fetched MCP resource", "Fetching MCP resource"), subtitle: textField("uri") },
   AskQuestion:      { icon: CircleHelp, label: tense("Asked question", "Asking question"), subtitle: textField("title"), renderInput: (i) => <QuestionPreview input={i} /> },
-  AskUserQuestion:  {
-    icon: CircleHelp,
-    label: tense("Asked question", "Asking question"),
-    subtitle: (i) => {
-      const p = parseJSON(i);
-      return truncate((p.question as string) || (p.title as string) || "", 60);
-    },
-    renderInput: (i) => <QuestionPreview input={i} />,
-  },
+  AskUserQuestion:  { icon: CircleHelp, label: tense("Asked question", "Asking question"), subtitle: textField("question"), renderInput: (i) => <QuestionPreview input={i} /> },
 
   // ── Codex file changes ──
   FileChange: {
@@ -459,42 +466,42 @@ const toolRegistry: Record<string, ToolMeta> = {
     },
   },
 
-  // ── BoxNex MCP tools (mcp__boxnex__ prefix from Claude) ──
-  "mcp__boxnex__save_asset":            { icon: Save,              label: tense("Saved asset", "Saving asset"), subtitle: (i) => {
+  // ── NexBox MCP tools (mcp__nexbox__ prefix from Claude) ──
+  "mcp__nexbox__save_asset":            { icon: Save,              label: tense("Saved asset", "Saving asset"), subtitle: (i) => {
     const p = parseJSON(i); const t = (p.title as string) || ""; const ty = (p.type as string) || "";
     return t ? `${t}${ty ? ` (${ty})` : ""}` : "";
   }},
-  "mcp__boxnex__get_asset_content":     { icon: BookOpen,          label: tense("Read asset", "Reading asset"),             subtitle: textField("title") },
-  "mcp__boxnex__list_assets":           { icon: List,              label: tense("Listed assets", "Listing assets") },
-  "mcp__boxnex__list_asset_comments":   { icon: MessageSquareMore, label: tense("Listed comments", "Listing comments"),     subtitle: textField("asset_id") },
-  "mcp__boxnex__ask_question":          { icon: CircleHelp,        label: tense("Asked question", "Asking question"),       subtitle: textField("title"), renderInput: (i) => <QuestionPreview input={i} /> },
-  "mcp__boxnex__get_task":              { icon: BookOpen,          label: tense("Read task", "Reading task"),                subtitle: textField("task_id") },
-  "mcp__boxnex__list_tasks":            { icon: List,              label: tense("Listed tasks", "Listing tasks"),            subtitle: textField("status") },
-  "mcp__boxnex__create_task":           { icon: Sparkles,          label: tense("Created task", "Creating task"),            subtitle: textField("title") },
-  "mcp__boxnex__run_in_terminal":       { icon: SquareTerminal,    label: tense("Ran in terminal", "Running in terminal"),   subtitle: textField("command"), renderInput: (i) => <CommandBlock input={i} />, renderOutput: (o, err) => <TerminalOutput output={o} isError={err} /> },
-  "mcp__boxnex__get_gitlab_mr_comments": { icon: GitPullRequestArrow, label: tense("Fetched MR comments", "Fetching MR comments"), subtitle: textField("mr_url") },
+  "mcp__nexbox__get_asset_content":     { icon: BookOpen,          label: tense("Read asset", "Reading asset"),             subtitle: textField("title") },
+  "mcp__nexbox__list_assets":           { icon: List,              label: tense("Listed assets", "Listing assets") },
+  "mcp__nexbox__list_asset_comments":   { icon: MessageSquareMore, label: tense("Listed comments", "Listing comments"),     subtitle: textField("asset_id") },
+  "mcp__nexbox__ask_question":          { icon: CircleHelp,        label: tense("Asked question", "Asking question"),       subtitle: textField("title"), renderInput: (i) => <QuestionPreview input={i} /> },
+  "mcp__nexbox__get_task":              { icon: BookOpen,          label: tense("Read task", "Reading task"),                subtitle: textField("task_id") },
+  "mcp__nexbox__list_tasks":            { icon: List,              label: tense("Listed tasks", "Listing tasks"),            subtitle: textField("status") },
+  "mcp__nexbox__create_task":           { icon: Sparkles,          label: tense("Created task", "Creating task"),            subtitle: textField("title") },
+  "mcp__nexbox__run_in_terminal":       { icon: SquareTerminal,    label: tense("Ran in terminal", "Running in terminal"),   subtitle: textField("command"), renderInput: (i) => <CommandBlock input={i} />, renderOutput: (o, err) => <TerminalOutput output={o} isError={err} /> },
+  "mcp__nexbox__get_gitlab_mr_comments": { icon: GitPullRequestArrow, label: tense("Fetched MR comments", "Fetching MR comments"), subtitle: textField("mr_url") },
 
-  // ── BoxNex MCP tools (boxnex/ prefix from Codex/Cursor) ──
-  "boxnex/save_asset":            { icon: Save,              label: tense("Saved asset", "Saving asset"), subtitle: (i) => {
+  // ── NexBox MCP tools (nexbox/ prefix from Codex/Cursor) ──
+  "nexbox/save_asset":            { icon: Save,              label: tense("Saved asset", "Saving asset"), subtitle: (i) => {
     const p = parseJSON(i); const t = (p.title as string) || ""; const ty = (p.type as string) || "";
     return t ? `${t}${ty ? ` (${ty})` : ""}` : "";
   }},
-  "boxnex/get_asset_content":     { icon: BookOpen,          label: tense("Read asset", "Reading asset"),             subtitle: textField("title") },
-  "boxnex/list_assets":           { icon: List,              label: tense("Listed assets", "Listing assets") },
-  "boxnex/list_asset_comments":   { icon: MessageSquareMore, label: tense("Listed comments", "Listing comments"),     subtitle: textField("asset_id") },
-  "boxnex/ask_question":          { icon: CircleHelp,        label: tense("Asked question", "Asking question"),       subtitle: textField("title"), renderInput: (i) => <QuestionPreview input={i} /> },
-  "boxnex/get_task":              { icon: BookOpen,          label: tense("Read task", "Reading task"),                subtitle: textField("task_id") },
-  "boxnex/list_tasks":            { icon: List,              label: tense("Listed tasks", "Listing tasks"),            subtitle: textField("status") },
-  "boxnex/create_task":           { icon: Sparkles,          label: tense("Created task", "Creating task"),            subtitle: textField("title") },
-  "boxnex/run_in_terminal":       { icon: SquareTerminal,    label: tense("Ran in terminal", "Running in terminal"),   subtitle: textField("command"), renderInput: (i) => <CommandBlock input={i} />, renderOutput: (o, err) => <TerminalOutput output={o} isError={err} /> },
-  "boxnex/get_gitlab_mr_comments": { icon: GitPullRequestArrow, label: tense("Fetched MR comments", "Fetching MR comments"), subtitle: textField("mr_url") },
+  "nexbox/get_asset_content":     { icon: BookOpen,          label: tense("Read asset", "Reading asset"),             subtitle: textField("title") },
+  "nexbox/list_assets":           { icon: List,              label: tense("Listed assets", "Listing assets") },
+  "nexbox/list_asset_comments":   { icon: MessageSquareMore, label: tense("Listed comments", "Listing comments"),     subtitle: textField("asset_id") },
+  "nexbox/ask_question":          { icon: CircleHelp,        label: tense("Asked question", "Asking question"),       subtitle: textField("title"), renderInput: (i) => <QuestionPreview input={i} /> },
+  "nexbox/get_task":              { icon: BookOpen,          label: tense("Read task", "Reading task"),                subtitle: textField("task_id") },
+  "nexbox/list_tasks":            { icon: List,              label: tense("Listed tasks", "Listing tasks"),            subtitle: textField("status") },
+  "nexbox/create_task":           { icon: Sparkles,          label: tense("Created task", "Creating task"),            subtitle: textField("title") },
+  "nexbox/run_in_terminal":       { icon: SquareTerminal,    label: tense("Ran in terminal", "Running in terminal"),   subtitle: textField("command"), renderInput: (i) => <CommandBlock input={i} />, renderOutput: (o, err) => <TerminalOutput output={o} isError={err} /> },
+  "nexbox/get_gitlab_mr_comments": { icon: GitPullRequestArrow, label: tense("Fetched MR comments", "Fetching MR comments"), subtitle: textField("mr_url") },
 };
 
 function normalizeToolName(toolName: string): string {
-  // "mcp__boxnex__save_asset" → "save_asset"
+  // "mcp__nexbox__save_asset" → "save_asset"
   const mcpMatch = toolName.match(/^mcp__\w+__(.+)$/);
   if (mcpMatch) return mcpMatch[1];
-  // "boxnex/save_asset" or "provider/tool" → "save_asset"
+  // "nexbox/save_asset" or "provider/tool" → "save_asset"
   const slashIdx = toolName.indexOf("/");
   if (slashIdx >= 0) return toolName.slice(slashIdx + 1);
   return toolName;
@@ -503,13 +510,13 @@ function normalizeToolName(toolName: string): string {
 function getToolMeta(toolName: string): ToolMeta {
   if (toolRegistry[toolName]) return toolRegistry[toolName];
 
-  // Try normalized form: strip mcp__boxnex__ or boxnex/ prefix
+  // Try normalized form: strip mcp__nexbox__ or nexbox/ prefix
   const normalized = normalizeToolName(toolName);
   if (normalized !== toolName) {
-    // Try "mcp__boxnex__<normalized>" and "boxnex/<normalized>" forms
-    const mcpKey = `mcp__boxnex__${normalized}`;
+    // Try "mcp__nexbox__<normalized>" and "nexbox/<normalized>" forms
+    const mcpKey = `mcp__nexbox__${normalized}`;
     if (toolRegistry[mcpKey]) return toolRegistry[mcpKey];
-    const slashKey = `boxnex/${normalized}`;
+    const slashKey = `nexbox/${normalized}`;
     if (toolRegistry[slashKey]) return toolRegistry[slashKey];
     // Try normalized as direct key (e.g. "save_asset" might not exist, but "Read" would)
     if (toolRegistry[normalized]) return toolRegistry[normalized];
@@ -555,10 +562,10 @@ export const TODO_TOOLS = new Set([
 
 /** Tools whose UI is rendered by dedicated components (not as a tool card). */
 export const HIDDEN_TOOLS = new Set([
-  "mcp__boxnex__visualize_show_widget",
-  "mcp__boxnex__visualize_read_me",
-  "boxnex/visualize_show_widget",
-  "boxnex/visualize_read_me",
+  "mcp__nexbox__visualize_show_widget",
+  "mcp__nexbox__visualize_read_me",
+  "nexbox/visualize_show_widget",
+  "nexbox/visualize_read_me",
 ]);
 
 export const ToolCallCard = memo(function ToolCallCard({
@@ -575,7 +582,7 @@ export const ToolCallCard = memo(function ToolCallCard({
   const [displayState, setDisplayState] = useState<ToolUseState>(state);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Auto-expand agent card when nested tools start arriving; auto-collapse when done
+  // Auto-expand agent card when nested tools start arriving; auto-collapse when done.
   useEffect(() => {
     if (isAgentTool && nestedTools && nestedTools.length > 0 && state === "running") {
       setExpanded(true);
@@ -649,8 +656,8 @@ export const ToolCallCard = memo(function ToolCallCard({
             </div>
           )}
           {result && (meta.renderOutput
-            ? meta.renderOutput(result.output, result.isError)
-            : <RawOutput output={result.output} isError={result.isError} />
+            ? meta.renderOutput(result.output ?? "", result.isError)
+            : <RawOutput output={result.output ?? ""} isError={result.isError} />
           )}
         </div>
       </CollapsibleContent>

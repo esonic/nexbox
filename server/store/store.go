@@ -10,8 +10,24 @@ import (
 // another client since it was last read).
 var ErrVersionConflict = errors.New("version conflict: entity was modified by another client")
 
-// Store defines the unified data access interface for all BoxNex entities.
-// Implementations: SQLiteStore (local), MySQLStore (remote DB).
+// ValidationError represents a business-rule violation (e.g. hierarchy constraint).
+type ValidationError struct {
+	Message string
+}
+
+func (e *ValidationError) Error() string { return e.Message }
+
+// NewValidationError creates a new ValidationError.
+func NewValidationError(msg string) error { return &ValidationError{Message: msg} }
+
+// IsValidationError reports whether err is a ValidationError.
+func IsValidationError(err error) bool {
+	var ve *ValidationError
+	return errors.As(err, &ve)
+}
+
+// Store defines the unified data access interface for all NexBox entities.
+// Implementations: SQLiteStore (local), MySQLStore (remote DB), RemoteStore (HTTP client).
 type Store interface {
 	ProjectStore
 	TaskStore
@@ -25,8 +41,6 @@ type Store interface {
 	ReviewCommentStore
 	ChangeStore
 	WorkflowStore
-	UserStore
-	BalanceStore
 }
 
 type ProjectStore interface {
@@ -43,11 +57,9 @@ type TaskStore interface {
 	ListTasks(limit, offset int, projectIDs []string, q string) ([]Task, error)
 	GetTask(id string) (*Task, error)
 	UpdateTask(id string, req UpdateTaskRequest) (*Task, error)
-	IncrementTaskRefCount(id string) error
 	DeleteTask(id string) error
-	LinkTaskAsset(taskID, assetID string) (*TaskAsset, error)
-	ListTaskAssets(taskID string) ([]Asset, error)
-	UnlinkTaskAsset(taskID, assetID string) error
+	SetParent(taskID, parentID string) error
+	RemoveParent(taskID string) error
 }
 
 type TaskCommentStore interface {
@@ -73,6 +85,15 @@ type ReactionStore interface {
 
 type SessionStore interface {
 	CreateSession(req CreateSessionRequest) (*Session, error)
+	// GetOrCreateScratchSession returns the per-project hidden "scratch"
+	// session, creating one if none exists. Used by the sidebar as a
+	// staging area for a new chat — the session is promoted via
+	// UnhideSession on first user message.
+	GetOrCreateScratchSession(projectID string) (*Session, error)
+	// UnhideSession flips a hidden session into a visible one. Returns
+	// true iff the flip actually happened (session existed and was
+	// hidden).
+	UnhideSession(id string) (bool, error)
 	ListSessions() ([]Session, error)
 	ListTrashedSessions() ([]Session, error)
 	GetSession(id string) (*Session, error)
@@ -81,6 +102,13 @@ type SessionStore interface {
 	UpdateSessionStreamID(id, streamID string) error
 	UpdateSessionFeatures(id, features string) error
 	UpdateSessionWorktree(id, mode, path string) error
+	// ForkSession creates a fork of parentID at atMessageID, copying messages
+	// from the parent up to and including atMessageID into the new session.
+	// forkedAtAgentMsgUUID is the parent message's CLI-side message UUID
+	// (e.g. Claude's SDK message UUID), used on the first turn of the new
+	// session to drive `--resume-session-at`. Empty string is allowed but
+	// the caller should reject if the agent requires it.
+	ForkSession(parentID, name, atMessageID, forkedAtAgentMsgUUID string) (*Session, error)
 	GetExpiredSessionWorktrees(olderThan time.Time) ([]string, error) // returns worktree_paths for soon-to-be-purged sessions
 	DeleteSession(id string) error   // soft delete (move to trash)
 	RestoreSession(id string) error  // restore from trash
@@ -100,16 +128,22 @@ type AssetStore interface {
 	GetAssetVersion(assetID string, version int) (*AssetVersion, error)
 	FindAssetByTitle(projectID, title string) (*Asset, error)
 	GetLatestAssetContent(assetID string) (string, error)
+	SetAssetLarkDoc(id, url string) error
 }
 
 type MessageStore interface {
 	CreateMessage(sessionID, role string, parts []MessagePart, metadata MessageMetadata) (*ChatMessage, error)
 	UpdateMessageParts(messageID string, parts []MessagePart, metadata MessageMetadata) error
+	GetMessage(id string) (*ChatMessage, error)
+	// GetMessageBySDKUUID looks up a message within a session by the
+	// CLI-side message UUID stored in its metadata. Used by the fork API
+	// to anchor on a turn even when the caller's BeeHub message id is a
+	// pre-persistence client-side UUID. Returns (nil, nil) when not found.
+	GetMessageBySDKUUID(sessionID, sdkUUID string) (*ChatMessage, error)
 	ListMessages(sessionID string) ([]ChatMessage, error)
 	ListMessagesPaginated(sessionID string, limit int, beforeID string) ([]ChatMessage, bool, error)
 	DeleteMessagesBySession(sessionID string) error
 	CreateUserMessage(sessionID, content string) (*ChatMessage, error)
-	TrimSessionMessages(sessionID string, keepCount int) (int64, error)
 }
 
 type QueueStore interface {
@@ -133,7 +167,6 @@ type ReviewCommentStore interface {
 
 type ChangeStore interface {
 	ListChanges(sinceID int64, limit int, order string) ([]Change, error)
-	PurgeOldChanges(olderThan time.Time) (int64, error)
 }
 
 type WorkflowStore interface {
@@ -150,6 +183,7 @@ type WorkflowStore interface {
 	GetExecution(id string) (*WorkflowExecution, error)
 	ListExecutions(workflowID string, limit int, offset int) ([]WorkflowExecution, error)
 	UpdateExecutionStatus(id string, status string, errorMsg string, durationMs *int64) error
+	UpdateExecutionWorktreePath(id, path string) error
 	ResetStaleExecutions() error
 
 	// Node Logs
@@ -161,37 +195,4 @@ type WorkflowStore interface {
 	// given execution to the provided terminal status. Used as a safety net when
 	// finishExecution is called to prevent nodes being stuck in "running" forever.
 	FailStaleNodeLogs(executionID, status string) error
-}
-
-type UserStore interface {
-	CreateUser(req CreateUserRequest) (*User, error)
-	GetUser(id string) (*User, error)
-	GetUserByUsername(username string) (*User, error)
-	ListUsers(limit, offset int) ([]User, error)
-	UpdateUserFeatures(id string, features int64) error
-	UpdateUserPassword(id string, passwordHash string) error
-	UpdateUserRole(id string, role string) error
-	UpdateUserQuotas(id, quotas string) error
-}
-
-type BalanceStore interface {
-	GetBalance(userID string) (*UserBalance, error)
-	// RechargeBalance adds tokens to the user's balance (admin operation).
-	RechargeBalance(userID string, tokens int64, adminID string) error
-	// ReserveTokens atomically moves `estimated` tokens from balance to reserved.
-	// Returns error if balance is insufficient.
-	ReserveTokens(userID string, estimated int64) error
-	// SettleTokens finalizes a task: releases the reservation and charges actual usage.
-	// If actual > estimated, additional tokens are deducted from balance.
-	// If actual < estimated, the difference is returned to balance.
-	SettleTokens(userID string, sessionID string, estimated, actual int64) error
-	ListTransactions(userID string, limit, offset int) ([]TokenTransaction, error)
-}
-
-// MarketplaceStore manages user-installed plugins from the local marketplace directory.
-type MarketplaceStore interface {
-	ListInstalledPlugins(userID string) ([]InstalledPlugin, error)
-	InstallPlugin(userID, pluginID, config string) (*InstalledPlugin, error)
-	UninstallPlugin(userID, pluginID string) error
-	GetInstalledPlugin(userID, pluginID string) (*InstalledPlugin, error)
 }

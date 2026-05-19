@@ -1,136 +1,68 @@
-import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
-import { useTranslation } from "react-i18next";
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import {
   ChevronRight,
   ChevronDown,
+  ChevronUp,
   File,
   Folder,
   FolderOpen,
   Loader2,
   RefreshCw,
   Search,
+  Upload,
+  Download,
+  Trash2,
+  Save,
+  ExternalLink,
   X,
   FileText,
   FileCode,
   Eye,
   Code2,
-  Upload,
-  Download,
-  Trash2,
-  Save,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { filesApi, type FileEntry, type FileContentResponse, type FileSearchResult } from "@/lib/api";
+import { filesApi, serverApi, type FileEntry, type FileContentResponse, type FileSearchResult } from "@/lib/api";
+import { getLangFromPath, ensureLangRegistered, highlightCode } from "@/lib/highlight";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { MarkdownRenderer, isMarkdownPath } from "@/components/markdown/MarkdownRenderer";
-import type { editor as MonacoEditorNS } from "monaco-editor";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
-const MonacoEditor = lazy(() => import("@monaco-editor/react"));
+const MonacoFileEditor = lazy(() => import("./MonacoFileEditor"));
 
-// ── Helpers ──
+// MIME type detection by extension for the drag-source marker. The exact value
+// is irrelevant; only the presence of this marker distinguishes internal moves
+// from OS file drops.
+const INTERNAL_DRAG_TYPE = "application/x-beehub-files";
+
+function dirnameOf(p: string): string {
+  if (!p) return "";
+  const idx = p.lastIndexOf("/");
+  return idx === -1 ? "" : p.slice(0, idx);
+}
+
+function joinPath(dir: string, name: string): string {
+  if (!dir) return name;
+  return `${dir}/${name}`;
+}
+
+function isHtmlPath(p: string): boolean {
+  const ext = p.split(".").pop()?.toLowerCase() || "";
+  return ext === "html" || ext === "htm";
+}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function getMonacoLanguage(filepath: string): string {
-  const name = filepath.split("/").pop()?.toLowerCase() ?? "";
-  if (name === "dockerfile") return "dockerfile";
-  if (name === "makefile" || name === "gnumakefile") return "makefile";
-  const ext = name.split(".").pop() ?? "";
-  const map: Record<string, string> = {
-    ts: "typescript", tsx: "typescript",
-    js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
-    py: "python", pyw: "python",
-    go: "go",
-    java: "java",
-    rs: "rust",
-    c: "c", h: "c",
-    cpp: "cpp", cc: "cpp", cxx: "cpp", hpp: "cpp", hxx: "cpp",
-    cs: "csharp",
-    html: "html", htm: "html",
-    css: "css", scss: "scss", sass: "sass", less: "less",
-    json: "json", jsonc: "json",
-    yaml: "yaml", yml: "yaml",
-    md: "markdown", mdx: "markdown",
-    sh: "shell", bash: "shell", zsh: "shell", fish: "shell",
-    sql: "sql",
-    php: "php",
-    rb: "ruby",
-    kt: "kotlin", kts: "kotlin",
-    swift: "swift",
-    r: "r",
-    xml: "xml", svg: "xml",
-    toml: "ini",
-    proto: "proto",
-    lua: "lua",
-    vim: "ini",
-    tf: "hcl", hcl: "hcl",
-  };
-  return map[ext] ?? "plaintext";
-}
-
-function getMonacoTheme(): string {
-  return document.body.classList.contains("dark") ? "vs-dark" : "vs";
-}
-
-// VSCode-style: compact single-child directory chains into one display node.
-function compactTree(entries: FileEntry[]): FileEntry[] {
-  return entries.map((e) => {
-    if (!e.is_dir || !e.children) return e;
-    let current = e;
-    let name = e.name;
-    while (
-      current.is_dir &&
-      current.children &&
-      current.children.length === 1 &&
-      current.children[0].is_dir
-    ) {
-      current = current.children[0];
-      name += "/" + current.name;
-    }
-    return {
-      ...current,
-      name,
-      children: current.children ? compactTree(current.children) : undefined,
-    };
-  });
-}
-
-// ── Monaco scroll + highlight helper ──
-
-function applyScrollAndHighlight(
-  editor: MonacoEditorNS.IStandaloneCodeEditor,
-  monaco: any,
-  decorationsRef: { current: any },
-  lineNumber: number,
-  query: string,
-) {
-  editor.revealLineInCenter(lineNumber);
-  editor.setPosition({ lineNumber, column: 1 });
-  const model = editor.getModel();
-  if (!model) return;
-  const lineContent = model.getLineContent(lineNumber);
-  const lowerLine = lineContent.toLowerCase();
-  const lowerQuery = query.toLowerCase();
-  const newDecorations: any[] = [];
-  let idx = lowerLine.indexOf(lowerQuery);
-  while (idx !== -1) {
-    newDecorations.push({
-      range: new monaco.Range(lineNumber, idx + 1, lineNumber, idx + 1 + query.length),
-      options: { inlineClassName: "search-match-highlight" },
-    });
-    idx = lowerLine.indexOf(lowerQuery, idx + 1);
-  }
-  if (decorationsRef.current) {
-    decorationsRef.current.clear();
-  }
-  if (newDecorations.length > 0) {
-    decorationsRef.current = editor.createDecorationsCollection(newDecorations);
-  }
 }
 
 // ── File tree item ──
@@ -140,31 +72,64 @@ function FileTreeItem({
   depth,
   expanded,
   onToggle,
-  selectedPath,
+  highlightedPath,
   onSelect,
+  onHighlight,
+  getChildren,
+  isLoading,
+  dragOverPath,
+  onDragStartItem,
+  onDragOverItem,
+  onDragLeaveItem,
+  onDropOnItem,
+  onDragEndItem,
 }: {
   entry: FileEntry;
   depth: number;
   expanded: Set<string>;
   onToggle: (path: string) => void;
-  selectedPath: string | null;
+  highlightedPath: string | null;
   onSelect: (path: string) => void;
+  onHighlight: (path: string) => void;
+  getChildren: (path: string) => FileEntry[] | undefined;
+  isLoading: (path: string) => boolean;
+  dragOverPath: string | null;
+  onDragStartItem: (entry: FileEntry, e: React.DragEvent) => void;
+  onDragOverItem: (entry: FileEntry, e: React.DragEvent) => void;
+  onDragLeaveItem: (entry: FileEntry, e: React.DragEvent) => void;
+  onDropOnItem: (entry: FileEntry, e: React.DragEvent) => void;
+  onDragEndItem: () => void;
 }) {
   const isExpanded = expanded.has(entry.path);
-  const isSelected = selectedPath === entry.path;
+  const isHighlighted = highlightedPath === entry.path;
+  const isDropTarget = entry.is_dir && dragOverPath === entry.path;
+  const children = isExpanded && entry.is_dir ? getChildren(entry.path) : undefined;
+  const loading = isExpanded && entry.is_dir && children === undefined && isLoading(entry.path);
 
   return (
     <>
       <div
+        draggable
+        onDragStart={(e) => onDragStartItem(entry, e)}
+        onDragOver={(e) => onDragOverItem(entry, e)}
+        onDragLeave={(e) => onDragLeaveItem(entry, e)}
+        onDrop={(e) => onDropOnItem(entry, e)}
+        onDragEnd={onDragEndItem}
         className={cn(
           "flex items-center gap-1 py-[3px] pr-2 cursor-pointer text-xs hover:bg-accent/50 transition-colors",
-          isSelected && "bg-accent"
+          isHighlighted && "bg-accent",
+          isDropTarget && "ring-1 ring-inset ring-primary/60 bg-primary/10"
         )}
         style={{ paddingLeft: depth * 16 + 8 }}
         onClick={() => {
-          if (entry.is_dir) onToggle(entry.path);
-          else onSelect(entry.path);
+          onHighlight(entry.path);
+          if (entry.is_dir) {
+            onToggle(entry.path);
+          } else {
+            onSelect(entry.path);
+          }
         }}
+        title={entry.is_symlink ? `${entry.name} (symlink)` : entry.name}
       >
         {entry.is_dir ? (
           <>
@@ -185,45 +150,61 @@ function FileTreeItem({
             <File className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
           </>
         )}
-        <span className="truncate min-w-0">{entry.name}</span>
+        <span className={cn("truncate min-w-0", entry.is_symlink && "italic")}>{entry.name}</span>
       </div>
-      {entry.is_dir && isExpanded && entry.children?.map((child) => (
-        <FileTreeItem
-          key={child.path}
-          entry={child}
-          depth={depth + 1}
-          expanded={expanded}
-          onToggle={onToggle}
-          selectedPath={selectedPath}
-          onSelect={onSelect}
-        />
-      ))}
+      {isExpanded && entry.is_dir && (
+        loading ? (
+          <div
+            className="flex items-center gap-1 py-[3px] text-xs text-muted-foreground/50"
+            style={{ paddingLeft: (depth + 1) * 16 + 8 }}
+          >
+            <Loader2 className="h-3 w-3 animate-spin" />
+          </div>
+        ) : children?.map((child) => (
+          <FileTreeItem
+            key={child.path}
+            entry={child}
+            depth={depth + 1}
+            expanded={expanded}
+            onToggle={onToggle}
+            highlightedPath={highlightedPath}
+            onSelect={onSelect}
+            onHighlight={onHighlight}
+            getChildren={getChildren}
+            isLoading={isLoading}
+            dragOverPath={dragOverPath}
+            onDragStartItem={onDragStartItem}
+            onDragOverItem={onDragOverItem}
+            onDragLeaveItem={onDragLeaveItem}
+            onDropOnItem={onDropOnItem}
+            onDragEndItem={onDragEndItem}
+          />
+        ))
+      )}
     </>
   );
 }
 
 // ── Search results ──
 
-function HighlightedSnippet({ content, query }: { content: string; query: string }) {
-  const lowerContent = content.toLowerCase();
-  const lowerQuery = query.toLowerCase();
-  const idx = lowerContent.indexOf(lowerQuery);
-  if (idx === -1) {
-    const display = content.length > 80 ? content.slice(0, 80) + "…" : content;
-    return <span>{display}</span>;
-  }
-  const CONTEXT = 35;
-  const start = Math.max(0, idx - CONTEXT);
-  const end = Math.min(content.length, idx + query.length + CONTEXT);
-  const prefix = (start > 0 ? "…" : "") + content.slice(start, idx);
-  const match = content.slice(idx, idx + query.length);
-  const suffix = content.slice(idx + query.length, end) + (end < content.length ? "…" : "");
+function ContentSnippet({ content, query }: { content: string; query: string }) {
+  if (!query || !content) return <>{content}</>;
+  const lower = content.toLowerCase();
+  const lowerQ = query.toLowerCase();
+  const idx = lower.indexOf(lowerQ);
+  if (idx === -1) return <>{content}</>;
+  const prePad = 15;
+  const postPad = 60;
+  const start = Math.max(0, idx - prePad);
+  const end = Math.min(content.length, idx + query.length + postPad);
   return (
-    <span>
-      {prefix}
-      <span className="text-orange-400 font-semibold">{match}</span>
-      {suffix}
-    </span>
+    <>
+      {start > 0 && "…"}
+      {content.slice(start, idx)}
+      <mark className="bg-yellow-300/50 dark:bg-yellow-600/50 text-foreground rounded-[2px] not-italic">{content.slice(idx, idx + query.length)}</mark>
+      {content.slice(idx + query.length, end)}
+      {end < content.length && "…"}
+    </>
   );
 }
 
@@ -231,16 +212,15 @@ function SearchResults({
   results,
   loading,
   searchType,
-  searchQuery,
+  query,
   onSelect,
 }: {
   results: FileSearchResult[];
   loading: boolean;
   searchType: "name" | "content";
-  searchQuery: string;
+  query: string;
   onSelect: (path: string, line?: number) => void;
 }) {
-  const { t } = useTranslation();
   if (loading) {
     return (
       <div className="flex items-center justify-center py-8">
@@ -251,7 +231,7 @@ function SearchResults({
   if (results.length === 0) {
     return (
       <div className="text-xs text-muted-foreground text-center py-6">
-        {t("files.no_results")}
+        No results
       </div>
     );
   }
@@ -278,10 +258,10 @@ function SearchResults({
             {matches.map((m, i) => (
               <div
                 key={i}
-                className="px-3 py-1 text-[11px] text-muted-foreground hover:bg-accent/30 cursor-pointer font-mono overflow-hidden"
+                className="px-3 py-1 text-[11px] text-muted-foreground hover:bg-accent/30 cursor-pointer font-mono overflow-hidden whitespace-nowrap"
                 onClick={() => onSelect(m.path, m.line)}
               >
-                <HighlightedSnippet content={m.content ?? ""} query={searchQuery} />
+                <ContentSnippet content={m.content ?? ""} query={query} />
               </div>
             ))}
           </div>
@@ -309,6 +289,317 @@ function SearchResults({
   );
 }
 
+// ── In-file search ──
+
+interface LineMatch {
+  start: number;
+  end: number;
+  globalIndex: number;
+}
+
+function computeLineMatches(lines: string[], query: string, caseSensitive: boolean): Map<number, LineMatch[]> {
+  const result = new Map<number, LineMatch[]>();
+  if (!query) return result;
+  const needle = caseSensitive ? query : query.toLowerCase();
+  let globalIndex = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const haystack = caseSensitive ? lines[i] : lines[i].toLowerCase();
+    let pos = 0;
+    while (pos <= haystack.length - needle.length) {
+      const idx = haystack.indexOf(needle, pos);
+      if (idx === -1) break;
+      const matches = result.get(i) ?? [];
+      matches.push({ start: idx, end: idx + needle.length, globalIndex });
+      result.set(i, matches);
+      globalIndex++;
+      pos = idx + 1;
+    }
+  }
+
+  return result;
+}
+
+function HighlightOverlay({
+  line,
+  matches,
+  currentGlobalIndex,
+}: {
+  line: string;
+  matches: LineMatch[];
+  currentGlobalIndex: number;
+}) {
+  const parts: React.ReactNode[] = [];
+  let pos = 0;
+
+  for (const match of matches) {
+    if (pos < match.start) {
+      parts.push(<span key={`text-${pos}`}>{line.slice(pos, match.start)}</span>);
+    }
+
+    const isCurrent = match.globalIndex === currentGlobalIndex;
+    parts.push(
+      <mark
+        key={`match-${match.start}-${match.globalIndex}`}
+        data-match-idx={match.globalIndex}
+        style={{
+          background: isCurrent ? "rgba(255, 160, 0, 0.65)" : "rgba(255, 220, 0, 0.35)",
+          color: "transparent",
+          borderRadius: "2px",
+        }}
+      >
+        {line.slice(match.start, match.end)}
+      </mark>
+    );
+
+    pos = match.end;
+  }
+
+  if (pos < line.length) {
+    parts.push(<span key={`text-${pos}`}>{line.slice(pos)}</span>);
+  }
+
+  return (
+    <div
+      className="absolute inset-0 px-3 py-0 whitespace-pre-wrap break-all pointer-events-none select-none"
+      style={{ color: "transparent", fontFamily: "inherit", fontSize: "inherit", lineHeight: "inherit" }}
+      aria-hidden
+    >
+      {parts}
+    </div>
+  );
+}
+
+function FileSearchBar({
+  query,
+  caseSensitive,
+  currentIndex,
+  total,
+  onQueryChange,
+  onCaseSensitiveChange,
+  onPrev,
+  onNext,
+  onClose,
+}: {
+  query: string;
+  caseSensitive: boolean;
+  currentIndex: number;
+  total: number;
+  onQueryChange: (query: string) => void;
+  onCaseSensitiveChange: (value: boolean) => void;
+  onPrev: () => void;
+  onNext: () => void;
+  onClose: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      onClose();
+      return;
+    }
+    if (e.key === "Enter") {
+      if (e.shiftKey) onPrev();
+      else onNext();
+    }
+  };
+
+  return (
+    <div className="absolute top-2 right-3 z-50 flex items-center gap-1 bg-popover border border-border rounded-md shadow-lg px-2 py-1.5">
+      <div className="flex items-center gap-1 bg-muted/50 rounded px-1.5 border border-transparent focus-within:border-ring/50">
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={(e) => onQueryChange(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Find in file..."
+          className="bg-transparent text-xs py-0.5 outline-none w-36 placeholder:text-muted-foreground/40"
+        />
+        {query && (
+          <button onClick={() => onQueryChange("")} className="text-muted-foreground/40 hover:text-muted-foreground">
+            <X className="h-3 w-3" />
+          </button>
+        )}
+      </div>
+      <button
+        onClick={() => onCaseSensitiveChange(!caseSensitive)}
+        title="Match case"
+        className={cn(
+          "h-5 w-6 rounded text-[11px] font-semibold transition-colors border",
+          caseSensitive
+            ? "bg-primary/10 text-primary border-primary/30"
+            : "text-muted-foreground/50 hover:text-muted-foreground border-transparent hover:border-border"
+        )}
+      >
+        Aa
+      </button>
+      <span
+        className={cn(
+          "text-[11px] min-w-[4.5rem] text-center tabular-nums",
+          query && total === 0 ? "text-destructive/70" : "text-muted-foreground/60"
+        )}
+      >
+        {query ? (total === 0 ? "No results" : `${currentIndex + 1} of ${total}`) : ""}
+      </span>
+      <button
+        onClick={onPrev}
+        disabled={total === 0}
+        className="p-0.5 rounded hover:bg-accent text-muted-foreground/60 hover:text-foreground transition-colors disabled:opacity-30"
+        title="Previous match (Shift+Enter)"
+      >
+        <ChevronUp className="h-3.5 w-3.5" />
+      </button>
+      <button
+        onClick={onNext}
+        disabled={total === 0}
+        className="p-0.5 rounded hover:bg-accent text-muted-foreground/60 hover:text-foreground transition-colors disabled:opacity-30"
+        title="Next match (Enter)"
+      >
+        <ChevronDown className="h-3.5 w-3.5" />
+      </button>
+      <button
+        onClick={onClose}
+        className="p-0.5 rounded hover:bg-accent text-muted-foreground/50 hover:text-foreground transition-colors"
+        title="Close (Escape)"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
+// ── Code viewer with highlight.js ──
+
+function CodeViewer({
+  content,
+  filepath,
+  searchQuery = "",
+  caseSensitive = false,
+  currentMatchIndex = -1,
+  onMatchesFound,
+  scrollToLine,
+  onScrollToLineReady,
+}: {
+  content: string;
+  filepath: string;
+  searchQuery?: string;
+  caseSensitive?: boolean;
+  currentMatchIndex?: number;
+  onMatchesFound?: (total: number) => void;
+  scrollToLine?: number;
+  onScrollToLineReady?: (matchIndex: number) => void;
+}) {
+  const lang = useMemo(() => getLangFromPath(filepath), [filepath]);
+  const [langReady, setLangReady] = useState(false);
+
+  useEffect(() => {
+    if (!lang) return;
+    let cancelled = false;
+    ensureLangRegistered(lang).then((ok) => {
+      if (!cancelled) setLangReady(ok);
+    });
+    return () => { cancelled = true; };
+  }, [lang]);
+
+  const lines = useMemo(() => content.split("\n"), [content]);
+
+  const highlightedLines = useMemo(() => {
+    if (!langReady || !lang) return null;
+    return lines.map((line) => highlightCode(line, lang));
+  }, [lines, langReady, lang]);
+
+  const gutterWidth = String(lines.length).length;
+  const lineMatches = useMemo(
+    () => computeLineMatches(lines, searchQuery, caseSensitive),
+    [lines, searchQuery, caseSensitive]
+  );
+  const totalMatches = useMemo(() => {
+    let total = 0;
+    lineMatches.forEach((matches) => {
+      total += matches.length;
+    });
+    return total;
+  }, [lineMatches]);
+
+  useEffect(() => {
+    onMatchesFound?.(totalMatches);
+  }, [totalMatches, onMatchesFound]);
+
+  useEffect(() => {
+    if (currentMatchIndex < 0) return;
+    if (scrollToLine != null) return; // useLayoutEffect handles scroll when navigating from search results
+    const currentMatch = document.querySelector(`[data-match-idx="${currentMatchIndex}"]`);
+    currentMatch?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [currentMatchIndex, scrollToLine]);
+
+  useLayoutEffect(() => {
+    if (scrollToLine == null || scrollToLine <= 0) return;
+    const targetLineIdx = scrollToLine - 1;
+    if (searchQuery && lineMatches.size > 0) {
+      let globalIdx = 0;
+      let found = false;
+      for (const [lineIdx, matches] of lineMatches) {
+        if (lineIdx === targetLineIdx) {
+          document.querySelector(`[data-match-idx="${globalIdx}"]`)?.scrollIntoView({ block: "center", behavior: "instant" });
+          onScrollToLineReady?.(globalIdx);
+          found = true;
+          break;
+        } else if (lineIdx < targetLineIdx) {
+          globalIdx += matches.length;
+        }
+      }
+      if (!found) {
+        document.querySelector(`[data-line-idx="${targetLineIdx}"]`)?.scrollIntoView({ block: "center", behavior: "instant" });
+        onScrollToLineReady?.(-1);
+      }
+    } else if (!searchQuery) {
+      document.querySelector(`[data-line-idx="${targetLineIdx}"]`)?.scrollIntoView({ block: "center", behavior: "instant" });
+    }
+  }, [scrollToLine, lineMatches, searchQuery, onScrollToLineReady]);
+
+  return (
+    <div className="overflow-auto h-full">
+      <table className="w-full text-xs font-mono leading-[1.4]">
+        <tbody>
+          {lines.map((line, i) => {
+            const matches = lineMatches.get(i);
+
+            return (
+              <tr key={i} data-line-idx={i} className="hover:bg-accent/30">
+                <td
+                  className="px-3 py-0 text-right select-none text-muted-foreground/40 border-r border-border/20 align-top"
+                  style={{ minWidth: gutterWidth * 8 + 24 }}
+                >
+                  {i + 1}
+                </td>
+                <td className="px-3 py-0 whitespace-pre-wrap break-all relative">
+                  {highlightedLines?.[i] ? (
+                    <span dangerouslySetInnerHTML={{ __html: highlightedLines[i] }} />
+                  ) : (
+                    <span>{line}</span>
+                  )}
+                  {matches && matches.length > 0 && (
+                    <HighlightOverlay
+                      line={line}
+                      matches={matches}
+                      currentGlobalIndex={currentMatchIndex}
+                    />
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ── Main component ──
 
 interface FileBrowserProps {
@@ -317,12 +608,28 @@ interface FileBrowserProps {
 }
 
 export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
-  const { t } = useTranslation();
-  const [tree, setTree] = useState<FileEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Lazy tree state: childrenMap[""] is the root level; childrenMap[path] is a folder's children.
+  const [childrenMap, setChildrenMap] = useState<Record<string, FileEntry[]>>({});
+  const [loadingPaths, setLoadingPaths] = useState<Set<string>>(() => new Set());
+  const [rootLoading, setRootLoading] = useState(true);
   const [fileContent, setFileContent] = useState<FileContentResponse | null>(null);
   const [loadingFile, setLoadingFile] = useState(false);
   const [markdownMode, setMarkdownMode] = useState<"source" | "rendered">("source");
+
+  // Edit/save state (only meaningful when enableFileEdit is true)
+  const [editEnabled, setEditEnabled] = useState(false);
+  const [editorValue, setEditorValue] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // Drag-drop state for tree-internal moves and OS file uploads
+  const [highlightedPath, setHighlightedPath] = useState<string | null>(null);
+  const [draggingPath, setDraggingPath] = useState<string | null>(null);
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
+  const [rootDragOver, setRootDragOver] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [pendingOverwrite, setPendingOverwrite] = useState<{ file: File; directory: string } | null>(null);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   // Persisted state from store
   const {
@@ -330,11 +637,25 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     setSelectedPath, toggleExpand, resetForProject,
   } = useFileBrowserStore();
 
+  // Reset store state when projectId changes (stale expanded/selectedPath from a
+  // different project must not bleed into the new project view).
   useEffect(() => {
-    if (ownerProjectId !== projectId) resetForProject(projectId);
+    if (ownerProjectId !== projectId) {
+      resetForProject(projectId);
+      setHighlightedPath(null);
+    }
   }, [projectId, ownerProjectId, resetForProject]);
 
-  // Sidebar search state
+  // Fetch the global enable_file_edit flag once on mount. The Monaco editor
+  // (and any code paths importing it) are kept behind this flag so disabling
+  // file editing also avoids any Monaco CDN download.
+  useEffect(() => {
+    serverApi.getSettings()
+      .then((data) => setEditEnabled(!!data.enable_file_edit))
+      .catch(() => { /* leave edit disabled on failure */ });
+  }, []);
+
+  // Search state
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchType, setSearchType] = useState<"name" | "content">("name");
@@ -342,120 +663,483 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const [searchLoading, setSearchLoading] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const [fileSearchVisible, setFileSearchVisible] = useState(false);
+  const [fileSearchQuery, setFileSearchQuery] = useState("");
+  const [fileSearchCaseSensitive, setFileSearchCaseSensitive] = useState(false);
+  const [fileSearchCurrentIndex, setFileSearchCurrentIndex] = useState(0);
+  const [fileSearchTotal, setFileSearchTotal] = useState(0);
+  const [pendingTargetLine, setPendingTargetLine] = useState<number | null>(null);
+  const skipIndexResetRef = useRef(false);
+  const fileContentSelectableRef = useRef<HTMLDivElement>(null);
 
-  // Editor state
-  const [editorContent, setEditorContent] = useState<string>("");
-  const [isDirty, setIsDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
-  const monacoRef = useRef<any>(null);
-  const decorationsRef = useRef<any>(null);
-  const scrollTargetRef = useRef<{ line: number; query: string } | null>(null);
-  const [monacoTheme, setMonacoTheme] = useState(getMonacoTheme);
+  // Track if a load is for the current projectId/sessionId; ignore stale results after switch.
+  const loadGenRef = useRef(0);
 
-  // Sync Monaco theme when the app's dark/light class changes on document.body
-  useEffect(() => {
-    const observer = new MutationObserver(() => setMonacoTheme(getMonacoTheme()));
-    observer.observe(document.body, { attributes: true, attributeFilter: ["class"] });
-    return () => observer.disconnect();
-  }, []);
-
-  const markdownPreviewAvailable = !!selectedPath && !!fileContent && !fileContent.binary && isMarkdownPath(selectedPath);
-  useEffect(() => {
-    if (!markdownPreviewAvailable && markdownMode !== "source") setMarkdownMode("source");
-  }, [markdownPreviewAvailable, markdownMode]);
-
-  const compactedTree = useMemo(() => compactTree(tree), [tree]);
-
-  const loadTree = useCallback(async () => {
-    setLoading(true);
+  const loadChildren = useCallback(async (path: string) => {
+    setLoadingPaths((prev) => {
+      if (prev.has(path)) return prev;
+      const next = new Set(prev);
+      next.add(path);
+      return next;
+    });
+    const gen = loadGenRef.current;
     try {
-      const data = await filesApi.tree(projectId, sessionId);
-      setTree(data || []);
+      const data = await filesApi.list(projectId, path, sessionId);
+      if (gen !== loadGenRef.current) return;
+      setChildrenMap((prev) => ({ ...prev, [path]: data || [] }));
     } catch (e) {
-      console.error("Failed to load file tree:", e);
+      console.error(`Failed to load directory "${path}":`, e);
+      if (gen === loadGenRef.current) {
+        // Cache an empty result so we don't keep retrying on every render.
+        setChildrenMap((prev) => ({ ...prev, [path]: [] }));
+      }
     } finally {
-      setLoading(false);
+      if (gen === loadGenRef.current) {
+        setLoadingPaths((prev) => {
+          if (!prev.has(path)) return prev;
+          const next = new Set(prev);
+          next.delete(path);
+          return next;
+        });
+      }
     }
   }, [projectId, sessionId]);
 
-  useEffect(() => { loadTree(); }, [loadTree]);
-
-  // Load file content whenever selectedPath changes — also handles remount after
-  // panel switch (selectedPath is persisted in the store but fileContent is local).
-  useEffect(() => {
-    if (!selectedPath) {
-      setFileContent(null);
-      setEditorContent("");
-      setIsDirty(false);
-      return;
-    }
-    let cancelled = false;
-    setLoadingFile(true);
-    setIsDirty(false);
-    filesApi.content(projectId, selectedPath, sessionId)
-      .then((data) => {
-        if (!cancelled) {
-          setFileContent(data);
-          setEditorContent(data.binary ? "" : data.content);
-          const target = scrollTargetRef.current;
-          if (target && editorRef.current && monacoRef.current) {
-            scrollTargetRef.current = null;
-            requestAnimationFrame(() => {
-              if (editorRef.current && monacoRef.current) {
-                applyScrollAndHighlight(editorRef.current, monacoRef.current, decorationsRef, target.line, target.query);
-              }
-            });
-          }
-        }
-      })
-      .catch(() => {
-        if (!cancelled) { setFileContent(null); setEditorContent(""); }
-      })
-      .finally(() => { if (!cancelled) setLoadingFile(false); });
-    return () => { cancelled = true; };
-  }, [selectedPath, projectId, sessionId]);
-
-  const handleSelectFile = useCallback((path: string, line?: number) => {
-    if (line !== undefined) {
-      scrollTargetRef.current = { line, query: searchQuery };
-    } else {
-      scrollTargetRef.current = null;
-      if (decorationsRef.current) {
-        decorationsRef.current.clear();
-        decorationsRef.current = null;
+  const reloadAll = useCallback(async () => {
+    loadGenRef.current++;
+    setChildrenMap({});
+    setLoadingPaths(new Set());
+    setRootLoading(true);
+    const gen = loadGenRef.current;
+    try {
+      const data = await filesApi.list(projectId, "", sessionId);
+      if (gen !== loadGenRef.current) return;
+      setChildrenMap((prev) => ({ ...prev, "": data || [] }));
+    } catch (e) {
+      console.error("Failed to load file tree:", e);
+      if (gen === loadGenRef.current) {
+        setChildrenMap((prev) => ({ ...prev, "": [] }));
+      }
+    } finally {
+      if (gen === loadGenRef.current) {
+        setRootLoading(false);
       }
     }
-    setSelectedPath(path);
-    setShowDeleteConfirm(false);
-  }, [setSelectedPath, searchQuery]);
+  }, [projectId, sessionId]);
+
+  useEffect(() => {
+    reloadAll();
+  }, [reloadAll]);
+
+  // After the root loads, fetch children for any persisted-expanded folders so
+  // the user's previous tree state restores without manual re-clicks.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (rootLoading) {
+      restoredRef.current = false;
+      return;
+    }
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    expanded.forEach((path) => {
+      if (path && childrenMap[path] === undefined) {
+        loadChildren(path);
+      }
+    });
+  }, [rootLoading, expanded, childrenMap, loadChildren]);
+
+  const handleToggleExpand = useCallback((path: string) => {
+    const willExpand = !expanded.has(path);
+    toggleExpand(path);
+    if (willExpand && childrenMap[path] === undefined && !loadingPaths.has(path)) {
+      loadChildren(path);
+    }
+  }, [expanded, toggleExpand, childrenMap, loadingPaths, loadChildren]);
+
+  const getChildren = useCallback((path: string) => childrenMap[path], [childrenMap]);
+  const isLoadingPath = useCallback((path: string) => loadingPaths.has(path), [loadingPaths]);
+  const rootEntries = childrenMap[""] ?? [];
+
+  const markdownPreviewAvailable = !!selectedPath && !!fileContent && !fileContent.binary && isMarkdownPath(selectedPath);
+  useEffect(() => {
+    if (!markdownPreviewAvailable && markdownMode !== "source") {
+      setMarkdownMode("source");
+    }
+  }, [markdownPreviewAvailable, markdownMode]);
+
+  useEffect(() => {
+    setFileSearchVisible(false);
+    setFileSearchQuery("");
+    setFileSearchCaseSensitive(false);
+    setFileSearchCurrentIndex(0);
+    setFileSearchTotal(0);
+    setPendingTargetLine(null);
+  }, [selectedPath]);
+
+  useEffect(() => {
+    if (skipIndexResetRef.current) {
+      skipIndexResetRef.current = false;
+      return;
+    }
+    setFileSearchCurrentIndex(0);
+  }, [fileSearchQuery, fileSearchCaseSensitive]);
+
+  const isDirty = !!fileContent && !fileContent.binary && editorValue !== fileContent.content;
 
   const handleSave = useCallback(async () => {
-    if (!selectedPath || !isDirty || saving) return;
+    if (!selectedPath || !fileContent || fileContent.binary) return;
     setSaving(true);
     try {
-      await filesApi.writeContent(projectId, selectedPath, editorContent, sessionId);
-      // Update the saved baseline so dirty tracking resets
-      setFileContent((prev) => prev ? { ...prev, content: editorContent, size: new Blob([editorContent]).size } : prev);
-      setIsDirty(false);
+      await filesApi.save(projectId, selectedPath, editorValue, sessionId);
+      setFileContent({ ...fileContent, content: editorValue, size: new Blob([editorValue]).size });
       toast.success("Saved");
-    } catch (e: any) {
-      toast.error("Save failed", { description: e.message });
+    } catch (e) {
+      console.error("Save failed:", e);
+      toast.error("Save failed", { description: String(e) });
     } finally {
       setSaving(false);
     }
-  }, [projectId, sessionId, selectedPath, editorContent, isDirty, saving]);
+  }, [projectId, selectedPath, sessionId, fileContent, editorValue]);
 
-  // Debounced sidebar search
   useEffect(() => {
-    if (!searchQuery.trim()) { setSearchResults([]); setSearchLoading(false); return; }
+    if (!selectedPath) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        return;
+      }
+
+      const useModifier = e.ctrlKey || e.metaKey;
+      if (!useModifier) return;
+      const key = e.key.toLowerCase();
+
+      if (key === "f") {
+        e.preventDefault();
+        setFileSearchVisible(true);
+        return;
+      }
+
+      if (key === "s" && editEnabled && fileContent && !fileContent.binary && isDirty && !saving) {
+        e.preventDefault();
+        handleSave();
+        return;
+      }
+
+      if (key === "a" && fileContent && !fileContent.binary) {
+        const root = fileContentSelectableRef.current;
+        if (!root) return;
+        const selection = window.getSelection();
+        if (!selection) return;
+
+        e.preventDefault();
+        const range = document.createRange();
+        range.selectNodeContents(root);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedPath, fileContent, editEnabled, isDirty, saving, handleSave]);
+
+  const handleSelectFile = useCallback(async (path: string) => {
+    setSelectedPath(path);
+    setHighlightedPath(path);
+    setLoadingFile(true);
+    try {
+      const data = await filesApi.content(projectId, path, sessionId);
+      setFileContent(data);
+      setEditorValue(data?.binary ? "" : (data?.content ?? ""));
+    } catch (e) {
+      console.error("Failed to load file:", e);
+      setFileContent(null);
+      setEditorValue("");
+    } finally {
+      setLoadingFile(false);
+    }
+  }, [projectId, sessionId, setSelectedPath]);
+
+  const handleSelectSearchResult = useCallback(async (path: string, line?: number) => {
+    setSelectedPath(path);
+    setHighlightedPath(path);
+    setLoadingFile(true);
+    try {
+      const data = await filesApi.content(projectId, path, sessionId);
+      setFileContent(data);
+      setEditorValue(data?.binary ? "" : (data?.content ?? ""));
+    } catch (e) {
+      console.error("Failed to load file:", e);
+      setFileContent(null);
+      setEditorValue("");
+    } finally {
+      setLoadingFile(false);
+    }
+    if (line != null && searchQuery.trim()) {
+      skipIndexResetRef.current = true;
+      setFileSearchVisible(true);
+      setFileSearchQuery(searchQuery.trim());
+      setPendingTargetLine(line);
+    }
+  }, [projectId, sessionId, searchQuery, setSelectedPath]);
+
+  // Determine the directory where new uploads should land based on highlight.
+  // - Highlighted directory → upload into it
+  // - Highlighted file → upload into its parent directory
+  // - Nothing highlighted → project root ("")
+  const uploadTargetDir = useMemo(() => {
+    if (!highlightedPath) return "";
+    // Look up the entry: we know dirs from childrenMap keys + any cached entry list.
+    const findEntry = (path: string): FileEntry | undefined => {
+      if (!path) return undefined;
+      for (const entries of Object.values(childrenMap)) {
+        for (const e of entries) {
+          if (e.path === path) return e;
+        }
+      }
+      return undefined;
+    };
+    const entry = findEntry(highlightedPath);
+    if (entry?.is_dir) return highlightedPath;
+    return dirnameOf(highlightedPath);
+  }, [highlightedPath, childrenMap]);
+
+  // Reload one directory plus the root (cheap; keeps the tree consistent
+  // without blowing away expanded folders the user opened).
+  const refreshDir = useCallback(async (dir: string) => {
+    // Snapshot the gen but don't increment — incrementing would invalidate any
+    // sibling refresh started in the same tick (e.g. the move handler refreshing
+    // both old and new parent dirs concurrently).
+    const gen = loadGenRef.current;
+    try {
+      const data = await filesApi.list(projectId, dir, sessionId);
+      if (gen !== loadGenRef.current) return;
+      setChildrenMap((prev) => ({ ...prev, [dir]: data || [] }));
+    } catch (e) {
+      console.error(`Failed to reload directory "${dir}":`, e);
+    }
+  }, [projectId, sessionId]);
+
+  const uploadSingleFile = useCallback(async (file: File, directory: string, overwrite: boolean) => {
+    setUploading(true);
+    try {
+      const res = await filesApi.upload(projectId, directory, file, { overwrite, sessionId });
+      if ("conflict" in res) {
+        setPendingOverwrite({ file, directory });
+        return;
+      }
+      await refreshDir(directory);
+      toast.success(`Uploaded ${res.name}`);
+    } catch (e) {
+      console.error("Upload failed:", e);
+      toast.error("Upload failed", { description: String(e) });
+    } finally {
+      setUploading(false);
+    }
+  }, [projectId, sessionId, refreshDir]);
+
+  const handlePickUpload = useCallback(() => {
+    uploadInputRef.current?.click();
+  }, []);
+
+  const handleUploadInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    uploadSingleFile(file, uploadTargetDir, false);
+    e.target.value = "";
+  }, [uploadTargetDir, uploadSingleFile]);
+
+  const handleConfirmOverwrite = useCallback(async () => {
+    if (!pendingOverwrite) return;
+    const { file, directory } = pendingOverwrite;
+    setPendingOverwrite(null);
+    await uploadSingleFile(file, directory, true);
+  }, [pendingOverwrite, uploadSingleFile]);
+
+  const handleDownload = useCallback(() => {
+    if (!selectedPath) return;
+    const url = filesApi.downloadUrl(projectId, selectedPath, sessionId);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = selectedPath.split("/").pop() || "download";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }, [projectId, selectedPath, sessionId]);
+
+  const handleOpenInNewTab = useCallback(() => {
+    if (!selectedPath) return;
+    window.open(filesApi.serveUrl(projectId, selectedPath, sessionId), "_blank", "noopener");
+  }, [projectId, selectedPath, sessionId]);
+
+  const handleDelete = useCallback(async () => {
+    if (!selectedPath) return;
+    const path = selectedPath;
+    setDeleteConfirmOpen(false);
+    try {
+      await filesApi.delete(projectId, path, sessionId);
+      const parent = dirnameOf(path);
+      await refreshDir(parent);
+      setSelectedPath(null);
+      setHighlightedPath(null);
+      setFileContent(null);
+      setEditorValue("");
+      toast.success(`Deleted ${path.split("/").pop()}`);
+    } catch (e) {
+      console.error("Delete failed:", e);
+      toast.error("Delete failed", { description: String(e) });
+    }
+  }, [projectId, selectedPath, sessionId, refreshDir, setSelectedPath]);
+
+  // Drag-and-drop handlers
+  const handleDragStartItem = useCallback((entry: FileEntry, e: React.DragEvent) => {
+    e.dataTransfer.setData(INTERNAL_DRAG_TYPE, entry.path);
+    e.dataTransfer.effectAllowed = "move";
+    setDraggingPath(entry.path);
+  }, []);
+
+  const handleDragEndItem = useCallback(() => {
+    setDraggingPath(null);
+    setDragOverPath(null);
+    setRootDragOver(false);
+  }, []);
+
+  const isInternalDrag = (e: React.DragEvent): boolean => e.dataTransfer.types.includes(INTERNAL_DRAG_TYPE);
+  const isFileDrag = (e: React.DragEvent): boolean => e.dataTransfer.types.includes("Files");
+
+  const handleDragOverItem = useCallback((entry: FileEntry, e: React.DragEvent) => {
+    if (!entry.is_dir) return;
+    const internal = isInternalDrag(e);
+    const files = isFileDrag(e);
+    if (!internal && !files) return;
+    // Disallow dropping a node onto itself or into its own subtree.
+    if (internal && draggingPath) {
+      if (entry.path === draggingPath || entry.path.startsWith(draggingPath + "/")) return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = internal ? "move" : "copy";
+    setDragOverPath(entry.path);
+    setRootDragOver(false);
+  }, [draggingPath]);
+
+  const handleDragLeaveItem = useCallback((entry: FileEntry, e: React.DragEvent) => {
+    // Only clear if we're leaving this exact item (not bubbling from a child).
+    if (e.currentTarget === e.target && dragOverPath === entry.path) {
+      setDragOverPath(null);
+    }
+  }, [dragOverPath]);
+
+  const performMove = useCallback(async (fromPath: string, toDir: string) => {
+    const name = fromPath.split("/").pop() || fromPath;
+    const toPath = joinPath(toDir, name);
+    if (fromPath === toPath) return;
+    try {
+      await filesApi.move(projectId, fromPath, toPath, sessionId);
+      const oldParent = dirnameOf(fromPath);
+
+      // Optimistic local-state patch: remove from old parent immediately so the
+      // stale entry doesn't linger if the upcoming server refresh races. The
+      // refresh below still corrects ordering / metadata.
+      setChildrenMap((prev) => {
+        const next = { ...prev };
+        const oldList = next[oldParent];
+        if (oldList) {
+          next[oldParent] = oldList.filter((e) => e.path !== fromPath);
+        }
+        const newList = next[toDir];
+        if (newList && oldList) {
+          const moved = oldList.find((e) => e.path === fromPath);
+          if (moved && !newList.some((e) => e.path === toPath)) {
+            next[toDir] = [...newList, { ...moved, path: toPath, name }];
+          }
+        }
+        return next;
+      });
+
+      // Server-of-truth refresh (sequential to avoid any setState batching
+      // surprises between the two parents). refreshDir uses a non-incrementing
+      // gen snapshot so neither cancels the other, but sequential is also fine.
+      await refreshDir(oldParent);
+      if (oldParent !== toDir) {
+        await refreshDir(toDir);
+      }
+      if (selectedPath === fromPath) {
+        setSelectedPath(toPath);
+        setHighlightedPath(toPath);
+      }
+      toast.success(`Moved ${name}`);
+    } catch (e) {
+      console.error("Move failed:", e);
+      toast.error("Move failed", { description: String(e) });
+    }
+  }, [projectId, sessionId, refreshDir, selectedPath, setSelectedPath]);
+
+  const handleDropOnItem = useCallback(async (entry: FileEntry, e: React.DragEvent) => {
+    if (!entry.is_dir) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverPath(null);
+    setRootDragOver(false);
+
+    const internalPath = e.dataTransfer.getData(INTERNAL_DRAG_TYPE);
+    if (internalPath) {
+      if (internalPath === entry.path || entry.path.startsWith(internalPath + "/")) return;
+      await performMove(internalPath, entry.path);
+      return;
+    }
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      uploadSingleFile(file, entry.path, false);
+    }
+  }, [performMove, uploadSingleFile]);
+
+  const handleRootDragOver = useCallback((e: React.DragEvent) => {
+    const internal = isInternalDrag(e);
+    const files = isFileDrag(e);
+    if (!internal && !files) return;
+    // Only allow root-level drop when the dragged node isn't already a top-level entry.
+    if (internal && draggingPath && dirnameOf(draggingPath) === "") return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = internal ? "move" : "copy";
+    setRootDragOver(true);
+  }, [draggingPath]);
+
+  const handleRootDragLeave = useCallback((e: React.DragEvent) => {
+    if (e.currentTarget === e.target) setRootDragOver(false);
+  }, []);
+
+  const handleRootDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    setRootDragOver(false);
+    const internalPath = e.dataTransfer.getData(INTERNAL_DRAG_TYPE);
+    if (internalPath) {
+      if (dirnameOf(internalPath) === "") return;
+      await performMove(internalPath, "");
+      return;
+    }
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      uploadSingleFile(file, "", false);
+    }
+  }, [performMove, uploadSingleFile]);
+
+  // Debounced search
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
+      setSearchLoading(false);
+      return;
+    }
     setSearchLoading(true);
     clearTimeout(searchTimerRef.current);
     searchTimerRef.current = setTimeout(async () => {
       try {
         const results = await filesApi.search(projectId, searchQuery.trim(), searchType, sessionId);
         setSearchResults(results || []);
-      } catch {
+      } catch (e) {
+        console.error("Search failed:", e);
         setSearchResults([]);
       } finally {
         setSearchLoading(false);
@@ -473,103 +1157,60 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     setSearchResults([]);
   }, []);
 
-  // Upload
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploading, setUploading] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
+  const handleFileSearchMatchesFound = useCallback((total: number) => {
+    setFileSearchTotal(total);
+  }, []);
 
-  const handleUpload = useCallback(async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    setUploading(true);
-    try {
-      for (const file of Array.from(files)) {
-        const dir = selectedPath
-          ? (tree.some((e) => e.path === selectedPath && e.is_dir)
-            ? selectedPath
-            : selectedPath.includes("/") ? selectedPath.substring(0, selectedPath.lastIndexOf("/")) : ".")
-          : ".";
-        await filesApi.upload(projectId, file, dir, sessionId);
-      }
-      toast.success(`Uploaded ${files.length} file${files.length > 1 ? "s" : ""}`);
-      loadTree();
-    } catch (e: any) {
-      toast.error("Upload failed", { description: e.message });
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  }, [projectId, sessionId, selectedPath, tree, loadTree]);
+  const handleFileSearchNext = useCallback(() => {
+    setFileSearchCurrentIndex((index) => (fileSearchTotal === 0 ? 0 : (index + 1) % fileSearchTotal));
+  }, [fileSearchTotal]);
 
-  const handleDownload = useCallback(() => {
-    if (!selectedPath) return;
-    window.open(filesApi.downloadUrl(projectId, selectedPath, sessionId), "_blank");
-  }, [projectId, sessionId, selectedPath]);
-
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-
-  useEffect(() => {
-    if (!showDeleteConfirm) return;
-    const handler = (e: MouseEvent) => {
-      if (!(e.target as HTMLElement).closest("[data-delete-confirm]")) setShowDeleteConfirm(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [showDeleteConfirm]);
-
-  const handleDelete = useCallback(async () => {
-    if (!selectedPath) return;
-    setDeleting(true);
-    try {
-      await filesApi.delete(projectId, selectedPath, sessionId);
-      toast.success("File deleted");
-      setSelectedPath(null);
-      setFileContent(null);
-      setEditorContent("");
-      setIsDirty(false);
-      setShowDeleteConfirm(false);
-      loadTree();
-    } catch (e: any) {
-      toast.error("Delete failed", { description: e.message });
-    } finally {
-      setDeleting(false);
-    }
-  }, [projectId, sessionId, selectedPath, setSelectedPath, loadTree]);
+  const handleFileSearchPrev = useCallback(() => {
+    setFileSearchCurrentIndex((index) => (fileSearchTotal === 0 ? 0 : (index - 1 + fileSearchTotal) % fileSearchTotal));
+  }, [fileSearchTotal]);
 
   return (
     <div className="flex h-full">
       {/* File tree sidebar */}
-      <div
-        className={cn("w-56 shrink-0 border-r flex flex-col", isDragging && "ring-2 ring-inset ring-primary/50 bg-primary/5")}
-        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-        onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDragging(false); }}
-        onDrop={async (e) => { e.preventDefault(); setIsDragging(false); await handleUpload(e.dataTransfer.files); }}
-      >
+      <div className="w-56 shrink-0 border-r flex flex-col">
         <div className="flex items-center justify-between px-3 py-1.5 border-b shrink-0">
-          <span className="text-xs text-muted-foreground font-medium">{t("files.title")}</span>
+          <span className="text-xs text-muted-foreground font-medium">Files</span>
           <div className="flex items-center gap-0.5">
             <button
               onClick={handleToggleSearch}
-              className={cn("p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors", showSearch && "bg-accent text-foreground")}
-              title={t("files.search")}
+              className={cn(
+                "p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors",
+                showSearch && "bg-accent text-foreground"
+              )}
+              title="Search files"
             >
               <Search className="h-3.5 w-3.5" />
             </button>
             <button
-              onClick={() => fileInputRef.current?.click()}
+              onClick={handlePickUpload}
               disabled={uploading}
-              className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-              title={t("files.upload")}
+              className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+              title={uploadTargetDir ? `Upload into ${uploadTargetDir}` : "Upload to project root"}
             >
               {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
             </button>
-            <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(e) => handleUpload(e.target.files)} />
-            <button onClick={loadTree} className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors" title={t("files.refresh")}>
+            <input
+              ref={uploadInputRef}
+              type="file"
+              className="hidden"
+              onChange={handleUploadInputChange}
+            />
+            <button
+              onClick={reloadAll}
+              className="p-1 rounded hover:bg-accent text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+              title="Refresh"
+            >
               <RefreshCw className="h-3 w-3" />
             </button>
           </div>
         </div>
 
+        {/* Search bar */}
         {showSearch && (
           <div className="border-b px-2 py-1.5 space-y-1.5">
             <div className="flex items-center gap-1 bg-muted/50 rounded px-1.5">
@@ -579,7 +1220,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Escape") handleToggleSearch(); }}
-                placeholder={searchType === "name" ? t("files.search_name_placeholder") : t("files.search_content_placeholder")}
+                placeholder={searchType === "name" ? "File name..." : "Search in files..."}
                 className="flex-1 bg-transparent text-xs py-1 outline-none placeholder:text-muted-foreground/40"
               />
               {searchQuery && (
@@ -589,191 +1230,313 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               )}
             </div>
             <div className="flex gap-1">
-              {(["name", "content"] as const).map((type) => (
-                <button
-                  key={type}
-                  onClick={() => setSearchType(type)}
-                  className={cn(
-                    "text-[10px] px-1.5 py-0.5 rounded transition-colors",
-                    searchType === type ? "bg-primary/10 text-primary font-medium" : "text-muted-foreground/60 hover:text-muted-foreground"
-                  )}
-                >
-                  {t(`files.search_${type}`)}
-                </button>
-              ))}
+              <button
+                onClick={() => setSearchType("name")}
+                className={cn(
+                  "text-[10px] px-1.5 py-0.5 rounded transition-colors",
+                  searchType === "name"
+                    ? "bg-primary/10 text-primary font-medium"
+                    : "text-muted-foreground/60 hover:text-muted-foreground"
+                )}
+              >
+                Name
+              </button>
+              <button
+                onClick={() => setSearchType("content")}
+                className={cn(
+                  "text-[10px] px-1.5 py-0.5 rounded transition-colors",
+                  searchType === "content"
+                    ? "bg-primary/10 text-primary font-medium"
+                    : "text-muted-foreground/60 hover:text-muted-foreground"
+                )}
+              >
+                Content
+              </button>
             </div>
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto">
+        {/* Tree or search results */}
+        <div
+          className={cn(
+            "flex-1 overflow-y-auto",
+            rootDragOver && "ring-1 ring-inset ring-primary/60 bg-primary/5"
+          )}
+          onDragOver={handleRootDragOver}
+          onDragLeave={handleRootDragLeave}
+          onDrop={handleRootDrop}
+        >
           {showSearch && searchQuery ? (
-            <SearchResults results={searchResults} loading={searchLoading} searchType={searchType} searchQuery={searchQuery} onSelect={handleSelectFile} />
-          ) : loading ? (
+            <SearchResults
+              results={searchResults}
+              loading={searchLoading}
+              searchType={searchType}
+              query={searchQuery}
+              onSelect={handleSelectSearchResult}
+            />
+          ) : rootLoading ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
             </div>
-          ) : tree.length === 0 ? (
-            <div className="text-xs text-muted-foreground text-center py-8">{t("files.no_files")}</div>
+          ) : rootEntries.length === 0 ? (
+            <div className="text-xs text-muted-foreground text-center py-8">
+              No files found
+            </div>
           ) : (
-            compactedTree.map((entry) => (
+            rootEntries.map((entry) => (
               <FileTreeItem
                 key={entry.path}
                 entry={entry}
                 depth={0}
                 expanded={expanded}
-                onToggle={toggleExpand}
-                selectedPath={selectedPath}
+                onToggle={handleToggleExpand}
+                highlightedPath={highlightedPath}
                 onSelect={handleSelectFile}
+                onHighlight={setHighlightedPath}
+                getChildren={getChildren}
+                isLoading={isLoadingPath}
+                dragOverPath={dragOverPath}
+                onDragStartItem={handleDragStartItem}
+                onDragOverItem={handleDragOverItem}
+                onDragLeaveItem={handleDragLeaveItem}
+                onDropOnItem={handleDropOnItem}
+                onDragEndItem={handleDragEndItem}
               />
             ))
           )}
         </div>
       </div>
 
-      {/* File content viewer / editor */}
+      {/* File content viewer */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {selectedPath ? (
           <>
-            {/* Header bar */}
             <div className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 text-xs">
               <File className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
               <span className="font-mono truncate text-muted-foreground">{selectedPath}</span>
-              {isDirty && <span className="w-1.5 h-1.5 rounded-full bg-primary shrink-0" title="Unsaved changes" />}
-              <div className="ml-auto flex items-center gap-1.5 shrink-0">
-                {markdownPreviewAvailable && (
-                  <div className="flex items-center gap-1">
-                    {(["source", "rendered"] as const).map((mode) => (
-                      <button
-                        key={mode}
-                        onClick={() => setMarkdownMode(mode)}
-                        className={cn(
-                          "h-6 px-2 rounded border text-[11px] inline-flex items-center gap-1 transition-colors",
-                          markdownMode === mode
-                            ? "bg-accent text-accent-foreground border-border"
-                            : "text-muted-foreground hover:text-foreground hover:bg-accent/50 border-transparent"
-                        )}
-                      >
-                        {mode === "source" ? <><Code2 className="h-3 w-3" />Source</> : <><Eye className="h-3 w-3" />Rendered</>}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {fileContent && !fileContent.binary && (
+              {markdownPreviewAvailable && (
+                <div className="ml-auto flex items-center gap-1">
                   <button
-                    onClick={handleSave}
-                    disabled={!isDirty || saving}
+                    onClick={() => setMarkdownMode("source")}
                     className={cn(
                       "h-6 px-2 rounded border text-[11px] inline-flex items-center gap-1 transition-colors",
-                      isDirty
-                        ? "bg-primary text-primary-foreground border-primary hover:bg-primary/90"
-                        : "text-muted-foreground/40 border-transparent cursor-default"
+                      markdownMode === "source"
+                        ? "bg-accent text-accent-foreground border-border"
+                        : "text-muted-foreground hover:text-foreground hover:bg-accent/50 border-transparent"
                     )}
-                    title="Save (Ctrl+S)"
+                    title="View source markdown"
                   >
-                    {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
-                    Save
+                    <Code2 className="h-3 w-3" />
+                    Source
                   </button>
-                )}
-                {fileContent && (
-                  <span className="text-muted-foreground/70">{formatSize(fileContent.size)}</span>
-                )}
-                <button onClick={handleDownload} className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors" title={t("files.download")}>
+                  <button
+                    onClick={() => setMarkdownMode("rendered")}
+                    className={cn(
+                      "h-6 px-2 rounded border text-[11px] inline-flex items-center gap-1 transition-colors",
+                      markdownMode === "rendered"
+                        ? "bg-accent text-accent-foreground border-border"
+                        : "text-muted-foreground hover:text-foreground hover:bg-accent/50 border-transparent"
+                    )}
+                    title="View rendered markdown"
+                  >
+                    <Eye className="h-3 w-3" />
+                    Rendered
+                  </button>
+                </div>
+              )}
+              {editEnabled && fileContent && !fileContent.binary && (
+                <button
+                  onClick={handleSave}
+                  disabled={!isDirty || saving}
+                  className={cn(
+                    "h-6 px-2 rounded border text-[11px] inline-flex items-center gap-1 transition-colors shrink-0",
+                    !markdownPreviewAvailable && "ml-auto",
+                    isDirty
+                      ? "bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
+                      : "text-muted-foreground/50 border-transparent",
+                    saving && "opacity-50"
+                  )}
+                  title={isDirty ? "Save (Ctrl+S)" : "No changes"}
+                >
+                  {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                  Save
+                </button>
+              )}
+              {fileContent && !fileContent.binary && (
+                <span className={cn(
+                  "text-muted-foreground/40 shrink-0",
+                  !markdownPreviewAvailable && !(editEnabled && fileContent && !fileContent.binary) && "ml-auto",
+                )}>
+                  {formatSize(fileContent.size)}
+                </span>
+              )}
+              {selectedPath && isHtmlPath(selectedPath) && (
+                <button
+                  onClick={handleOpenInNewTab}
+                  className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                  title="Open rendered HTML in new tab"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </button>
+              )}
+              {selectedPath && (
+                <button
+                  onClick={handleDownload}
+                  className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                  title="Download"
+                >
                   <Download className="h-3.5 w-3.5" />
                 </button>
-                <div className="relative">
-                  <button onClick={() => setShowDeleteConfirm(true)} className="p-0.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors" title={t("files.delete")}>
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                  {showDeleteConfirm && (
-                    <div data-delete-confirm className="absolute right-0 top-full mt-1 z-50 bg-popover border rounded-md shadow-md p-2 flex items-center gap-1.5 whitespace-nowrap">
-                      <span className="text-xs text-muted-foreground">{t("files.delete_confirm")}</span>
-                      <button onClick={handleDelete} disabled={deleting} className="px-2 py-0.5 text-xs bg-destructive text-destructive-foreground rounded hover:bg-destructive/90">
-                        {deleting ? "..." : t("files.delete_btn")}
+              )}
+              {selectedPath && (
+                <Popover open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+                  <PopoverTrigger asChild>
+                    <button
+                      className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-destructive transition-colors shrink-0"
+                      title="Delete"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-56 p-3">
+                    <div className="text-xs text-foreground mb-1">Delete this file?</div>
+                    <div className="text-[11px] text-muted-foreground font-mono truncate mb-2">{selectedPath}</div>
+                    <div className="flex justify-end gap-1">
+                      <button
+                        onClick={() => setDeleteConfirmOpen(false)}
+                        className="h-6 px-2 rounded text-[11px] hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        Cancel
                       </button>
-                      <button onClick={() => setShowDeleteConfirm(false)} className="px-2 py-0.5 text-xs bg-muted text-muted-foreground rounded hover:bg-accent">
-                        {t("files.cancel")}
+                      <button
+                        onClick={handleDelete}
+                        className="h-6 px-2 rounded text-[11px] bg-destructive text-destructive-foreground hover:opacity-90 transition-opacity"
+                      >
+                        Delete
                       </button>
                     </div>
-                  )}
-                </div>
-              </div>
+                  </PopoverContent>
+                </Popover>
+              )}
             </div>
 
-            {/* Content area */}
             {loadingFile ? (
               <div className="flex-1 flex items-center justify-center">
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
               </div>
             ) : fileContent?.binary ? (
               <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-                {t("files.binary_file", { size: formatSize(fileContent.size) })}
+                Binary file ({formatSize(fileContent.size)})
               </div>
             ) : fileContent ? (
-              <div className="flex-1 min-h-0">
-                {markdownPreviewAvailable && markdownMode === "rendered" ? (
-                  <MarkdownRenderer
-                    content={editorContent}
-                    className="h-full overflow-auto px-4 py-3 markdown-content text-sm"
+              <div className="flex-1 min-h-0 relative">
+                {fileSearchVisible && (
+                  <FileSearchBar
+                    query={fileSearchQuery}
+                    caseSensitive={fileSearchCaseSensitive}
+                    currentIndex={fileSearchCurrentIndex}
+                    total={fileSearchTotal}
+                    onQueryChange={(query) => {
+                      setFileSearchQuery(query);
+                      setFileSearchCurrentIndex(0);
+                    }}
+                    onCaseSensitiveChange={(value) => {
+                      setFileSearchCaseSensitive(value);
+                      setFileSearchCurrentIndex(0);
+                    }}
+                    onPrev={handleFileSearchPrev}
+                    onNext={handleFileSearchNext}
+                    onClose={() => {
+                      setFileSearchVisible(false);
+                      setFileSearchQuery("");
+                    }}
                   />
+                )}
+                {markdownPreviewAvailable && markdownMode === "rendered" ? (
+                  <div ref={fileContentSelectableRef} className="h-full">
+                    <MarkdownRenderer
+                      content={fileContent.content}
+                      className="h-full overflow-auto px-4 py-3 markdown-content text-sm"
+                    />
+                  </div>
+                ) : editEnabled ? (
+                  <div className="h-full">
+                    <Suspense
+                      fallback={
+                        <div className="flex h-full items-center justify-center">
+                          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                        </div>
+                      }
+                    >
+                      <MonacoFileEditor
+                        filepath={selectedPath}
+                        value={editorValue}
+                        onChange={setEditorValue}
+                        onSave={handleSave}
+                      />
+                    </Suspense>
+                  </div>
                 ) : (
-                  <Suspense fallback={<div className="flex-1 flex items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>}>
-                    <MonacoEditor
-                      height="100%"
-                      language={getMonacoLanguage(selectedPath)}
-                      theme={monacoTheme}
-                      value={editorContent}
-                      onChange={(value) => {
-                        const v = value ?? "";
-                        setEditorContent(v);
-                        setIsDirty(v !== (fileContent?.content ?? ""));
-                      }}
-                      onMount={(editor, monaco) => {
-                        editorRef.current = editor;
-                        monacoRef.current = monaco;
-                        // Ctrl+S / Cmd+S to save
-                        editor.addCommand(
-                          monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
-                          () => handleSave(),
-                        );
-                        // Apply pending scroll target if file already loaded
-                        const target = scrollTargetRef.current;
-                        if (target) {
-                          scrollTargetRef.current = null;
-                          requestAnimationFrame(() => {
-                            applyScrollAndHighlight(editor, monaco, decorationsRef, target.line, target.query);
-                          });
-                        }
-                      }}
-                      options={{
-                        fontSize: 13,
-                        lineHeight: 20,
-                        fontFamily: "var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace)",
-                        minimap: { enabled: false },
-                        scrollBeyondLastLine: false,
-                        automaticLayout: true,
-                        wordWrap: isMarkdownPath(selectedPath) ? "on" : "off",
-                        tabSize: 2,
-                        renderWhitespace: "selection",
-                        smoothScrolling: true,
-                        cursorSmoothCaretAnimation: "on",
-                        padding: { top: 8, bottom: 8 },
+                  <div ref={fileContentSelectableRef} className="h-full">
+                    <CodeViewer
+                      content={fileContent.content}
+                      filepath={selectedPath}
+                      searchQuery={fileSearchQuery}
+                      caseSensitive={fileSearchCaseSensitive}
+                      currentMatchIndex={fileSearchCurrentIndex}
+                      onMatchesFound={handleFileSearchMatchesFound}
+                      scrollToLine={pendingTargetLine ?? undefined}
+                      onScrollToLineReady={(idx) => {
+                        if (idx >= 0) setFileSearchCurrentIndex(idx);
+                        setPendingTargetLine(null);
                       }}
                     />
-                  </Suspense>
+                  </div>
                 )}
               </div>
             ) : (
               <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-                {t("files.load_failed")}
+                Failed to load file
               </div>
             )}
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-            {t("files.select_file")}
+            Select a file to view
           </div>
         )}
       </div>
+
+      <Dialog
+        open={pendingOverwrite !== null}
+        onOpenChange={(open) => { if (!open) setPendingOverwrite(null); }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>File already exists</DialogTitle>
+            <DialogDescription>
+              <span className="font-mono text-foreground">{pendingOverwrite?.file.name}</span>
+              {" "}already exists in{" "}
+              <span className="font-mono text-foreground">{pendingOverwrite?.directory || "/"}</span>.
+              Do you want to overwrite it?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <button
+              onClick={() => setPendingOverwrite(null)}
+              className="h-8 px-3 rounded text-xs hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleConfirmOverwrite}
+              className="h-8 px-3 rounded text-xs bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
+            >
+              Overwrite
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

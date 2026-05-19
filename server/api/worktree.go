@@ -58,6 +58,50 @@ func (s *Server) ensureWorktree(sessionID string, session *Session, projectWorkD
 	return worktreeDir
 }
 
+// createWorkflowRunWorktree creates a fresh git worktree for a workflow run.
+// Returns the absolute worktree path on success. Caller is expected to persist
+// the path (e.g. on the WorkflowExecution row) and pass it to every session
+// spawned during the run.
+//
+// Naming: directory and branch are both `wfrun-{executionID[:8]}`. This lets a
+// human reading `git worktree list` immediately tie a worktree back to a run.
+func (s *Server) createWorkflowRunWorktree(executionID, projectID string) (string, error) {
+	project, err := s.getProjectWithLocalPath(projectID)
+	if err != nil || project == nil {
+		return "", fmt.Errorf("project not found")
+	}
+	if project.GitRepoPath == "" {
+		return "", fmt.Errorf("project has no git repo path configured")
+	}
+	check := exec.Command("git", "rev-parse", "--git-dir")
+	check.Dir = project.GitRepoPath
+	if err := check.Run(); err != nil {
+		return "", fmt.Errorf("project path is not a git repository")
+	}
+
+	shortID := executionID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+
+	worktreeDir := s.DataDir + "/worktrees/wfrun-" + shortID
+	branchName := "wfrun-" + shortID
+
+	if err := os.MkdirAll(s.DataDir+"/worktrees", 0755); err != nil {
+		return "", fmt.Errorf("create worktrees dir: %w", err)
+	}
+
+	cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreeDir)
+	cmd.Dir = project.GitRepoPath
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git worktree add: %w\n%s", err, out)
+	}
+
+	log.Printf("[worktree] Created workflow-run worktree %s (branch %s) for execution %s", worktreeDir, branchName, executionID)
+	return worktreeDir, nil
+}
+
 // SetWorktreeMode sets the worktree mode for a session before first message.
 // PUT /api/sessions/{sessionId}/worktree-mode
 func (s *Server) SetWorktreeMode(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +135,7 @@ func (s *Server) SetWorktreeMode(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "session is not bound to a project")
 			return
 		}
-		project, err := s.Store.GetProject(session.ProjectID)
+		project, err := s.getProjectWithLocalPath(session.ProjectID)
 		if err != nil || project == nil {
 			writeError(w, http.StatusBadRequest, "project not found")
 			return

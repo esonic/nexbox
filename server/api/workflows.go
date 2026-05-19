@@ -2,11 +2,13 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"gitlab.okg.com/sre_ai/nexbox/store"
 )
 
 // RegisterWorkflowRoutes registers workflow-related routes
@@ -39,6 +41,9 @@ func (s *Server) createWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userEmail := "local"
+	if s.Cloud != nil {
+		userEmail = s.Cloud.Info.UserName
+	}
 	projectID := r.URL.Query().Get("project_id")
 
 	if projectID == "" {
@@ -118,6 +123,10 @@ func (s *Server) updateWorkflow(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
+		if store.IsValidationError(err) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -142,12 +151,22 @@ func (s *Server) executeWorkflow(w http.ResponseWriter, r *http.Request) {
 	workflowID := chi.URLParam(r, "id")
 
 	var req struct {
-		TaskIDs     []string `json:"task_ids"`
-		UserContext string   `json:"user_context"`
+		Env map[string]string `json:"env"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return
+	// Empty body is allowed, but malformed JSON should not silently start a run
+	// with missing env values.
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&req); err != nil {
+		if !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	} else {
+		var extra struct{}
+		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
 	}
 
 	wf, err := s.Store.GetWorkflow(workflowID)
@@ -156,14 +175,11 @@ func (s *Server) executeWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var tasks []store.Task
-	for _, tid := range req.TaskIDs {
-		if t, err := s.Store.GetTask(tid); err == nil && t != nil {
-			tasks = append(tasks, *t)
-		}
-	}
-
-	if s.isWorkflowRunning(workflowID) {
+	// Block concurrent runs only when the workflow is NOT using worktree mode.
+	// Worktree-mode workflows isolate each run in its own git worktree/branch,
+	// so parallel runs are intentional. (Execute repeats this check under a
+	// lock; the duplicate here just gives callers a clean 409 instead of 500.)
+	if wf.WorktreeMode != "worktree" && s.isWorkflowRunning(workflowID) {
 		writeError(w, http.StatusConflict, "workflow is already running")
 		return
 	}
@@ -171,8 +187,7 @@ func (s *Server) executeWorkflow(w http.ResponseWriter, r *http.Request) {
 	exec, err := s.Execute(ExecuteWorkflowRequest{
 		WorkflowID:  workflowID,
 		ProjectID:   wf.ProjectID,
-		UserContext:  req.UserContext,
-		Tasks:       tasks,
+		Env:         req.Env,
 		TriggeredBy: "api",
 	})
 	if err != nil {

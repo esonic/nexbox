@@ -18,10 +18,8 @@ export interface CfgItem<V> {
 // ── Status definitions ──
 
 export const STATUS_LIST: CfgItem<TaskStatus>[] = [
-  { value: "open",        label: "Open",        color: "text-blue-500" },
-  { value: "in_progress", label: "In Progress", color: "text-[#f2994a]" },
-  { value: "done",        label: "Done",        color: "text-[#34a853]" },
-  { value: "closed",      label: "Closed",      color: "text-[#8b95a2]" },
+  { value: "open",   label: "Open",   color: "text-blue-500" },
+  { value: "closed", label: "Closed", color: "text-[#8b95a2]" },
 ];
 
 export const PRIORITY_LIST: CfgItem<TaskPriority>[] = [
@@ -49,5 +47,9 @@ export function normalizePriority(p: string): TaskPriority {
 // ── Helpers ──
 
 export function shortId(id: string): string {
+  if (id.startsWith("gl:")) {
+    const iid = id.slice(id.lastIndexOf(":") + 1);
+    return `#${iid}`;
+  }
   return id.slice(0, 6).toUpperCase();
 }

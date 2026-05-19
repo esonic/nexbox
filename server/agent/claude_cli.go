@@ -12,7 +12,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
-	"time"
 )
 
 // outboundCtrlSeq is a monotonically increasing counter for generating unique
@@ -21,11 +20,9 @@ var outboundCtrlSeq int64
 
 // ClaudeClient wraps the Claude CLI for programmatic use
 type ClaudeClient struct {
-	CLIPath      string            // Path to claude CLI (default: "claude")
-	Env          map[string]string // Additional environment variables
-	Verbose      bool              // Enable verbose logging
-	ContainerMgr *ContainerManager // Optional: run inside Docker container
-	ContainerID  string            // Container name/ID (set when ContainerMgr is active)
+	CLIPath string            // Path to claude CLI (default: "claude")
+	Env     map[string]string // Additional environment variables
+	Verbose bool              // Enable verbose logging
 }
 
 // NewClaudeClient creates a new Claude CLI client
@@ -46,29 +43,40 @@ type QueryOptions struct {
 	Resume         string   // Session ID to resume
 	SessionID      string   // Specific session ID to use
 	Model          string   // Model to use
+	Effort         string   // Reasoning effort level: low|medium|high|xhigh|max
 	AllowedTools   []string // List of allowed tools
 	PermissionMode string   // Permission mode: default, acceptEdits, plan, etc.
 	MCPConfigPath  string   // Path to MCP config file (enables --mcp-config and --strict-mcp-config)
 	PluginDirs     []string // Directories to pass via --plugin-dir
+
+	// ForkSession, when set with Resume, instructs the CLI to materialize a
+	// new session (new session id + new JSONL file) instead of appending to
+	// the resumed one. Maps to the `--fork-session` CLI flag.
+	ForkSession bool
+	// ResumeAtMessageUUID, when set with Resume + ForkSession, asks the CLI
+	// to truncate the parent's history at (and including) this assistant
+	// message UUID before continuing the new session. Maps to the hidden
+	// `--resume-session-at <uuid>` CLI flag (confirmed working on
+	// claude-code 2.1.119; not listed in --help but accepted by the parser).
+	ResumeAtMessageUUID string
 
 	// IncludePartialMessages enables --include-partial-messages, causing the CLI
 	// to emit stream_event messages with incremental text deltas.
 	// When true, CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1 is also set.
 	IncludePartialMessages bool
 
-	// UserInputHandler is called when the CLI sends a can_use_tool control_request
-	// for an interactive tool (e.g., AskUserQuestion). The handler shows the
-	// question to the user and blocks until they respond. If nil, all tools are
-	// auto-allowed (matching the old bypassPermissions behavior).
+	// UserInputHandler, when set, handles interactive tool calls (e.g. AskUserQuestion).
+	// The handler is called with (requestID, toolName, inputJSON) and should block
+	// until the user responds.
 	UserInputHandler UserInputHandler
+
+	// DisallowedTools lists tools that should be explicitly blocked.
+	DisallowedTools []string
 }
 
-// ---------------------------------------------------------------------------
-// Stream-JSON protocol types
-// ---------------------------------------------------------------------------
-
 // StreamMessage represents a message from Claude CLI stream-json output.
-// Covers: assistant, user, system, result, stream_event, control_request, control_response.
+// Covers: assistant, user, system, result, stream_event, control_request,
+// control_response, rate_limit_event.
 type StreamMessage struct {
 	Type      string          `json:"type"`
 	Subtype   string          `json:"subtype,omitempty"`
@@ -76,29 +84,60 @@ type StreamMessage struct {
 	UUID      string          `json:"uuid,omitempty"`
 	Message   json.RawMessage `json:"message,omitempty"`
 
-	// For result messages
-	Result        string                 `json:"result,omitempty"`
-	IsError       bool                   `json:"is_error,omitempty"`
-	DurationMs    int64                  `json:"duration_ms,omitempty"`
-	DurationApiMs int64                  `json:"duration_api_ms,omitempty"`
-	TotalCostUSD  float64                `json:"total_cost_usd,omitempty"`
-	Usage         map[string]interface{} `json:"usage,omitempty"`
-	NumTurns      int                    `json:"num_turns,omitempty"`
-	StopReason    string                 `json:"stop_reason,omitempty"`
-	Errors        []string               `json:"errors,omitempty"`
+	// ParentToolUseID is set on assistant/user JSONL lines emitted by a
+	// sub-agent. It points at the tool_use_id of the Task tool that
+	// launched this sub-agent. Empty/absent on main-agent messages and
+	// (per Claude SDK convention) on system/result messages.
+	ParentToolUseID string `json:"parent_tool_use_id,omitempty"`
 
-	// For system messages (general data payload)
+	// For result messages
+	Result        string                           `json:"result,omitempty"`
+	IsError       bool                             `json:"is_error,omitempty"`
+	DurationMs    int64                            `json:"duration_ms,omitempty"`
+	DurationApiMs int64                            `json:"duration_api_ms,omitempty"`
+	TotalCostUSD  float64                          `json:"total_cost_usd,omitempty"`
+	Usage         map[string]interface{}           `json:"usage,omitempty"`
+	ModelUsage    map[string]ClaudeModelUsageEntry `json:"modelUsage,omitempty"`
+	NumTurns      int                              `json:"num_turns,omitempty"`
+	StopReason    string                           `json:"stop_reason,omitempty"`
+	Errors        []string                         `json:"errors,omitempty"`
+
+	// For system messages (general data payload; legacy wrapper, rarely present)
 	Data map[string]interface{} `json:"data,omitempty"`
 
+	// InitModels carries the parsed `models[]` from the initialize
+	// control_response. Populated by the CLI wrapper before the synthetic
+	// `system.init_response` message is emitted so ClaudeAgent can refresh
+	// its cached model catalog opportunistically.
+	InitModels []ClaudeInitModel `json:"-"`
+
+	// For system.init messages (all fields are at top level)
+	Model             string                   `json:"model,omitempty"`
+	Cwd               string                   `json:"cwd,omitempty"`
+	PermissionMode    string                   `json:"permissionMode,omitempty"`
+	APIKeySource      string                   `json:"apiKeySource,omitempty"`
+	ClaudeCodeVersion string                   `json:"claude_code_version,omitempty"`
+	OutputStyle       string                   `json:"output_style,omitempty"`
+	FastModeState     string                   `json:"fast_mode_state,omitempty"`
+	Tools             []string                 `json:"tools,omitempty"`
+	MCPServers        []map[string]interface{} `json:"mcp_servers,omitempty"`
+	SlashCommands     []string                 `json:"slash_commands,omitempty"`
+	Agents            []string                 `json:"agents,omitempty"`
+	Skills            []string                 `json:"skills,omitempty"`
+	Plugins           []interface{}            `json:"plugins,omitempty"`
+
 	// For task_* system subtypes (fields are at top level, not inside data)
-	TaskID      string `json:"task_id,omitempty"`
-	Description string `json:"description,omitempty"`
-	Status      string `json:"status,omitempty"`
-	Summary     string `json:"summary,omitempty"`
+	TaskID       string `json:"task_id,omitempty"`
+	Description  string `json:"description,omitempty"`
+	Status       string `json:"status,omitempty"`
+	Summary      string `json:"summary,omitempty"`
 	LastToolName string `json:"last_tool_name,omitempty"`
 
 	// For stream_event messages (partial message streaming)
 	Event json.RawMessage `json:"event,omitempty"`
+
+	// For rate_limit_event messages.
+	RateLimitInfo *ClaudeRateLimitInfo `json:"rate_limit_info,omitempty"`
 
 	// For control_request messages
 	RequestID string          `json:"request_id,omitempty"`
@@ -106,6 +145,30 @@ type StreamMessage struct {
 
 	// For control_response messages
 	Response json.RawMessage `json:"response,omitempty"`
+}
+
+// ClaudeModelUsageEntry is the per-model usage block from result messages.
+// The `contextWindow` and `maxOutputTokens` fields are the authoritative
+// capacity values for the resolved model slug.
+type ClaudeModelUsageEntry struct {
+	InputTokens              int64   `json:"inputTokens"`
+	OutputTokens             int64   `json:"outputTokens"`
+	CacheReadInputTokens     int64   `json:"cacheReadInputTokens"`
+	CacheCreationInputTokens int64   `json:"cacheCreationInputTokens"`
+	WebSearchRequests        int64   `json:"webSearchRequests,omitempty"`
+	CostUSD                  float64 `json:"costUSD,omitempty"`
+	ContextWindow            int64   `json:"contextWindow,omitempty"`
+	MaxOutputTokens          int64   `json:"maxOutputTokens,omitempty"`
+}
+
+// ClaudeRateLimitInfo mirrors the payload of the `rate_limit_event` message.
+type ClaudeRateLimitInfo struct {
+	Status          string `json:"status,omitempty"`
+	ResetsAt        int64  `json:"resetsAt,omitempty"`
+	RateLimitType   string `json:"rateLimitType,omitempty"`
+	OverageStatus   string `json:"overageStatus,omitempty"`
+	OverageResetsAt int64  `json:"overageResetsAt,omitempty"`
+	IsUsingOverage  bool   `json:"isUsingOverage,omitempty"`
 }
 
 // AssistantContent represents content from an assistant message
@@ -140,22 +203,21 @@ type UserInputMessage struct {
 	Content string `json:"content"`
 }
 
-// ControlRequest is the request payload inside a control_request message.
-type ControlRequest struct {
-	Subtype              string                 `json:"subtype"`
-	ToolName             string                 `json:"tool_name,omitempty"`
-	Input                map[string]interface{} `json:"input,omitempty"`
-	PermissionSuggestions []interface{}          `json:"permission_suggestions,omitempty"`
-	BlockedPath          string                 `json:"blocked_path,omitempty"`
-	// Hook callback fields
-	CallbackID string      `json:"callback_id,omitempty"`
-	ToolUseID  string      `json:"tool_use_id,omitempty"`
-}
-
 // interactiveToolNames lists tool names that should be routed to the
 // UserInputHandler instead of being auto-allowed.
 var interactiveToolNames = map[string]bool{
 	"AskUserQuestion": true,
+}
+
+// ControlRequest is the request payload inside a control_request message.
+type ControlRequest struct {
+	Subtype               string                 `json:"subtype"`
+	ToolName              string                 `json:"tool_name,omitempty"`
+	Input                 map[string]interface{} `json:"input,omitempty"`
+	PermissionSuggestions []interface{}          `json:"permission_suggestions,omitempty"`
+	BlockedPath           string                 `json:"blocked_path,omitempty"`
+	CallbackID            string                 `json:"callback_id,omitempty"`
+	ToolUseID             string                 `json:"tool_use_id,omitempty"`
 }
 
 // StreamCallback is called for each streaming event
@@ -163,7 +225,7 @@ type StreamCallback func(msg StreamMessage, parsed *AssistantMessage)
 
 // Query sends a message to Claude and streams the response.
 // Uses the Agent SDK control protocol (no -p flag) for full bidirectional
-// communication, supporting interactive tools like AskUserQuestion.
+// communication.
 func (c *ClaudeClient) Query(
 	ctx context.Context,
 	prompt string,
@@ -177,40 +239,20 @@ func (c *ClaudeClient) Query(
 		log.Printf("[claude] Prompt: %s", prompt)
 	}
 
-	// Build the command — either directly on the host or inside a Docker container.
-	var cmd *exec.Cmd
-	if c.ContainerMgr != nil && c.ContainerID != "" {
-		var envSlice []string
-		for k, v := range c.Env {
-			envSlice = append(envSlice, k+"="+v)
-		}
-		containerWorkDir := ""
-		if opts.WorkDir != "" {
-			containerWorkDir = "/workspace"
-		}
-		cliCmd := append([]string{c.CLIPath}, args...)
-		cmd = c.ContainerMgr.ExecClaudeInContainer(c.ContainerID, cliCmd, envSlice, containerWorkDir)
-	} else {
-		cmd = exec.Command(c.CLIPath, args...)
-		cmd.Dir = opts.WorkDir
-	}
+	// Use exec.Command (not CommandContext) so we can control process group killing ourselves.
+	cmd := exec.Command(c.CLIPath, args...)
+	cmd.Dir = opts.WorkDir
 
-	// Create a new process group so we can kill all child processes
+	// Create a new process group so we can kill all child processes.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	// Set environment (host-only path; container env is passed via -e flags above)
-	if c.ContainerMgr == nil || c.ContainerID == "" {
-		cmd.Env = os.Environ()
-		for k, v := range c.Env {
-			cmd.Env = append(cmd.Env, k+"="+v)
-		}
-		if opts.IncludePartialMessages {
-			cmd.Env = append(cmd.Env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1")
-		}
-		// Ensure localhost connections (MCP server) bypass any HTTP_PROXY set in
-		// the parent process environment — without this, Claude Code would try to
-		// reach the local MCP server through the external proxy and fail.
-		cmd.Env = append(cmd.Env, "NO_PROXY=localhost,127.0.0.1,::1")
+	// Set environment.
+	cmd.Env = os.Environ()
+	for k, v := range c.Env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	if opts.IncludePartialMessages {
+		cmd.Env = append(cmd.Env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1")
 	}
 
 	stdin, err := cmd.StdinPipe()
@@ -253,44 +295,18 @@ func (c *ClaudeClient) Query(
 	// doneCh signals the context monitor that the main loop is done.
 	doneCh := make(chan struct{})
 
-	// Monitor context cancellation. First attempt a graceful interrupt by sending
-	// an interrupt control_request via stdin, which lets Claude finish its current
-	// API call and emit a result message (preserving token usage data). Fall back
-	// to SIGTERM/SIGKILL if the CLI does not exit within 5 s.
+	// Monitor context cancellation and kill the entire process group.
+	// We intentionally use force-kill behavior here to stop immediately.
 	go func() {
 		select {
 		case <-ctx.Done():
-			log.Printf("[claude] Context cancelled, sending interrupt control_request")
-			seq := atomic.AddInt64(&outboundCtrlSeq, 1)
-			interruptMsg := map[string]interface{}{
-				"type":       "control_request",
-				"request_id": fmt.Sprintf("sdk-interrupt-%d", seq),
-				"request":    map[string]interface{}{"subtype": "interrupt"},
-			}
-			if data, merr := json.Marshal(interruptMsg); merr == nil {
-				_ = writeStdin(append(data, '\n')) // best-effort; stdin may already be closing
-			}
-			// Wait for Claude to finish the current turn and exit gracefully.
-			select {
-			case <-doneCh:
-				log.Printf("[claude] Process exited gracefully after interrupt")
-				return
-			case <-time.After(5 * time.Second):
-			}
-			// Graceful interrupt timed out — escalate to SIGTERM.
 			if cmd.Process != nil {
 				pgid, perr := syscall.Getpgid(cmd.Process.Pid)
 				if perr == nil {
-					log.Printf("[claude] Interrupt timed out, sending SIGTERM to process group %d", pgid)
-					_ = syscall.Kill(-pgid, syscall.SIGTERM)
-					select {
-					case <-doneCh:
-						log.Printf("[claude] Process group %d exited after SIGTERM", pgid)
-					case <-time.After(5 * time.Second):
-						log.Printf("[claude] Process group %d still running, sending SIGKILL", pgid)
-						_ = syscall.Kill(-pgid, syscall.SIGKILL)
-					}
+					log.Printf("[claude] Context cancelled, killing process group %d", pgid)
+					_ = syscall.Kill(-pgid, syscall.SIGKILL)
 				} else {
+					log.Printf("[claude] Context cancelled, killing process %d", cmd.Process.Pid)
 					_ = cmd.Process.Kill()
 				}
 			}
@@ -326,7 +342,7 @@ func (c *ClaudeClient) Query(
 		if data, merr := json.Marshal(initMsg); merr == nil {
 			if werr := writeStdin(append(data, '\n')); werr != nil {
 				log.Printf("[claude] Failed to send initialize control_request: %v", werr)
-				initReqID = "" // won't try to match the response
+				initReqID = ""
 			}
 		}
 	}
@@ -381,13 +397,15 @@ func (c *ClaudeClient) Query(
 			continue
 		}
 
-		if c.Verbose {
+		if c.Verbose && msg.Type != "stream_event" {
 			log.Printf("[claude] Received: type=%s, subtype=%s", msg.Type, msg.Subtype)
 		}
 
 		// Handle control_request from CLI — bidirectional protocol.
+		// Interactive tools (AskUserQuestion) block waiting for user input,
+		// so handle them in a goroutine to avoid blocking the scanner loop.
 		if msg.Type == "control_request" {
-			c.handleControlRequest(ctx, msg, opts, writeStdin)
+			go c.handleControlRequest(ctx, msg, writeStdin, opts)
 			continue
 		}
 
@@ -400,14 +418,22 @@ func (c *ClaudeClient) Query(
 				}
 				if json.Unmarshal(msg.Response, &resp) == nil && resp.RequestID == initReqID {
 					log.Printf("[claude] Initialize handshake complete (keys: %v)", mapKeys(resp.Response))
-					// Relay to callback as a synthetic system message so claude_agent.go
-					// can extract available commands and other CLI capabilities.
+					// Re-parse the payload with a typed struct to extract the
+					// strongly-typed `models[]` slice without relying on the
+					// generic map[string]interface{} walk.
+					var typed struct {
+						Response struct {
+							Models []ClaudeInitModel `json:"models"`
+						} `json:"response"`
+					}
+					_ = json.Unmarshal(msg.Response, &typed)
 					callback(StreamMessage{
-						Type:    "system",
-						Subtype: "init_response",
-						Data:    resp.Response,
+						Type:       "system",
+						Subtype:    "init_response",
+						Data:       resp.Response,
+						InitModels: typed.Response.Models,
 					}, nil)
-					initReqID = "" // consumed
+					initReqID = ""
 				}
 			}
 			continue
@@ -485,8 +511,8 @@ func mapKeys(m map[string]interface{}) []string {
 func (c *ClaudeClient) handleControlRequest(
 	ctx context.Context,
 	msg StreamMessage,
-	opts QueryOptions,
 	writeStdin func([]byte) error,
+	opts QueryOptions,
 ) {
 	requestID := msg.RequestID
 	if requestID == "" {
@@ -494,7 +520,7 @@ func (c *ClaudeClient) handleControlRequest(
 		return
 	}
 
-	// Parse the request payload
+	// Parse the request payload.
 	var req ControlRequest
 	if err := json.Unmarshal(msg.Request, &req); err != nil {
 		log.Printf("[claude] Failed to parse control_request payload: %v", err)
@@ -507,18 +533,50 @@ func (c *ClaudeClient) handleControlRequest(
 	switch req.Subtype {
 	case "can_use_tool":
 		c.handleCanUseTool(ctx, writeStdin, requestID, req, opts)
-
 	case "hook_callback":
-		// Auto-continue for hooks — we don't register any hooks currently
+		// Auto-continue for hooks — we don't register any hooks currently.
 		c.sendControlSuccess(writeStdin, requestID, map[string]interface{}{
 			"continue": true,
 		})
-
 	default:
 		// For unrecognized subtypes (initialize, mcp_message, etc.),
 		// send a success response with empty payload to avoid blocking the CLI.
 		log.Printf("[claude] Unhandled control_request subtype=%q, auto-acknowledging", req.Subtype)
 		c.sendControlSuccess(writeStdin, requestID, map[string]interface{}{})
+	}
+}
+
+// sendControlSuccess writes a successful control_response to stdin.
+func (c *ClaudeClient) sendControlSuccess(writeStdin func([]byte) error, requestID string, response map[string]interface{}) {
+	msg := map[string]interface{}{
+		"type": "control_response",
+		"response": map[string]interface{}{
+			"subtype":    "success",
+			"request_id": requestID,
+			"response":   response,
+		},
+	}
+	data, _ := json.Marshal(msg)
+	if err := writeStdin(append(data, '\n')); err != nil {
+		log.Printf("[claude] Failed to write control_response: %v", err)
+	} else if c.Verbose {
+		log.Printf("[claude] Sent control_response: %s", string(data))
+	}
+}
+
+// sendControlError writes an error control_response to stdin.
+func (c *ClaudeClient) sendControlError(writeStdin func([]byte) error, requestID string, errMsg string) {
+	msg := map[string]interface{}{
+		"type": "control_response",
+		"response": map[string]interface{}{
+			"subtype":    "error",
+			"request_id": requestID,
+			"error":      errMsg,
+		},
+	}
+	data, _ := json.Marshal(msg)
+	if err := writeStdin(append(data, '\n')); err != nil {
+		log.Printf("[claude] Failed to write error control_response: %v", err)
 	}
 }
 
@@ -579,45 +637,11 @@ func (c *ClaudeClient) handleCanUseTool(
 		return
 	}
 
-	// Non-interactive tools: auto-allow (same as bypassPermissions)
+	// Non-interactive tools: auto-allow
 	c.sendControlSuccess(writeStdin, requestID, map[string]interface{}{
 		"behavior":     "allow",
 		"updatedInput": req.Input,
 	})
-}
-
-// sendControlSuccess writes a successful control_response to stdin.
-func (c *ClaudeClient) sendControlSuccess(writeStdin func([]byte) error, requestID string, response map[string]interface{}) {
-	msg := map[string]interface{}{
-		"type": "control_response",
-		"response": map[string]interface{}{
-			"subtype":    "success",
-			"request_id": requestID,
-			"response":   response,
-		},
-	}
-	data, _ := json.Marshal(msg)
-	if err := writeStdin(append(data, '\n')); err != nil {
-		log.Printf("[claude] Failed to write control_response: %v", err)
-	} else if c.Verbose {
-		log.Printf("[claude] Sent control_response: %s", string(data))
-	}
-}
-
-// sendControlError writes an error control_response to stdin.
-func (c *ClaudeClient) sendControlError(writeStdin func([]byte) error, requestID string, errMsg string) {
-	msg := map[string]interface{}{
-		"type": "control_response",
-		"response": map[string]interface{}{
-			"subtype":    "error",
-			"request_id": requestID,
-			"error":      errMsg,
-		},
-	}
-	data, _ := json.Marshal(msg)
-	if err := writeStdin(append(data, '\n')); err != nil {
-		log.Printf("[claude] Failed to write error control_response: %v", err)
-	}
 }
 
 // buildArgs constructs CLI arguments from options.
@@ -626,8 +650,6 @@ func (c *ClaudeClient) sendControlError(writeStdin func([]byte) error, requestID
 func (c *ClaudeClient) buildArgs(opts QueryOptions) []string {
 	args := []string{
 		// No -p flag: use Agent SDK mode for full control protocol support.
-		// This enables bidirectional communication via control_request/control_response,
-		// which is required for interactive tools like AskUserQuestion.
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
@@ -635,12 +657,24 @@ func (c *ClaudeClient) buildArgs(opts QueryOptions) []string {
 
 	if opts.Resume != "" {
 		args = append(args, "--resume", opts.Resume)
+		if opts.ForkSession {
+			// `--fork-session` only makes sense in combination with --resume
+			// (or --continue); the CLI rejects it otherwise.
+			args = append(args, "--fork-session")
+			if opts.ResumeAtMessageUUID != "" {
+				args = append(args, "--resume-session-at", opts.ResumeAtMessageUUID)
+			}
+		}
 	} else if opts.SessionID != "" {
 		args = append(args, "--session-id", opts.SessionID)
 	}
 
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
+	}
+
+	if opts.Effort != "" {
+		args = append(args, "--effort", opts.Effort)
 	}
 
 	if len(opts.AllowedTools) > 0 {
@@ -650,6 +684,11 @@ func (c *ClaudeClient) buildArgs(opts QueryOptions) []string {
 
 	args = append(args, "--tools", "default")
 
+	if len(opts.DisallowedTools) > 0 {
+		args = append(args, "--disallowed-tools")
+		args = append(args, opts.DisallowedTools...)
+	}
+
 	if opts.PermissionMode != "" {
 		args = append(args, "--permission-mode", opts.PermissionMode)
 	}
@@ -657,8 +696,7 @@ func (c *ClaudeClient) buildArgs(opts QueryOptions) []string {
 	// When a UserInputHandler is set, route tool permission prompts through
 	// the stdio control protocol so AskUserQuestion (and similar interactive
 	// tools) send can_use_tool control_requests instead of trying to prompt
-	// on the terminal. This mirrors the Python SDK's behavior of automatically
-	// setting --permission-prompt-tool stdio when can_use_tool is provided.
+	// on the terminal.
 	if opts.UserInputHandler != nil {
 		args = append(args, "--permission-prompt-tool", "stdio")
 	}
@@ -668,7 +706,7 @@ func (c *ClaudeClient) buildArgs(opts QueryOptions) []string {
 		args = append(args, "--mcp-config", opts.MCPConfigPath)
 	}
 
-	// Plugin directories
+	// Plugin directories.
 	for _, dir := range opts.PluginDirs {
 		args = append(args, "--plugin-dir", dir)
 	}

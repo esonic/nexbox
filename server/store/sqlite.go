@@ -1,36 +1,24 @@
 package store
 
-import (
-	"database/sql"
-	"fmt"
-)
+import "database/sql"
 
 var _ Store = (*SQLiteStore)(nil)
 
 // SQLiteStore implements the Store interface using SQLite.
 type SQLiteStore struct {
-	db *sql.DB
+	db *DB
 }
 
 // NewSQLiteStore creates a new SQLiteStore with the given database connection.
-func NewSQLiteStore(db *sql.DB) *SQLiteStore {
+func NewSQLiteStore(db *DB) *SQLiteStore {
 	return &SQLiteStore{db: db}
 }
 
-// DB exposes the underlying *sql.DB for use by non-Store code (e.g. MCP helpers).
-func (s *SQLiteStore) DB() *sql.DB {
+// DB exposes the wrapped *DB for use by non-Store code (e.g. MCP helpers).
+// Callers should use the wrapper's Query/Exec methods (not the raw *sql.DB)
+// so that CANTOPEN auto-reconnect logic is applied.
+func (s *SQLiteStore) DB() *DB {
 	return s.db
-}
-
-// Maintain performs periodic SQLite maintenance: WAL checkpoint and VACUUM.
-func (s *SQLiteStore) Maintain() error {
-	if _, err := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		return fmt.Errorf("wal_checkpoint: %w", err)
-	}
-	if _, err := s.db.Exec(`VACUUM`); err != nil {
-		return fmt.Errorf("vacuum: %w", err)
-	}
-	return nil
 }
 
 // GetTaskInfo returns minimal task data for agent context building.

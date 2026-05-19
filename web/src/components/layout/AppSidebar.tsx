@@ -1,5 +1,4 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
-import { useTranslation, Trans } from "react-i18next";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
   PanelLeftClose,
@@ -11,7 +10,6 @@ import {
   ChevronDown,
   Plus,
   FolderOpen,
-  FolderPlus,
   Settings,
   Cloud,
   CloudOff,
@@ -24,7 +22,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { sessionsApi, projectsApi, serverApi, marketplaceApi, authCloudApi, balanceApi, clearToken } from "@/lib/api";
+import { sessionsApi, projectsApi, serverApi, marketplaceApi } from "@/lib/api";
 import type { CloudInfo } from "@/lib/api";
 import { globalWS } from "@/lib/ws";
 import { cn, formatRelativeDate } from "@/lib/utils";
@@ -33,6 +31,7 @@ import { useLayoutStore } from "@/stores/layout";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { ProjectDialog } from "@/components/project/ProjectDialog";
 import { UNASSIGNED_PROJECT, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX } from "@/lib/constants";
+import { useSessionNotifications } from "@/hooks/useSessionNotifications";
 import type { Project, Session } from "@/types";
 
 // ── SessionRow ──────────────────────────────────────────────────────────
@@ -137,7 +136,6 @@ function SessionRow({
 // ── AppSidebar ──────────────────────────────────────────────────────────
 
 export function AppSidebar() {
-  const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
   const {
@@ -146,13 +144,13 @@ export function AppSidebar() {
     connectStatus, setConnectStatus,
     projects, setProjects,
     marketplaceUpdateCount, setMarketplaceUpdateCount,
-    currentUser,
-    balanceTokens, balanceCny, setBalance,
   } = useAppStore();
   const {
     sidebarCollapsed: collapsed, setSidebarCollapsed: setCollapsed,
     sidebarWidth, setSidebarWidth,
   } = useLayoutStore();
+
+  useSessionNotifications();
 
   // Resize
   const isResizing = useRef(false);
@@ -199,12 +197,6 @@ export function AppSidebar() {
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
 
-  // Delete project confirmation
-  const [deleteProjectDialogOpen, setDeleteProjectDialogOpen] = useState(false);
-  const [deletingProject, setDeletingProject] = useState<Project | null>(null);
-  const [deleteConfirmInput, setDeleteConfirmInput] = useState("");
-  const [deleteProjectLoading, setDeleteProjectLoading] = useState(false);
-
   // Project ... menu
   const [projectMenuId, setProjectMenuId] = useState<string | null>(null);
   const projectMenuRef = useRef<HTMLDivElement>(null);
@@ -217,10 +209,16 @@ export function AppSidebar() {
     try {
       const data = await sessionsApi.list();
       const list = data.sessions || [];
-      setSessions(list);
-      if (data.active_session_ids) {
-        initStreamingSessions(data.active_session_ids);
-      }
+      // The server filters hidden ("scratch") sessions out of the list, so
+      // refetching would otherwise wipe an active scratch session and
+      // orphan its activeSessionId. Preserve locally-known hidden sessions
+      // that the server didn't return; the server's copy wins for any
+      // session it does return (e.g. a just-promoted one).
+      const remoteIds = new Set(list.map((s) => s.id));
+      const prev = useAppStore.getState().sessions;
+      const preservedScratch = prev.filter((s) => s.is_hidden && !remoteIds.has(s.id));
+      setSessions([...list, ...preservedScratch]);
+      initStreamingSessions(data.active_session_ids || []);
     } catch (e) {
       console.error("Failed to load sessions:", e);
     }
@@ -229,49 +227,21 @@ export function AppSidebar() {
   const loadProjects = useCallback(async () => {
     try {
       const data = await projectsApi.list();
-      const list = data || [];
-      if (list.length === 0) {
-        // Auto-create a default project when none exist
-        try {
-          const defaultProj = await projectsApi.create({ name: "Default" });
-          setProjects([defaultProj]);
-          // Also create a default session so the user can start immediately
-          try {
-            const sess = await sessionsApi.create({ name: "New Chat", project_id: defaultProj.id });
-            setSessions([sess]);
-          } catch (e) {
-            console.error("Failed to create default session:", e);
-          }
-          return;
-        } catch (e) {
-          console.error("Failed to create default project:", e);
-        }
-      }
-      setProjects(list);
+      setProjects(data || []);
     } catch (e) {
       console.error("Failed to load projects:", e);
     }
-  }, [setSessions]);
+  }, []);
 
   const checkMarketplaceUpdates = useCallback(async () => {
-    // Local-only marketplace: no cloud update checking needed
+    // No remote registry – update count is always 0
     setMarketplaceUpdateCount(0);
   }, [setMarketplaceUpdateCount]);
-
-  const loadBalance = useCallback(async () => {
-    try {
-      const data = await balanceApi.get();
-      setBalance(data.balance_tokens, data.balance_cny);
-    } catch {
-      // balance endpoint may not be available
-    }
-  }, [setBalance]);
 
   useEffect(() => {
     loadSessions();
     loadProjects();
-    loadBalance();
-  }, [loadSessions, loadProjects, loadBalance]);
+  }, [loadSessions, loadProjects]);
 
   useEffect(() => {
     const timer = setTimeout(checkMarketplaceUpdates, 60 * 1000);
@@ -295,10 +265,6 @@ export function AppSidebar() {
       if (event.type === "change" && event.entity_type === "session") {
         loadSessions();
       }
-      // Refresh balance when agent execution finishes
-      if (event.type === "settle") {
-        loadBalance();
-      }
       if (event.type === "change" && event.entity_type === "notification") {
         const me = cloudUserRef.current;
         const recipient = event.recipient as string | undefined;
@@ -310,6 +276,33 @@ export function AppSidebar() {
             markNotificationUnread();
           }
         }
+      }
+      // OAuth authorization prompts from the MCP proxy.
+      if (event.type === "connector:needs_auth") {
+        const name = event.name as string;
+        const projectId = event.project_id as string | undefined;
+        toast.warning(`MCP "${name}" requires authorization`, {
+          id: `connector-needs-auth-${name}`, // dedup: only one toast per MCP
+          duration: Infinity,
+          closeButton: true,
+          description: "Authorize to enable this tool, then talk to AI again.",
+          action: {
+            label: "Authorize",
+            onClick: async () => {
+              try {
+                const { auth_url } = await marketplaceApi.oauthStart(name, projectId || undefined);
+                window.open(auth_url, "_blank", "noopener,noreferrer");
+              } catch (e: any) {
+                toast.error(`Cannot start OAuth for "${name}"`, { description: e.message });
+              }
+            },
+          },
+        });
+      }
+      if (event.type === "connector:connected") {
+        const name = event.name as string;
+        toast.dismiss(`connector-needs-auth-${name}`);
+        toast.success(`MCP "${name}" connected`);
       }
     });
   }, [loadSessions]);
@@ -405,6 +398,11 @@ export function AppSidebar() {
     const unbound: typeof sessions = [];
 
     for (const sess of sessions) {
+      // Hidden ("scratch") sessions are per-project staging buffers — they
+      // live in the store so the chat panel can render them, but the
+      // sidebar list and project session count both ignore them until
+      // they're promoted on first user message.
+      if (sess.is_hidden) continue;
       if (sess.project_id) {
         const proj = projectMap.get(sess.project_id);
         if (!proj) continue; // project unlinked locally — hide session
@@ -422,9 +420,13 @@ export function AppSidebar() {
 
     const sortSessions = (list: typeof sessions) =>
       [...list].sort((a, b) => {
-        // 按 updated_at 倒序（最近修改的在前）
-        const ta = new Date(a.updated_at || a.created_at).getTime();
-        const tb = new Date(b.updated_at || b.created_at).getTime();
+        // 1. 优先按 sort_order 排序（升序）
+        if (a.sort_order !== b.sort_order) {
+          return a.sort_order - b.sort_order;
+        }
+        // 2. sort_order 相同时，按 created_at 倒序（新创建的在前）
+        const ta = new Date(a.created_at).getTime();
+        const tb = new Date(b.created_at).getTime();
         return tb - ta;
       });
 
@@ -456,13 +458,25 @@ export function AppSidebar() {
   useEffect(() => {
     const visibleSessions = groupedSessions.flatMap((g) => g.sessions);
 
-    // If no sessions are loaded yet, don't do anything
-    if (visibleSessions.length === 0) return;
+    // All sessions deleted — clear active session so the UI shows empty state
+    if (visibleSessions.length === 0) {
+      // Don't clear when a hidden scratch session is active: that session
+      // is intentionally filtered out of the sidebar list but is the user's
+      // current chat surface and must remain selected.
+      const activeIsScratch = activeSessionId
+        ? sessions.some((s) => s.id === activeSessionId && s.is_hidden)
+        : false;
+      if (activeSessionId && !activeIsScratch) setActiveSessionId(null);
+      return;
+    }
 
     // If there's an activeSessionId (from persistence or previous selection)
     if (activeSessionId) {
-      // Check if it still exists in the current session list
-      const sessionExists = visibleSessions.some((s) => s.id === activeSessionId);
+      // Check if it still exists — either in the visible list, or as a
+      // hidden scratch session in the full store.
+      const sessionExists =
+        visibleSessions.some((s) => s.id === activeSessionId) ||
+        sessions.some((s) => s.id === activeSessionId && s.is_hidden);
       if (!sessionExists) {
         // Session no longer exists, fall back to first session
         console.log('[AppSidebar] Active session not found, selecting first session');
@@ -475,7 +489,7 @@ export function AppSidebar() {
     // No activeSessionId set, select the first available session
     console.log('[AppSidebar] No active session, selecting first session');
     setActiveSessionId(visibleSessions[0].id);
-  }, [groupedSessions, activeSessionId, setActiveSessionId]);
+  }, [groupedSessions, sessions, activeSessionId, setActiveSessionId]);
 
   // ── Session actions ──
 
@@ -499,6 +513,27 @@ export function AppSidebar() {
       toast.error("Failed to create session", { description: String(e) });
     }
   };
+
+  // Clicking a project row body activates that project's hidden ("scratch")
+  // session: a per-project staging surface for a new chat. The session is
+  // created lazily on first request (server-side) and gets promoted to a
+  // visible session automatically when the user sends the first message,
+  // so right-side panels (Files / Terminal / Workflow) and chat input all
+  // work just like a regular session in the meantime.
+  const handleSelectProject = useCallback(async (projectId: string) => {
+    try {
+      const scratch = await projectsApi.scratchSession(projectId);
+      const current = useAppStore.getState().sessions;
+      if (!current.some((s) => s.id === scratch.id)) {
+        setSessions([scratch, ...current]);
+      }
+      setActiveSessionId(scratch.id);
+      if (location.pathname !== "/") navigate("/");
+    } catch (e) {
+      console.error("Failed to open project scratch session:", e);
+      toast.error("Failed to open project", { description: String(e) });
+    }
+  }, [setSessions, setActiveSessionId, location.pathname, navigate]);
 
   const handleDeleteSession = async (sessionId: string) => {
     // Check if session has a dirty worktree and warn the user
@@ -539,6 +574,17 @@ export function AppSidebar() {
     }
   };
 
+  const handleRestoreSession = async (sessionId: string) => {
+    try {
+      const restored = await sessionsApi.restore(sessionId);
+      setTrashedSessions(trashedSessions.filter((s) => s.id !== sessionId));
+      setSessions([restored, ...sessions]);
+    } catch (e) {
+      console.error("Failed to restore session:", e);
+      toast.error("Failed to restore session", { description: String(e) });
+    }
+  };
+
   const [confirmEmptyTrash, setConfirmEmptyTrash] = useState(false);
   const handleEmptyTrash = async () => {
     try {
@@ -549,17 +595,6 @@ export function AppSidebar() {
     } catch (e) {
       console.error("Failed to empty trash:", e);
       toast.error("Failed to empty trash", { description: String(e) });
-    }
-  };
-
-  const handleRestoreSession = async (sessionId: string) => {
-    try {
-      const restored = await sessionsApi.restore(sessionId);
-      setTrashedSessions(trashedSessions.filter((s) => s.id !== sessionId));
-      setSessions([restored, ...sessions]);
-    } catch (e) {
-      console.error("Failed to restore session:", e);
-      toast.error("Failed to restore session", { description: String(e) });
     }
   };
 
@@ -596,27 +631,6 @@ export function AppSidebar() {
     setProjectDialogOpen(true);
   };
 
-  const handleOpenDeleteProject = (project: Project) => {
-    setDeletingProject(project);
-    setDeleteConfirmInput("");
-    setDeleteProjectDialogOpen(true);
-  };
-
-  const handleConfirmDeleteProject = async () => {
-    if (!deletingProject) return;
-    setDeleteProjectLoading(true);
-    try {
-      await projectsApi.delete(deletingProject.id);
-      handleProjectDeleted(deletingProject.id);
-      setDeleteProjectDialogOpen(false);
-    } catch (e) {
-      console.error("Failed to delete project:", e);
-      toast.error("Failed to delete project", { description: String(e) });
-    } finally {
-      setDeleteProjectLoading(false);
-    }
-  };
-
   const handleProjectSaved = (project: Project) => {
     if (editingProject) {
       setProjects(projects.map((p) => (p.id === project.id ? project : p)));
@@ -641,13 +655,6 @@ export function AppSidebar() {
       toast.error("Failed to unlink local directory", { description: String(e) });
     }
   };
-
-  // ── Logout ──
-  async function handleLogout() {
-    try { await authCloudApi.logout(); } catch {}
-    clearToken();
-    window.location.reload();
-  }
 
   // ── Server mode detection ──
   useEffect(() => {
@@ -688,7 +695,7 @@ export function AppSidebar() {
           <button
             onClick={() => setCollapsed(false)}
             className="p-1.5 rounded hover:bg-accent transition-colors"
-            title={t("sidebar.expand_sidebar")}
+            title="Expand sidebar"
           >
             <PanelLeftOpen className="h-4 w-4" />
           </button>
@@ -703,7 +710,7 @@ export function AppSidebar() {
                 ? "bg-accent text-foreground"
                 : "text-muted-foreground hover:text-foreground hover:bg-accent"
             )}
-            title={t("sidebar.marketplace")}
+            title={marketplaceUpdateCount > 0 ? `Customize (${marketplaceUpdateCount} update${marketplaceUpdateCount > 1 ? "s" : ""} available)` : "Customize"}
           >
             <Store className="h-4 w-4" />
             {marketplaceUpdateCount > 0 && (
@@ -718,7 +725,7 @@ export function AppSidebar() {
                 ? "bg-accent text-foreground"
                 : "text-muted-foreground hover:text-foreground hover:bg-accent"
             )}
-            title={connectStatus === "connected" ? t("sidebar.cloud") : t("sidebar.local")}
+            title={connectStatus === "connected" ? "Cloud" : "Local"}
           >
             {connectStatus === "connected" ? (
               <Cloud className="h-4 w-4 text-green-500" />
@@ -734,7 +741,7 @@ export function AppSidebar() {
                 ? "bg-accent text-foreground"
                 : "text-muted-foreground hover:text-foreground hover:bg-accent"
             )}
-            title={t("sidebar.settings")}
+            title="Settings"
           >
             <Settings className="h-4 w-4" />
           </button>
@@ -757,15 +764,15 @@ export function AppSidebar() {
             onClick={() => navigate("/")}
             className="flex items-center gap-2 font-bold text-lg hover:opacity-80"
           >
-            <img src="/favicon.svg" alt="BoxNex" className="w-7 h-7" aria-hidden="true" />
-            BoxNex
+            <img src="/favicon.svg" alt="BeeHub" className="w-7 h-7" aria-hidden="true" />
+            BeeHub
           </button>
           <div className="flex items-center gap-0.5">
             <ThemeToggle />
             <button
               onClick={() => setCollapsed(true)}
               className="p-1.5 rounded hover:bg-accent transition-colors text-muted-foreground hover:text-foreground"
-              title={t("sidebar.collapse_sidebar")}
+              title="Collapse sidebar"
             >
               <PanelLeftClose className="h-4 w-4" />
             </button>
@@ -777,10 +784,17 @@ export function AppSidebar() {
           <button
             onClick={() => {
               const realProjects = projects.filter((p) => p.name !== UNASSIGNED_PROJECT);
+              const localProjects = realProjects.filter((p) => p.git_repo_path);
+              if (realProjects.length === 0 && connectStatus === "connected") {
+                toast.info("Create a project first", {
+                  description: "Cloud mode requires a project to start a session.",
+                });
+                return;
+              }
               if (realProjects.length === 0) {
                 handleNewSession();
-              } else if (realProjects.length === 1) {
-                handleNewSession(realProjects[0].id);
+              } else if (localProjects.length === 1) {
+                handleNewSession(localProjects[0].id);
               } else {
                 setShowNewSessionMenu((v) => !v);
               }
@@ -788,16 +802,16 @@ export function AppSidebar() {
             className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
           >
             <SquarePen className="h-4 w-4 shrink-0 text-muted-foreground" />
-            <span>{t("sidebar.new_session")}</span>
+            <span>New session</span>
           </button>
 
           {/* Project picker dropdown */}
           {showNewSessionMenu && (
             <div className="absolute left-2 right-2 top-full z-50 mt-0.5 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
               <div className="px-3 py-2 text-xs font-medium text-muted-foreground border-b border-border bg-muted/30">
-                {t("sidebar.select_project")}
+                Select Project
               </div>
-              {projects.filter((p) => p.name !== UNASSIGNED_PROJECT).map((p) => (
+              {projects.filter((p) => p.name !== UNASSIGNED_PROJECT && p.git_repo_path).map((p) => (
                 <button
                   key={p.id}
                   onClick={() => { setShowNewSessionMenu(false); handleNewSession(p.id); }}
@@ -809,13 +823,13 @@ export function AppSidebar() {
               ))}
               {connectStatus !== "connected" && (
                 <>
-                  {projects.filter((p) => p.name !== UNASSIGNED_PROJECT).length > 0 && <div className="border-t border-border/50" />}
+                  {projects.filter((p) => p.name !== UNASSIGNED_PROJECT && p.git_repo_path).length > 0 && <div className="border-t border-border/50" />}
                   <button
                     onClick={() => { setShowNewSessionMenu(false); handleNewSession(); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
                   >
                     <span className="text-muted-foreground/60">—</span>
-                    <span>{t("sidebar.no_project")}</span>
+                    <span>No project</span>
                   </button>
                 </>
               )}
@@ -825,30 +839,21 @@ export function AppSidebar() {
 
         {/* ── Sessions section header ── */}
         <div className="flex items-center justify-between pl-4 pr-3 pt-2 pb-1.5 relative" ref={trashRef}>
-          <span className="text-[13px] font-medium text-muted-foreground/60">{t("sidebar.sessions")}</span>
-          <div className="flex items-center gap-0.5">
-            <button
-              onClick={() => setProjectDialogOpen(true)}
-              className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-              title={t("sidebar.new_project")}
-            >
-              <FolderPlus className="h-3.5 w-3.5" />
-            </button>
-            <button
-              onClick={handleOpenTrash}
-              className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-              title={t("sidebar.recently_deleted")}
-            >
-              <History className="h-3.5 w-3.5" />
-            </button>
-          </div>
+          <span className="text-[13px] font-medium text-muted-foreground/60">Sessions</span>
+          <button
+            onClick={handleOpenTrash}
+            className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+            title="Recently deleted"
+          >
+            <History className="h-3.5 w-3.5" />
+          </button>
           {/* Trash popover */}
           {showTrash && (
             <div className="absolute left-0 right-0 top-full z-50 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
               <div className="px-3 py-2 border-b border-border bg-muted/30 flex items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5">
                   <History className="h-3.5 w-3.5 text-muted-foreground/60 shrink-0" />
-                  <span className="text-xs font-medium text-muted-foreground">{t("sidebar.recently_deleted")}</span>
+                  <span className="text-xs font-medium text-muted-foreground">Recently Deleted</span>
                 </div>
                 <div className="flex items-center gap-0.5 relative">
                   {trashedSessions.length > 0 && (
@@ -886,13 +891,13 @@ export function AppSidebar() {
               </div>
               <div className="px-3 py-1.5 border-b border-border/50">
                 <p className="text-[11px] text-muted-foreground/60">
-                  {t("sidebar.trash_hint")}
+                  Sessions are permanently deleted after 7 days.
                 </p>
               </div>
               <div className="max-h-64 overflow-y-auto">
                 {trashedSessions.length === 0 ? (
                   <div className="px-3 py-4 text-[12px] text-muted-foreground/40 text-center">
-                    {t("sidebar.no_deleted_sessions")}
+                    No recently deleted sessions
                   </div>
                 ) : (
                   trashedSessions.map((s) => (
@@ -909,7 +914,7 @@ export function AppSidebar() {
                       <button
                         onClick={() => handleRestoreSession(s.id)}
                         className="shrink-0 p-1 rounded hover:bg-accent text-muted-foreground/50 hover:text-foreground transition-colors"
-                        title={t("sidebar.restore")}
+                        title="Restore session"
                       >
                         <RotateCcw className="h-3 w-3" />
                       </button>
@@ -929,20 +934,41 @@ export function AppSidebar() {
 
             return (
               <div key={groupKey} className="mb-1">
-                {/* Project group header */}
+                {/* Project group header. The chevron and the rest of the row
+                    are separate click targets: chevron toggles expand/collapse,
+                    the row body opens the project's scratch session so the
+                    user can start a new chat (and use Files/Terminal/Workflow
+                    in the meantime) without committing to a real session
+                    until they send the first message. */}
                 <div className="group flex items-center rounded-lg hover:bg-accent/30 transition-colors">
                   <button
-                    onClick={() => toggleProjectCollapsed(groupKey)}
-                    className="flex-1 flex items-center gap-1.5 px-2 py-1.5 min-w-0"
+                    onClick={(e) => { e.stopPropagation(); toggleProjectCollapsed(groupKey); }}
+                    className="flex items-center justify-center pl-2 py-1.5 shrink-0"
+                    title={isCollapsed ? "Expand" : "Collapse"}
                   >
                     {isCollapsed
-                      ? <ChevronRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
-                      : <ChevronDown className="h-3 w-3 text-muted-foreground/50 shrink-0" />}
+                      ? <ChevronRight className="h-3 w-3 text-muted-foreground/50" />
+                      : <ChevronDown className="h-3 w-3 text-muted-foreground/50" />}
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (group.projectId) {
+                        handleSelectProject(group.projectId);
+                      } else {
+                        // Unassigned group: keep legacy expand/collapse behavior
+                        // since there's no project to anchor a scratch session.
+                        toggleProjectCollapsed(groupKey);
+                      }
+                    }}
+                    className="flex-1 flex items-center gap-1.5 pl-1 pr-2 py-1.5 min-w-0"
+                  >
                     <FolderOpen className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
                     <span className="text-[13px] text-muted-foreground truncate">
-                      {group.project?.name === UNASSIGNED_PROJECT
-                        ? t("sidebar.unassigned")
-                        : (group.project?.name || t("sidebar.unassigned"))}
+                      {group.project?.name === UNASSIGNED_PROJECT ? "Unassigned" : (
+                        group.project?.namespace_id
+                          ? `${group.project.namespace_id}/${group.project.name}`
+                          : (group.project?.name || "Unassigned")
+                      )}
                     </span>
                     <span className="text-[11px] text-muted-foreground/30 tabular-nums ml-1.5 shrink-0">
                       {group.sessions.length}
@@ -954,7 +980,7 @@ export function AppSidebar() {
                       <button
                         onClick={(e) => { e.stopPropagation(); setProjectMenuId(projectMenuId === group.projectId ? null : group.projectId); }}
                         className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-all opacity-0 group-hover:opacity-100"
-                        title={t("sidebar.project_options")}
+                        title="Project options"
                       >
                         <MoreHorizontal className="h-3 w-3" />
                       </button>
@@ -962,7 +988,7 @@ export function AppSidebar() {
                       <button
                         onClick={(e) => { e.stopPropagation(); handleNewSession(group.projectId!); }}
                         className="p-1 mr-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-all"
-                        title={t("sidebar.new_session")}
+                        title="New session"
                       >
                         <Plus className="h-3 w-3" />
                       </button>
@@ -977,14 +1003,14 @@ export function AppSidebar() {
                             className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors"
                           >
                             <Settings className="h-3 w-3 text-muted-foreground" />
-                            {t("sidebar.settings")}
+                            Settings
                           </button>
                           <button
-                            onClick={(e) => { e.stopPropagation(); setProjectMenuId(null); handleOpenDeleteProject(group.project!); }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors text-destructive"
+                            onClick={(e) => { e.stopPropagation(); handleRemoveFromSidebar(group.project!); }}
+                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors text-muted-foreground"
                           >
-                            <Trash2 className="h-3 w-3" />
-                            {t("sidebar.delete_project")}
+                            <LogOut className="h-3 w-3" />
+                            Unlink Local
                           </button>
                         </div>
                       )}
@@ -1021,32 +1047,61 @@ export function AppSidebar() {
 
           {groupedSessions.length === 0 && sessions.length === 0 && (
             <div className="text-[12px] text-muted-foreground/40 text-center py-8">
-              {t("sidebar.no_projects_hint")}<br />
+              No working projects yet.<br />
               <button
-                onClick={() => { setEditingProject(null); setProjectDialogOpen(true); }}
+                onClick={() => navigate("/projects")}
                 className="text-primary/60 hover:text-primary underline-offset-2 hover:underline mt-1"
               >
-                {t("sidebar.new_project")}
+                Manage Projects
               </button>
             </div>
           )}
         </div>
 
-        {/* Cloud / Local connect button — hidden (no longer needed) */}
+        {/* ── Cloud / Local ── */}
+        <div className="px-2 pb-1 shrink-0">
+          <button
+            onClick={() => navigate("/connect")}
+            className={cn(
+              "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors",
+              location.pathname === "/connect"
+                ? "bg-accent text-foreground font-medium"
+                : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
+            )}
+          >
+            <div className="relative shrink-0">
+              {connectStatus === "connected" ? (
+                <Cloud className="h-4 w-4 text-green-500" />
+              ) : (
+                <CloudOff className="h-4 w-4" />
+              )}
+              {notificationUnread && connectStatus === "connected" && (
+                <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-red-500" />
+              )}
+            </div>
+            <span>{connectStatus === "connected" ? "Cloud" : "Local"}</span>
+            {connectStatus === "connected" && cloudInfo?.user_name && (
+              <span className="ml-auto text-[11px] text-muted-foreground/50 truncate max-w-[50%]">
+                {cloudInfo.user_name}
+              </span>
+            )}
+          </button>
+        </div>
 
         {/* ── Bottom nav ── */}
         <div className="px-2 pb-3 pt-1 shrink-0 space-y-0.5 border-t border-border/40 mt-1">
-          {balanceTokens > 0 && (
-            <div className="px-3 py-1.5 text-xs text-muted-foreground/70">
-              <span className="tabular-nums">{balanceTokens.toLocaleString()}</span>
-              <span className="ml-1">{t("sidebar.tokens")}</span>
-              {balanceCny > 0 && (
-                <span className="ml-1.5 text-muted-foreground/50">
-                  ≈ ¥{balanceCny.toFixed(2)}
-                </span>
-              )}
-            </div>
-          )}
+          <button
+            onClick={() => navigate("/projects")}
+            className={cn(
+              "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors mt-1",
+              location.pathname === "/projects"
+                ? "bg-accent text-foreground font-medium"
+                : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
+            )}
+          >
+            <LayoutGrid className="h-4 w-4 shrink-0" />
+            <span>Projects</span>
+          </button>
           <button
             onClick={() => navigate("/marketplace")}
             className={cn(
@@ -1062,7 +1117,7 @@ export function AppSidebar() {
                 <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-red-500" />
               )}
             </div>
-            <span>{t("sidebar.marketplace")}</span>
+            <span>Customize</span>
             {marketplaceUpdateCount > 0 && (
               <span className="ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-500/10 text-red-500">
                 {marketplaceUpdateCount}
@@ -1079,12 +1134,12 @@ export function AppSidebar() {
             )}
           >
             <Settings className="h-4 w-4 shrink-0" />
-            <span>{t("sidebar.settings")}</span>
+            <span>Settings</span>
           </button>
         </div>
       </div>
 
-      {/* Project Dialog (edit only) */}
+      {/* Project Dialog (edit-only from sidebar; delete is in Projects page) */}
       <ProjectDialog
         open={projectDialogOpen}
         onOpenChange={setProjectDialogOpen}
@@ -1093,59 +1148,6 @@ export function AppSidebar() {
         onDelete={handleProjectDeleted}
         hideDelete
       />
-
-      {/* Delete Project Confirmation Dialog */}
-      {deleteProjectDialogOpen && deletingProject && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="fixed inset-0 bg-black/50" onClick={() => setDeleteProjectDialogOpen(false)} />
-          <div className="relative bg-popover border rounded-lg shadow-lg p-5 w-[340px] space-y-4">
-            <h3 className="text-sm font-semibold">{t("sidebar.delete_project_title")}</h3>
-            <p className="text-xs text-muted-foreground">
-              <Trans
-                i18nKey="sidebar.delete_project_desc"
-                values={{ name: deletingProject.name }}
-                components={{ name: <span className="font-medium text-foreground" /> }}
-              />
-            </p>
-            <div className="space-y-1.5">
-              <label className="text-xs text-muted-foreground">
-                <Trans
-                  i18nKey="sidebar.delete_project_confirm_label"
-                  values={{ name: deletingProject.name }}
-                  components={{ name: <span className="font-medium text-foreground" /> }}
-                />
-              </label>
-              <input
-                value={deleteConfirmInput}
-                onChange={(e) => setDeleteConfirmInput(e.target.value)}
-                placeholder={deletingProject.name}
-                className="w-full h-8 px-2 text-sm border rounded-md bg-background outline-none focus:ring-1 focus:ring-ring"
-                autoFocus
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.nativeEvent.isComposing && deleteConfirmInput.trim() === deletingProject.name) {
-                    handleConfirmDeleteProject();
-                  }
-                }}
-              />
-            </div>
-            <div className="flex items-center justify-end gap-2">
-              <button
-                onClick={() => setDeleteProjectDialogOpen(false)}
-                className="px-3 py-1.5 text-xs rounded-md hover:bg-accent transition-colors"
-              >
-                {t("sidebar.cancel")}
-              </button>
-              <button
-                onClick={handleConfirmDeleteProject}
-                disabled={deleteProjectLoading || deleteConfirmInput.trim() !== deletingProject.name}
-                className="px-3 py-1.5 text-xs rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {deleteProjectLoading ? t("sidebar.deleting") : t("sidebar.delete_project")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Resize handle */}
       <div

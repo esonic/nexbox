@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# BoxNex Server Black-Box Integration Test
+# NexBox Server Black-Box Integration Test
 # =============================================================================
 # This script:
 #   1. Builds the server binary
@@ -14,7 +14,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMPDIR_BASE=$(mktemp -d)
 DATA_DIR="$TMPDIR_BASE/data"
-BINARY="$TMPDIR_BASE/boxnex"
+BINARY="$TMPDIR_BASE/beehub"
 SERVER_LOG="$TMPDIR_BASE/server.log"
 PORT=47321
 MCP_PORT=47322
@@ -467,7 +467,7 @@ log "=== Tests complete: $PASS passed, $FAIL failed, $TOTAL total ==="
 PASS_RATE=$(python3 -c "print(f'{$PASS/$TOTAL*100:.1f}%')" 2>/dev/null || echo "N/A")
 
 cat > "$REPORT" << HEADER
-# BoxNex Server Black-Box Test Report
+# NexBox Server Black-Box Test Report
 
 **Date**: $(date '+%Y-%m-%d %H:%M:%S')
 **Server Port**: $PORT | **MCP Port**: $MCP_PORT

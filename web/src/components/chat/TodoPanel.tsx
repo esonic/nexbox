@@ -33,7 +33,6 @@ export function TodoPanel({ todos, isPending }: TodoPanelProps) {
 
   return (
     <div className="border border-border rounded-lg overflow-hidden bg-background mb-3">
-      {/* Header */}
       <div className="flex items-center gap-2 px-4 py-2 border-b bg-muted/30">
         {isPending
           ? <Loader2 className="h-4 w-4 text-muted-foreground animate-spin" />
@@ -45,7 +44,6 @@ export function TodoPanel({ todos, isPending }: TodoPanelProps) {
         </span>
       </div>
 
-      {/* Task list */}
       <div className="px-3 py-2 space-y-0.5 max-h-[240px] overflow-y-auto">
         {todos.map((t) => {
           const { icon: S, color } = TODO_ICONS[t.status] ?? { icon: CircleDashed, color: "text-muted-foreground/40" };

@@ -5,9 +5,9 @@
  *   <IssueRow task={task} />                        // read-only, compact
  *   <IssueRow task={task} onStatusChange={...} />   // interactive
  */
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import { toast } from "sonner";
-import { Plus, Trash2, ChevronRight, ChevronDown, CornerRightUp, AtSign, MessageSquare } from "lucide-react";
+import { Plus, CornerRightUp, AtSign, MessageSquare } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -29,7 +29,7 @@ import {
   shortId,
 } from "./task-config";
 import { formatRelativeDate } from "@/lib/utils";
-import { STATUS_ICONS, PRIORITY_ICONS } from "./task-icons";
+import { STATUS_ICONS, PRIORITY_ICONS, TypeIssue, TypeTask } from "./task-icons";
 
 // ── Props ──
 
@@ -49,7 +49,6 @@ export interface IssueRowProps {
   /** Callbacks — omit any to make that part read-only. */
   onToggle?: (id: string) => void;
   onAddChild?: (id: string) => void;
-  onDelete?: (id: string) => void;
   onStatusChange?: (id: string, status: TaskStatus) => void;
   onPriorityChange?: (id: string, priority: TaskPriority) => void;
   onTitleChange?: (id: string, title: string) => void;
@@ -79,7 +78,6 @@ export function IssueRow({
   isExpanded = false,
   onToggle,
   onAddChild,
-  onDelete,
   onStatusChange,
   onPriorityChange,
   onTitleChange,
@@ -93,22 +91,9 @@ export function IssueRow({
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
-
-  useEffect(() => {
-    if (!confirmingDelete) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.closest("[data-delete-confirm]")) return;
-      setConfirmingDelete(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [confirmingDelete]);
-
   const status = normalizeStatus(task.status);
   const priority = normalizePriority(task.priority);
-  const isDone = status === "done" || status === "closed";
+  const isDone = status === "closed";
   const sc = STATUS_MAP.get(status)!;
   const pc = PRIORITY_MAP.get(priority)!;
   const StatusIcon = STATUS_ICONS[status];
@@ -207,30 +192,24 @@ export function IssueRow({
         onClick && "cursor-pointer",
         className
       )}
-      style={{ paddingLeft: compact ? 8 : (grouped ? 28 : 16) + depth * 20 }}
+      style={{ paddingLeft: compact ? 8 : (grouped ? 28 : 16) }}
       onClick={onClick ? () => onClick(task) : undefined}
     >
-      {/* Expand/collapse */}
-      {hasChildren && onToggle ? (
-        <button
-          onClick={(e) => { e.stopPropagation(); onToggle(task.id); }}
-          className="shrink-0 w-5 h-5 flex items-center justify-center rounded hover:bg-accent/60 transition-colors text-muted-foreground"
-        >
-          {isExpanded
-            ? <ChevronDown className="h-3 w-3" />
-            : <ChevronRight className="h-3 w-3" />}
-        </button>
-      ) : !compact && hasChildren !== undefined && (
-        <span className="shrink-0 w-5" />
-      )}
-
       {/* Priority */}
       {priorityCell}
+
+      {/* Type icon (Issue vs Task) */}
+      <span
+        className="shrink-0 w-5 h-5 flex items-center justify-center text-muted-foreground"
+        title={task.external_type || "Issue"}
+      >
+        {task.external_type === "Task" ? <TypeTask /> : <TypeIssue />}
+      </span>
 
       {/* Issue ID */}
       {!compact && (
         <span
-          className="shrink-0 w-[64px] pl-2 text-[11px] text-muted-foreground font-mono tabular-nums tracking-wide hover:text-foreground cursor-copy"
+          className="shrink-0 w-[64px] pl-2 text-[11px] font-mono tabular-nums tracking-wide cursor-copy text-muted-foreground hover:text-foreground"
           title={task.id}
           onClick={(e) => {
             e.stopPropagation();
@@ -273,12 +252,6 @@ export function IssueRow({
           </span>
         )}
 
-        {/* Child count badge */}
-        {hasChildren && !isExpanded && childCount > 0 && (
-          <span className="shrink-0 text-[10px] text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded tabular-nums">
-            {childCount}
-          </span>
-        )}
         {/* Project badge */}
         {projectName && (
           <span className="shrink-0 text-[10px] text-violet-500/80 bg-violet-500/10 px-1.5 py-0.5 rounded font-medium truncate max-w-[120px]" title={projectName}>
@@ -301,15 +274,6 @@ export function IssueRow({
         <div className="flex items-center shrink-0">
           {/* Hover actions */}
           <div className="hidden group-hover/row:flex items-center gap-0 mr-1">
-            {onPick && (
-              <button
-                onClick={(e) => { e.stopPropagation(); onPick(task); }}
-                className="p-1 rounded hover:bg-primary/10 text-muted-foreground/60 hover:text-primary transition-colors"
-                title="Send to chat"
-              >
-                <CornerRightUp className="h-3.5 w-3.5" />
-              </button>
-            )}
             {onAddChild && (
               <button
                 onClick={(e) => { e.stopPropagation(); onAddChild(task.id); }}
@@ -317,6 +281,15 @@ export function IssueRow({
                 title="Add sub-task"
               >
                 <Plus className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {onPick && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onPick(task); }}
+                className="p-1 rounded hover:bg-primary/10 text-muted-foreground/60 hover:text-primary transition-colors"
+                title="Send to chat"
+              >
+                <CornerRightUp className="h-3.5 w-3.5" />
               </button>
             )}
             <button
@@ -331,32 +304,14 @@ export function IssueRow({
             >
               <AtSign className="h-3.5 w-3.5" />
             </button>
-            {onDelete && (
-              <div className="relative">
-                <button
-                  onClick={(e) => { e.stopPropagation(); setConfirmingDelete(true); }}
-                  className="p-1 rounded hover:bg-destructive/10 text-muted-foreground/60 hover:text-destructive transition-colors"
-                  title="Delete"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-                {confirmingDelete && (
-                  <div data-delete-confirm className="absolute right-0 top-full mt-1 z-50 bg-popover border rounded-md shadow-md p-1.5 flex gap-1 whitespace-nowrap">
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onDelete(task.id); setConfirmingDelete(false); }}
-                      className="px-2 py-0.5 text-xs bg-destructive text-destructive-foreground rounded hover:bg-destructive/90"
-                    >
-                      Delete
-                    </button>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setConfirmingDelete(false); }}
-                      className="px-2 py-0.5 text-xs bg-muted text-muted-foreground rounded hover:bg-accent"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                )}
-              </div>
+            {onStatusChange && !isDone && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onStatusChange(task.id, "closed"); }}
+                className="p-1 rounded hover:bg-accent/60 text-muted-foreground/60 hover:text-foreground transition-colors"
+                title="Close"
+              >
+                <STATUS_ICONS.closed className="h-3.5 w-3.5" />
+              </button>
             )}
           </div>
 
@@ -375,14 +330,6 @@ export function IssueRow({
               >
                 <MessageSquare className="h-3 w-3" />
                 {task.comment_count}
-              </span>
-            )}
-            {task.ref_count > 0 && (
-              <span
-                className="shrink-0 text-[10px] text-primary/60 bg-primary/10 px-1.5 py-0.5 rounded tabular-nums font-medium"
-                title={`Referenced ${task.ref_count} time${task.ref_count > 1 ? "s" : ""} in chat`}
-              >
-                Ref {task.ref_count}
               </span>
             )}
             <span

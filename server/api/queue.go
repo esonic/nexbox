@@ -6,7 +6,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"gitlab.okg.com/sre_ai/nexbox/store"
 )
 
 func (s *Server) ListQueuedMessages(w http.ResponseWriter, r *http.Request) {

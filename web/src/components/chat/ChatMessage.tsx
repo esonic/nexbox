@@ -1,14 +1,17 @@
-import { useMemo, useState, useCallback, useRef, useEffect } from "react";
+import { useMemo, useState, useCallback, useRef, useEffect, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Loader2, Sparkles, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, ChevronDown, ChevronRight } from "lucide-react";
+import { Loader2, Sparkles, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, FileEdit } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { ToolCallCard, TODO_TOOLS, HIDDEN_TOOLS } from "@/components/chat/ToolCallCard";
-import { WidgetBlock } from "@/components/chat/WidgetBlock";
 import { ThinkingBlock } from "@/components/chat/ThinkingBlock";
+import { WidgetBlock } from "@/components/chat/WidgetBlock";
 import { IssueRow } from "@/plugins/task/IssueRow";
-import { messagesApi } from "@/lib/api";
+import { messagesApi, sessionsApi } from "@/lib/api";
+import { toast } from "sonner";
+import { useAppStore } from "@/stores/app";
+import { useSmoothText } from "@/hooks/useSmoothText";
 import type { ChatMessage as ChatMessageType, MessagePart, Task, AssetType } from "@/types";
 
 const ASSET_TYPE_CONFIG: Record<string, { label: string; color: string; icon: typeof FileText }> = {
@@ -203,7 +206,7 @@ function CollapsibleToolSteps({ parts }: { parts: MessagePart[] }) {
     const m: Record<string, { output: string; isError?: boolean }> = {};
     for (const p of parts) {
       if (p.type === "tool_result") {
-        m[p.toolCallId] = { output: p.output, isError: p.isError };
+        m[p.toolCallId] = { output: p.output ?? "", isError: p.isError };
       }
     }
     return m;
@@ -303,8 +306,9 @@ function StepsGroupBlock({
   );
 }
 
-function TextBlock({ content }: { content: string }) {
-  if (!content) return null;
+const TextBlock = memo(function TextBlock({ content, isStreaming }: { content: string; isStreaming?: boolean }) {
+  const visible = useSmoothText(content, !!isStreaming);
+  if (!visible) return null;
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -342,12 +346,12 @@ function TextBlock({ content }: { content: string }) {
         ),
       }}
     >
-      {content}
+      {visible}
     </ReactMarkdown>
   );
-}
+});
 
-function CopyButton({ text }: { text: string }) {
+export function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(() => {
@@ -369,17 +373,163 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function extractPlainText(parts: MessagePart[]): string {
+// ForkButton lets the user create a new session branched from a specific
+// assistant message. Renders nothing when fork is not applicable (user
+// message, still streaming, non-Claude backend, or no SDK message UUID
+// to anchor the cut on).
+export function ForkButton({ message }: { message: ChatMessageType }) {
+  const currentSession = useAppStore((s) => s.currentSession);
+  const sessions = useAppStore((s) => s.sessions);
+  const setSessions = useAppStore((s) => s.setSessions);
+  const setActiveSessionId = useAppStore((s) => s.setActiveSessionId);
+  const [busy, setBusy] = useState(false);
+
+  const canFork =
+    message.role === "assistant" &&
+    !message.isStreaming &&
+    currentSession?.agent === "claude" &&
+    !!message.metadata?.sdkMessageUuid;
+
+  const onClick = useCallback(async () => {
+    if (busy || !currentSession) return;
+    setBusy(true);
+    try {
+      const sdkUuid = message.metadata?.sdkMessageUuid;
+      if (!sdkUuid) return;
+      const newSess = await sessionsApi.fork(currentSession.id, sdkUuid);
+      setSessions([newSess, ...sessions.filter((s) => s.id !== newSess.id)]);
+      setActiveSessionId(newSess.id);
+    } catch (err) {
+      console.error("Fork failed:", err);
+      toast.error("Failed to fork session", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, currentSession, message.id, sessions, setSessions, setActiveSessionId]);
+
+  if (!canFork) return null;
+
+  return (
+    <button
+      onClick={onClick}
+      disabled={busy}
+      className="p-1 rounded-md text-muted-foreground/60 hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+      title="Fork conversation from this point"
+    >
+      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitFork className="h-3.5 w-3.5" />}
+    </button>
+  );
+}
+
+export function extractPlainText(parts: MessagePart[]): string {
   return parts
     .filter((p) => p.type === "text")
     .map((p) => (p as { type: "text"; content: string }).content)
     .join("");
 }
 
-export function ChatMessage({ message }: ChatMessageProps) {
+type FileChangeKind = "create" | "update" | "delete";
+interface FileChangeEntry {
+  path: string;
+  kind: FileChangeKind;
+}
+
+const FILE_WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "StrReplace", "Delete"]);
+
+function parseJSONSafe(s: string): Record<string, unknown> {
+  try { return JSON.parse(s); } catch { return {}; }
+}
+
+function kindFromToolName(name: string): FileChangeKind {
+  if (name === "Write") return "create";
+  if (name === "Delete") return "delete";
+  return "update";
+}
+
+function extractFileChanges(parts: MessagePart[]): FileChangeEntry[] {
+  const map = new Map<string, FileChangeKind>();
+  const rank: Record<FileChangeKind, number> = { update: 0, create: 1, delete: 2 };
+
+  for (const part of parts) {
+    if (part.type !== "tool_use") continue;
+    const { toolName, input } = part;
+
+    if (toolName === "FileChange") {
+      const parsed = parseJSONSafe(input);
+      const changes = parsed.changes as Array<{ path?: string; kind?: string }> | undefined;
+      if (!Array.isArray(changes)) continue;
+      for (const c of changes) {
+        if (!c?.path) continue;
+        const k = (c.kind === "create" || c.kind === "delete") ? c.kind : "update";
+        const prev = map.get(c.path);
+        if (prev == null || rank[k] > rank[prev]) map.set(c.path, k);
+      }
+      continue;
+    }
+
+    if (FILE_WRITE_TOOLS.has(toolName)) {
+      const parsed = parseJSONSafe(input);
+      const path = (parsed.file_path as string) || (parsed.path as string) || "";
+      if (!path) continue;
+      const k = kindFromToolName(toolName);
+      const prev = map.get(path);
+      if (prev == null || rank[k] > rank[prev]) map.set(path, k);
+    }
+  }
+
+  return Array.from(map.entries()).map(([path, kind]) => ({ path, kind }));
+}
+
+function toRelativePath(absPath: string, projectRoot: string | undefined): string {
+  if (!projectRoot) return absPath;
+  const root = projectRoot.endsWith("/") ? projectRoot : projectRoot + "/";
+  if (absPath === projectRoot) return ".";
+  if (absPath.startsWith(root)) return absPath.slice(root.length);
+  return absPath;
+}
+
+function FileChangesSummary({ files, projectRoot }: { files: FileChangeEntry[]; projectRoot?: string }) {
+  const [expanded, setExpanded] = useState(true);
+  if (files.length === 0) return null;
+
+  const summary = `${files.length} file${files.length === 1 ? "" : "s"} changed`;
+  const kindIcon: Record<FileChangeKind, string> = { create: "+", update: "~", delete: "-" };
+  const kindClass: Record<FileChangeKind, string> = {
+    create: "text-green-500",
+    update: "text-yellow-500",
+    delete: "text-red-500",
+  };
+
+  return (
+    <Collapsible open={expanded} onOpenChange={setExpanded} className="mt-2 rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
+      <CollapsibleTrigger className="flex items-center gap-2 w-full text-left px-3 py-2 text-xs hover:bg-muted/50 transition-colors outline-none">
+        {expanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+        <FileEdit className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <span className="font-medium">{summary}</span>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div className="px-3 pb-2 space-y-0.5 border-t border-border/30 pt-2">
+          {files.map((f, i) => (
+            <div key={i} className="flex items-center gap-2 text-[11px] font-mono">
+              <span className={cn("w-3 text-center shrink-0", kindClass[f.kind])}>{kindIcon[f.kind]}</span>
+              <span className="break-all text-muted-foreground" title={f.path}>
+                {toRelativePath(f.path, projectRoot)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+export const ChatMessage = memo(function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.role === "user";
   const [loadedParts, setLoadedParts] = useState<MessagePart[] | null>(null);
   const loadingRef = useRef(false);
+  const projectRoot = useAppStore((s) => s.currentProject?.git_repo_path);
 
   const effectiveParts = loadedParts || message.parts;
   const groups = useMemo(
@@ -392,6 +542,10 @@ export function ChatMessage({ message }: ChatMessageProps) {
     ? groups.length - 1
     : -1;
   const plainText = useMemo(() => extractPlainText(effectiveParts), [effectiveParts]);
+  const fileChanges = useMemo(
+    () => (isUser ? [] : extractFileChanges(effectiveParts)),
+    [isUser, effectiveParts],
+  );
 
   const loadDetails = useCallback(async (): Promise<boolean> => {
     if (loadedParts || loadingRef.current) return !!loadedParts;
@@ -423,11 +577,10 @@ export function ChatMessage({ message }: ChatMessageProps) {
     ? message.parts.filter((p) => p.type === "workflow_ref") as Array<{ type: "workflow_ref"; workflowId: string; name: string; nodeCount?: number; edgeCount?: number }>
     : [];
 
-
   return (
     <div
       className={cn(
-        "group/msg flex flex-row gap-4 w-full",
+        "flex flex-row gap-4 w-full",
         isUser && "justify-end",
       )}
     >
@@ -439,14 +592,14 @@ export function ChatMessage({ message }: ChatMessageProps) {
 
       <div
         className={cn(
-          "flex flex-col gap-1 text-sm leading-relaxed",
+          "flex flex-col gap-1 text-sm leading-relaxed min-w-0",
           isUser
             ? "max-w-[80%]"
             : "w-full",
         )}
       >
         {isUser ? (
-          <div className="relative">
+          <div>
             <div className="inline-block max-w-full space-y-2">
               {(plainText || userImages.length > 0) && (
                 <div className="rounded-2xl px-4 py-2.5 bg-muted overflow-hidden">
@@ -506,14 +659,9 @@ export function ChatMessage({ message }: ChatMessageProps) {
                 </div>
               )}
             </div>
-            {plainText && (
-              <div className="absolute -left-8 top-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
-                <CopyButton text={plainText} />
-              </div>
-            )}
           </div>
         ) : (
-          <div className="relative">
+          <div>
             <div className="rounded-2xl px-4 py-3 bg-muted/50 max-w-full">
               {groups.length === 0 && message.isStreaming && (
                 <div className="flex items-center gap-2 text-muted-foreground">
@@ -522,15 +670,23 @@ export function ChatMessage({ message }: ChatMessageProps) {
                 </div>
               )}
               {groups.map((group, gi) => {
+                const isLastGroup = gi === groups.length - 1;
+                const textIsStreaming = !!message.isStreaming && isLastGroup && group.type === "text";
                 switch (group.type) {
                   case "text":
                     return (
                       <div key={gi} className="markdown-content">
-                        {group.parts.map((part, pi) =>
-                          part.type === "text" ? (
-                            <TextBlock key={pi} content={part.content} />
-                          ) : null
-                        )}
+                        {group.parts.map((part, pi) => {
+                          if (part.type !== "text") return null;
+                          const isLastTextPart = pi === group.parts.length - 1;
+                          return (
+                            <TextBlock
+                              key={pi}
+                              content={part.content}
+                              isStreaming={textIsStreaming && isLastTextPart}
+                            />
+                          );
+                        })}
                       </div>
                     );
                   case "thinking":
@@ -586,15 +742,13 @@ export function ChatMessage({ message }: ChatMessageProps) {
                   <Loader2 className="size-3 animate-spin" />
                 </span>
               )}
+              {!message.isStreaming && fileChanges.length > 0 && (
+                <FileChangesSummary files={fileChanges} projectRoot={projectRoot} />
+              )}
             </div>
-            {plainText && !message.isStreaming && (
-              <div className="absolute -right-8 top-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
-                <CopyButton text={plainText} />
-              </div>
-            )}
           </div>
         )}
       </div>
     </div>
   );
-}
+});

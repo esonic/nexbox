@@ -30,10 +30,6 @@ func (s *Server) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
 	}
-	if GetUserRole(r) != "admin" && project.OwnerID != GetUserID(r) {
-		http.Error(w, "access denied", http.StatusForbidden)
-		return
-	}
 
 	workDir := project.GitRepoPath
 	if workDir == "" {
@@ -52,10 +48,6 @@ func (s *Server) HandleTerminalSessionWS(w http.ResponseWriter, r *http.Request)
 	session, err := s.Store.GetSession(sessionID)
 	if err != nil || session == nil {
 		http.Error(w, "session not found", http.StatusNotFound)
-		return
-	}
-	if GetUserRole(r) != "admin" && session.UserID != GetUserID(r) {
-		http.Error(w, "access denied", http.StatusForbidden)
 		return
 	}
 

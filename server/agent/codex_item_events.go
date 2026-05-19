@@ -45,26 +45,29 @@ func emitCodexItemStarted(item codexThreadItem, cb EventCallback) {
 		})
 
 	case "webSearch":
-		query := codexWebSearchQuery(item)
-		qJSON, _ := json.Marshal(map[string]string{"query": query})
+		toolName, inputJSON := codexWebSearchToolStart(item)
 		cb(StreamEvent{
 			Type:     EventToolStart,
 			ToolID:   item.ID,
-			ToolName: "WebSearch",
-			Input:    string(qJSON),
+			ToolName: toolName,
+			Input:    inputJSON,
 		})
 
 	case "fileChange":
-		changes := make([]codexFileChange, 0, len(item.Changes))
+		type fileChangeEntry struct {
+			Path string `json:"path"`
+			Kind string `json:"kind"`
+		}
+		changes := make([]fileChangeEntry, 0, len(item.Changes))
 		for _, ch := range item.Changes {
-			kind := strings.TrimSpace(strings.ToLower(ch.Kind))
+			kind := ch.Kind()
 			if kind == "add" {
 				kind = "create"
 			}
 			if kind == "" {
 				kind = "update"
 			}
-			changes = append(changes, codexFileChange{
+			changes = append(changes, fileChangeEntry{
 				Path: ch.Path,
 				Kind: kind,
 			})
@@ -139,6 +142,7 @@ func emitCodexItemCompleted(item codexThreadItem, agentStreamed, reasoningStream
 		cb(StreamEvent{
 			Type:   EventToolResult,
 			ToolID: item.ID,
+			Output: codexWebSearchResultText(item),
 		})
 
 	case "fileChange":
@@ -354,6 +358,79 @@ func codexGenericToolOutput(item codexThreadItem) string {
 	}
 	if len(item.Error) > 0 && string(item.Error) != "null" {
 		return string(item.Error)
+	}
+	return ""
+}
+
+// codexWebSearchToolStart picks a frontend tool name and input shape for a
+// webSearch item. Codex 0.124.0 distinguishes "search" / "openPage" /
+// "findInPage" / "other" via the `action` field; we map openPage to WebFetch
+// (so the UI shows the URL hostname) and everything else to WebSearch.
+func codexWebSearchToolStart(item codexThreadItem) (toolName, inputJSON string) {
+	action, _ := parseRawJSONMap(item.Action)
+	actionType := strings.ToLower(strings.TrimSpace(firstJSONMapString(action, "type")))
+
+	switch actionType {
+	case "openpage":
+		url := firstJSONMapString(action, "url")
+		if url == "" {
+			url = strings.TrimSpace(item.Query)
+		}
+		b, _ := json.Marshal(map[string]string{"url": url})
+		return "WebFetch", string(b)
+	case "findinpage":
+		pattern := firstJSONMapString(action, "pattern")
+		url := firstJSONMapString(action, "url")
+		query := strings.TrimSpace(item.Query)
+		if query == "" && pattern != "" && url != "" {
+			query = "'" + pattern + "' in " + url
+		}
+		if query == "" {
+			query = pattern
+		}
+		b, _ := json.Marshal(map[string]string{"query": query})
+		return "WebSearch", string(b)
+	default:
+		query := codexWebSearchQuery(item)
+		b, _ := json.Marshal(map[string]string{"query": query})
+		return "WebSearch", string(b)
+	}
+}
+
+// codexWebSearchResultText renders a short summary of what the search returned,
+// so the UI shows non-empty output when the dropdown is expanded.
+func codexWebSearchResultText(item codexThreadItem) string {
+	action, _ := parseRawJSONMap(item.Action)
+	actionType := strings.ToLower(strings.TrimSpace(firstJSONMapString(action, "type")))
+
+	switch actionType {
+	case "search":
+		if rawQueries, ok := action["queries"]; ok {
+			if list, ok := rawQueries.([]interface{}); ok && len(list) > 0 {
+				lines := make([]string, 0, len(list))
+				for _, q := range list {
+					if s := strings.TrimSpace(stringifyJSONValue(q)); s != "" {
+						lines = append(lines, "- "+s)
+					}
+				}
+				if len(lines) > 0 {
+					return "Searched: " + strings.Join(lines, "\n")
+				}
+			}
+		}
+	case "openpage":
+		if url := firstJSONMapString(action, "url"); url != "" {
+			return "Opened " + url
+		}
+	case "findinpage":
+		pattern := firstJSONMapString(action, "pattern")
+		url := firstJSONMapString(action, "url")
+		if pattern != "" && url != "" {
+			return "Found '" + pattern + "' in " + url
+		}
+	}
+	if q := strings.TrimSpace(item.Query); q != "" {
+		return q
 	}
 	return ""
 }

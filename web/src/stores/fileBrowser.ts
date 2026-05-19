@@ -32,7 +32,7 @@ export const useFileBrowserStore = create<FileBrowserState>()(
         set({ ownerProjectId: projectId, expanded: new Set(), selectedPath: null }),
     }),
     {
-      name: "boxnex-file-browser",
+      name: "nexbox-file-browser",
       // Only persist ownerProjectId + expanded. Never persist selectedPath.
       partialize: (state) => ({
         ownerProjectId: state.ownerProjectId,

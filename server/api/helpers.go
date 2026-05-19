@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,9 +10,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
-	"gitlab.okg.com/sre_ai/boxnex/config"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"gitlab.okg.com/sre_ai/nexbox/agent"
+	"gitlab.okg.com/sre_ai/nexbox/config"
+	"gitlab.okg.com/sre_ai/nexbox/store"
 )
 
 // getDefaultAgent reads the persisted default agent from config, falling back to in-memory value.
@@ -23,18 +26,30 @@ func (s *Server) getDefaultAgent() string {
 }
 
 // GetServerInfo returns basic server configuration info.
-// GET /api/info → {"agent": "claude", "mode": "local"|"needs_login"}
+// GET /api/info → {"agent": "claude", "mode": "local"|"cloud"|"needs_login"}
 func (s *Server) GetServerInfo(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Config.Get()
+
 	mode := "local"
-	if cfg.JWTSecret != "" {
+	if s.StoreMode == "remote" {
+		mode = "cloud"
+	} else if !cfg.DisableCloud && cfg.Token == "" {
+		// Cloud is the default but no token yet — prompt the user to log in
 		mode = "needs_login"
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+
+	info := map[string]interface{}{
 		"agent":   s.getDefaultAgent(),
 		"mode":    mode,
 		"version": s.Version,
-	})
+	}
+	if s.StoreMode == "remote" {
+		info["server_url"] = cfg.ServerURL
+		if s.Cloud != nil {
+			info["user_name"] = s.Cloud.Info.UserName
+		}
+	}
+	writeJSON(w, http.StatusOK, info)
 }
 
 // ListAvailableAgents returns all registered agent backends.
@@ -47,6 +62,59 @@ func (s *Server) ListAvailableAgents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"agents":  names,
 		"default": s.getDefaultAgent(),
+	})
+}
+
+// ListAvailableModels returns the available model catalog for an agent.
+// GET /api/available-models?agent=codex → {
+//   "agent":       "codex",
+//   "models":      ["gpt-5.4", ...],                           // legacy string list
+//   "models_info": [{id, label, description, supported_efforts, default_effort, is_default, ...}, ...],
+//   "source":      "dynamic|none"
+// }
+//
+// Both agents expose this information directly via their CLIs:
+//   - Claude: `initialize` control_response → `models[]` with `supportsEffort`
+//             and `supportedEffortLevels`.
+//   - Codex: `model/list` RPC → `Model[]` with `supportedReasoningEfforts`
+//            and `defaultReasoningEffort`.
+// There is no curated catalog on our side.
+func (s *Server) ListAvailableModels(w http.ResponseWriter, r *http.Request) {
+	agentName := strings.TrimSpace(r.URL.Query().Get("agent"))
+	if agentName == "" {
+		agentName = s.getDefaultAgent()
+	}
+	backend, ok := s.Agents[agentName]
+	if !ok {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent: %q", agentName))
+		return
+	}
+
+	var info []agent.ModelInfo
+	source := "none"
+
+	// Allow up to ~10s for the first-ever probe (init handshake for Claude is
+	// ~3-4s cold; subsequent calls are served from cache instantly).
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	switch a := backend.(type) {
+	case *agent.CodexAgent:
+		info, source = a.ListSupportedModels(ctx)
+	case *agent.ClaudeAgent:
+		info, source = a.ListSupportedModels(ctx)
+	}
+
+	ids := make([]string, 0, len(info))
+	for _, m := range info {
+		ids = append(ids, m.ID)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"agent":       agentName,
+		"models":      ids,
+		"models_info": info,
+		"source":      source,
 	})
 }
 
@@ -98,25 +166,30 @@ func isVisibleChange(c store.Change, joined map[string]bool) bool {
 	return joined[c.ProjectID]
 }
 
-// getProjectWithLocalPath fetches a project by ID.
+// getProjectWithLocalPath fetches a project and patches git_repo_path from
+// local config in cloud mode (remote store doesn't hold local paths).
 func (s *Server) getProjectWithLocalPath(id string) (*store.Project, error) {
-	return s.Store.GetProject(id)
-}
-
-// isSubPath reports whether child is a sub-path of parent.
-func isSubPath(parent, child string) bool {
-	rel, err := filepath.Rel(parent, child)
-	if err != nil {
-		return false
+	project, err := s.Store.GetProject(id)
+	if err != nil || project == nil {
+		return project, err
 	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	if s.StoreMode == "remote" {
+		for _, m := range s.Config.Get().Projects {
+			if m.RemoteID == project.ID {
+				project.GitRepoPath = m.GitRepoPath
+				break
+			}
+		}
+	}
+	return project, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Headers already sent; cannot change status code. Log the error.
+		log.Printf("[api] writeJSON encode error: %v", err)
 	}
 }
 
@@ -127,11 +200,16 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-// writeStoreError logs the original error and writes a generic error response.
+// writeStoreError logs the original error and maps remote ApiError to its real status/message.
 // Returns true when an error response has been written.
 func writeStoreError(w http.ResponseWriter, err error, op, fallback string) bool {
 	if err == nil {
 		return false
+	}
+	if ae, ok := err.(*store.ApiError); ok {
+		log.Printf("[api] %s remote error: status=%d message=%s", op, ae.StatusCode, ae.Message)
+		writeError(w, ae.StatusCode, ae.Message)
+		return true
 	}
 	log.Printf("[api] %s error: %v", op, err)
 	writeError(w, http.StatusInternalServerError, fallback)
@@ -311,6 +389,8 @@ func (s *Server) GetSettings(w http.ResponseWriter, r *http.Request) {
 		"has_gitlab_token":    cfg.GitLabToken != "",
 		"masked_gitlab_token": maskedGitLabToken,
 		"disable_cloud":       cfg.DisableCloud,
+		"chrome_headless":     cfg.ChromeHeadless,
+		"enable_file_edit":    cfg.EnableFileEdit,
 	})
 }
 
@@ -318,10 +398,11 @@ func (s *Server) GetSettings(w http.ResponseWriter, r *http.Request) {
 // PUT /api/settings
 func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DefaultAgent *string `json:"default_agent,omitempty"`
-		Token        *string `json:"token,omitempty"`
-		GitLabToken  *string `json:"gitlab_token,omitempty"`
-		DisableCloud *bool   `json:"disable_cloud,omitempty"`
+		DefaultAgent   *string `json:"default_agent,omitempty"`
+		Token          *string `json:"token,omitempty"`
+		GitLabToken    *string `json:"gitlab_token,omitempty"`
+		DisableCloud   *bool   `json:"disable_cloud,omitempty"`
+		ChromeHeadless *bool   `json:"chrome_headless,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -350,6 +431,9 @@ func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.DisableCloud != nil {
 			cfg.DisableCloud = *req.DisableCloud
+		}
+		if req.ChromeHeadless != nil {
+			cfg.ChromeHeadless = *req.ChromeHeadless
 		}
 	}); err != nil {
 		log.Printf("[api] UpdateSettings persist error: %v", err)

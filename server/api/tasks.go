@@ -7,7 +7,8 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"gitlab.okg.com/sre_ai/nexbox/gitlab"
+	"gitlab.okg.com/sre_ai/nexbox/store"
 )
 
 func (s *Server) ListTasks(w http.ResponseWriter, r *http.Request) {
@@ -15,28 +16,29 @@ func (s *Server) ListTasks(w http.ResponseWriter, r *http.Request) {
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	projectID := r.URL.Query().Get("project_id")
 	search := r.URL.Query().Get("q")
+	source := r.URL.Query().Get("source") // "local" to force DB read (used during migration)
 
-	var projectIDs []string
-	if projectID != "" {
-		// Validate the requesting user can access this project.
-		if GetUserRole(r) != "admin" {
-			project, err := s.Store.GetProject(projectID)
-			if err != nil || project == nil || project.OwnerID != GetUserID(r) {
-				writeError(w, http.StatusForbidden, "access denied")
+	// GitLab project → fetch from GitLab API (unless source=local is requested)
+	if projectID != "" && source != "local" {
+		if info := s.resolveGitLabProject(projectID); info != nil {
+			tasks, err := s.gitlabListTasks(r.Context(), info, projectID, limit, offset, search)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "gitlab: "+err.Error())
 				return
 			}
+			writeJSON(w, http.StatusOK, tasks)
+			return
 		}
+	}
+
+	// Local store
+	var projectIDs []string
+	if projectID != "" {
 		projectIDs = []string{projectID}
-	} else if GetUserRole(r) != "admin" {
-		// Scope to the user's own projects so tasks from other users are never leaked.
-		allProjects, err := s.Store.ListProjects()
-		if err == nil {
-			userID := GetUserID(r)
-			for _, p := range allProjects {
-				if p.OwnerID == userID {
-					projectIDs = append(projectIDs, p.ID)
-				}
-			}
+	} else if joined := s.joinedProjectIDs(); joined != nil {
+		projectIDs = make([]string, 0, len(joined))
+		for id := range joined {
+			projectIDs = append(projectIDs, id)
 		}
 	}
 
@@ -61,14 +63,20 @@ func (s *Server) CreateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "title is required")
 		return
 	}
-	// Validate project ownership so users can only create tasks in their own projects.
-	if req.ProjectID != "" && GetUserRole(r) != "admin" {
-		project, err := s.Store.GetProject(req.ProjectID)
-		if err != nil || project == nil || project.OwnerID != GetUserID(r) {
-			writeError(w, http.StatusForbidden, "access denied")
+
+	// GitLab project → create via GitLab API
+	if info := s.resolveGitLabProject(req.ProjectID); info != nil {
+		task, err := s.gitlabCreateTask(r.Context(), info, req.ProjectID, req)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "gitlab: "+err.Error())
 			return
 		}
+		s.Hub.NotifyChange("task", task.ID, "created")
+		writeJSON(w, http.StatusCreated, task)
+		return
 	}
+
+	// Local store — validate parent (max 1 level)
 	if req.ParentID != "" {
 		parent, err := s.Store.GetTask(req.ParentID)
 		if err != nil || parent == nil {
@@ -102,6 +110,25 @@ func (s *Server) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) GetTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "taskId")
+
+	// GitLab task
+	if gitlab.IsGitLabTaskID(id) {
+		info, iid, err := s.resolveGitLabTask(id)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		projectID, _, _ := gitlab.ParseTaskID(id)
+		task, err := s.gitlabGetTask(r.Context(), info, projectID, iid)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "gitlab: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, task)
+		return
+	}
+
+	// Local store
 	task, err := s.Store.GetTask(id)
 	if writeStoreError(w, err, "GetTask", "failed to get task") {
 		return
@@ -121,7 +148,25 @@ func (s *Server) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Capture old assigner before update to detect changes
+	// GitLab task
+	if gitlab.IsGitLabTaskID(id) {
+		info, iid, err := s.resolveGitLabTask(id)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		projectID, _, _ := gitlab.ParseTaskID(id)
+		task, err := s.gitlabUpdateTask(r.Context(), info, projectID, iid, req)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "gitlab: "+err.Error())
+			return
+		}
+		s.Hub.NotifyChange("task", id, "updated")
+		writeJSON(w, http.StatusOK, task)
+		return
+	}
+
+	// Local store
 	var oldAssigner string
 	var gotOldTask bool
 	if req.Assigner != nil {
@@ -146,7 +191,6 @@ func (s *Server) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Hub.NotifyChange("task", id, "updated")
 
-	// Notify new assigner if changed (only when we successfully read the old task)
 	if gotOldTask && req.Assigner != nil && *req.Assigner != "" && *req.Assigner != oldAssigner {
 		actor := s.currentUser()
 		recipient := buildRecipient(actor, *req.Assigner)
@@ -162,6 +206,24 @@ func (s *Server) UpdateTask(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "taskId")
+
+	// GitLab task
+	if gitlab.IsGitLabTaskID(id) {
+		info, iid, err := s.resolveGitLabTask(id)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := s.gitlabDeleteTask(r.Context(), info, iid); err != nil {
+			writeError(w, http.StatusBadGateway, "gitlab: "+err.Error())
+			return
+		}
+		s.Hub.NotifyChange("task", id, "deleted")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Local store
 	err := s.Store.DeleteTask(id)
 	if writeStoreError(w, err, "DeleteTask", "failed to delete task") {
 		return
@@ -170,49 +232,83 @@ func (s *Server) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) IncrementTaskRefCount(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "taskId")
-	err := s.Store.IncrementTaskRefCount(id)
-	if writeStoreError(w, err, "IncrementTaskRefCount", "failed to increment ref count") {
+func (s *Server) SetTaskParent(w http.ResponseWriter, r *http.Request) {
+	taskID := chi.URLParam(r, "taskId")
+
+	var req store.SetParentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	if req.ParentID == "" {
+		writeError(w, http.StatusBadRequest, "parent_id is required")
+		return
+	}
+
+	// Both GitLab → use Work Items API
+	if gitlab.IsGitLabTaskID(taskID) && gitlab.IsGitLabTaskID(req.ParentID) {
+		if err := s.gitlabSetParent(r.Context(), taskID, req.ParentID); err != nil {
+			writeError(w, http.StatusBadGateway, "gitlab: "+err.Error())
+			return
+		}
+		s.Hub.NotifyChange("task", taskID, "updated")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Mixed → not supported
+	if gitlab.IsGitLabTaskID(taskID) || gitlab.IsGitLabTaskID(req.ParentID) {
+		writeError(w, http.StatusBadRequest, "cannot set parent-child between GitLab and local tasks")
+		return
+	}
+
+	// Local/remote store — use UpdateTask with parent_id
+	parentID := req.ParentID
+	_, err := s.Store.UpdateTask(taskID, store.UpdateTaskRequest{ParentID: &parentID})
+	if err != nil {
+		if store.IsValidationError(err) {
+			writeError(w, http.StatusBadRequest, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to set parent: "+err.Error())
+		}
+		return
+	}
+	s.Hub.NotifyChange("task", taskID, "updated")
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) ListTaskAssets(w http.ResponseWriter, r *http.Request) {
+func (s *Server) RemoveTaskParent(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
-	assets, err := s.Store.ListTaskAssets(taskID)
-	if writeStoreError(w, err, "ListTaskAssets", "failed to list task assets") {
-		return
-	}
-	if assets == nil {
-		assets = []Asset{}
-	}
-	writeJSON(w, http.StatusOK, assets)
-}
 
-func (s *Server) LinkTaskAsset(w http.ResponseWriter, r *http.Request) {
-	taskID := chi.URLParam(r, "taskId")
-	var body struct {
-		AssetID string `json:"asset_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.AssetID == "" {
-		writeError(w, http.StatusBadRequest, "asset_id is required")
+	// GitLab task — remove parent via Work Items API
+	if gitlab.IsGitLabTaskID(taskID) {
+		info, iid, err := s.resolveGitLabTask(taskID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		client := gitlab.NewClient(info.Token)
+		wi, err := client.GetWorkItemInfo(r.Context(), info.ProjectPath, iid)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "gitlab: "+err.Error())
+			return
+		}
+		if err := client.RemoveWorkItemParent(r.Context(), wi.GID); err != nil {
+			writeError(w, http.StatusBadGateway, "gitlab: "+err.Error())
+			return
+		}
+		s.Hub.NotifyChange("task", taskID, "updated")
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	ta, err := s.Store.LinkTaskAsset(taskID, body.AssetID)
-	if writeStoreError(w, err, "LinkTaskAsset", "failed to link asset") {
-		return
-	}
-	writeJSON(w, http.StatusCreated, ta)
-}
 
-func (s *Server) UnlinkTaskAsset(w http.ResponseWriter, r *http.Request) {
-	taskID := chi.URLParam(r, "taskId")
-	assetID := chi.URLParam(r, "assetId")
-	err := s.Store.UnlinkTaskAsset(taskID, assetID)
-	if writeStoreError(w, err, "UnlinkTaskAsset", "failed to unlink asset") {
+	// Local/remote store — use UpdateTask with empty parent_id
+	emptyParent := ""
+	_, err := s.Store.UpdateTask(taskID, store.UpdateTaskRequest{ParentID: &emptyParent})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to remove parent: "+err.Error())
 		return
 	}
+	s.Hub.NotifyChange("task", taskID, "updated")
 	w.WriteHeader(http.StatusNoContent)
 }

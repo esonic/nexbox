@@ -56,10 +56,6 @@ func (s *Server) GetProjectDiff(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
-	if GetUserRole(r) != "admin" && project.OwnerID != GetUserID(r) {
-		writeError(w, http.StatusForbidden, "access denied")
-		return
-	}
 
 	workDir := s.resolveDiffWorkDir(r, projectID)
 	if workDir == "" {
@@ -109,10 +105,6 @@ func (s *Server) GetProjectDiffStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
-	if GetUserRole(r) != "admin" && project.OwnerID != GetUserID(r) {
-		writeError(w, http.StatusForbidden, "access denied")
-		return
-	}
 
 	workDir := s.resolveDiffWorkDir(r, projectID)
 	if workDir == "" || !isGitRepo(workDir) {
@@ -154,10 +146,6 @@ func (s *Server) GetProjectFileDiff(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
-	if GetUserRole(r) != "admin" && project.OwnerID != GetUserID(r) {
-		writeError(w, http.StatusForbidden, "access denied")
-		return
-	}
 
 	workDir := s.resolveDiffWorkDir(r, projectID)
 	if workDir == "" || !isGitRepo(workDir) {
@@ -166,7 +154,8 @@ func (s *Server) GetProjectFileDiff(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fullContext := r.URL.Query().Get("full") == "true"
-	diff, err := getFileDiff(workDir, filePath, fullContext)
+	staged := r.URL.Query().Get("staged") == "true"
+	diff, err := getFileDiff(workDir, filePath, fullContext, staged)
 	if err != nil {
 		log.Printf("[diff] file diff error for %s in %s: %v", filePath, workDir, err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("file diff failed: %v", err))
@@ -179,32 +168,31 @@ func (s *Server) GetProjectFileDiff(w http.ResponseWriter, r *http.Request) {
 // --- Helper functions (unchanged) ---
 
 func isGitRepo(dir string) bool {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
 	cmd.Dir = dir
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return false
-	}
-	toplevel := strings.TrimSpace(out.String())
-	// Ensure dir is the actual git root, not just a subdirectory of another repo
-	cleanDir := filepath.Clean(dir)
-	return toplevel == cleanDir
+	return cmd.Run() == nil
 }
 
-func getFileDiff(dir string, filePath string, fullContext bool) (string, error) {
+func getFileDiff(dir string, filePath string, fullContext bool, staged bool) (string, error) {
 	args := []string{"diff"}
 	if fullContext {
 		args = append(args, "-U99999999")
 	}
-	args = append(args, "HEAD", "--", filePath)
+	if staged {
+		// Show only staged changes: index vs HEAD
+		args = append(args, "--cached", "HEAD", "--", filePath)
+	} else {
+		// Show all working tree changes vs HEAD (default behavior)
+		args = append(args, "HEAD", "--", filePath)
+	}
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Run(); err != nil && !staged {
+		// Fallback for HEAD diff: try --cached (e.g. newly staged files with no HEAD ref)
 		args2 := []string{"diff"}
 		if fullContext {
 			args2 = append(args2, "-U99999999")
@@ -302,6 +290,10 @@ func runGitDiffCached(dir string) (string, error) {
 }
 
 func runGitDiffStats(dir string) ([]GitDiffFile, error) {
+	// git diff outputs paths relative to the repo root, not the CWD.
+	// Strip this prefix so all returned paths are relative to dir.
+	prefix := gitRelPrefix(dir)
+
 	numstatCmd := exec.Command("git", "diff", "HEAD", "--numstat")
 	numstatCmd.Dir = dir
 	var numstatOut, numstatErr bytes.Buffer
@@ -329,7 +321,7 @@ func runGitDiffStats(dir string) ([]GitDiffFile, error) {
 		if len(parts) != 3 {
 			continue
 		}
-		path := parts[2]
+		path := strings.TrimPrefix(parts[2], prefix)
 		if parts[0] == "-" && parts[1] == "-" {
 			continue // skip binary files
 		}
@@ -363,7 +355,7 @@ func runGitDiffStats(dir string) ([]GitDiffFile, error) {
 			continue
 		}
 		statusCode := parts[0]
-		path := parts[1]
+		path := strings.TrimPrefix(parts[1], prefix)
 		status := "modified"
 		switch {
 		case statusCode == "A":

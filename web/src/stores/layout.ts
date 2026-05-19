@@ -6,6 +6,8 @@ interface TerminalSessionState {
   key: number;
 }
 
+export type TerminalPosition = "bottom" | "right";
+
 interface LayoutState {
   // Right panel
   rightPanel: string | null;
@@ -13,9 +15,11 @@ interface LayoutState {
   panelWidth: number;
   setPanelWidth: (width: number) => void;
 
-  // Terminal — height is global (UI preference), show/key are per-session
+  // Terminal — height/position are global (UI preference), show/key are per-session
   terminalHeight: number;
   setTerminalHeight: (height: number) => void;
+  terminalPosition: TerminalPosition;
+  setTerminalPosition: (position: TerminalPosition) => void;
   terminalStates: Record<string, TerminalSessionState>;
   setTerminalShow: (sessionId: string, show: boolean) => void;
   killTerminal: (sessionId: string) => void;
@@ -39,6 +43,8 @@ export const useLayoutStore = create<LayoutState>()(
 
       terminalHeight: 260,
       setTerminalHeight: (height) => set({ terminalHeight: height }),
+      terminalPosition: "bottom",
+      setTerminalPosition: (position) => set({ terminalPosition: position }),
       terminalStates: {},
       setTerminalShow: (sessionId, show) =>
         set((s) => ({
@@ -63,11 +69,12 @@ export const useLayoutStore = create<LayoutState>()(
       setSidebarWidth: (width) => set({ sidebarWidth: width }),
     }),
     {
-      name: "boxnex-layout",
+      name: "nexbox-layout",
       partialize: (state) => ({
         rightPanel: state.rightPanel,
         panelWidth: state.panelWidth,
         terminalHeight: state.terminalHeight,
+        terminalPosition: state.terminalPosition,
         // Persist show state per session; reset key to 0 so terminal reconnects on reload
         terminalStates: Object.fromEntries(
           Object.entries(state.terminalStates).map(([id, ts]) => [id, { show: ts.show, key: 0 }])

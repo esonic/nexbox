@@ -14,7 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-const maxImageSize = 5 << 20 // 5 MB
+const maxImageSize = 20 << 20 // 20 MB
 
 var allowedImageTypes = map[string]string{
 	"image/jpeg": ".jpg",
@@ -34,7 +34,7 @@ func (s *Server) UploadImage(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxImageSize)
 	if err := r.ParseMultipartForm(maxImageSize); err != nil {
-		writeError(w, http.StatusBadRequest, "file too large (max 5MB)")
+		writeError(w, http.StatusBadRequest, "file too large (max 20MB)")
 		return
 	}
 

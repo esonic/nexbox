@@ -3,7 +3,7 @@ package workflow
 import (
 	"fmt"
 
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"gitlab.okg.com/sre_ai/nexbox/store"
 )
 
 // ValidateDAG checks if the workflow definition is a valid DAG (no cycles, connected)

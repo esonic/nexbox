@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { DiffResponse, AuthUser, GitBranchResponse } from "@/lib/api";
-import type { Project, Session, ChatMessage, MessagePart, Task, AssetType, ExecutionStats } from "../types";
+import type { DiffResponse } from "@/lib/api";
+import type { Project, Session, ChatMessage, MessagePart, Task, AssetType, ExecutionStats, ContextUsage } from "../types";
 
 export interface PickedAsset {
   id: string;
@@ -59,13 +59,13 @@ interface AppState {
   updateToolInput: (sessionId: string, toolCallId: string, inputDelta: string) => void;
   addToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
   appendThinkingDelta: (sessionId: string, text: string) => void;
-  setAgentToolSummary: (sessionId: string, summary: string) => void;
+  setAgentToolSummary: (sessionId: string, summary: string, toolCallId?: string) => void;
   addNestedToolStart: (sessionId: string, agentToolCallId: string, toolCallId: string, toolName: string, input: string) => void;
   updateNestedToolInput: (sessionId: string, toolCallId: string, inputDelta: string) => void;
   addNestedToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
   addWidgetPart: (sessionId: string, title: string, widgetCode: string, loadingMessages?: string[]) => void;
 
-  finishStreaming: (sessionId: string, stats?: ExecutionStats) => void;
+  finishStreaming: (sessionId: string, stats?: ExecutionStats, sdkMessageUuid?: string) => void;
   clearChatMessages: (sessionId: string) => void;
 
   // Per-session streaming state (global, survives tab switches)
@@ -78,6 +78,10 @@ interface AppState {
   sessionTotalDuration: Record<string, number>;
   addSessionDuration: (sessionId: string, ms: number) => void;
   setSessionDuration: (sessionId: string, ms: number) => void;
+
+  // Live context-window usage, keyed by session ID
+  sessionContextUsage: Record<string, ContextUsage>;
+  setSessionContextUsage: (sessionId: string, usage: ContextUsage) => void;
 
   // Picked tasks (for sending to chat)
   pickedTasks: Record<string, Task[]>;
@@ -117,22 +121,9 @@ interface AppState {
   gitDiffStats: DiffResponse | null;
   setGitDiffStats: (stats: DiffResponse | null) => void;
 
-  // Git branch data (shared, polled by SessionWorkspace)
-  gitBranchData: GitBranchResponse | null;
-  setGitBranchData: (data: GitBranchResponse | null) => void;
-
   // Marketplace update badge (packages with newer version available)
   marketplaceUpdateCount: number;
   setMarketplaceUpdateCount: (count: number) => void;
-
-  // Authenticated user (JWT cloud mode)
-  currentUser: AuthUser | null;
-  setCurrentUser: (user: AuthUser | null) => void;
-
-  // Token balance
-  balanceTokens: number;
-  balanceCny: number;
-  setBalance: (tokens: number, cny: number) => void;
 }
 
 /** Replace a session's message array. Reduces boilerplate around chatMessages spread. */
@@ -238,9 +229,34 @@ export const useAppStore = create<AppState>()(
       }),
     ),
 
-  setAgentToolSummary: (sessionId, summary) =>
+  appendThinkingDelta: (sessionId, text) =>
     set((state) =>
       updateLastAssistant(state, sessionId, (parts) => {
+        const last = parts[parts.length - 1];
+        if (last && last.type === "thinking") {
+          parts[parts.length - 1] = { ...last, content: last.content + text };
+        } else {
+          parts.push({ type: "thinking", content: text });
+        }
+        return parts;
+      })
+    ),
+
+  setAgentToolSummary: (sessionId, summary, toolCallId) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) => {
+        // Prefer matching by explicit toolCallId so parallel sub-agents
+        // each get their own summary. Fall back to the last running
+        // tool_use only when no id was supplied (legacy path).
+        if (toolCallId) {
+          for (let i = parts.length - 1; i >= 0; i--) {
+            const p = parts[i];
+            if (p.type === "tool_use" && p.toolCallId === toolCallId) {
+              parts[i] = { ...p, summary };
+              return parts;
+            }
+          }
+        }
         for (let i = parts.length - 1; i >= 0; i--) {
           const p = parts[i];
           if (p.type === "tool_use" && (p.state === "running" || p.state === "streaming")) {
@@ -290,7 +306,11 @@ export const useAppStore = create<AppState>()(
             const nIdx = p.nestedTools.findIndex((n) => n.toolCallId === toolCallId);
             if (nIdx >= 0) {
               const updated = [...p.nestedTools];
-              updated[nIdx] = { ...updated[nIdx], state: isError ? "error" as const : "complete" as const, result: { output, isError } };
+              updated[nIdx] = {
+                ...updated[nIdx],
+                state: isError ? "error" as const : "complete" as const,
+                result: { output, isError },
+              };
               parts[i] = { ...p, nestedTools: updated };
               break;
             }
@@ -298,19 +318,6 @@ export const useAppStore = create<AppState>()(
         }
         return parts;
       }),
-    ),
-
-  appendThinkingDelta: (sessionId, text) =>
-    set((state) =>
-      updateLastAssistant(state, sessionId, (parts) => {
-        const last = parts[parts.length - 1];
-        if (last && last.type === "thinking") {
-          parts[parts.length - 1] = { ...last, content: last.content + text };
-        } else {
-          parts.push({ type: "thinking", content: text });
-        }
-        return parts;
-      })
     ),
 
   addWidgetPart: (sessionId, title, widgetCode, loadingMessages) =>
@@ -321,7 +328,7 @@ export const useAppStore = create<AppState>()(
       }),
     ),
 
-  finishStreaming: (sessionId, stats?) =>
+  finishStreaming: (sessionId, stats?, sdkMessageUuid?) =>
     set((state) => {
       const msgs = state.chatMessages[sessionId] || [];
       const lastMsg = msgs[msgs.length - 1];
@@ -335,15 +342,23 @@ export const useAppStore = create<AppState>()(
           }
           return p;
         });
-        // Merge execution stats into the message metadata
-        const updatedMetadata = stats
+        // Merge execution stats and CLI-side message uuid into the message
+        // metadata. sdkMessageUuid is required for the fork button to render
+        // — without it, the message appears unforkable until the next page
+        // refresh re-fetches from the API.
+        const updatedMetadata = stats || sdkMessageUuid
           ? {
               ...lastMsg.metadata,
-              durationMs: stats.duration_ms,
-              inputTokens: stats.input_tokens,
-              outputTokens: stats.output_tokens,
-              totalCostUsd: stats.total_cost_usd,
-              toolCalls: stats.tool_calls,
+              ...(stats ? {
+                durationMs: stats.duration_ms,
+                inputTokens: stats.input_tokens,
+                outputTokens: stats.output_tokens,
+                cacheReadInputTokens: stats.cache_read_input_tokens,
+                cacheCreationInputTokens: stats.cache_creation_input_tokens,
+                totalCostUsd: stats.total_cost_usd,
+                toolCalls: stats.tool_calls,
+              } : {}),
+              ...(sdkMessageUuid ? { sdkMessageUuid } : {}),
             }
           : lastMsg.metadata;
         return {
@@ -404,6 +419,15 @@ export const useAppStore = create<AppState>()(
       sessionTotalDuration: {
         ...state.sessionTotalDuration,
         [sessionId]: ms,
+      },
+    })),
+
+  sessionContextUsage: {},
+  setSessionContextUsage: (sessionId, usage) =>
+    set((state) => ({
+      sessionContextUsage: {
+        ...state.sessionContextUsage,
+        [sessionId]: usage,
       },
     })),
 
@@ -541,21 +565,11 @@ export const useAppStore = create<AppState>()(
   gitDiffStats: null,
   setGitDiffStats: (stats) => set({ gitDiffStats: stats }),
 
-  gitBranchData: null,
-  setGitBranchData: (data) => set({ gitBranchData: data }),
-
   marketplaceUpdateCount: 0,
   setMarketplaceUpdateCount: (count) => set({ marketplaceUpdateCount: count }),
-
-  currentUser: null,
-  setCurrentUser: (user) => set({ currentUser: user }),
-
-  balanceTokens: 0,
-  balanceCny: 0,
-  setBalance: (tokens, cny) => set({ balanceTokens: tokens, balanceCny: cny }),
 }),
     {
-      name: "boxnex-app",
+      name: "nexbox-app",
       // Persist activeSessionId to remember which session was last selected
       partialize: (state) => ({
         activeSessionId: state.activeSessionId,

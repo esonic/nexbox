@@ -8,50 +8,38 @@ import (
 	"sync"
 )
 
-// Config holds all local-only configuration persisted to ~/.boxnex/config.json.
-type Config struct {
-	DefaultAgent string           `json:"default_agent"`
-	Token        string           `json:"token,omitempty"`
-	GitLabToken  string           `json:"gitlab_token,omitempty"`
-	DisableCloud bool             `json:"disable_cloud"`
-	Projects     []ProjectMapping `json:"projects,omitempty"`
+const DefaultServerURL = "https://sre-admin.okg.com/rca/api/v1/nexbox"
 
-	// Cloud server settings (used when running as a multi-tenant cloud service)
-	StoreType string `json:"store_type,omitempty"` // "sqlite" (default) | "mysql"
-	MySQLDSN  string `json:"mysql_dsn,omitempty"`  // e.g. "user:pass@tcp(host:3306)/dbname?parseTime=true"
-
-	JWTSecret  string `json:"jwt_secret,omitempty"`   // required for cloud mode
-	JWTExpDays int    `json:"jwt_exp_days,omitempty"` // token expiry in days, default 7
-
-	// Email — used for sending verification codes via Resend (resend.com)
-	ResendAPIKey string `json:"resend_api_key,omitempty"` // e.g. "re_xxxx"
-	ResendFrom   string `json:"resend_from,omitempty"`    // e.g. "BoxNex <noreply@yourdomain.com>"
-
-	MarketplaceDir string `json:"marketplace_dir,omitempty"` // default "/marketplace"
-
-	// Per-user limits
-	DiskQuotaBytes int64 `json:"disk_quota_bytes,omitempty"` // default 1GB
-
-	// Billing
-	TokenPricePerMillion float64 `json:"token_price_per_million,omitempty"` // currency per 1M tokens
-
-	// Docker rootless + Sysbox container isolation
-	ContainerEnabled bool   `json:"container_enabled,omitempty"` // enable per-project Docker container isolation
-	ContainerImage   string `json:"container_image,omitempty"`   // container image (default: "boxnex-agent:latest")
-	ContainerNetwork string `json:"container_network,omitempty"` // Docker network name (default: "boxnex-net")
-
-	// Local-mode feature flags (bitmask). When nil, defaults to 0xFF (all features).
-	Features *int64 `json:"features,omitempty"`
-
-	// CORS allowed origins (e.g. ["http://localhost:5173"]). Falls back to
-	// built-in dev defaults when empty.
-	CORSOrigins []string `json:"cors_origins,omitempty"`
+// OKOneConfig holds per-project OKOne change-order integration settings.
+// Stored under "project_okone" in config.json, keyed by project ID.
+type OKOneConfig struct {
+	BaseURL        string `json:"base_url,omitempty"`
+	ApplicationID  int    `json:"application_id,omitempty"`
+	ServiceID      int    `json:"service_id,omitempty"`
+	Service        string `json:"service,omitempty"`
+	ServiceEnvID   int    `json:"service_env_id,omitempty"`
+	ServiceEnvName string `json:"service_env_name,omitempty"`
+	Owner          string `json:"owner,omitempty"`
 }
 
-// ProjectMapping links a remote project to a local Git repository path.
+// Config holds all local-only configuration persisted to ~/.nexbox/config.json.
+type Config struct {
+	DefaultAgent   string           `json:"default_agent"`
+	ServerURL      string           `json:"server_url,omitempty"`
+	Token          string           `json:"token,omitempty"`
+	GitLabToken    string           `json:"gitlab_token,omitempty"`
+	DisableCloud   bool             `json:"disable_cloud"`
+	ChromeHeadless bool             `json:"chrome_headless"`
+	EnableFileEdit bool             `json:"enable_file_edit"`
+	Projects       []ProjectMapping `json:"projects,omitempty"`
+}
+
+// ProjectMapping links a remote project to a local Git repository path,
+// and optionally holds per-project settings like OKOne integration.
 type ProjectMapping struct {
-	RemoteID    string `json:"remote_id"`
-	GitRepoPath string `json:"git_repo_path"`
+	RemoteID    string       `json:"remote_id"`
+	GitRepoPath string       `json:"git_repo_path"`
+	OKOne       *OKOneConfig `json:"okone,omitempty"`
 }
 
 // Manager provides thread-safe load/save operations for Config.
@@ -73,7 +61,7 @@ func NewManager(path string) (*Manager, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			m.cfg = Config{DefaultAgent: "claude"}
+			m.cfg = Config{DefaultAgent: "claude", ServerURL: DefaultServerURL}
 			return m, m.save()
 		}
 		return nil, fmt.Errorf("read config: %w", err)
@@ -81,6 +69,9 @@ func NewManager(path string) (*Manager, error) {
 
 	if err := json.Unmarshal(data, &m.cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if m.cfg.ServerURL == "" {
+		m.cfg.ServerURL = DefaultServerURL
 	}
 	return m, nil
 }
@@ -112,10 +103,7 @@ func (m *Manager) save() error {
 	}
 	data = append(data, '\n')
 
-	tmp, err := os.OpenFile(
-		filepath.Join(filepath.Dir(m.path), ".config-tmp.json"),
-		os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600,
-	)
+	tmp, err := os.CreateTemp(filepath.Dir(m.path), ".config-*.json")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -132,7 +120,5 @@ func (m *Manager) save() error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename config: %w", err)
 	}
-	// Ensure restrictive permissions even if file already existed before this run.
-	_ = os.Chmod(m.path, 0600)
 	return nil
 }

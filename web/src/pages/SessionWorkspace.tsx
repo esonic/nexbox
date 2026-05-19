@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
-import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
 
 import {
@@ -10,6 +9,8 @@ import {
   Check,
   ChevronDown,
   PanelRightClose,
+  PanelBottom,
+  PanelRight,
   GripVertical,
   Loader2,
   FolderGit2,
@@ -25,11 +26,13 @@ import {
   Pencil,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { sessionsApi, projectsApi, diffApi, gitApi, gitlabApi, type DiffResponse, type CreateMRResponse } from "@/lib/api";
+import { sessionsApi, projectsApi, diffApi, gitlabApi, type DiffResponse, type CreateMRResponse } from "@/lib/api";
 import { TaskPlugin } from "@/plugins/task/TaskPlugin";
 import { AssetPanel } from "@/plugins/asset/AssetPanel";
 import { WorkflowPanel } from "@/components/workflow/WorkflowPanel";
 import { RalphPanel } from "@/components/ralph/RalphPanel";
+import { ChangeOrderMenuItem } from "@/plugins/okone/ChangeOrderMenuItem";
+import { ChangeOrderResult } from "@/plugins/okone/ChangeOrderResult";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { DiffView } from "@/components/diff/DiffView";
 const FileBrowser = lazy(() => import("@/components/files/FileBrowser").then(m => ({ default: m.FileBrowser })));
@@ -188,8 +191,21 @@ function GitPanelContent({
   headerPortalTarget: HTMLDivElement | null;
 }) {
   const projects = useAppStore((s) => s.projects);
+  const currentProject = projects.find((p) => p.id === projectId);
+  const okoneEnabled = !!(currentProject?.okone?.application_id);
   const [mrLoading, setMrLoading] = useState(false);
   const [mrResult, setMrResult] = useState<{ success: boolean; data?: CreateMRResponse; error?: string } | null>(null);
+  const [showMrMenu, setShowMrMenu] = useState(false);
+
+  // Close MR menu on outside click
+  useEffect(() => {
+    if (!showMrMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest("[data-mr-menu]")) setShowMrMenu(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showMrMenu]);
 
   const handleCreateMR = useCallback(async () => {
     if (mrLoading) return;
@@ -205,14 +221,53 @@ function GitPanelContent({
     }
   }, [projectId, mrLoading]);
 
-  const mrButton = null;
+  const mrButton = gitRepoPath ? (
+    <div className="relative" data-mr-menu>
+      <div className="flex items-center">
+        <Button
+          size="sm"
+          onClick={handleCreateMR}
+          disabled={mrLoading}
+          className={cn(
+            "h-6 text-xs bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700",
+            okoneEnabled && "rounded-r-none border-r border-r-blue-500/40",
+          )}
+        >
+          {mrLoading ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <GitMerge className="mr-1 h-3 w-3" />}
+          Create MR
+        </Button>
+        {okoneEnabled && (
+          <Button
+            size="sm"
+            disabled={mrLoading}
+            onClick={() => setShowMrMenu(!showMrMenu)}
+            className="h-6 px-1 bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700 rounded-l-none"
+          >
+            <ChevronDown className="h-3 w-3" />
+          </Button>
+        )}
+      </div>
+      {showMrMenu && okoneEnabled && (
+        <div className="absolute top-full right-0 mt-1 w-44 bg-popover border rounded-md shadow-lg overflow-hidden z-10">
+          <button
+            onClick={() => { setShowMrMenu(false); handleCreateMR(); }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-accent transition-colors"
+          >
+            <GitMerge className="h-3.5 w-3.5" />
+            Create MR
+          </button>
+          <ChangeOrderMenuItem projectId={projectId} onClose={() => setShowMrMenu(false)} />
+        </div>
+      )}
+    </div>
+  ) : null;
 
   return (
     <>
       {/* Portal MR button into panel header */}
       {headerPortalTarget && mrButton && createPortal(mrButton, headerPortalTarget)}
 
-      {/* MR result */}
+      {/* MR result + plugin slots */}
       <div className="px-4 py-2 border-b space-y-2 empty:hidden">
         {mrResult && (
           <div className={cn("rounded-lg border p-3 text-sm", mrResult.success ? "border-green-500/30" : "border-destructive/30")}>
@@ -240,6 +295,7 @@ function GitPanelContent({
             </div>
           </div>
         )}
+        <ChangeOrderResult projectId={projectId} />
       </div>
 
       {/* Diff view */}
@@ -262,23 +318,29 @@ function GitPanelContent({
 }
 
 export function SessionWorkspace() {
-  const { t } = useTranslation();
   const {
     sessions, setSessions, activeSessionId,
     setCurrentSession, setCurrentProject, sessionTotalDuration,
-    projects, setProjects, setGitDiffStats, setGitBranchData,
-    currentUser,
+    projects, setProjects, setGitDiffStats, chatMessages,
   } = useAppStore();
-  const userFeatures = currentUser?.features ?? 0;
   const {
     rightPanel, setRightPanel, panelWidth, setPanelWidth,
     terminalHeight, setTerminalHeight,
+    terminalPosition, setTerminalPosition,
     terminalStates, setTerminalShow, killTerminal,
   } = useLayoutStore();
   const isResizingTerminal = useRef(false);
   const sessionTerminal = terminalStates[activeSessionId ?? ""] ?? { show: false, key: 0 };
   const showTerminal = sessionTerminal.show;
   const terminalKey = sessionTerminal.key;
+  // When terminal is moved to "right" and the active session has it visible,
+  // it occupies the same right panel slot as Files/Git (mutually exclusive).
+  const showingTerminalInRightSlot = terminalPosition === "right" && showTerminal;
+  // Slot is visible when something should be drawn (a panel is selected or terminal is showing).
+  const rightSlotVisible = !!rightPanel || showingTerminalInRightSlot;
+  // Keep slot mounted (invisible) so terminal panels inside survive hide/show and mode swaps.
+  const hasMountedTerminalsInRightMode = terminalPosition === "right" && Object.keys(terminalStates).length > 0;
+  const rightSlotMounted = rightSlotVisible || hasMountedTerminalsInRightMode;
 
   // Workflow editing state — allows WorkflowPanel to replace the panel header title
   const [wfEditing, setWfEditing] = useState(false);
@@ -300,10 +362,8 @@ export function SessionWorkspace() {
   const activeSessionIdRef = useRef(activeSessionId);
   const showTerminalRef = useRef(showTerminal);
   const isRealProjectRef = useRef(false);
-  const userFeaturesRef = useRef(userFeatures);
   activeSessionIdRef.current = activeSessionId;
   showTerminalRef.current = showTerminal;
-  userFeaturesRef.current = userFeatures;
 
   // Track sessions where user sent first message but worktree not yet created.
   // Used to immediately disable the worktree selector and show a preparing indicator.
@@ -396,66 +456,53 @@ export function SessionWorkspace() {
 
   const worktreeSessionId = activeSession?.worktree_mode === "worktree" ? activeSession.id : undefined;
 
-  // ── Unified git polling ──────────────────────────────────────────────────
-  // When git panel is open: refresh stats + branches every 15s.
-  // When git panel is closed: refresh stats only every 30s (for badge).
-  // Project change: clear stale data immediately.
-  const gitPanelOpen = rightPanel === "git";
-
-  const fetchGitStats = useCallback(async () => {
-    if (!boundProject?.git_repo_path || !boundProject?.id) return;
-    try {
-      const data = await diffApi.stats(boundProject.id, worktreeSessionId);
-      setGitDiffStats(data);
-    } catch { /* silent – badge stays stale at most one interval */ }
-  }, [boundProject?.id, boundProject?.git_repo_path, worktreeSessionId, setGitDiffStats]);
-
-  const fetchGitBranches = useCallback(async () => {
-    if (!boundProject?.git_repo_path || !boundProject?.id) return;
-    try {
-      const data = await gitApi.branches(boundProject.id, worktreeSessionId);
-      setGitBranchData(data);
-    } catch { /* silent */ }
-  }, [boundProject?.id, boundProject?.git_repo_path, worktreeSessionId, setGitBranchData]);
-
-  const fetchGitAll = useCallback(async () => {
-    await Promise.allSettled([fetchGitStats(), fetchGitBranches()]);
-  }, [fetchGitStats, fetchGitBranches]);
-
-  // Reset state when project changes, then kick off an immediate fetch.
+  // Reset built-in panel data when the bound project changes
   const prevProjectIdRef = useRef(boundProject?.id);
   useEffect(() => {
     if (prevProjectIdRef.current !== boundProject?.id) {
       prevProjectIdRef.current = boundProject?.id;
       setGitDiffStats(null);
-      setGitBranchData(null);
+      if (rightPanel === "git" && boundProject?.git_repo_path) {
+        setLoadingGitDiff(true);
+        diffApi.stats(boundProject.id)
+          .then(setGitDiffStats)
+          .catch((e) => console.error("Failed to load git diff:", e))
+          .finally(() => setLoadingGitDiff(false));
+      }
     }
-  }, [boundProject?.id, setGitDiffStats, setGitBranchData]);
+  }, [boundProject, rightPanel, setGitDiffStats]);
 
-  // Polling: fast (15s) when panel open, slow (30s) when closed.
-  useEffect(() => {
-    if (!boundProject?.git_repo_path) return;
-    const fetch = gitPanelOpen ? fetchGitAll : fetchGitStats;
-    const interval = gitPanelOpen ? 15_000 : 30_000;
-    fetch();
-    const timer = setInterval(fetch, interval);
-    return () => clearInterval(timer);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gitPanelOpen, boundProject?.id, boundProject?.git_repo_path, worktreeSessionId]);
+  // When terminal occupies the right slot and the user opens a panel
+  // (Files/Git/Tasks/etc.), the panel takes over the slot and the terminal hides.
+  // Conversely, opening the terminal in right mode hides any open panel.
+  const setRightPanelExclusive = useCallback((panel: string | null) => {
+    setRightPanel(panel);
+    if (panel !== null && terminalPosition === "right" && activeSessionId && showTerminal) {
+      setTerminalShow(activeSessionId, false);
+    }
+  }, [setRightPanel, setTerminalShow, terminalPosition, activeSessionId, showTerminal]);
+
+  const setTerminalShowExclusive = useCallback((sessionId: string, show: boolean) => {
+    setTerminalShow(sessionId, show);
+    if (show && terminalPosition === "right" && rightPanel && sessionId === activeSessionId) {
+      setRightPanel(null);
+    }
+  }, [setRightPanel, setTerminalShow, terminalPosition, activeSessionId, rightPanel]);
 
   const handleOpenGit = useCallback(async () => {
     if (!boundProject) return;
-    setRightPanel("git");
-    // Fetch immediately so panel content is ready without waiting for interval.
+    setRightPanelExclusive("git");
     setLoadingGitDiff(true);
     try {
-      await fetchGitAll();
+      const data = await diffApi.stats(boundProject.id, worktreeSessionId);
+      setGitDiffStats(data);
     } catch (e) {
+      console.error("Failed to load git diff:", e);
       toast.error("Failed to load git diff", { description: String(e) });
     } finally {
       setLoadingGitDiff(false);
     }
-  }, [boundProject, fetchGitAll]);
+  }, [boundProject, worktreeSessionId, setGitDiffStats, setRightPanelExclusive]);
 
   // Allow other components to open the Git panel via custom event
   useEffect(() => {
@@ -471,37 +518,37 @@ export function SessionWorkspace() {
     return globalWS.subscribeGlobal((event) => {
       if (event.type === "change" && event.entity_type === "terminal" && event.action === "open") {
         const sid = (event.entity_id as string) || activeSessionIdRef.current;
-        if (sid) setTerminalShow(sid, true);
+        if (sid) setTerminalShowExclusive(sid, true);
       }
       if (event.type === "change" && event.entity_type === "session" && event.action === "updated") {
         window.dispatchEvent(new CustomEvent("session-updated"));
       }
     });
-  }, [setTerminalShow]);
+  }, [setTerminalShowExclusive]);
 
   // Ctrl+` keyboard shortcut to toggle terminal (mirrors right sidebar terminal button)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "`" && e.ctrlKey && !e.altKey && !e.metaKey) {
         if (!activeSessionIdRef.current || !isRealProjectRef.current) return;
-        if (!(userFeaturesRef.current & 8)) return;
         e.preventDefault();
-        setTerminalShow(activeSessionIdRef.current, !showTerminalRef.current);
+        setTerminalShowExclusive(activeSessionIdRef.current, !showTerminalRef.current);
       }
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [setTerminalShow]);
+  }, [setTerminalShowExclusive]);
 
   const refreshGitReview = useCallback(async () => {
     if (!boundProject) return;
     try {
-      await fetchGitAll();
+      const data = await diffApi.stats(boundProject.id, worktreeSessionId);
+      setGitDiffStats(data);
     } catch (e) {
       console.error("Failed to refresh git:", e);
       toast.error("Failed to refresh git", { description: String(e) });
     }
-  }, [boundProject, fetchGitAll]);
+  }, [boundProject, worktreeSessionId, setGitDiffStats]);
 
   // Right panel resize handler
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -546,85 +593,41 @@ export function SessionWorkspace() {
         <div className="flex-1 min-w-0">
           {activeSession && (
             <span className="text-sm font-medium text-foreground/80 truncate block max-w-[50%]">
-              {activeSession.name || t("workspace.new_session")}
+              {activeSession.name || "New Session"}
             </span>
           )}
         </div>
 
         {/* Tasks & Assets panel buttons */}
-        {!!(userFeatures & 1) && (
-          <Button
-            variant={rightPanel === "task" ? "secondary" : "ghost"}
-            size="sm"
-            className="h-7 text-xs gap-1"
-            onClick={() => setRightPanel(rightPanel === "task" ? null : "task")}
-          >
-            <ListTodo className="h-3.5 w-3.5" />
-            {t("workspace.task")}
-          </Button>
-        )}
-        {!!(userFeatures & 2) && (
-          <Button
-            variant={rightPanel === "asset" ? "secondary" : "ghost"}
-            size="sm"
-            className="h-7 text-xs gap-1"
-            onClick={() => setRightPanel(rightPanel === "asset" ? null : "asset")}
-          >
-            <FileText className="h-3.5 w-3.5" />
-            {t("workspace.asset")}
-          </Button>
-        )}
+        <Button
+          variant={rightPanel === "task" ? "secondary" : "ghost"}
+          size="sm"
+          className="h-7 text-xs gap-1"
+          onClick={() => setRightPanelExclusive(rightPanel === "task" ? null : "task")}
+        >
+          <ListTodo className="h-3.5 w-3.5" />
+          Task
+        </Button>
+        <Button
+          variant={rightPanel === "asset" ? "secondary" : "ghost"}
+          size="sm"
+          className="h-7 text-xs gap-1"
+          onClick={() => setRightPanelExclusive(rightPanel === "asset" ? null : "asset")}
+        >
+          <FileText className="h-3.5 w-3.5" />
+          Asset
+        </Button>
 
         {/* Workflows button */}
-        {!!(userFeatures & 4) && (
-          <Button
-            variant={rightPanel === "workflow" ? "secondary" : "ghost"}
-            size="sm"
-            className="h-7 text-xs gap-1"
-            onClick={() => setRightPanel(rightPanel === "workflow" ? null : "workflow")}
-          >
-            <Workflow className="h-3.5 w-3.5" />
-            {t("workspace.workflow")}
-          </Button>
-        )}
-
-        {/* Files / Terminal / Git — shown when a real project is bound */}
-        {isRealProject && boundProject?.git_repo_path && (
-          <Button
-            variant={rightPanel === "files" ? "secondary" : "ghost"}
-            size="sm"
-            className="h-7 text-xs gap-1"
-            onClick={() => setRightPanel(rightPanel === "files" ? null : "files")}
-          >
-            <FolderCode className="h-3.5 w-3.5" />
-            {t("workspace.files")}
-          </Button>
-        )}
-        {isRealProject && !!(userFeatures & 8) && (
-          <Button
-            variant={showTerminal ? "secondary" : "ghost"}
-            size="sm"
-            className="h-7 text-xs gap-1"
-            onClick={() => activeSessionId && setTerminalShow(activeSessionId, !showTerminal)}
-          >
-            <TerminalSquare className="h-3.5 w-3.5" />
-            {t("workspace.terminal")}
-          </Button>
-        )}
-        {isRealProject && !!(userFeatures & 16) && boundProject?.git_repo_path && (
-          <Button
-            variant={rightPanel === "git" ? "secondary" : "ghost"}
-            size="sm"
-            className="h-7 text-xs gap-1"
-            onClick={() => rightPanel === "git" ? setRightPanel(null) : handleOpenGit()}
-          >
-            <GitBranch className="h-3.5 w-3.5" />
-            Git
-            {gitDiffData && (gitDiffData.insertions > 0 || gitDiffData.deletions > 0) && (
-              <span className="h-2 w-2 rounded-full bg-blue-500" />
-            )}
-          </Button>
-        )}
+        <Button
+          variant={rightPanel === "workflow" ? "secondary" : "ghost"}
+          size="sm"
+          className="h-7 text-xs gap-1"
+          onClick={() => setRightPanelExclusive(rightPanel === "workflow" ? null : "workflow")}
+        >
+          <Workflow className="h-3.5 w-3.5" />
+          Workflow
+        </Button>
 
       </div>
 
@@ -655,9 +658,11 @@ export function SessionWorkspace() {
 
           </div>
 
-          {/* Right panel */}
-          {rightPanel && (
-            <>
+          {/* Right panel — shared slot for Files/Git/Tasks/etc. AND terminal when terminalPosition === "right".
+              Stays mounted (invisible via display:none) while any terminal exists in right mode, so its
+              PTY survives panel switches and hide/show — matching the bottom-mode behavior. */}
+          {rightSlotMounted && (
+            <div style={{ display: rightSlotVisible ? "contents" : "none" }}>
               <div
                 className="w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors flex items-center justify-center shrink-0"
                 onMouseDown={handleMouseDown}
@@ -668,6 +673,26 @@ export function SessionWorkspace() {
                 className="border-l bg-background overflow-hidden shrink-0 flex flex-col"
                 style={{ width: panelWidth }}
               >
+                {/* Header — terminal vs rightPanel based on current mode */}
+                {showingTerminalInRightSlot ? (
+                  <div className="flex items-center justify-between px-4 py-2 border-b gap-2 shrink-0">
+                    <div className="flex items-center gap-1 flex-1 min-w-0">
+                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => activeSessionId && setTerminalShow(activeSessionId, false)}>
+                        <PanelRightClose className="h-4 w-4" />
+                      </Button>
+                      <h3 className="font-medium text-sm">Terminal</h3>
+                    </div>
+                    <div className="flex items-center gap-0.5">
+                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Move to bottom" onClick={() => setTerminalPosition("bottom")}>
+                        <PanelBottom className="h-4 w-4" />
+                      </Button>
+                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Kill terminal" onClick={() => activeSessionId && killTerminal(activeSessionId)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ) : rightPanel ? (
+                  <>
                 {/* Panel header */}
                 <div className="flex items-center justify-between px-4 py-2 border-b gap-2 shrink-0">
                   <div className="flex items-center gap-1 flex-1 min-w-0">
@@ -733,7 +758,7 @@ export function SessionWorkspace() {
                           <PanelRightClose className="h-4 w-4" />
                         </Button>
                         <h3 className="font-medium text-sm">
-                          {rightPanel === "git" ? t("workspace.git") : rightPanel === "files" ? t("workspace.files") : rightPanel === "task" ? t("workspace.task") : rightPanel === "asset" ? t("workspace.asset") : rightPanel === "workflow" ? t("workspace.workflow") : rightPanel === "ralph" ? "RALPH" : rightPanel}
+                          {rightPanel === "git" ? "Git" : rightPanel === "files" ? "Files" : rightPanel === "task" ? "Tasks" : rightPanel === "asset" ? "Assets" : rightPanel === "workflow" ? "Workflows" : rightPanel === "ralph" ? "RALPH" : rightPanel}
                         </h3>
                       </>
                     )}
@@ -762,7 +787,7 @@ export function SessionWorkspace() {
                 )}
                 {(rightPanel === "task" || rightPanel === "asset" || rightPanel === "workflow" || rightPanel === "ralph" || rightPanel === "files" || rightPanel === "git") && !boundProject && (
                   <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-                    {t("workspace.bind_project_hint")}
+                    Bind a project to this session first
                   </div>
                 )}
                 {rightPanel === "task" && boundProject && (
@@ -785,19 +810,88 @@ export function SessionWorkspace() {
                     <RalphPanel key={boundProject.id} projectId={boundProject.id} />
                   </div>
                 )}
+                  </>
+                ) : null}
+
+                {/* Terminal panels — always rendered when terminalPosition === "right" so PTY connections
+                    survive panel switches and hide/show, matching the bottom-mode behavior. */}
+                {terminalPosition === "right" && (
+                  <div style={{ display: showingTerminalInRightSlot ? "contents" : "none" }}>
+                    {sessions.map((session) => {
+                      const ts = terminalStates[session.id];
+                      if (!ts) return null;
+                      const sessionProject = projects.find((p) => p.id === session.project_id);
+                      if (!sessionProject || sessionProject.name === UNASSIGNED_PROJECT) return null;
+                      const isActive = session.id === activeSessionId;
+                      const isVisible = isActive && ts.show;
+                      return (
+                        <div key={session.id} className="flex-1 overflow-hidden" style={{ display: isVisible ? "block" : "none" }}>
+                          <TerminalPanel
+                            key={ts.key}
+                            sessionId={session.id}
+                            visible={isActive && ts.show}
+                            onExited={() => killTerminal(session.id)}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            </>
+            </div>
           )}
 
+          {/* Right activity bar — always visible */}
+          {isRealProject && (
+            <div className="flex flex-col items-center gap-3 px-1 py-3 border-l bg-muted/10 shrink-0">
+              {boundProject?.git_repo_path && (
+                <button
+                  onClick={() => setRightPanelExclusive(rightPanel === "files" ? null : "files")}
+                  className={cn(
+                    "p-1.5 rounded transition-colors",
+                    rightPanel === "files" ? "bg-accent text-accent-foreground" : "text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent/50"
+                  )}
+                  title="Files"
+                >
+                  <FolderCode className="h-4 w-4" />
+                </button>
+              )}
+              <button
+                onClick={() => activeSessionId && setTerminalShowExclusive(activeSessionId, !showTerminal)}
+                className={cn(
+                  "p-1.5 rounded transition-colors",
+                  showTerminal ? "bg-accent text-accent-foreground" : "text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent/50"
+                )}
+                title="Terminal"
+              >
+                <TerminalSquare className="h-4 w-4" />
+              </button>
+              {boundProject?.git_repo_path && (
+                <button
+                  onClick={() => rightPanel === "git" ? setRightPanelExclusive(null) : handleOpenGit()}
+                  className={cn(
+                    "relative p-1.5 rounded transition-colors",
+                    rightPanel === "git" ? "bg-accent text-accent-foreground" : "text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent/50"
+                  )}
+                  title="Git"
+                >
+                  <GitBranch className="h-4 w-4" />
+                  {gitDiffData && (gitDiffData.insertions > 0 || gitDiffData.deletions > 0) && (
+                    <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-blue-500" />
+                  )}
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Session info */}
         <div className="flex items-center gap-3 px-4 py-1 shrink-0">
-          {isRealProject && !!(userFeatures & 16) && boundProject?.git_repo_path && (
+          {isRealProject && (
             <WorktreeSelector
               sessionId={activeSession.id}
               mode={activeSession.worktree_mode || "local"}
-              locked={!!activeSession.agent_session_id || preparingWorktrees.has(activeSession.id)}
+              locked={!!activeSession.agent_session_id || preparingWorktrees.has(activeSession.id) || !!activeSession.worktree_path || (chatMessages[activeSession.id] || []).some(m => m.role === "user")}
               worktreePending={preparingWorktrees.has(activeSession.id) && !activeSession.worktree_path}
               hasGitRepo={!!boundProject?.git_repo_path}
               onSetMode={handleSetWorktreeMode}
@@ -808,6 +902,15 @@ export function SessionWorkspace() {
               <FolderGit2 className="h-3 w-3 text-muted-foreground/60 shrink-0" />
               <span className="text-[11px] text-muted-foreground/70 truncate">
                 {boundProject?.name || "Loading..."}
+                {(activeSession.worktree_mode === "worktree" && activeSession.worktree_path
+                  ? activeSession.worktree_path
+                  : boundProject?.git_repo_path) && (
+                  <span className="text-muted-foreground/50 ml-1">
+                    ({activeSession.worktree_mode === "worktree" && activeSession.worktree_path
+                      ? activeSession.worktree_path
+                      : boundProject?.git_repo_path})
+                  </span>
+                )}
               </span>
             </div>
           )}
@@ -821,10 +924,10 @@ export function SessionWorkspace() {
           )}
         </div>
 
-        {/* Terminal panels — one per session that has ever opened a terminal.
+        {/* Bottom terminal panels — one per session that has ever opened a terminal.
             All are kept mounted (preserving the PTY session); only the active
             session's terminal is visible via display:contents vs display:none. */}
-        {sessions.map((session) => {
+        {terminalPosition === "bottom" && sessions.map((session) => {
           const ts = terminalStates[session.id];
           if (!ts) return null; // never opened for this session
           const sessionProject = projects.find((p) => p.id === session.project_id);
@@ -847,6 +950,20 @@ export function SessionWorkspace() {
                     <span className="text-xs text-muted-foreground font-medium">Terminal</span>
                   </div>
                   <div className="flex items-center gap-0.5">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-5 w-5 p-0"
+                      title="Move to right"
+                      onClick={() => {
+                        setTerminalPosition("right");
+                        // In right mode the terminal shares the slot with Files/Git;
+                        // prevent overlap by closing any open right panel.
+                        if (rightPanel) setRightPanel(null);
+                      }}
+                    >
+                      <PanelRight className="h-3 w-3" />
+                    </Button>
                     <Button
                       variant="ghost"
                       size="sm"

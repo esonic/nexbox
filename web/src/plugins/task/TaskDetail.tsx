@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import { toast } from "sonner";
 import {
   ArrowLeft,
@@ -6,33 +6,24 @@ import {
   X,
   Loader2,
   Pencil,
-  FolderGit2,
-  FileText,
-  FileCode,
-  TestTube,
-  ClipboardList,
   Eye,
   Save,
   MessageSquare,
+  Link2,
+  Unlink,
+  ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { tasksApi, projectsApi, assetsApi } from "@/lib/api";
+import { tasksApi, projectsApi } from "@/lib/api";
 import { cn, formatRelativeDate } from "@/lib/utils";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import type { Task, Asset, Project, TaskComment } from "@/types";
-import { ReactionPicker } from "./components/ReactionPicker";
+import { MarkdownRenderer } from "@/components/markdown/MarkdownRenderer";
+import type { Task, Project, TaskComment } from "@/types";
 import { LabelPicker, LabelBadge } from "./components/LabelPicker";
 import { UserPicker, UserDisplay } from "./components/UserPicker";
 import { MentionTextarea } from "./components/MentionTextarea";
+import { TypeIssue, TypeTask } from "./task-icons";
+import { shortId } from "./task-config";
 
 function formatTimestamp(dateStr: string): string {
   const d = new Date(dateStr);
@@ -68,22 +59,6 @@ const PRIORITY_COLORS: Record<string, string> = {
   critical: "bg-red-500/15 text-red-500 border-red-500/30",
 };
 
-const ASSET_TYPE_ICONS: Record<string, typeof FileText> = {
-  requirement_doc: ClipboardList,
-  design_doc: FileText,
-  code_change: FileCode,
-  unit_test: TestTube,
-  test_case: TestTube,
-};
-
-const ASSET_TYPE_LABELS: Record<string, string> = {
-  requirement_doc: "Requirements",
-  design_doc: "Design Docs",
-  code_change: "Code Changes",
-  unit_test: "Unit Tests",
-  test_case: "Test Cases",
-};
-
 interface TaskDraft {
   editingTitle?: boolean;
   title?: string;
@@ -115,7 +90,6 @@ interface TaskDetailProps {
 
 export function TaskDetail({ taskId, onBack, initialCommentId }: TaskDetailProps) {
   const [task, setTask] = useState<Task | null>(null);
-  const [linkedAssets, setLinkedAssets] = useState<Asset[]>([]);
   const [loading, setLoading] = useState(true);
 
   const [editingTitle, setEditingTitle] = useState(false);
@@ -130,15 +104,13 @@ export function TaskDetail({ taskId, onBack, initialCommentId }: TaskDetailProps
 
   const [showLabelPicker, setShowLabelPicker] = useState(false);
 
-  const [showLinkDialog, setShowLinkDialog] = useState(false);
+  const [parentTask, setParentTask] = useState<Task | null>(null);
+  const [showParentPicker, setShowParentPicker] = useState(false);
+  const [parentSearch, setParentSearch] = useState("");
+  const [parentCandidates, setParentCandidates] = useState<Task[]>([]);
+  const [loadingParents, setLoadingParents] = useState(false);
+
   const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState("");
-  const [projectAssets, setProjectAssets] = useState<Asset[]>([]);
-  const [loadingAssets, setLoadingAssets] = useState(false);
-  const [assetsHasMore, setAssetsHasMore] = useState(false);
-  const [assetsOffset, setAssetsOffset] = useState(0);
-  const [linkError, setLinkError] = useState("");
-  const [linking, setLinking] = useState(false);
 
   useEffect(() => {
     if (taskId) loadTask();
@@ -155,16 +127,26 @@ export function TaskDetail({ taskId, onBack, initialCommentId }: TaskDetailProps
   const loadTask = async () => {
     setLoading(true);
     try {
-      const [t, assets, cmts, projList] = await Promise.all([
+      const [t, cmts, projList] = await Promise.all([
         tasksApi.get(taskId!),
-        tasksApi.listAssets(taskId!),
         tasksApi.listComments(taskId!),
         projectsApi.list(),
       ]);
       setTask(t);
-      setLinkedAssets(assets || []);
       setComments(cmts || []);
       setProjects(projList || []);
+
+      // Load parent task info if this task has a parent
+      if (t.parent_id) {
+        try {
+          const parent = await tasksApi.get(t.parent_id);
+          setParentTask(parent);
+        } catch {
+          setParentTask(null);
+        }
+      } else {
+        setParentTask(null);
+      }
 
       // Restore any in-progress draft
       const draft = loadDraft(taskId!);
@@ -220,33 +202,6 @@ export function TaskDetail({ taskId, onBack, initialCommentId }: TaskDetailProps
     const t = await tasksApi.get(taskId);
     setTask(t);
   };
-
-  const [projectNames, setProjectNames] = useState<Record<string, string>>({});
-  const fetchedNamesRef = useRef<Set<string>>(new Set());
-
-  const groupedByProject = useMemo(() => {
-    const groups: Record<string, { projectName: string; assets: Asset[] }> = {};
-    for (const asset of linkedAssets) {
-      const pid = asset.project_id;
-      if (!groups[pid]) {
-        groups[pid] = { projectName: projectNames[pid] || pid, assets: [] };
-      }
-      groups[pid].assets.push(asset);
-    }
-    return groups;
-  }, [linkedAssets, projectNames]);
-
-  useEffect(() => {
-    const pids = [...new Set(linkedAssets.map((a) => a.project_id))];
-    for (const pid of pids) {
-      if (!fetchedNamesRef.current.has(pid)) {
-        fetchedNamesRef.current.add(pid);
-        projectsApi.get(pid).then((p) => {
-          setProjectNames((prev) => ({ ...prev, [pid]: p.name }));
-        }).catch(() => {});
-      }
-    }
-  }, [linkedAssets]);
 
   const handleSaveTitle = async () => {
     if (!taskId || !editTitle.trim()) return;
@@ -352,102 +307,60 @@ export function TaskDetail({ taskId, onBack, initialCommentId }: TaskDetailProps
     }
   };
 
-  const handleProjectChange = async (projectId: string) => {
+
+  const handleSearchParents = async (query: string) => {
+    setParentSearch(query);
+    if (!query.trim()) {
+      setParentCandidates([]);
+      return;
+    }
+    setLoadingParents(true);
+    try {
+      const all = await tasksApi.list(50, 0, task?.project_id || undefined);
+      const filtered = (all || []).filter(
+        (t) => t.id !== taskId && !t.parent_id && t.title.toLowerCase().includes(query.toLowerCase())
+      );
+      setParentCandidates(filtered);
+    } catch {
+      setParentCandidates([]);
+    } finally {
+      setLoadingParents(false);
+    }
+  };
+
+  const handleChangeParent = async (parentId: string) => {
     if (!taskId) return;
     try {
-      const updated = await tasksApi.update(taskId, { project_id: projectId });
-      setTask(updated);
+      await tasksApi.setParent(taskId, parentId);
+      const [t, parent] = await Promise.all([
+        tasksApi.get(taskId),
+        tasksApi.get(parentId),
+      ]);
+      setTask(t);
+      setParentTask(parent);
+      setShowParentPicker(false);
+      setParentSearch("");
+      setParentCandidates([]);
+      toast.success("Parent updated");
     } catch (e) {
-      console.error("Failed to update project:", e);
-      toast.error("Failed to update project", { description: String(e) });
+      console.error("Failed to set parent:", e);
+      toast.error("Failed to set parent", { description: String(e) });
     }
   };
 
-  const handleUnlinkAsset = async (assetId: string) => {
+  const handleRemoveParent = async () => {
     if (!taskId) return;
     try {
-      await tasksApi.unlinkAsset(taskId, assetId);
-      setLinkedAssets((prev) => prev.filter((a) => a.id !== assetId));
+      await tasksApi.removeParent(taskId);
+      setParentTask(null);
+      const t = await tasksApi.get(taskId);
+      setTask(t);
+      toast.success("Parent removed");
     } catch (e) {
-      console.error("Failed to unlink asset:", e);
-      toast.error("Failed to unlink asset", { description: String(e) });
+      console.error("Failed to remove parent:", e);
+      toast.error("Failed to remove parent", { description: String(e) });
     }
   };
-
-  const handleOpenLinkDialog = async () => {
-    setShowLinkDialog(true);
-    setSelectedProjectId("");
-    setProjectAssets([]);
-    setLinkError("");
-    try {
-      const p = await projectsApi.list();
-      setProjects(p || []);
-    } catch (e) {
-      console.error("Failed to load projects:", e);
-      toast.error("Failed to load projects", { description: String(e) });
-    }
-  };
-
-  const handleSelectProject = async (projectId: string) => {
-    setSelectedProjectId(projectId);
-    setLoadingAssets(true);
-    setAssetsOffset(0);
-    try {
-      const data = await assetsApi.list(projectId, 20, 0);
-      setProjectAssets(data || []);
-      setAssetsHasMore((data || []).length === 20);
-      setAssetsOffset((data || []).length);
-    } catch (e) {
-      console.error("Failed to load assets:", e);
-      toast.error("Failed to load assets", { description: String(e) });
-    } finally {
-      setLoadingAssets(false);
-    }
-  };
-
-  const handleLoadMoreDialogAssets = async () => {
-    if (!selectedProjectId || loadingAssets) return;
-    setLoadingAssets(true);
-    try {
-      const data = await assetsApi.list(selectedProjectId, 20, assetsOffset);
-      setProjectAssets((prev) => [...prev, ...(data || [])]);
-      setAssetsHasMore((data || []).length === 20);
-      setAssetsOffset((prev) => prev + (data || []).length);
-    } catch (e) {
-      console.error("Failed to load more assets:", e);
-      toast.error("Failed to load assets", { description: String(e) });
-    } finally {
-      setLoadingAssets(false);
-    }
-  };
-
-  const handleLinkAsset = async (asset: Asset) => {
-    if (!taskId || linking) return;
-    setLinking(true);
-    setLinkError("");
-    try {
-      await tasksApi.linkAsset(taskId, asset.id);
-      setLinkedAssets((prev) => [...prev, asset]);
-      setShowLinkDialog(false);
-    } catch (e: any) {
-      const msg = e?.message || String(e);
-      setLinkError(`Failed to link "${asset.title}": ${msg}`);
-      console.error("Failed to link asset:", e);
-    } finally {
-      setLinking(false);
-    }
-  };
-
-  const dialogAssetsGrouped = useMemo(() => {
-    const alreadyLinked = new Set(linkedAssets.map((a) => a.id));
-    const available = projectAssets.filter((a) => !alreadyLinked.has(a.id));
-    const grouped: Record<string, Asset[]> = {};
-    for (const a of available) {
-      if (!grouped[a.type]) grouped[a.type] = [];
-      grouped[a.type].push(a);
-    }
-    return grouped;
-  }, [projectAssets, linkedAssets]);
 
   if (loading) {
     return (
@@ -479,8 +392,31 @@ export function TaskDetail({ taskId, onBack, initialCommentId }: TaskDetailProps
           Back
         </button>
 
-        {/* Title */}
+        {/* Type badge + Title */}
         <div className="mb-5">
+          {task.source === "gitlab" && (
+            <div className="flex items-center gap-2 mb-2">
+              <span className={cn(
+                "inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium",
+                task.external_type === "Task"
+                  ? "bg-purple-500/10 text-purple-500"
+                  : "bg-green-500/10 text-green-500"
+              )}>
+                {task.external_type === "Task" ? <TypeTask className="h-3 w-3" /> : <TypeIssue className="h-3 w-3" />}
+                {task.external_type || "Issue"}
+              </span>
+              {task.external_url && (
+                <a
+                  href={task.external_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  View in GitLab →
+                </a>
+              )}
+            </div>
+          )}
           {editingTitle ? (
             <div className="flex items-center gap-2">
               <Input
@@ -569,17 +505,8 @@ export function TaskDetail({ taskId, onBack, initialCommentId }: TaskDetailProps
               )}
               <tr>
                 <td className="px-4 py-2.5 text-muted-foreground">Project</td>
-                <td className="px-4 py-1.5">
-                  <select
-                    value={task.project_id || ""}
-                    onChange={(e) => handleProjectChange(e.target.value)}
-                    className="text-sm bg-transparent outline-none cursor-pointer"
-                  >
-                    <option value="">None</option>
-                    {projects.map((p) => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                  </select>
+                <td className="px-4 py-1.5 text-sm">
+                  {projects.find((p) => p.id === task.project_id)?.name || "None"}
                 </td>
               </tr>
               <tr>
@@ -608,9 +535,148 @@ export function TaskDetail({ taskId, onBack, initialCommentId }: TaskDetailProps
                   </div>
                 </td>
               </tr>
+              {/* Parent relationship */}
+              <tr>
+                <td className="px-4 py-2.5 text-muted-foreground">Parent</td>
+                <td className="px-4 py-1.5">
+                  {parentTask ? (
+                    <div className="flex items-center gap-2">
+                      <TypeIssue className="shrink-0 text-blue-500" />
+                      <span
+                        className="text-sm text-blue-500 truncate"
+                        title={parentTask.title}
+                      >
+                        {shortId(parentTask.id)} {parentTask.title}
+                      </span>
+                      <button
+                        onClick={() => setShowParentPicker(true)}
+                        className="shrink-0 p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                        title="Change parent"
+                      >
+                        <Pencil className="h-3 w-3" />
+                      </button>
+                      <button
+                        onClick={handleRemoveParent}
+                        className="shrink-0 p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
+                        title="Remove parent"
+                      >
+                        <Unlink className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ) : task.parent_id ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-muted-foreground">{shortId(task.parent_id)}</span>
+                      <button
+                        onClick={() => setShowParentPicker(true)}
+                        className="shrink-0 p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                        title="Change parent"
+                      >
+                        <Pencil className="h-3 w-3" />
+                      </button>
+                      <button
+                        onClick={handleRemoveParent}
+                        className="shrink-0 p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
+                        title="Remove parent"
+                      >
+                        <Unlink className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setShowParentPicker(true)}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
+                    >
+                      <Plus className="h-3 w-3" />
+                      Set parent
+                    </button>
+                  )}
+                  {showParentPicker && (
+                    <div className="mt-2 border rounded-md bg-popover p-2 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <input
+                          value={parentSearch}
+                          onChange={(e) => handleSearchParents(e.target.value)}
+                          placeholder="Search for parent task..."
+                          className="flex-1 text-xs bg-transparent border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring"
+                          autoFocus
+                        />
+                        <button
+                          onClick={() => { setShowParentPicker(false); setParentSearch(""); setParentCandidates([]); }}
+                          className="p-1 rounded hover:bg-accent text-muted-foreground"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                      {loadingParents && (
+                        <div className="flex justify-center py-2">
+                          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                        </div>
+                      )}
+                      {parentCandidates.length > 0 && (
+                        <div className="max-h-[200px] overflow-y-auto divide-y divide-border/50">
+                          {parentCandidates.map((candidate) => (
+                            <button
+                              key={candidate.id}
+                              onClick={() => handleChangeParent(candidate.id)}
+                              className="w-full flex items-center gap-2 px-2 py-1.5 text-left hover:bg-accent/50 rounded transition-colors"
+                            >
+                              <TypeIssue className="shrink-0 text-green-500" />
+                              <span className="text-[11px] text-muted-foreground font-mono">{shortId(candidate.id)}</span>
+                              <span className="text-xs truncate">{candidate.title}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {parentSearch && !loadingParents && parentCandidates.length === 0 && (
+                        <p className="text-xs text-muted-foreground text-center py-2">No matching tasks found</p>
+                      )}
+                    </div>
+                  )}
+                </td>
+              </tr>
             </tbody>
           </table>
         </div>
+
+        {/* Children */}
+        {task.children && task.children.length > 0 && (
+          <div className="rounded-lg border mb-4">
+            <div className="px-4 py-2.5 border-b bg-muted/30 flex items-center gap-2">
+              <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="text-sm font-medium">
+                Child tasks
+                <span className="ml-1.5 text-muted-foreground font-normal">({task.children.length})</span>
+              </span>
+            </div>
+            <div className="divide-y divide-border/50">
+              {task.children.map((child) => (
+                <div
+                  key={child.id}
+                  className="flex items-center gap-2.5 px-4 py-2 hover:bg-accent/30 transition-colors cursor-pointer"
+                  onClick={() => onBack()}
+                >
+                  <TypeTask className="shrink-0 text-muted-foreground" />
+                  <span className="text-[11px] text-muted-foreground font-mono">{shortId(child.id)}</span>
+                  <span className={cn(
+                    "text-sm truncate flex-1",
+                    child.status === "closed" ? "line-through text-muted-foreground" : "text-foreground"
+                  )}>
+                    {child.title}
+                  </span>
+                  <span className={cn(
+                    "text-[10px] px-1.5 py-0.5 rounded",
+                    child.status === "closed"
+                      ? "bg-zinc-500/15 text-zinc-400"
+                      : "bg-blue-500/15 text-blue-500"
+                  )}>
+                    {child.status === "closed" ? "Closed" : "Open"}
+                  </span>
+                  <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50" />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Metadata */}
         <div className="flex gap-6 flex-wrap text-[11px] text-muted-foreground/70 mb-5 px-1">
@@ -681,74 +747,10 @@ export function TaskDetail({ taskId, onBack, initialCommentId }: TaskDetailProps
           ) : (
             <div className="rounded-md border p-3 min-h-[40px]">
               {task.description ? (
-                <div className="markdown-content text-sm">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {task.description}
-                  </ReactMarkdown>
-                </div>
+                <MarkdownRenderer content={task.description} className="markdown-content text-sm" />
               ) : (
                 <p className="text-sm text-muted-foreground/50 italic">No description</p>
               )}
-            </div>
-          )}
-          <div className="mt-2">
-            <ReactionPicker targetType="task" targetId={taskId} />
-          </div>
-        </div>
-
-        {/* Linked Assets */}
-        <div className="mb-5">
-          <div className="flex items-center justify-between mb-2">
-            <h2 className="text-sm font-semibold">Linked Assets</h2>
-            <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={handleOpenLinkDialog}>
-              <Plus className="h-3 w-3" />
-              Link Asset
-            </Button>
-          </div>
-
-          {linkedAssets.length === 0 ? (
-            <div className="text-xs text-muted-foreground border border-dashed rounded-lg py-4 text-center">
-              No assets linked.{" "}
-              <button onClick={handleOpenLinkDialog} className="text-primary hover:underline">
-                Link one
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {Object.entries(groupedByProject).map(([projectId, group]) => (
-                <div key={projectId}>
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
-                    <FolderGit2 className="h-3 w-3" />
-                    <span>{group.projectName !== projectId ? group.projectName : projectId.slice(0, 8)}</span>
-                  </div>
-                  <div className="space-y-1">
-                    {group.assets.map((asset) => {
-                      const Icon = ASSET_TYPE_ICONS[asset.type] || FileText;
-                      return (
-                        <div
-                          key={asset.id}
-                          className="flex items-center gap-2 px-3 py-2 border rounded-md hover:bg-accent/50 transition-colors group"
-                        >
-                          <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
-                          <div className="flex-1 min-w-0">
-                            <span className="text-sm font-medium truncate block">{asset.title}</span>
-                            <span className="text-[11px] text-muted-foreground">
-                              {ASSET_TYPE_LABELS[asset.type] || asset.type} · v{asset.current_version} · {asset.status}
-                            </span>
-                          </div>
-                          <button
-                            onClick={() => handleUnlinkAsset(asset.id)}
-                            className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-all"
-                            title="Unlink"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
             </div>
           )}
         </div>
@@ -789,14 +791,7 @@ export function TaskDetail({ taskId, onBack, initialCommentId }: TaskDetailProps
                   </div>
                 </div>
                 <div className="px-4 py-3">
-                  <div className="markdown-content text-sm">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={mentionComponents}>
-                      {comment.body}
-                    </ReactMarkdown>
-                  </div>
-                </div>
-                <div className="px-4 pb-2.5">
-                  <ReactionPicker targetType="task_comment" targetId={comment.id} />
+                  <MarkdownRenderer content={comment.body} className="markdown-content text-sm" components={mentionComponents} />
                 </div>
               </div>
             ))}
@@ -832,93 +827,6 @@ export function TaskDetail({ taskId, onBack, initialCommentId }: TaskDetailProps
           </div>
         </div>
 
-        {/* Link Asset Dialog */}
-        <Dialog open={showLinkDialog} onOpenChange={setShowLinkDialog}>
-          <DialogContent className="sm:max-w-lg">
-            <DialogHeader>
-              <DialogTitle>Link Asset to Task</DialogTitle>
-            </DialogHeader>
-            <div className="space-y-3">
-              <div>
-                <label className="text-sm font-medium">Project</label>
-                <select
-                  className="w-full border rounded-md px-3 py-2 text-sm mt-1 bg-background"
-                  value={selectedProjectId}
-                  onChange={(e) => handleSelectProject(e.target.value)}
-                >
-                  <option value="">Select a project...</option>
-                  {projects.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              {linkError && (
-                <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-md px-3 py-2">
-                  {linkError}
-                </div>
-              )}
-
-              {linking && (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Linking...
-                </div>
-              )}
-
-              {selectedProjectId && (
-                <div className="border rounded-md max-h-[300px] overflow-y-auto">
-                  {loadingAssets && projectAssets.length === 0 ? (
-                    <div className="flex items-center justify-center py-6">
-                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                    </div>
-                  ) : Object.keys(dialogAssetsGrouped).length === 0 ? (
-                    <div className="text-xs text-muted-foreground text-center py-6">
-                      No available assets in this project
-                    </div>
-                  ) : (
-                    Object.entries(dialogAssetsGrouped).map(([type, assets]) => {
-                      const Icon = ASSET_TYPE_ICONS[type] || FileText;
-                      return (
-                        <div key={type}>
-                          <div className="sticky top-0 bg-muted/80 backdrop-blur-sm px-3 py-1 text-xs font-medium text-muted-foreground flex items-center gap-1.5 border-b">
-                            <Icon className="h-3 w-3" />
-                            {ASSET_TYPE_LABELS[type] || type} ({assets.length})
-                          </div>
-                          {assets.map((asset) => (
-                            <button
-                              key={asset.id}
-                              onClick={() => handleLinkAsset(asset)}
-                              disabled={linking}
-                              className={cn(
-                                "w-full text-left px-3 py-2 hover:bg-accent transition-colors border-b last:border-b-0",
-                                linking && "opacity-50 cursor-not-allowed"
-                              )}
-                            >
-                              <div className="text-sm font-medium">{asset.title}</div>
-                              <div className="text-xs text-muted-foreground">
-                                v{asset.current_version} · {asset.status}
-                              </div>
-                            </button>
-                          ))}
-                        </div>
-                      );
-                    })
-                  )}
-                  {assetsHasMore && (
-                    <button
-                      onClick={handleLoadMoreDialogAssets}
-                      disabled={loadingAssets}
-                      className="w-full text-center text-xs text-muted-foreground py-2 hover:bg-accent transition-colors border-t"
-                    >
-                      {loadingAssets ? <Loader2 className="h-3 w-3 animate-spin inline" /> : "Load more..."}
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          </DialogContent>
-        </Dialog>
       </div>
     </div>
   );

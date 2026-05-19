@@ -1,16 +1,32 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"gitlab.okg.com/sre_ai/nexbox/agent"
 )
+
+// wfPrefixRegex matches the WF[xxxxx] prefix that orchestrator.go writes onto
+// workflow-created session names (e.g. "WF[b54a0] my-workflow — node-label").
+// The trailing whitespace is captured so the prefix can be re-applied verbatim
+// in front of an auto-generated title.
+var wfPrefixRegex = regexp.MustCompile(`^WF\[[A-Fa-f0-9]+\]\s*`)
+
+// sessionNNNRegex matches the "Session 12" placeholder name assigned at
+// creation time when the caller doesn't supply one.
+var sessionNNNRegex = regexp.MustCompile(`^Session\s+\d+$`)
 
 // ListSessions returns all sessions.
 func (s *Server) ListSessions(w http.ResponseWriter, r *http.Request) {
@@ -22,24 +38,12 @@ func (s *Server) ListSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = []Session{}
 	}
 
-	// Filter by owner unless admin
-	if GetUserRole(r) != "admin" {
-		userID := GetUserID(r)
-		filtered := sessions[:0]
-		for _, sess := range sessions {
-			if sess.UserID == userID {
-				filtered = append(filtered, sess)
-			}
-		}
-		sessions = filtered
-	}
-
 	allActiveIDs := s.Hub.ActiveSessionIDs()
 	sessionIDSet := make(map[string]bool, len(sessions))
 	for _, sess := range sessions {
 		sessionIDSet[sess.ID] = true
 	}
-	var activeIDs []string
+	activeIDs := make([]string, 0)
 	for _, id := range allActiveIDs {
 		if sessionIDSet[id] {
 			activeIDs = append(activeIDs, id)
@@ -52,46 +56,12 @@ func (s *Server) ListSessions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-const maxActiveSessionsPerProject = 20
-
-// countActiveSessionsForUser counts non-deleted sessions for a user in a given project.
-func (s *Server) countActiveSessionsForUser(userID, projectID string) (int, error) {
-	sessions, err := s.Store.ListSessions()
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	for _, sess := range sessions {
-		if sess.UserID == userID && sess.ProjectID == projectID {
-			count++
-		}
-	}
-	return count, nil
-}
-
 // CreateSession creates a new session.
 func (s *Server) CreateSession(w http.ResponseWriter, r *http.Request) {
 	var req CreateSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
-	}
-
-	// Set owner from authenticated user
-	req.UserID = GetUserID(r)
-
-	// Enforce session limit per project
-	if req.ProjectID != "" {
-		count, err := s.countActiveSessionsForUser(req.UserID, req.ProjectID)
-		if err != nil {
-			log.Printf("[sessions] Failed to count sessions: %v", err)
-			writeError(w, http.StatusInternalServerError, "failed to check session limit")
-			return
-		}
-		if count >= maxActiveSessionsPerProject {
-			writeError(w, http.StatusConflict, "session limit reached: maximum "+strconv.Itoa(maxActiveSessionsPerProject)+" active sessions per project")
-			return
-		}
 	}
 
 	// If no agent specified, use the persisted default from settings
@@ -106,6 +76,10 @@ func (s *Server) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.MarketplaceStats != nil {
+		s.MarketplaceStats.RecordSession()
+	}
+
 	writeJSON(w, http.StatusCreated, sess)
 }
 
@@ -118,10 +92,6 @@ func (s *Server) GetSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if sess == nil {
 		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if GetUserRole(r) != "admin" && sess.UserID != GetUserID(r) {
-		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
 	// Fill in default agent if empty
@@ -139,21 +109,6 @@ func (s *Server) UpdateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	// Ownership check
-	if GetUserRole(r) != "admin" {
-		existing, err := s.Store.GetSession(id)
-		if writeStoreError(w, err, "UpdateSession/GetSession", "failed to get session") {
-			return
-		}
-		if existing == nil {
-			writeError(w, http.StatusNotFound, "session not found")
-			return
-		}
-		if existing.UserID != GetUserID(r) {
-			writeError(w, http.StatusForbidden, "access denied")
-			return
-		}
-	}
 	sess, err := s.Store.UpdateSession(id, req)
 	if writeStoreError(w, err, "UpdateSession", "failed to update session") {
 		return
@@ -163,6 +118,173 @@ func (s *Server) UpdateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sess)
+}
+
+// AutoTitleSessionRequest is the JSON body for POST /api/sessions/{id}/auto-title.
+type AutoTitleSessionRequest struct {
+	// Message is the user's first message text. Used as the sole input to the
+	// LLM title generation; refs/attachments are intentionally ignored to keep
+	// the prompt short and cheap.
+	Message string `json:"message"`
+}
+
+// AutoTitleSession generates a short, semantic title for a session based on
+// the user's first message and writes it back. Workflow-created sessions whose
+// names carry a WF[xxxxx] prefix keep the prefix; the LLM-generated title is
+// appended after it. Customized names (anything that is not the default
+// placeholder and not WF-prefixed) are left untouched.
+//
+// The call is best-effort: if the LLM fails or returns nothing usable, falls
+// back to the same first-sentence heuristic the frontend used to apply.
+func (s *Server) AutoTitleSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "sessionId")
+
+	var req AutoTitleSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	msg := strings.TrimSpace(req.Message)
+	if msg == "" {
+		writeError(w, http.StatusBadRequest, "message is required")
+		return
+	}
+
+	sess, err := s.Store.GetSession(id)
+	if writeStoreError(w, err, "AutoTitleSession", "failed to get session") {
+		return
+	}
+	if sess == nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	prefix, rest := splitWFPrefix(strings.TrimSpace(sess.Name))
+	if prefix == "" && !isDefaultSessionName(rest) {
+		// User has customized this title; respect it.
+		writeJSON(w, http.StatusOK, sess)
+		return
+	}
+
+	title, err := s.generateAutoTitle(r.Context(), s.sessionWorkDir(sess), msg)
+	if err != nil {
+		log.Printf("[auto-title] LLM failed (session=%s): %v; falling back to heuristic", id, err)
+		title = heuristicTitle(msg)
+	}
+	if title == "" {
+		title = heuristicTitle(msg)
+	}
+
+	newName := prefix + title
+	updated, err := s.Store.UpdateSession(id, UpdateSessionRequest{Name: &newName})
+	if writeStoreError(w, err, "AutoTitleSession", "failed to update session") {
+		return
+	}
+	if updated == nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// splitWFPrefix separates an optional "WF[xxxxx] " prefix from the rest of
+// the name. Returns ("", name) when there is no prefix.
+func splitWFPrefix(name string) (prefix, rest string) {
+	loc := wfPrefixRegex.FindStringIndex(name)
+	if loc == nil {
+		return "", name
+	}
+	return name[:loc[1]], name[loc[1]:]
+}
+
+// isDefaultSessionName reports whether `name` looks like the auto-assigned
+// placeholder ("", "New Session", "Session 12"). Anything else is assumed to
+// be user-chosen and should not be overwritten by auto-title.
+func isDefaultSessionName(name string) bool {
+	n := strings.TrimSpace(name)
+	return n == "" || n == "New Session" || sessionNNNRegex.MatchString(n)
+}
+
+// heuristicTitle mirrors the frontend's first-sentence slice. Used as a
+// fallback when the LLM call fails so the user still gets something better
+// than "New Session".
+func heuristicTitle(message string) string {
+	cleaned := strings.Join(strings.Fields(message), " ")
+	if cleaned == "" {
+		return "New Session"
+	}
+	cut := strings.IndexAny(cleaned, ".!?。！？\n")
+	if cut > 0 {
+		cleaned = cleaned[:cut]
+	}
+	cleaned = strings.TrimSpace(cleaned)
+	if cleaned == "" {
+		return "New Session"
+	}
+	return truncateRunes(cleaned, 48)
+}
+
+// truncateRunes returns s truncated to at most n runes (so it never splits a
+// multi-byte UTF-8 codepoint mid-sequence).
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
+// generateAutoTitle calls Claude CLI (Haiku) one-shot to produce a short
+// title from the user's first message. Pins the agent to "claude" regardless
+// of the session's selected agent so the feature works uniformly across all
+// sessions (Codex, Cursor, etc.).
+func (s *Server) generateAutoTitle(parentCtx context.Context, workDir, firstMessage string) (string, error) {
+	a, ok := s.Agents["claude"]
+	if !ok || a == nil {
+		return "", fmt.Errorf("claude agent not available")
+	}
+
+	if workDir == "" {
+		workDir, _ = os.UserHomeDir()
+	}
+
+	prompt := "Summarize the following user message as a very short session title.\n\n" +
+		"Rules:\n" +
+		"- 4 to 8 words maximum\n" +
+		"- Reply in the SAME language as the user message\n" +
+		"- No punctuation, no quotes, no markdown, no emojis\n" +
+		"- Capture the core intent or topic, not pleasantries\n" +
+		"- Output ONLY the title text — no explanation, no preface\n" +
+		"- Do NOT use any tools; just respond with the title\n\n" +
+		"User message:\n" + firstMessage
+
+	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
+	defer cancel()
+
+	var textBuf strings.Builder
+	_, err := a.SendMessage(ctx, agent.Request{
+		ConversationID: fmt.Sprintf("auto-title-%d", time.Now().UnixNano()),
+		WorkDir:        workDir,
+		Model:          "haiku",
+		Message:        prompt,
+	}, func(event agent.StreamEvent) {
+		if event.Type == agent.EventTextDelta {
+			textBuf.WriteString(event.Content)
+		}
+	})
+	if err != nil {
+		return "", fmt.Errorf("agent: %w", err)
+	}
+
+	title := strings.TrimSpace(textBuf.String())
+	// Strip markdown fences / quotes some models add despite instructions.
+	title = strings.Trim(title, "`\"' \n\r\t")
+	// Collapse newlines — titles must be single-line.
+	title = strings.Join(strings.Fields(title), " ")
+	if title == "" {
+		return "", fmt.Errorf("agent returned empty response")
+	}
+	return truncateRunes(title, 48), nil
 }
 
 // ReorderSessions sets the display order of sessions.
@@ -183,24 +305,175 @@ func (s *Server) ReorderSessions(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ForkSessionRequest is the JSON body of POST /api/sessions/{sessionId}/fork.
+type ForkSessionRequest struct {
+	// SDKMessageUUID identifies the assistant turn to fork at. It is the
+	// CLI-side message uuid stored in message.metadata.sdkMessageUuid and
+	// is the durable identity of a turn — it's emitted by the agent and
+	// persisted alongside the message, so it survives across reloads and
+	// across the gap between local streaming and the first history fetch.
+	// BeeHub-side message row ids are deliberately not part of this API:
+	// during that gap the frontend only has a client-side uuid that never
+	// reached the DB.
+	SDKMessageUUID string `json:"sdk_message_uuid"`
+	// Name for the new session. If empty, defaults to "<parent name> (fork)".
+	Name string `json:"name,omitempty"`
+}
+
+// ForkSession creates a new session that is a fork of the session in the URL,
+// branched at the given message. Currently supported only for Claude sessions
+// because the CLI-level fork mechanism is Claude-specific (`--fork-session` +
+// `--resume-session-at`).
+//
+// On success, the new session is fully populated in the BeeHub DB (with a
+// copy of the parent's messages up to the cut point) but its
+// `agent_session_id` is empty: the actual CLI fork happens lazily on the
+// first chat turn, when chat.go sees `forked_from_session_id != ""` and
+// passes the fork flags to the agent.
+func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
+	parentID := chi.URLParam(r, "sessionId")
+	var req ForkSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.SDKMessageUUID == "" {
+		writeError(w, http.StatusBadRequest, "sdk_message_uuid is required")
+		return
+	}
+
+	parent, err := s.Store.GetSession(parentID)
+	if writeStoreError(w, err, "ForkSession", "failed to load parent session") {
+		return
+	}
+	if parent == nil {
+		writeError(w, http.StatusNotFound, "parent session not found")
+		return
+	}
+	if parent.DeletedAt != nil {
+		// Forking from the trash would silently bring messages back into a
+		// fresh session, sidestepping the trash UX. Reject.
+		writeError(w, http.StatusBadRequest, "cannot fork a trashed session; restore it first")
+		return
+	}
+
+	// Today fork is wired only for Claude. Other backends should not show a
+	// fork button on the frontend, but defend in depth on the server too.
+	resolvedAgent := parent.Agent
+	if resolvedAgent == "" {
+		resolvedAgent = s.getDefaultAgent()
+	}
+	if resolvedAgent != "claude" {
+		writeError(w, http.StatusBadRequest, "fork is only supported for Claude sessions")
+		return
+	}
+
+	// Find the cut-point message by SDK uuid scoped to the parent session.
+	atMsg, err := s.Store.GetMessageBySDKUUID(parentID, req.SDKMessageUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load message: "+err.Error())
+		return
+	}
+	if atMsg == nil {
+		writeError(w, http.StatusNotFound, "message not found in this session")
+		return
+	}
+	if atMsg.Role != "assistant" {
+		writeError(w, http.StatusBadRequest, "fork must be anchored on an assistant message")
+		return
+	}
+
+	// Create new session row + copy messages.
+	newSess, err := s.Store.ForkSession(parentID, req.Name, atMsg.ID, req.SDKMessageUUID)
+	if err != nil {
+		log.Printf("[sessions] Fork failed (parent=%s, atMsg=%s): %v", parentID, atMsg.ID, err)
+		writeError(w, http.StatusInternalServerError, "failed to fork session: "+err.Error())
+		return
+	}
+
+	// Eagerly create a worktree for the fork when the parent uses one. We
+	// branch from the parent's current branch tip, leaving the parent's
+	// worktree untouched. Errors here are logged but don't fail the fork
+	// (the user can still send messages — we'll fall back to the project
+	// root, matching what ensureWorktree does on add-failure).
+	if parent.WorktreeMode == "worktree" && parent.WorktreePath != "" {
+		s.cloneWorktreeForFork(newSess, parent)
+	}
+
+	log.Printf("[sessions] Forked session %s from %s at message %s (sdkUuid=%s)",
+		newSess.ID, parentID, atMsg.ID, atMsg.Metadata.SDKMessageUUID)
+
+	if s.MarketplaceStats != nil {
+		s.MarketplaceStats.RecordSession()
+	}
+
+	writeJSON(w, http.StatusCreated, newSess)
+}
+
+// cloneWorktreeForFork creates a new git worktree for `newSess` branched
+// from `parent`'s current branch tip. Requires parent.WorktreePath to point
+// to an existing worktree directory. Updates the new session's worktree
+// fields on success.
+//
+// On failure (parent missing, detached HEAD, git error), this function logs
+// and returns without updating the session — the new session is left in
+// worktree mode with an empty path. ensureWorktree on the first chat turn
+// will then create a worktree branched from the project root's HEAD instead
+// of the parent's branch, which is a different starting point. We accept
+// that drift over failing the whole fork: the user is more likely to want
+// "the fork still works, just from project HEAD" than "the fork is dead".
+func (s *Server) cloneWorktreeForFork(newSess *Session, parent *Session) {
+	parentBranch, err := exec.Command("git", "-C", parent.WorktreePath, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		log.Printf("[fork-worktree] failed to read parent branch (session=%s, path=%s): %v",
+			parent.ID, parent.WorktreePath, err)
+		return
+	}
+	parentBranchName := strings.TrimSpace(string(parentBranch))
+	if parentBranchName == "" || parentBranchName == "HEAD" {
+		log.Printf("[fork-worktree] parent worktree is detached (session=%s); skipping worktree clone", parent.ID)
+		return
+	}
+
+	shortID := newSess.ID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	newWorktreeDir := filepath.Join(s.DataDir, "worktrees", shortID)
+	newBranchName := "fork-" + shortID
+
+	if err := os.MkdirAll(filepath.Join(s.DataDir, "worktrees"), 0755); err != nil {
+		log.Printf("[fork-worktree] mkdir failed: %v", err)
+		return
+	}
+
+	// `git worktree add -b <newBranch> <dir> <startPoint>` creates a new
+	// branch starting at the parent's branch tip (a committed ref) and
+	// checks it out in a fresh worktree directory. Run from inside the
+	// parent worktree so git can locate the repo regardless of where we
+	// are in the filesystem.
+	cmd := exec.Command("git", "worktree", "add", "-b", newBranchName, newWorktreeDir, parentBranchName)
+	cmd.Dir = parent.WorktreePath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("[fork-worktree] git worktree add failed (parent=%s, branch=%s): %v\n%s",
+			parent.ID, parentBranchName, err, out)
+		return
+	}
+
+	if err := s.Store.UpdateSessionWorktree(newSess.ID, "worktree", newWorktreeDir); err != nil {
+		log.Printf("[fork-worktree] failed to record worktree path: %v", err)
+		// Fall through: we still created the worktree on disk; ensureWorktree
+		// would now fail because the dir already exists, but this is rare.
+		return
+	}
+	newSess.WorktreePath = newWorktreeDir
+	log.Printf("[fork-worktree] created worktree %s (branch %s) for forked session %s",
+		newWorktreeDir, newBranchName, newSess.ID)
+}
+
 // DeleteSession soft-deletes a session (moves to trash).
 func (s *Server) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "sessionId")
-	// Ownership check
-	if GetUserRole(r) != "admin" {
-		existing, err := s.Store.GetSession(id)
-		if writeStoreError(w, err, "DeleteSession/GetSession", "failed to get session") {
-			return
-		}
-		if existing == nil {
-			writeError(w, http.StatusNotFound, "session not found")
-			return
-		}
-		if existing.UserID != GetUserID(r) {
-			writeError(w, http.StatusForbidden, "access denied")
-			return
-		}
-	}
 	if err := s.Store.DeleteSession(id); err != nil {
 		log.Printf("[sessions] Failed to trash session %s: %v", id, err)
 		writeError(w, http.StatusInternalServerError, "failed to delete session")
@@ -219,17 +492,6 @@ func (s *Server) ListTrashedSessions(w http.ResponseWriter, r *http.Request) {
 	if sessions == nil {
 		sessions = []Session{}
 	}
-	// Filter by owner unless admin
-	if GetUserRole(r) != "admin" {
-		userID := GetUserID(r)
-		filtered := sessions[:0]
-		for _, sess := range sessions {
-			if sess.UserID == userID {
-				filtered = append(filtered, sess)
-			}
-		}
-		sessions = filtered
-	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"sessions": sessions,
 	})
@@ -238,32 +500,6 @@ func (s *Server) ListTrashedSessions(w http.ResponseWriter, r *http.Request) {
 // RestoreSession restores a session from the trash.
 func (s *Server) RestoreSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "sessionId")
-	// Ownership check + session limit check
-	existing, err := s.Store.GetSession(id)
-	if writeStoreError(w, err, "RestoreSession/GetSession", "failed to get session") {
-		return
-	}
-	if existing == nil {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if GetUserRole(r) != "admin" && existing.UserID != GetUserID(r) {
-		writeError(w, http.StatusForbidden, "access denied")
-		return
-	}
-	// Enforce session limit on restore
-	if existing.ProjectID != "" {
-		count, err := s.countActiveSessionsForUser(existing.UserID, existing.ProjectID)
-		if err != nil {
-			log.Printf("[sessions] Failed to count sessions for restore: %v", err)
-			writeError(w, http.StatusInternalServerError, "failed to check session limit")
-			return
-		}
-		if count >= maxActiveSessionsPerProject {
-			writeError(w, http.StatusConflict, "session limit reached: maximum "+strconv.Itoa(maxActiveSessionsPerProject)+" active sessions per project")
-			return
-		}
-	}
 	if err := s.Store.RestoreSession(id); err != nil {
 		log.Printf("[sessions] Failed to restore session %s: %v", id, err)
 		writeError(w, http.StatusInternalServerError, "failed to restore session")

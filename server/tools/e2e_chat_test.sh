@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# BoxNex E2E Chat Integration Test
+# NexBox E2E Chat Integration Test
 # =============================================================================
 # Tests the real user chat flow:
 #   1. Build & start server
@@ -14,7 +14,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMPDIR_BASE=$(mktemp -d)
 DATA_DIR="$TMPDIR_BASE/data"
-SERVER_BIN="$TMPDIR_BASE/boxnex"
+SERVER_BIN="$TMPDIR_BASE/beehub"
 WSCLIENT_BIN="$TMPDIR_BASE/wsclient"
 SERVER_LOG="$TMPDIR_BASE/server.log"
 GIT_REPO_DIR="$TMPDIR_BASE/test-repo"
@@ -147,7 +147,7 @@ log "Iteration: $ITERATION_ID (session=$SESSION_ID)"
 # =============================================================================
 log "=== Sending first chat message ==="
 
-USER_MSG="Reply with exactly this text and nothing else: Hello from BoxNex E2E test. Do not use any tools."
+USER_MSG="Reply with exactly this text and nothing else: Hello from NexBox E2E test. Do not use any tools."
 WS_URL="ws://127.0.0.1:$PORT/ws"
 
 log "WebSocket URL: $WS_URL"
@@ -311,7 +311,7 @@ log "=== Tests complete: $PASS passed, $FAIL failed, $TOTAL total ==="
 PASS_RATE=$(python3 -c "print(f'{$PASS/$TOTAL*100:.1f}%')" 2>/dev/null || echo "N/A")
 
 cat > "$REPORT" << HEADER
-# BoxNex E2E Chat Integration Test Report
+# NexBox E2E Chat Integration Test Report
 
 **Date**: $(date '+%Y-%m-%d %H:%M:%S')
 **Server Port**: $PORT | **MCP Port**: $MCP_PORT
