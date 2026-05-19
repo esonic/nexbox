@@ -644,18 +644,6 @@ export function AppSidebar() {
     setSessions(sessions.filter((s) => s.project_id !== projectId));
   };
 
-  const handleRemoveFromSidebar = async (project: Project) => {
-    setProjectMenuId(null);
-    try {
-      await projectsApi.removeFromSidebar(project.id);
-      // In cloud mode: project stays in cloud but loses local dir → filter will hide it
-      // In local mode: project git_repo_path cleared → filter hides it
-      setProjects(projects.map((p) => p.id === project.id ? { ...p, git_repo_path: "" } : p));
-    } catch (e) {
-      toast.error("Failed to unlink local directory", { description: String(e) });
-    }
-  };
-
   // ── Server mode detection ──
   useEffect(() => {
     serverApi.info()
@@ -785,15 +773,11 @@ export function AppSidebar() {
             onClick={() => {
               const realProjects = projects.filter((p) => p.name !== UNASSIGNED_PROJECT);
               const localProjects = realProjects.filter((p) => p.git_repo_path);
-              if (realProjects.length === 0 && connectStatus === "connected") {
-                toast.info("Create a project first", {
-                  description: "Cloud mode requires a project to start a session.",
-                });
+              if (realProjects.length === 0) {
+                toast.info("Create a project first");
                 return;
               }
-              if (realProjects.length === 0) {
-                handleNewSession();
-              } else if (localProjects.length === 1) {
+              if (localProjects.length === 1) {
                 handleNewSession(localProjects[0].id);
               } else {
                 setShowNewSessionMenu((v) => !v);
@@ -1005,13 +989,6 @@ export function AppSidebar() {
                             <Settings className="h-3 w-3 text-muted-foreground" />
                             Settings
                           </button>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleRemoveFromSidebar(group.project!); }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors text-muted-foreground"
-                          >
-                            <LogOut className="h-3 w-3" />
-                            Unlink Local
-                          </button>
                         </div>
                       )}
                     </div>
@@ -1045,14 +1022,18 @@ export function AppSidebar() {
             );
           })}
 
-          {groupedSessions.length === 0 && sessions.length === 0 && (
-            <div className="text-[12px] text-muted-foreground/40 text-center py-8">
-              No working projects yet.<br />
+          {projects.filter((p) => p.name !== UNASSIGNED_PROJECT).length === 0 && (
+            <div className="flex flex-col items-center text-center px-3 py-8 gap-2">
+              <FolderOpen className="h-6 w-6 text-muted-foreground/40" />
+              <p className="text-[12px] text-muted-foreground">
+                No projects yet. Create one to start chatting.
+              </p>
               <button
-                onClick={() => navigate("/projects")}
-                className="text-primary/60 hover:text-primary underline-offset-2 hover:underline mt-1"
+                onClick={() => { setEditingProject(null); setProjectDialogOpen(true); }}
+                className="mt-1 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] font-medium text-primary-foreground bg-primary hover:bg-primary/90 transition-colors"
               >
-                Manage Projects
+                <Plus className="h-3 w-3" />
+                New Project
               </button>
             </div>
           )}

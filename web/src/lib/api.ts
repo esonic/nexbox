@@ -6,6 +6,23 @@ import type {
 
 const API_BASE = "/api";
 
+// Paths that should NOT trigger an auth redirect on 401 — typically the
+// auth endpoints themselves (the LoginPage needs to render the error
+// inline rather than bouncing back to /login).
+const AUTH_REDIRECT_SKIP = new Set<string>([
+  "/login",
+  "/logout",
+  "/auth/me",
+]);
+
+function redirectToLogin() {
+  if (typeof window === "undefined") return;
+  const path = window.location.pathname;
+  if (path === "/login" || path.startsWith("/login")) return;
+  const from = encodeURIComponent(path + window.location.search);
+  window.location.assign(`/login?from=${from}`);
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -15,6 +32,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     },
   });
   if (!res.ok) {
+    if (res.status === 401 && !AUTH_REDIRECT_SKIP.has(path)) {
+      redirectToLogin();
+    }
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || res.statusText);
   }
@@ -105,21 +125,6 @@ function createAssetsApi(prefix: string) {
       request<AssetVersion[]>(`${prefix}/assets/${id}/versions`),
     diff: (id: string, v1: number, v2: number) =>
       request<DiffResult>(`${prefix}/assets/${id}/diff?v1=${v1}&v2=${v2}`),
-    larkFetch: (url: string) =>
-      request<{ title: string; content: string }>(`${prefix}/assets/lark-fetch`, {
-        method: "POST",
-        body: JSON.stringify({ url }),
-      }),
-    publishToLark: (id: string, title?: string) =>
-      request<{ url: string }>(`${prefix}/assets/${id}/publish-to-lark`, {
-        method: "POST",
-        body: JSON.stringify({ title }),
-      }),
-    setLarkDoc: (id: string, url: string) =>
-      request<void>(`${prefix}/assets/${id}/lark-doc`, {
-        method: "PUT",
-        body: JSON.stringify({ lark_doc_url: url }),
-      }),
   };
 }
 
@@ -138,50 +143,18 @@ export const assetsApi = createAssetsApi("");
 export const projectsApi = {
   list: () => request<Project[]>("/projects"),
   get: (id: string) => request<Project>(`/projects/${id}`),
-  create: (data: { namespace_id?: string; name: string; description?: string; git_repo_path?: string }) =>
+  create: (data: { name: string; description?: string }) =>
     request<Project>("/projects", {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  update: (id: string, data: Partial<{
-    name: string; description: string; git_repo_path: string;
-    okone: Project["okone"];
-  }>) =>
+  update: (id: string, data: Partial<{ name: string; description: string }>) =>
     request<Project>(`/projects/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),
   delete: (id: string) =>
     request<void>(`/projects/${id}`, { method: "DELETE" }),
-  listMembers: (id: string) =>
-    request<{ user_name: string; created_at: string }[]>(`/projects/${id}/members`),
-  addMember: (id: string, userName: string) =>
-    request<void>(`/projects/${id}/members`, {
-      method: "POST",
-      body: JSON.stringify({ user_name: userName }),
-    }),
-  removeMember: (id: string, userName: string) =>
-    request<void>(`/projects/${id}/members/${encodeURIComponent(userName)}`, { method: "DELETE" }),
-  leave: (id: string) =>
-    request<void>(`/projects/${id}/members/me`, { method: "DELETE" }),
-  lookupByDir: (dir: string) =>
-    request<{ remote_id: string; git_repo_path: string }>(`/projects/lookup-by-dir?dir=${encodeURIComponent(dir)}`),
-  checkGitDir: (path: string) =>
-    request<Project>(`/projects/by-git-dir?path=${encodeURIComponent(path)}`),
-  addToSidebar: (id: string, localDir: string) =>
-    request<Project>(`/projects/${id}`, {
-      method: "PUT",
-      body: JSON.stringify({ git_repo_path: localDir }),
-    }),
-  removeFromSidebar: (id: string) =>
-    request<Project>(`/projects/${id}`, {
-      method: "PUT",
-      body: JSON.stringify({ git_repo_path: "" }),
-    }),
-  getMigrationStatus: (id: string) =>
-    request<{ needs_migration: boolean; task_count: number; reason?: string }>(`/projects/${id}/migration-status`),
-  migrateTasks: (id: string) =>
-    request<{ migrated: number; failed: number; errors?: string[] }>(`/projects/${id}/migrate-tasks`, { method: "POST" }),
   // Returns the per-project hidden "scratch" session, creating it on first
   // call. Used by the sidebar when the user clicks a project row to open a
   // new-chat surface without committing to a real session — the server
@@ -486,19 +459,6 @@ export const diffApi = {
     request<{ diff: string }>(`/projects/${projectId}/file-diff?path=${encodeURIComponent(path)}${full ? "&full=true" : ""}${staged ? "&staged=true" : ""}${sidAmp(sessionId)}`),
 };
 
-// GitLab integration
-export interface CreateMRResponse {
-  iid: number;
-  web_url: string;
-  title: string;
-  state: string;
-}
-
-export const gitlabApi = {
-  createMR: (projectId: string) =>
-    request<CreateMRResponse>(`/projects/${projectId}/create-mr`, { method: "POST" }),
-};
-
 // Labels (project-scoped)
 export const labelsApi = {
   list: (projectId: string) =>
@@ -611,8 +571,8 @@ export const serverApi = {
       body: JSON.stringify({ agent }),
     }),
   getSettings: () =>
-    request<{ default_agent: string; has_token: boolean; masked_token: string; has_gitlab_token: boolean; masked_gitlab_token: string; disable_cloud: boolean; chrome_headless: boolean; enable_file_edit: boolean }>("/settings"),
-  updateSettings: (data: { default_agent?: string; token?: string; gitlab_token?: string; disable_cloud?: boolean; chrome_headless?: boolean }) =>
+    request<{ default_agent: string; chrome_headless: boolean; enable_file_edit: boolean }>("/settings"),
+  updateSettings: (data: { default_agent?: string; chrome_headless?: boolean; enable_file_edit?: boolean }) =>
     request<void>("/settings", {
       method: "PUT",
       body: JSON.stringify(data),
@@ -627,26 +587,17 @@ export interface CloudInfo extends ServerInfo {
   user_name?: string;
 }
 
-export const updateApi = {
-  status: () => request<{ state: string; remote_version?: string }>("/update/status"),
-  restart: () => request<{ restarting: boolean }>("/update/restart", { method: "POST" }),
-};
-
+// Local username/password auth (replaces the old OAuth flow).
 export const authApi = {
-  loginUrl: () => request<{ url: string }>("/auth/login-url"),
-  logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
-};
-
-// Members (namespace-level fuzzy search)
-export interface Member {
-  user_name: string;
-  display_name: string;
-  avatar_url: string;
-}
-
-export const membersApi = {
-  search: (q: string) =>
-    request<Member[]>(`/members?q=${encodeURIComponent(q)}`),
+  login: (username: string, password: string) =>
+    request<{ username: string; user_id: number }>("/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  logout: () =>
+    request<void>("/logout", { method: "POST" }),
+  me: () =>
+    request<{ username: string; user_id: number }>("/auth/me"),
 };
 
 // ---------------------------------------------------------------------------

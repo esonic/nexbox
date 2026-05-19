@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { toast } from "sonner";
 import {
   Save, Clock, Eye, Pencil, GitCompare, ArrowLeft,
-  MessageSquare, Plus, Send, Trash2, ExternalLink, RefreshCw, FilePlus,
+  MessageSquare, Plus, Send, Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,10 +15,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { assetsApi, commentsApi, marketplaceApi } from "@/lib/api";
+import { assetsApi, commentsApi } from "@/lib/api";
 import { assetTypeLabel, formatDate, formatRelativeDate, cn } from "@/lib/utils";
 import { MarkdownRenderer } from "@/components/markdown/MarkdownRenderer";
-import { useLarkMCP } from "@/lib/useLarkMCP";
 import type { Asset, AssetVersion, DiffResult, DiffLine, ReviewComment } from "@/types";
 
 interface AssetEditorProps {
@@ -56,34 +55,11 @@ export function AssetEditor({ assetId, onClose, onSaved, initialMode, initialLin
   const [generalComment, setGeneralComment] = useState("");
   const [posting, setPosting] = useState(false);
 
-  // Publish to Lark
-  const [showPublishDialog, setShowPublishDialog] = useState(false);
-  const [publishing, setPublishing] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-  const { hasLarkMCP, larkMCP } = useLarkMCP(asset?.project_id);
-
-  const triggerLarkAuth = async () => {
-    const mcpKey = larkMCP?.name ?? "OKEngine LARK MCP";
-    try {
-      const { auth_url } = await marketplaceApi.oauthStart(mcpKey, asset?.project_id);
-      window.open(auth_url, "_blank", "noopener,noreferrer");
-    } catch {
-      toast.error("OKEngine LARK MCP 未连接", {
-        description: "请先在 Marketplace 中安装 OKEngine LARK MCP，然后重新授权。",
-      });
-    }
-  };
   useEffect(() => {
     loadAsset();
     loadVersions();
     loadComments();
   }, [assetId]);
-
-  useEffect(() => {
-    if (asset?.type === "lark_doc" && mode === "edit") {
-      setMode("preview");
-    }
-  }, [asset?.type]);
 
   useEffect(() => {
     if (mode === "diff" && diffV1 > 0 && diffV2 > 0 && diffV1 !== diffV2) {
@@ -223,58 +199,6 @@ export function AssetEditor({ assetId, onClose, onSaved, initialMode, initialLin
     }
   };
 
-  const handlePublish = async () => {
-    if (publishing) return;
-    setPublishing(true);
-    try {
-      const res = await assetsApi.publishToLark(assetId, asset?.title || undefined);
-      setShowPublishDialog(false);
-      // Directly update lark_doc_url in state from the response — don't rely on loadAsset
-      // returning the updated value (SetAssetLarkDoc may not have propagated yet in all store modes).
-      setAsset((prev) => (prev ? { ...prev, lark_doc_url: res.url } : prev));
-      toast.success("Published to Lark", {
-        action: { label: "Open", onClick: () => window.open(res.url, "_blank") },
-        description: res.url,
-        duration: 8000,
-      });
-    } catch (e) {
-      const msg = String(e);
-      if (msg.includes("authorization") || msg.toLowerCase().includes("unauthori")) {
-        setShowPublishDialog(false);
-        await triggerLarkAuth();
-      } else {
-        toast.error("Failed to publish", { description: msg });
-      }
-    } finally {
-      setPublishing(false);
-    }
-  };
-
-  const handleLarkSync = async (sourceUrl: string) => {
-    if (syncing) return;
-    if (!hasLarkMCP) { await triggerLarkAuth(); return; }
-    setSyncing(true);
-    try {
-      const res = await assetsApi.larkFetch(sourceUrl);
-      await assetsApi.update(assetId, { content: res.content });
-      setContent(res.content);
-      setOriginalContent(res.content);
-      await loadAsset();
-      await loadVersions();
-      onSaved();
-      toast.success("Synced from Lark");
-    } catch (e) {
-      const msg = String(e);
-      if (msg.includes("authorization") || msg.toLowerCase().includes("unauthori")) {
-        await triggerLarkAuth();
-      } else {
-        toast.error("Sync failed", { description: msg });
-      }
-    } finally {
-      setSyncing(false);
-    }
-  };
-
   const handleAddComment = useCallback(async (lineNumber?: number) => {
     const text = lineNumber != null ? newCommentText : generalComment;
     if (!text.trim() || !asset) return;
@@ -331,7 +255,6 @@ export function AssetEditor({ assetId, onClose, onSaved, initialMode, initialLin
     );
   }
 
-  const larkDocUrl = asset.lark_doc_url ?? null;
   const contentLines = content.split("\n");
 
   const modeButtons = (
@@ -342,37 +265,18 @@ export function AssetEditor({ assetId, onClose, onSaved, initialMode, initialLin
       <Button variant={mode === "review" ? "secondary" : "ghost"} size="sm" className="h-8 w-8 p-0" onClick={() => setMode("review")} title="Review">
         <MessageSquare className="h-3.5 w-3.5" />
       </Button>
-      {asset?.type !== "lark_doc" && (
-        <Button variant={mode === "edit" ? "secondary" : "ghost"} size="sm" className="h-8 w-8 p-0" onClick={() => setMode("edit")} title="Edit">
-          <Pencil className="h-3.5 w-3.5" />
-        </Button>
-      )}
+      <Button variant={mode === "edit" ? "secondary" : "ghost"} size="sm" className="h-8 w-8 p-0" onClick={() => setMode("edit")} title="Edit">
+        <Pencil className="h-3.5 w-3.5" />
+      </Button>
       {canDiff && (
         <Button variant={mode === "diff" ? "secondary" : "ghost"} size="sm" className="h-8 w-8 p-0" onClick={() => setMode("diff")} title="Compare Versions">
           <GitCompare className="h-3.5 w-3.5" />
         </Button>
       )}
-      {mode === "edit" && asset?.type !== "lark_doc" && (
+      {mode === "edit" && (
         <Button size="sm" className="h-8" onClick={handleSave} disabled={!hasChanges || saving}>
           <Save className="mr-1 h-3.5 w-3.5" />
           {saving ? "Saving..." : "Save"}
-        </Button>
-      )}
-      {asset?.type !== "lark_doc" && (
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-8 px-2"
-          onClick={async () => {
-            if (!hasLarkMCP) {
-              await triggerLarkAuth();
-              return;
-            }
-            setShowPublishDialog(true);
-          }}
-          title={hasLarkMCP ? "发布到 Lark" : "OKEngine LARK MCP 未连接，点击授权"}
-        >
-          <Send className={cn("h-3.5 w-3.5", !hasLarkMCP && "opacity-40")} />
         </Button>
       )}
     </div>
@@ -407,50 +311,9 @@ export function AssetEditor({ assetId, onClose, onSaved, initialMode, initialLin
       </div>
 
       <div className="max-w-3xl mx-auto px-6 pb-6">
-      {/* Lark doc source link — above title */}
-      <div className="flex items-center gap-4 mt-2 mb-1">
-        {larkDocUrl ? (
-          <a
-            href={larkDocUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-xs text-foreground hover:text-foreground/70"
-          >
-            <ExternalLink className="h-3 w-3" />
-            View in Lark
-          </a>
-        ) : (
-          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground/40 cursor-default">
-            <ExternalLink className="h-3 w-3" />
-            View in Lark
-          </span>
-        )}
-        {asset?.type === "lark_doc" ? (
-          <button
-            onClick={() => larkDocUrl && handleLarkSync(larkDocUrl)}
-            disabled={!larkDocUrl || syncing}
-            className="group inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-cyan-400 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-          >
-            <RefreshCw className={cn("h-3 w-3", syncing && "animate-spin")} />
-            <span className="opacity-0 group-hover:opacity-100 transition-opacity">
-              {syncing ? "Syncing..." : "Sync content from Lark doc"}
-            </span>
-          </button>
-        ) : larkDocUrl ? (
-          <button
-            onClick={() => { setShowPublishDialog(true); }}
-            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-cyan-400 transition-colors"
-            title="创建新的 Lark 文档"
-          >
-            <FilePlus className="h-3 w-3" />
-            <span>Create new Lark doc</span>
-          </button>
-        ) : null}
-      </div>
-
       {/* Title */}
       <div className="mb-4 mt-2">
-        {editingTitle && asset.type !== "lark_doc" ? (
+        {editingTitle ? (
           <div className="flex items-center gap-2">
             <Input
               value={editTitle}
@@ -464,16 +327,11 @@ export function AssetEditor({ assetId, onClose, onSaved, initialMode, initialLin
           </div>
         ) : (
           <h1
-            className={cn(
-              "text-2xl font-bold flex items-center gap-2",
-              asset.type !== "lark_doc" && "cursor-pointer hover:text-primary/80 group",
-            )}
-            onClick={() => { if (asset.type !== "lark_doc") { setEditingTitle(true); setEditTitle(asset.title); } }}
+            className="text-2xl font-bold flex items-center gap-2 cursor-pointer hover:text-primary/80 group"
+            onClick={() => { setEditingTitle(true); setEditTitle(asset.title); }}
           >
             {asset.title}
-            {asset.type !== "lark_doc" && (
-              <Pencil className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
-            )}
+            <Pencil className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
           </h1>
         )}
       </div>
@@ -767,29 +625,6 @@ export function AssetEditor({ assetId, onClose, onSaved, initialMode, initialLin
       )}
       </div>
 
-      {/* Publish to Lark dialog */}
-      {showPublishDialog && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center" onClick={() => setShowPublishDialog(false)}>
-          <div className="bg-background rounded-lg border shadow-lg p-4 w-80 space-y-3" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-sm font-semibold">Publish to Lark</h3>
-            <p className="text-xs text-muted-foreground bg-muted/50 rounded px-2 py-1.5">
-              {larkDocUrl
-                ? "This will generate a new Lark doc and update the linked URL."
-                : "This will generate a new Lark doc."}
-            </p>
-            <div className="space-y-1">
-              <span className="text-xs text-muted-foreground">Title</span>
-              <p className="text-sm font-medium truncate">{asset?.title}</p>
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" size="sm" onClick={() => setShowPublishDialog(false)}>Cancel</Button>
-              <Button size="sm" onClick={handlePublish} disabled={publishing}>
-                {publishing ? "Publishing…" : "Publish"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

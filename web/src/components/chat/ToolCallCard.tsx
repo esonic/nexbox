@@ -28,7 +28,6 @@ import {
   List,
   MessageSquareMore,
   NotebookPen,
-  GitPullRequestArrow,
   SquareTerminal,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -479,7 +478,6 @@ const toolRegistry: Record<string, ToolMeta> = {
   "mcp__nexbox__list_tasks":            { icon: List,              label: tense("Listed tasks", "Listing tasks"),            subtitle: textField("status") },
   "mcp__nexbox__create_task":           { icon: Sparkles,          label: tense("Created task", "Creating task"),            subtitle: textField("title") },
   "mcp__nexbox__run_in_terminal":       { icon: SquareTerminal,    label: tense("Ran in terminal", "Running in terminal"),   subtitle: textField("command"), renderInput: (i) => <CommandBlock input={i} />, renderOutput: (o, err) => <TerminalOutput output={o} isError={err} /> },
-  "mcp__nexbox__get_gitlab_mr_comments": { icon: GitPullRequestArrow, label: tense("Fetched MR comments", "Fetching MR comments"), subtitle: textField("mr_url") },
 
   // ── NexBox MCP tools (nexbox/ prefix from Codex/Cursor) ──
   "nexbox/save_asset":            { icon: Save,              label: tense("Saved asset", "Saving asset"), subtitle: (i) => {
@@ -494,7 +492,6 @@ const toolRegistry: Record<string, ToolMeta> = {
   "nexbox/list_tasks":            { icon: List,              label: tense("Listed tasks", "Listing tasks"),            subtitle: textField("status") },
   "nexbox/create_task":           { icon: Sparkles,          label: tense("Created task", "Creating task"),            subtitle: textField("title") },
   "nexbox/run_in_terminal":       { icon: SquareTerminal,    label: tense("Ran in terminal", "Running in terminal"),   subtitle: textField("command"), renderInput: (i) => <CommandBlock input={i} />, renderOutput: (o, err) => <TerminalOutput output={o} isError={err} /> },
-  "nexbox/get_gitlab_mr_comments": { icon: GitPullRequestArrow, label: tense("Fetched MR comments", "Fetching MR comments"), subtitle: textField("mr_url") },
 };
 
 function normalizeToolName(toolName: string): string {

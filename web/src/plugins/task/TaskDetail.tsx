@@ -394,29 +394,6 @@ export function TaskDetail({ taskId, onBack, initialCommentId }: TaskDetailProps
 
         {/* Type badge + Title */}
         <div className="mb-5">
-          {task.source === "gitlab" && (
-            <div className="flex items-center gap-2 mb-2">
-              <span className={cn(
-                "inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium",
-                task.external_type === "Task"
-                  ? "bg-purple-500/10 text-purple-500"
-                  : "bg-green-500/10 text-green-500"
-              )}>
-                {task.external_type === "Task" ? <TypeTask className="h-3 w-3" /> : <TypeIssue className="h-3 w-3" />}
-                {task.external_type || "Issue"}
-              </span>
-              {task.external_url && (
-                <a
-                  href={task.external_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  View in GitLab →
-                </a>
-              )}
-            </div>
-          )}
           {editingTitle ? (
             <div className="flex items-center gap-2">
               <Input

@@ -364,30 +364,6 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
 
   const load = useCallback(async () => {
     try {
-      // Auto-migrate local tasks to GitLab if needed (guard against concurrent calls)
-      if (currentProjectId && !migratingRef.current) {
-        try {
-          const migration = await projectsApi.getMigrationStatus(currentProjectId);
-          if (migration?.needs_migration) {
-            migratingRef.current = true;
-            try {
-              const result = await projectsApi.migrateTasks(currentProjectId);
-              if (result.failed > 0) {
-                toast.warning(`Migrated ${result.migrated} tasks, ${result.failed} failed`, {
-                  description: result.errors?.join("; "),
-                });
-              } else if (result.migrated > 0) {
-                toast.success(`Auto-migrated ${result.migrated} tasks to GitLab`);
-              }
-            } catch (e) {
-              toast.error("Auto-migration failed", { description: String(e) });
-            } finally {
-              migratingRef.current = false;
-            }
-          }
-        } catch { /* ignore */ }
-      }
-
       const [taskList, projList] = await Promise.all([
         tasksApi.list(PAGE_SIZE, 0, currentProjectId || undefined),
         projectsApi.list(),

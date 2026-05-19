@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
-import { serverApi } from "@/lib/api";
-import { ChevronDown, Check } from "lucide-react";
+import { serverApi, authApi } from "@/lib/api";
+import { ChevronDown, LogOut, Loader2 } from "lucide-react";
 
 const AGENT_LABELS: Record<string, string> = {
   codex: "Codex",
@@ -13,13 +13,9 @@ export function GeneralSettings() {
   const [defaultAgent, setDefaultAgent] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const [hasGitlabToken, setHasGitlabToken] = useState(false);
-  const [maskedGitlabToken, setMaskedGitlabToken] = useState("");
-  const [gitlabTokenInput, setGitlabTokenInput] = useState("");
-  const [showGitlabTokenInput, setShowGitlabTokenInput] = useState(false);
-  const [gitlabTokenSaved, setGitlabTokenSaved] = useState(false);
-
-  const [chromeHeadless, setChromeHeadless] = useState(false);
+  const [chromeHeadless, setChromeHeadless] = useState(true);
+  const [enableFileEdit, setEnableFileEdit] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   useEffect(() => {
     serverApi.availableAgents()
@@ -31,9 +27,8 @@ export function GeneralSettings() {
 
     serverApi.getSettings()
       .then((data) => {
-        setHasGitlabToken(data.has_gitlab_token);
-        setMaskedGitlabToken(data.masked_gitlab_token);
         setChromeHeadless(!!data.chrome_headless);
+        setEnableFileEdit(!!data.enable_file_edit);
       })
       .catch((e) => console.error("Failed to load settings:", e));
   }, []);
@@ -54,6 +49,22 @@ export function GeneralSettings() {
     }
   };
 
+  const handleFileEditChange = async (next: boolean) => {
+    if (next === enableFileEdit || saving) return;
+    const prev = enableFileEdit;
+    setEnableFileEdit(next);
+    setSaving(true);
+    try {
+      await serverApi.updateSettings({ enable_file_edit: next });
+    } catch (e) {
+      setEnableFileEdit(prev);
+      console.error("Failed to update file edit:", e);
+      toast.error("Failed to update setting", { description: String(e) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleAgentChange = async (agentId: string) => {
     if (agentId === defaultAgent || saving) return;
     setSaving(true);
@@ -68,26 +79,16 @@ export function GeneralSettings() {
     }
   };
 
-  const handleSaveGitlabToken = async () => {
-    setSaving(true);
+  const handleSignOut = async () => {
+    if (signingOut) return;
+    setSigningOut(true);
     try {
-      await serverApi.updateSettings({ gitlab_token: gitlabTokenInput });
-      setHasGitlabToken(gitlabTokenInput !== "");
-      if (gitlabTokenInput) {
-        const len = gitlabTokenInput.length;
-        setMaskedGitlabToken(len > 10 ? gitlabTokenInput.slice(0, 6) + "..." + gitlabTokenInput.slice(-4) : "***");
-      } else {
-        setMaskedGitlabToken("");
-      }
-      setShowGitlabTokenInput(false);
-      setGitlabTokenInput("");
-      setGitlabTokenSaved(true);
-      setTimeout(() => setGitlabTokenSaved(false), 2000);
+      await authApi.logout();
     } catch (e) {
-      console.error("Failed to save GitLab token:", e);
-      toast.error("Failed to save GitLab token", { description: String(e) });
+      console.error("Failed to sign out:", e);
+      // Still bounce to /login on failure — the cookie may already be cleared.
     } finally {
-      setSaving(false);
+      window.location.assign("/login");
     }
   };
 
@@ -118,67 +119,6 @@ export function GeneralSettings() {
         </div>
       </div>
 
-      {/* GitLab Personal Access Token */}
-      <div className="rounded-lg border bg-card">
-        <div className="px-4 py-3 space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-sm font-medium">GitLab Token</div>
-              <div className="text-xs text-muted-foreground mt-0.5">
-                {hasGitlabToken ? "Personal access token configured" : "No token — GitLab features (MR comments, create MR) won't work"}
-              </div>
-            </div>
-            {gitlabTokenSaved && (
-              <span className="flex items-center gap-1 text-xs text-green-500">
-                <Check className="h-3 w-3" /> Saved
-              </span>
-            )}
-          </div>
-
-          {hasGitlabToken && !showGitlabTokenInput && (
-            <div className="flex items-center gap-2">
-              <code className="flex-1 bg-muted px-3 py-1.5 rounded-md text-xs font-mono text-muted-foreground">
-                {maskedGitlabToken}
-              </code>
-              <button
-                onClick={() => setShowGitlabTokenInput(true)}
-                className="text-xs text-muted-foreground hover:text-foreground transition-colors px-2 py-1"
-              >
-                Change
-              </button>
-            </div>
-          )}
-
-          {(showGitlabTokenInput || !hasGitlabToken) && (
-            <div className="flex items-center gap-2">
-              <input
-                type="password"
-                value={gitlabTokenInput}
-                onChange={(e) => setGitlabTokenInput(e.target.value)}
-                placeholder="glpat-..."
-                className="flex-1 bg-background border rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1"
-                onKeyDown={(e) => e.key === "Enter" && handleSaveGitlabToken()}
-              />
-              <button
-                onClick={handleSaveGitlabToken}
-                disabled={saving}
-                className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Save
-              </button>
-              {showGitlabTokenInput && (
-                <button
-                  onClick={() => { setShowGitlabTokenInput(false); setGitlabTokenInput(""); }}
-                  className="text-xs text-muted-foreground hover:text-foreground transition-colors px-2 py-1"
-                >
-                  Cancel
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
       {/* Chrome Headless Mode (E2E Browser Testing) */}
       <div className="rounded-lg border bg-card">
         <div className="flex items-center justify-between px-4 py-3">
@@ -203,6 +143,42 @@ export function GeneralSettings() {
         </div>
       </div>
 
+      {/* Enable file editing from the Files panel */}
+      <div className="rounded-lg border bg-card">
+        <div className="flex items-center justify-between px-4 py-3">
+          <div>
+            <div className="text-sm font-medium">Enable File Editing</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              Allow editing, uploading and deleting files from the Files panel.
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enableFileEdit}
+            disabled={saving}
+            onClick={() => handleFileEditChange(!enableFileEdit)}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${enableFileEdit ? "bg-primary" : "bg-input"}`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-background shadow ring-0 transition-transform ${enableFileEdit ? "translate-x-5" : "translate-x-0"}`}
+            />
+          </button>
+        </div>
+      </div>
+
+      {/* Sign out — visually distinct, last item */}
+      <div className="flex justify-end pt-4">
+        <button
+          type="button"
+          onClick={handleSignOut}
+          disabled={signingOut}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {signingOut ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <LogOut className="h-3.5 w-3.5" />}
+          Sign out
+        </button>
+      </div>
     </section>
   );
 }

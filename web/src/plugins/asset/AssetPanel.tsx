@@ -1,13 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { FileText, BookOpen, Loader2, ArrowLeft, Plus, AtSign, Trash2, Search } from "lucide-react";
+import { FileText, Loader2, Plus, AtSign, Trash2, Search } from "lucide-react";
 import { UserChip } from "@/plugins/task/components/UserPicker";
-import { assetsApi, marketplaceApi } from "@/lib/api";
+import { assetsApi } from "@/lib/api";
 import { globalWS } from "@/lib/ws";
 import { cn, formatRelativeDate } from "@/lib/utils";
 import { shortId } from "@/plugins/task/task-config";
-import { useLarkMCP } from "@/lib/useLarkMCP";
 import type { Asset, AssetType } from "@/types";
 import { AssetEditor } from "./AssetEditor";
 
@@ -17,7 +16,6 @@ const ASSET_TYPES: { value: AssetType; label: string }[] = [
   { value: "code_change", label: "Code Change" },
   { value: "unit_test", label: "Unit Test" },
   { value: "test_case", label: "Test Case" },
-  { value: "lark_doc", label: "Lark Doc" },
 ];
 
 const TYPE_LABELS: Record<string, string> = Object.fromEntries(
@@ -30,7 +28,6 @@ const TYPE_BADGE_COLORS: Record<string, string> = {
   code_change: "bg-emerald-500/15 text-emerald-400",
   unit_test: "bg-amber-500/15 text-amber-400",
   test_case: "bg-rose-500/15 text-rose-400",
-  lark_doc: "bg-sky-500/10 text-sky-500",
 };
 
 const TYPE_COLORS: Record<string, string> = {
@@ -39,7 +36,6 @@ const TYPE_COLORS: Record<string, string> = {
   code_change: "text-emerald-400",
   unit_test: "text-amber-400",
   test_case: "text-rose-400",
-  lark_doc: "text-sky-500",
 };
 
 export function AssetPanel({ projectId }: { projectId: string }) {
@@ -53,7 +49,6 @@ export function AssetPanel({ projectId }: { projectId: string }) {
   });
   const [initialCommentId, setInitialCommentId] = useState<string | undefined>(() => searchParams.get("comment_id") ?? undefined);
   const isFirstMount = useRef(true);
-  const { hasLarkMCP, larkMCP } = useLarkMCP(projectId);
 
   // Clear URL params consumed on mount
   useEffect(() => {
@@ -71,10 +66,6 @@ export function AssetPanel({ projectId }: { projectId: string }) {
   const [formType, setFormType] = useState<AssetType>("design_doc");
   const [formContent, setFormContent] = useState("");
   const [saving, setSaving] = useState(false);
-
-  // Lark doc form
-  const [larkUrl, setLarkUrl] = useState("");
-  const [fetching, setFetching] = useState(false);
 
   // Search / filter
   const [showSearch, setShowSearch] = useState(false);
@@ -151,62 +142,18 @@ export function AssetPanel({ projectId }: { projectId: string }) {
     });
   }, [load]);
 
-  const triggerLarkAuth = async () => {
-    const mcpKey = larkMCP?.name ?? "OKEngine LARK MCP";
-    try {
-      const { auth_url } = await marketplaceApi.oauthStart(mcpKey, projectId);
-      window.open(auth_url, "_blank", "noopener,noreferrer");
-    } catch {
-      toast.error("OKEngine LARK MCP 未连接", {
-        description: "请先在 Marketplace 中安装 OKEngine LARK MCP，然后重新授权。",
-      });
-    }
-  };
-
-  const handleLarkFetch = async () => {
-    if (!larkUrl.trim() || fetching) return;
-    if (!hasLarkMCP) {
-      await triggerLarkAuth();
-      return;
-    }
-    setFetching(true);
-    try {
-      const res = await assetsApi.larkFetch(larkUrl.trim());
-      setFormContent(res.content);
-      if (res.title) setFormTitle(res.title);
-      toast.success("Fetched Lark doc content");
-    } catch (e) {
-      const msg = String(e);
-      if (msg.includes("authorization") || msg.toLowerCase().includes("unauthori")) {
-        await triggerLarkAuth();
-      } else {
-        toast.error("Failed to fetch Lark doc", { description: msg });
-      }
-    } finally {
-      setFetching(false);
-    }
-  };
-
   const handleCreate = async () => {
     if (!formTitle.trim() || saving) return;
     setSaving(true);
     try {
-      const asset = await assetsApi.create(projectId, {
+      await assetsApi.create(projectId, {
         type: formType,
         title: formTitle.trim(),
         content: formContent,
       });
-      if (formType === "lark_doc" && larkUrl.trim()) {
-        try {
-          await assetsApi.setLarkDoc(asset.id, larkUrl.trim());
-        } catch (e) {
-          toast.error("Asset created but failed to save Lark URL", { description: String(e) });
-        }
-      }
       setShowForm(false);
       setFormTitle("");
       setFormContent("");
-      setLarkUrl("");
       load();
     } catch (e) {
       console.error("Failed to create asset:", e);
@@ -291,13 +238,9 @@ export function AssetPanel({ projectId }: { projectId: string }) {
           <input
             value={formTitle}
             onChange={(e) => setFormTitle(e.target.value)}
-            placeholder={formType === "lark_doc" ? "Title (auto-filled from Lark doc)" : "Title"}
-            readOnly={formType === "lark_doc"}
-            className={cn(
-              "w-full text-xs bg-transparent border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring",
-              formType === "lark_doc" && "opacity-50 cursor-not-allowed",
-            )}
-            autoFocus={formType !== "lark_doc"}
+            placeholder="Title"
+            className="w-full text-xs bg-transparent border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring"
+            autoFocus
           />
           <div className="flex gap-2">
             <select
@@ -305,7 +248,6 @@ export function AssetPanel({ projectId }: { projectId: string }) {
               onChange={(e) => {
                 setFormType(e.target.value as AssetType);
                 setFormContent("");
-                setLarkUrl("");
               }}
               className="text-xs bg-background border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring"
             >
@@ -314,57 +256,25 @@ export function AssetPanel({ projectId }: { projectId: string }) {
               ))}
             </select>
           </div>
-          {formType === "lark_doc" && (
-            <p className="text-[11px] text-muted-foreground bg-muted/40 border border-border/40 rounded px-2 py-1.5 leading-relaxed">
-              Read-only after creation. Content can only be updated by syncing from Lark.
-            </p>
-          )}
 
-          {formType === "lark_doc" ? (
-            <div className="space-y-2">
-              <div className="flex gap-1.5">
-                <input
-                  value={larkUrl}
-                  onChange={(e) => setLarkUrl(e.target.value)}
-                  placeholder="Lark doc URL (e.g. https://xxx.larksuite.com/wiki/...)"
-                  className="flex-1 text-xs bg-transparent border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-                <button
-                  onClick={handleLarkFetch}
-                  disabled={!larkUrl.trim() || fetching}
-                  className="text-xs px-2 py-1 rounded bg-cyan-600 text-white hover:bg-cyan-500 transition-colors disabled:opacity-50 shrink-0"
-                >
-                  {fetching ? <Loader2 className="h-3 w-3 animate-spin" /> : "Fetch"}
-                </button>
-              </div>
-              <textarea
-                value={formContent}
-                readOnly
-                placeholder="Content will be fetched automatically…"
-                rows={6}
-                className="w-full text-xs bg-transparent border rounded px-2 py-1 resize-y min-h-[60px] focus:outline-none opacity-50 cursor-not-allowed"
-              />
-            </div>
-          ) : (
-            <textarea
-              value={formContent}
-              onChange={(e) => setFormContent(e.target.value)}
-              placeholder="Content"
-              rows={6}
-              className="w-full text-xs bg-transparent border rounded px-2 py-1 resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
-            />
-          )}
+          <textarea
+            value={formContent}
+            onChange={(e) => setFormContent(e.target.value)}
+            placeholder="Content"
+            rows={6}
+            className="w-full text-xs bg-transparent border rounded px-2 py-1 resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
+          />
 
           <div className="flex justify-end gap-1.5">
             <button
-              onClick={() => { setShowForm(false); setLarkUrl(""); setFormContent(""); }}
+              onClick={() => { setShowForm(false); setFormContent(""); }}
               className="text-xs px-2 py-1 rounded hover:bg-accent transition-colors text-muted-foreground"
             >
               Cancel
             </button>
             <button
               onClick={handleCreate}
-              disabled={!formTitle.trim() || saving || (formType === "lark_doc" && !larkUrl.trim())}
+              disabled={!formTitle.trim() || saving}
               className="text-xs px-2 py-1 rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
             >
               {saving ? "Saving..." : "Create"}
@@ -419,10 +329,7 @@ export function AssetPanel({ projectId }: { projectId: string }) {
 
               {/* Icon + Title + Type badge */}
               <div className="flex-1 min-w-0 flex items-center gap-2 pl-2 pr-2">
-                {asset.type === "lark_doc"
-                  ? <BookOpen className={cn("h-3.5 w-3.5 shrink-0", TYPE_COLORS["lark_doc"])} />
-                  : <FileText className={cn("h-3.5 w-3.5 shrink-0", TYPE_COLORS[asset.type] || "text-muted-foreground")} />
-                }
+                <FileText className={cn("h-3.5 w-3.5 shrink-0", TYPE_COLORS[asset.type] || "text-muted-foreground")} />
                 <span className="truncate text-[13px] text-foreground">{asset.title}</span>
                 <span className={cn(
                   "shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded",

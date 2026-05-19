@@ -1,24 +1,18 @@
-export interface OKOneConfig {
-  base_url?: string;
-  application_id?: number;
-  service_id?: number;
-  service?: string;
-  service_env_id?: number;
-  service_env_name?: string;
-  owner?: string;
-}
-
 export interface Project {
   id: string;
   namespace_id?: string;
   name: string;
   description: string;
   git_repo_path: string;
-  gitlab_repo_url?: string;
-  okone?: OKOneConfig;
+  owner_user_id?: number;
   created_by?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface User {
+  user_id: number;
+  username: string;
 }
 
 export interface Task {

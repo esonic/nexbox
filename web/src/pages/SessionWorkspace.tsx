@@ -1,11 +1,8 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
-import { createPortal } from "react-dom";
 
 import {
   X,
   GitBranch,
-  GitMerge,
-  ExternalLink,
   Check,
   ChevronDown,
   PanelRightClose,
@@ -22,17 +19,14 @@ import {
   FileText,
   Workflow,
   ArrowLeft,
-  Repeat,
   Pencil,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { sessionsApi, projectsApi, diffApi, gitlabApi, type DiffResponse, type CreateMRResponse } from "@/lib/api";
+import { sessionsApi, projectsApi, diffApi, type DiffResponse } from "@/lib/api";
 import { TaskPlugin } from "@/plugins/task/TaskPlugin";
 import { AssetPanel } from "@/plugins/asset/AssetPanel";
 import { WorkflowPanel } from "@/components/workflow/WorkflowPanel";
 import { RalphPanel } from "@/components/ralph/RalphPanel";
-import { ChangeOrderMenuItem } from "@/plugins/okone/ChangeOrderMenuItem";
-import { ChangeOrderResult } from "@/plugins/okone/ChangeOrderResult";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { DiffView } from "@/components/diff/DiffView";
 const FileBrowser = lazy(() => import("@/components/files/FileBrowser").then(m => ({ default: m.FileBrowser })));
@@ -176,11 +170,9 @@ function ProjectSelector({
 function GitPanelContent({
   projectId,
   sessionId,
-  gitRepoPath,
   diffData,
   loadingDiff,
   onRefresh,
-  headerPortalTarget,
 }: {
   projectId: string;
   sessionId?: string;
@@ -190,130 +182,21 @@ function GitPanelContent({
   onRefresh: () => void;
   headerPortalTarget: HTMLDivElement | null;
 }) {
-  const projects = useAppStore((s) => s.projects);
-  const currentProject = projects.find((p) => p.id === projectId);
-  const okoneEnabled = !!(currentProject?.okone?.application_id);
-  const [mrLoading, setMrLoading] = useState(false);
-  const [mrResult, setMrResult] = useState<{ success: boolean; data?: CreateMRResponse; error?: string } | null>(null);
-  const [showMrMenu, setShowMrMenu] = useState(false);
-
-  // Close MR menu on outside click
-  useEffect(() => {
-    if (!showMrMenu) return;
-    const handler = (e: MouseEvent) => {
-      if (!(e.target as HTMLElement).closest("[data-mr-menu]")) setShowMrMenu(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [showMrMenu]);
-
-  const handleCreateMR = useCallback(async () => {
-    if (mrLoading) return;
-    setMrLoading(true);
-    setMrResult(null);
-    try {
-      const data = await gitlabApi.createMR(projectId);
-      setMrResult({ success: true, data });
-    } catch (e: unknown) {
-      setMrResult({ success: false, error: e instanceof Error ? e.message : "Unknown error" });
-    } finally {
-      setMrLoading(false);
-    }
-  }, [projectId, mrLoading]);
-
-  const mrButton = gitRepoPath ? (
-    <div className="relative" data-mr-menu>
-      <div className="flex items-center">
-        <Button
-          size="sm"
-          onClick={handleCreateMR}
-          disabled={mrLoading}
-          className={cn(
-            "h-6 text-xs bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700",
-            okoneEnabled && "rounded-r-none border-r border-r-blue-500/40",
-          )}
-        >
-          {mrLoading ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <GitMerge className="mr-1 h-3 w-3" />}
-          Create MR
-        </Button>
-        {okoneEnabled && (
-          <Button
-            size="sm"
-            disabled={mrLoading}
-            onClick={() => setShowMrMenu(!showMrMenu)}
-            className="h-6 px-1 bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700 rounded-l-none"
-          >
-            <ChevronDown className="h-3 w-3" />
-          </Button>
-        )}
-      </div>
-      {showMrMenu && okoneEnabled && (
-        <div className="absolute top-full right-0 mt-1 w-44 bg-popover border rounded-md shadow-lg overflow-hidden z-10">
-          <button
-            onClick={() => { setShowMrMenu(false); handleCreateMR(); }}
-            className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-accent transition-colors"
-          >
-            <GitMerge className="h-3.5 w-3.5" />
-            Create MR
-          </button>
-          <ChangeOrderMenuItem projectId={projectId} onClose={() => setShowMrMenu(false)} />
+  return (
+    <div className="flex flex-col flex-1 overflow-hidden">
+      {loadingDiff ? (
+        <div className="flex items-center justify-center h-full text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin mr-2" />
+          Loading changes...
+        </div>
+      ) : diffData?.files ? (
+        <DiffView fileStats={diffData.files} projectId={projectId} sessionId={sessionId} onCommitted={onRefresh} />
+      ) : (
+        <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
+          No changes found
         </div>
       )}
     </div>
-  ) : null;
-
-  return (
-    <>
-      {/* Portal MR button into panel header */}
-      {headerPortalTarget && mrButton && createPortal(mrButton, headerPortalTarget)}
-
-      {/* MR result + plugin slots */}
-      <div className="px-4 py-2 border-b space-y-2 empty:hidden">
-        {mrResult && (
-          <div className={cn("rounded-lg border p-3 text-sm", mrResult.success ? "border-green-500/30" : "border-destructive/30")}>
-            <div className="flex items-start gap-2">
-              {mrResult.success ? <Check className="h-4 w-4 text-green-500 shrink-0 mt-0.5" /> : <X className="h-4 w-4 text-destructive shrink-0 mt-0.5" />}
-              <div className="flex-1 min-w-0">
-                {mrResult.success && mrResult.data ? (
-                  <>
-                    <div className="font-medium text-green-600 dark:text-green-400 text-xs">MR Created</div>
-                    <a href={mrResult.data.web_url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-xs text-blue-500 hover:underline mt-0.5 break-all">
-                      !{mrResult.data.iid} — {mrResult.data.title}
-                      <ExternalLink className="h-3 w-3 shrink-0" />
-                    </a>
-                  </>
-                ) : (
-                  <>
-                    <div className="font-medium text-destructive text-xs">MR Failed</div>
-                    <div className="text-xs text-muted-foreground mt-0.5 break-all">{mrResult.error}</div>
-                  </>
-                )}
-              </div>
-              <button onClick={() => setMrResult(null)} className="text-muted-foreground hover:text-foreground shrink-0">
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-        )}
-        <ChangeOrderResult projectId={projectId} />
-      </div>
-
-      {/* Diff view */}
-      <div className="flex flex-col flex-1 overflow-hidden">
-        {loadingDiff ? (
-          <div className="flex items-center justify-center h-full text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin mr-2" />
-            Loading changes...
-          </div>
-        ) : diffData?.files ? (
-          <DiffView fileStats={diffData.files} projectId={projectId} sessionId={sessionId} onCommitted={onRefresh} />
-        ) : (
-          <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-            No changes found
-          </div>
-        )}
-      </div>
-    </>
   );
 }
 

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import { AppSidebar } from "@/components/layout/AppSidebar";
@@ -10,9 +10,8 @@ import { WorkflowsPage } from "@/pages/WorkflowsPage";
 import { WorkflowEditorPage } from "@/pages/WorkflowEditorPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { MarketplacePage } from "@/pages/MarketplacePage";
-import { UpdateBanner } from "@/components/ui/UpdateBanner";
-import { LoginModal } from "@/components/ui/LoginModal";
-import { serverApi } from "@/lib/api";
+import { LoginPage } from "@/pages/LoginPage";
+import { authApi } from "@/lib/api";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -23,24 +22,11 @@ const queryClient = new QueryClient({
   },
 });
 
-function AppLayout() {
-  const [mode, setMode] = useState<string | null>(null);
+type AuthState = "checking" | "authed" | "unauthed";
 
-  useEffect(() => {
-    serverApi.info().then((info) => setMode(info.mode)).catch(() => setMode("local"));
-  }, []);
-
-  if (mode === null) {
-    return <div className="flex h-screen items-center justify-center" />;
-  }
-
-  if (mode === "needs_login") {
-    return <LoginModal />;
-  }
-
+function MainLayout() {
   return (
     <div className="flex h-screen overflow-hidden">
-      <UpdateBanner />
       <AppSidebar />
       <main className="flex-1 overflow-hidden">
         <Routes>
@@ -57,11 +43,54 @@ function AppLayout() {
   );
 }
 
+function AppRoutes() {
+  const [auth, setAuth] = useState<AuthState>("checking");
+  const location = useLocation();
+
+  useEffect(() => {
+    let cancelled = false;
+    // On every mount (and on route change), verify the JWT cookie still
+    // resolves to a user. The /api/auth/me endpoint is whitelisted from
+    // the redirect interceptor — a 401 here just means "not logged in",
+    // not a session that expired mid-action.
+    authApi.me()
+      .then(() => { if (!cancelled) setAuth("authed"); })
+      .catch(() => { if (!cancelled) setAuth("unauthed"); });
+    return () => { cancelled = true; };
+    // Re-check whenever we land on a non-login route (covers post-login
+    // navigation that swaps the cookie without a full reload).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (auth === "checking") {
+    return (
+      <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">
+        Loading...
+      </div>
+    );
+  }
+
+  // Always render /login regardless of auth state — it manages its own state.
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage onAuthed={() => setAuth("authed")} />} />
+      <Route
+        path="/*"
+        element={
+          auth === "authed"
+            ? <MainLayout />
+            : <Navigate to={`/login?from=${encodeURIComponent(location.pathname + location.search)}`} replace />
+        }
+      />
+    </Routes>
+  );
+}
+
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <AppLayout />
+        <AppRoutes />
         <Toaster position="top-center" richColors />
       </BrowserRouter>
     </QueryClientProvider>
