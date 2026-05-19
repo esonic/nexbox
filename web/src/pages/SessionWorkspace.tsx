@@ -471,11 +471,12 @@ export function SessionWorkspace() {
 
   return (
     <div ref={containerRef} className="flex flex-col h-full">
-      {/* Toolbar — always visible */}
-      <div className="flex items-center gap-1.5 px-3 py-1.5 border-b bg-muted/20 text-sm shrink-0 min-h-[36px]">
+      {/* Toolbar — always visible. On phones we drop the button labels so the
+          full row fits in <375px; sm: breakpoints bring them back. */}
+      <div className="flex items-center gap-0.5 sm:gap-1.5 px-2 sm:px-3 py-1.5 border-b bg-muted/20 text-sm shrink-0 min-h-[36px]">
         <div className="flex-1 min-w-0">
           {activeSession && (
-            <span className="text-sm font-medium text-foreground/80 truncate block max-w-[50%]">
+            <span className="text-sm font-medium text-foreground/80 truncate block max-w-[40%] sm:max-w-[50%]">
               {activeSession.name || "New Session"}
             </span>
           )}
@@ -486,51 +487,56 @@ export function SessionWorkspace() {
           <Button
             variant={rightPanel === "files" ? "secondary" : "ghost"}
             size="sm"
-            className="h-7 text-xs gap-1"
+            title="Files"
+            className="h-7 text-xs gap-1 px-2 sm:px-2.5"
             onClick={() => setRightPanelExclusive(rightPanel === "files" ? null : "files")}
           >
             <FolderCode className="h-3.5 w-3.5" />
-            Files
+            <span className="hidden sm:inline">Files</span>
           </Button>
         )}
         {isRealProject && (
           <Button
             variant={showingTerminalInRightSlot ? "secondary" : "ghost"}
             size="sm"
-            className="h-7 text-xs gap-1"
+            title="Terminal"
+            className="h-7 text-xs gap-1 px-2 sm:px-2.5"
             onClick={() => activeSessionId && setTerminalShowExclusive(activeSessionId, !showTerminal)}
           >
             <TerminalSquare className="h-3.5 w-3.5" />
-            Terminal
+            <span className="hidden sm:inline">Terminal</span>
           </Button>
         )}
         <Button
           variant={rightPanel === "task" ? "secondary" : "ghost"}
           size="sm"
-          className="h-7 text-xs gap-1"
+          title="Task"
+          className="h-7 text-xs gap-1 px-2 sm:px-2.5"
           onClick={() => setRightPanelExclusive(rightPanel === "task" ? null : "task")}
         >
           <ListTodo className="h-3.5 w-3.5" />
-          Task
+          <span className="hidden sm:inline">Task</span>
         </Button>
         <Button
           variant={rightPanel === "workflow" ? "secondary" : "ghost"}
           size="sm"
-          className="h-7 text-xs gap-1"
+          title="Workflow"
+          className="h-7 text-xs gap-1 px-2 sm:px-2.5"
           onClick={() => setRightPanelExclusive(rightPanel === "workflow" ? null : "workflow")}
         >
           <Workflow className="h-3.5 w-3.5" />
-          Workflow
+          <span className="hidden sm:inline">Workflow</span>
         </Button>
         {isRealProject && boundProject?.is_git_repo && (
           <Button
             variant={rightPanel === "git" ? "secondary" : "ghost"}
             size="sm"
-            className="h-7 text-xs gap-1 relative"
+            title="Git"
+            className="h-7 text-xs gap-1 px-2 sm:px-2.5 relative"
             onClick={() => rightPanel === "git" ? setRightPanelExclusive(null) : handleOpenGit()}
           >
             <GitBranch className="h-3.5 w-3.5" />
-            Git
+            <span className="hidden sm:inline">Git</span>
             {gitDiffData && (gitDiffData.insertions > 0 || gitDiffData.deletions > 0) && (
               <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-blue-500" />
             )}
@@ -542,8 +548,13 @@ export function SessionWorkspace() {
       {activeSession ? (
         <div className="flex flex-col flex-1 overflow-hidden">
         <div className="flex flex-1 overflow-hidden">
-          {/* Chat area */}
-          <div className="flex-1 flex flex-col overflow-hidden">
+          {/* Chat area. On phones the right panel takes the whole viewport
+              instead of splitting, so we hide the chat when any panel is
+              visible. md+ keeps the side-by-side layout. */}
+          <div className={cn(
+            "flex-1 flex-col overflow-hidden",
+            rightSlotVisible ? "hidden md:flex" : "flex",
+          )}>
             {!hasProjectId && (
               <ProjectSelector
                 projects={projects}
@@ -570,15 +581,17 @@ export function SessionWorkspace() {
               PTY survives panel switches and hide/show — matching the bottom-mode behavior. */}
           {rightSlotMounted && (
             <div style={{ display: rightSlotVisible ? "contents" : "none" }}>
+              {/* Resize handle — hidden on touch-sized viewports where drag
+                  doesn't make sense and the panel is full-width anyway. */}
               <div
-                className="w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors flex items-center justify-center shrink-0"
+                className="hidden md:flex w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors items-center justify-center shrink-0"
                 onMouseDown={handleMouseDown}
               >
                 <GripVertical className="h-4 w-4 text-muted-foreground/50" />
               </div>
               <div
-                className="border-l bg-background overflow-hidden shrink-0 flex flex-col"
-                style={{ width: panelWidth }}
+                className="border-l bg-background overflow-hidden shrink-0 flex flex-col w-full md:w-[var(--panel-width)]"
+                style={{ ['--panel-width' as string]: `${panelWidth}px` }}
               >
                 {/* Header — terminal vs rightPanel based on current mode */}
                 {showingTerminalInRightSlot ? (
