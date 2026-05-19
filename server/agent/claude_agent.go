@@ -657,8 +657,13 @@ func (a *ClaudeAgent) ListSupportedModels(ctx context.Context) ([]ModelInfo, str
 
 	init, err := client.ProbeInitialize(ctx)
 	if err != nil {
-		log.Printf("[claude-agent] ProbeInitialize failed: %v", err)
-		return nil, "none"
+		log.Printf("[claude-agent] ProbeInitialize failed: %v — falling back to standard aliases", err)
+		fallback := mergeStandardClaudeAliases(nil)
+		a.modelsMu.Lock()
+		a.cachedModels = fallback
+		a.cachedProbed = true
+		a.modelsMu.Unlock()
+		return append([]ModelInfo(nil), fallback...), "fallback"
 	}
 
 	models := convertClaudeInitModels(init.Models)
@@ -690,7 +695,12 @@ func (a *ClaudeAgent) updateModelCacheFromInit(models []ClaudeInitModel) {
 }
 
 // convertClaudeInitModels projects the Claude-specific init payload onto the
-// unified ModelInfo shape the API layer consumes.
+// unified ModelInfo shape the API layer consumes. After conversion we make
+// sure the three standard CLI aliases (opus / sonnet / haiku) are present:
+// the CLI's catalog is sometimes incomplete (sonnet has been observed to
+// disappear depending on subscription tier / region / CLI version) but the
+// missing alias still works as a --model argument, so we synthesize an entry
+// for any that the live response left out.
 func convertClaudeInitModels(in []ClaudeInitModel) []ModelInfo {
 	out := make([]ModelInfo, 0, len(in))
 	for _, m := range in {
@@ -721,7 +731,50 @@ func convertClaudeInitModels(in []ClaudeInitModel) []ModelInfo {
 		}
 		out = append(out, info)
 	}
-	return out
+	return mergeStandardClaudeAliases(out)
+}
+
+// standardClaudeAliases is the canonical short-name list the Claude CLI has
+// historically accepted as --model arguments. Order here is the display
+// order we use when synthesizing a missing entry.
+var standardClaudeAliases = []struct {
+	id, label string
+}{
+	{"opus", "Opus"},
+	{"sonnet", "Sonnet"},
+	{"haiku", "Haiku"},
+}
+
+// mergeStandardClaudeAliases ensures opus / sonnet / haiku each appear in the
+// model list. Missing entries are appended with a minimal stub — effort
+// levels are copied from any peer that exposes them so the UI's EFFORT picker
+// has reasonable choices.
+func mergeStandardClaudeAliases(models []ModelInfo) []ModelInfo {
+	present := make(map[string]bool, len(models))
+	var sampleEfforts []string
+	var sampleDefault string
+	for _, m := range models {
+		present[m.ID] = true
+		if sampleEfforts == nil && len(m.SupportedEfforts) > 0 {
+			sampleEfforts = append([]string(nil), m.SupportedEfforts...)
+			sampleDefault = m.DefaultEffort
+		}
+	}
+	for _, alias := range standardClaudeAliases {
+		if present[alias.id] {
+			continue
+		}
+		stub := ModelInfo{
+			ID:    alias.id,
+			Label: alias.label,
+		}
+		if len(sampleEfforts) > 0 {
+			stub.SupportedEfforts = append([]string(nil), sampleEfforts...)
+			stub.DefaultEffort = sampleDefault
+		}
+		models = append(models, stub)
+	}
+	return models
 }
 
 // validateEffort drops the requested effort level if it isn't advertised

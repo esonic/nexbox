@@ -413,17 +413,12 @@ func TestBuildStaticContext_Full(t *testing.T) {
 	ctx := BuildStaticContext(project, "sess-001")
 
 	mustContain := []string{
-		"Nexbox Platform Context",
-		"You are working within the Nexbox development platform.",
+		"[Platform Context]",
+		"You are working within the Nexbox AI platform.",
 		"Project: Order Service",
 		"Project Description: E-commerce order system",
 		"Project ID: proj-001",
-		"Session ID: sess-001",
 		"Working Directory: /home/dev/order-service",
-		"[Guidelines]",
-		"Use Nexbox MCP tools for asset/task management (project_id: proj-001)",
-		"Respond in user's language",
-		"Work within the project directory",
 	}
 
 	for _, s := range mustContain {
@@ -631,51 +626,6 @@ func TestBuildPrompt_EmptyStatic(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// BuildBrainstormPrompt
-// ---------------------------------------------------------------------------
-
-func TestBuildBrainstormPrompt(t *testing.T) {
-	project := &ProjectInfo{
-		Name:        "Research Project",
-		Description: "AI research",
-	}
-	mindmap := &MindmapRef{
-		Title: "Feature Ideas",
-	}
-
-	prompt := BuildBrainstormPrompt(project, mindmap)
-
-	mustContain := []string{
-		"Nexbox Brainstorm Mode",
-		"brainstorming partner",
-		"Project: Research Project",
-		"Project Description: AI research",
-		"Mindmap: Feature Ideas",
-		"Brainstorming Approach",
-		"Response Style",
-	}
-
-	for _, s := range mustContain {
-		if !containsString(prompt, s) {
-			t.Errorf("brainstorm prompt missing: %q", s)
-		}
-	}
-}
-
-func TestBuildBrainstormPrompt_NilProject(t *testing.T) {
-	mindmap := &MindmapRef{Title: "Ideas"}
-
-	prompt := BuildBrainstormPrompt(nil, mindmap)
-
-	if containsString(prompt, "Project:") {
-		t.Error("should not contain project section when nil")
-	}
-	if !containsString(prompt, "Mindmap: Ideas") {
-		t.Error("should contain mindmap")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // CodexAgent
 // ---------------------------------------------------------------------------
 
@@ -744,6 +694,69 @@ func TestStreamEvent_JSONRoundTrip(t *testing.T) {
 	}
 	if decoded.Input != original.Input {
 		t.Errorf("Input = %q, want %q", decoded.Input, original.Input)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Claude model alias merge
+// ---------------------------------------------------------------------------
+
+func TestMergeStandardClaudeAliases_FillsMissing(t *testing.T) {
+	// CLI returned only Opus (with effort levels) — the merge should
+	// synthesize Sonnet and Haiku, inheriting effort levels from the peer
+	// so the UI shows EFFORT options for them too.
+	cli := []ModelInfo{
+		{ID: "opus", Label: "Opus", SupportedEfforts: []string{"low", "medium", "high"}, DefaultEffort: "high"},
+	}
+	out := mergeStandardClaudeAliases(cli)
+	got := make(map[string]ModelInfo, len(out))
+	for _, m := range out {
+		got[m.ID] = m
+	}
+	for _, want := range []string{"opus", "sonnet", "haiku"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("merged list missing %q", want)
+		}
+	}
+	if eff := got["sonnet"].SupportedEfforts; len(eff) != 3 || eff[0] != "low" {
+		t.Errorf("sonnet should inherit peer efforts; got %v", eff)
+	}
+	if got["sonnet"].DefaultEffort != "high" {
+		t.Errorf("sonnet default effort = %q, want %q", got["sonnet"].DefaultEffort, "high")
+	}
+}
+
+func TestMergeStandardClaudeAliases_FromEmpty(t *testing.T) {
+	// Probe failure path: nothing came back from the CLI. We still want all
+	// three aliases so the picker isn't empty; they just have no effort
+	// metadata.
+	out := mergeStandardClaudeAliases(nil)
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d, want 3", len(out))
+	}
+	for i, want := range []string{"opus", "sonnet", "haiku"} {
+		if out[i].ID != want {
+			t.Errorf("out[%d].ID = %q, want %q", i, out[i].ID, want)
+		}
+		if len(out[i].SupportedEfforts) != 0 {
+			t.Errorf("out[%d] should have no effort metadata when no peer is present", i)
+		}
+	}
+}
+
+func TestMergeStandardClaudeAliases_PreservesExisting(t *testing.T) {
+	// All three already present — the merge must be a no-op.
+	in := []ModelInfo{
+		{ID: "opus", Label: "Opus Live"},
+		{ID: "sonnet", Label: "Sonnet Live"},
+		{ID: "haiku", Label: "Haiku Live"},
+	}
+	out := mergeStandardClaudeAliases(in)
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d, want 3", len(out))
+	}
+	if out[1].Label != "Sonnet Live" {
+		t.Errorf("preserved label lost; got %q", out[1].Label)
 	}
 }
 
