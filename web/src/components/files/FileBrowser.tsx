@@ -363,7 +363,7 @@ function HighlightOverlay({
 
   return (
     <div
-      className="absolute inset-0 px-3 py-0 whitespace-pre-wrap break-all pointer-events-none select-none"
+      className="absolute inset-0 pl-2 pr-3 py-0 whitespace-pre-wrap break-all pointer-events-none select-none"
       style={{ color: "transparent", fontFamily: "inherit", fontSize: "inherit", lineHeight: "inherit" }}
       aria-hidden
     >
@@ -574,12 +574,12 @@ function CodeViewer({
             return (
               <tr key={i} data-line-idx={i} className="hover:bg-accent/30">
                 <td
-                  className="px-3 py-0 text-right select-none text-muted-foreground/40 border-r border-border/20 align-top"
-                  style={{ minWidth: gutterWidth * 8 + 24 }}
+                  className="pl-2 pr-2 py-0 text-right select-none text-muted-foreground/40 border-r border-border/20 align-top whitespace-nowrap"
+                  style={{ width: gutterWidth * 8 + 16 }}
                 >
                   {i + 1}
                 </td>
-                <td className="px-3 py-0 whitespace-pre-wrap break-all relative">
+                <td className="pl-2 pr-3 py-0 whitespace-pre-wrap break-all relative w-full">
                   {highlightedLines?.[i] ? (
                     <span dangerouslySetInnerHTML={{ __html: highlightedLines[i] }} />
                   ) : (

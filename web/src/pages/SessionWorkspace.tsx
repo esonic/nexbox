@@ -48,21 +48,18 @@ import { toast } from "sonner";
 // ── WorktreeSelector ────────────────────────────────────────────────────
 
 function WorktreeSelector({
-  sessionId,
   mode,
   locked,
   worktreePending,
   hasGitRepo,
   onSetMode,
 }: {
-  sessionId: string;
   mode: "local" | "worktree";
   locked: boolean;
   worktreePending: boolean;
   hasGitRepo: boolean;
   onSetMode: (mode: "local" | "worktree") => void;
 }) {
-  const shortId = sessionId.slice(0, 8);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -75,7 +72,9 @@ function WorktreeSelector({
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
-  const label = mode === "worktree" ? `Worktree · ${shortId}` : `Local · ${shortId}`;
+  // The 8-char session id suffix was useful when debugging multi-cloud sessions
+  // but means nothing to the user in local-only mode — drop it.
+  const label = mode === "worktree" ? "Worktree" : "Local";
 
   if (locked) {
     return (
@@ -767,7 +766,6 @@ export function SessionWorkspace() {
         <div className="flex items-center gap-3 px-4 py-1 shrink-0">
           {isRealProject && (
             <WorktreeSelector
-              sessionId={activeSession.id}
               mode={activeSession.worktree_mode || "local"}
               locked={!!activeSession.agent_session_id || preparingWorktrees.has(activeSession.id) || !!activeSession.worktree_path || (chatMessages[activeSession.id] || []).some(m => m.role === "user")}
               worktreePending={preparingWorktrees.has(activeSession.id) && !activeSession.worktree_path}

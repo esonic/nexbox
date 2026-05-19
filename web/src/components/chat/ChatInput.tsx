@@ -1160,9 +1160,12 @@ export function ChatInput({
           {/* Bottom toolbar */}
           <div className="flex items-center justify-between px-3 pb-2 pt-1">
             <div className="flex items-center gap-2">
-              <span className={`text-xs ${isConnected ? "text-green-500" : "text-red-500"}`}>
-                {isConnected ? "Connected" : "Disconnected"}
-              </span>
+              <span
+                className={`inline-block h-2 w-2 rounded-full ${isConnected ? "bg-green-500" : "bg-red-500"}`}
+                title={isConnected ? "Connected" : "Disconnected"}
+                aria-label={isConnected ? "Connected" : "Disconnected"}
+              />
+              <span className="sr-only">{isConnected ? "Connected" : "Disconnected"}</span>
               {agentName && (
                 <>
                   <span className="text-muted-foreground/40 text-xs">·</span>
