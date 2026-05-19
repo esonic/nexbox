@@ -11,6 +11,7 @@ import {
   Plus,
   FolderOpen,
   FolderPlus,
+  Pencil,
   Settings,
   Cloud,
   CloudOff,
@@ -31,6 +32,7 @@ import { useAppStore } from "@/stores/app";
 import { useLayoutStore } from "@/stores/layout";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { ProjectDialog } from "@/components/project/ProjectDialog";
+import { DeleteProjectDialog } from "@/components/project/DeleteProjectDialog";
 import { UNASSIGNED_PROJECT, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX } from "@/lib/constants";
 import { useSessionNotifications } from "@/hooks/useSessionNotifications";
 import type { Project, Session } from "@/types";
@@ -197,6 +199,8 @@ export function AppSidebar() {
   // Project dialog
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
+  const [deleteTargetProject, setDeleteTargetProject] = useState<Project | null>(null);
+  const [deletingProject, setDeletingProject] = useState(false);
 
   // Project ... menu
   const [projectMenuId, setProjectMenuId] = useState<string | null>(null);
@@ -645,6 +649,22 @@ export function AppSidebar() {
     setSessions(sessions.filter((s) => s.project_id !== projectId));
   };
 
+  const handleConfirmDeleteProject = async () => {
+    if (!deleteTargetProject) return;
+    const target = deleteTargetProject;
+    setDeletingProject(true);
+    try {
+      await projectsApi.delete(target.id);
+      handleProjectDeleted(target.id);
+      toast.success(`Project "${target.name}" deleted`);
+      setDeleteTargetProject(null);
+    } catch (e) {
+      toast.error("Failed to delete project", { description: String(e) });
+    } finally {
+      setDeletingProject(false);
+    }
+  };
+
   // ── Server mode detection ──
   useEffect(() => {
     serverApi.info()
@@ -964,8 +984,15 @@ export function AppSidebar() {
                             onClick={(e) => { e.stopPropagation(); setProjectMenuId(null); handleOpenEditProject(group.project!); }}
                             className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors"
                           >
-                            <Settings className="h-3 w-3 text-muted-foreground" />
-                            Settings
+                            <Pencil className="h-3 w-3 text-muted-foreground" />
+                            Edit
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setProjectMenuId(null); setDeleteTargetProject(group.project!); }}
+                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-destructive hover:bg-destructive/10 transition-colors"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                            Delete
                           </button>
                         </div>
                       )}
@@ -1068,7 +1095,8 @@ export function AppSidebar() {
         </div>
       </div>
 
-      {/* Project Dialog (edit-only from sidebar; delete is in Projects page) */}
+      {/* Project Dialog (create + edit). Delete uses the dedicated typed-name
+          confirmation dialog rendered below. */}
       <ProjectDialog
         open={projectDialogOpen}
         onOpenChange={setProjectDialogOpen}
@@ -1077,6 +1105,15 @@ export function AppSidebar() {
         onDelete={handleProjectDeleted}
         hideDelete
       />
+
+      {deleteTargetProject && (
+        <DeleteProjectDialog
+          project={deleteTargetProject}
+          deleting={deletingProject}
+          onConfirm={handleConfirmDeleteProject}
+          onClose={() => { if (!deletingProject) setDeleteTargetProject(null); }}
+        />
+      )}
 
       {/* Resize handle */}
       <div
