@@ -19,6 +19,8 @@ import {
   FileCode,
   Eye,
   Code2,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -675,6 +677,9 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   // Track if a load is for the current projectId/sessionId; ignore stale results after switch.
   const loadGenRef = useRef(0);
 
+  // Tree pane collapse — gives the content/editor pane the full width.
+  const [treeCollapsed, setTreeCollapsed] = useState(false);
+
   const loadChildren = useCallback(async (path: string) => {
     setLoadingPaths((prev) => {
       if (prev.has(path)) return prev;
@@ -1171,7 +1176,22 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
 
   return (
     <div className="flex h-full">
+      {/* Collapsed tree strip — a thin vertical bar with one expand button so
+          the file-content/editor side can use the whole panel width. */}
+      {treeCollapsed && (
+        <div className="w-7 shrink-0 border-r flex flex-col items-center py-1.5">
+          <button
+            onClick={() => setTreeCollapsed(false)}
+            className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+            title="Show file tree"
+          >
+            <PanelLeftOpen className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* File tree sidebar */}
+      {!treeCollapsed && (
       <div className="w-56 shrink-0 border-r flex flex-col">
         <div className="flex items-center justify-between px-3 py-1.5 border-b shrink-0">
           <span className="text-xs text-muted-foreground font-medium">Files</span>
@@ -1206,6 +1226,13 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               title="Refresh"
             >
               <RefreshCw className="h-3 w-3" />
+            </button>
+            <button
+              onClick={() => setTreeCollapsed(true)}
+              className="p-1 rounded hover:bg-accent text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+              title="Hide file tree"
+            >
+              <PanelLeftClose className="h-3.5 w-3.5" />
             </button>
           </div>
         </div>
@@ -1306,6 +1333,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
           )}
         </div>
       </div>
+      )}
 
       {/* File content viewer */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
