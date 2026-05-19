@@ -68,7 +68,7 @@ func (s *Server) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	// Notify assigner
 	if req.Assigner != "" {
-		actor := s.currentUser()
+		actor := s.currentUser(r)
 		recipient := buildRecipient(actor, req.Assigner)
 		if err := s.sendNotification(task.ProjectID, task.ID, task.Title,
 			actor+" assigned you to a task", recipient, task.ID, "", "", "", nil); err != nil {
@@ -126,7 +126,7 @@ func (s *Server) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	s.Hub.NotifyChange("task", id, "updated")
 
 	if gotOldTask && req.Assigner != nil && *req.Assigner != "" && *req.Assigner != oldAssigner {
-		actor := s.currentUser()
+		actor := s.currentUser(r)
 		recipient := buildRecipient(actor, *req.Assigner)
 		if err := s.sendNotification(task.ProjectID, task.ID, task.Title,
 			actor+" assigned you to a task", recipient, task.ID, "", "", "", nil); err != nil {

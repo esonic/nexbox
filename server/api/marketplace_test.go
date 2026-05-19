@@ -15,7 +15,7 @@ func testTempDir(t *testing.T) string {
 	t.Helper()
 	base := os.Getenv("TMPDIR")
 	if base == "" {
-		base = "/Users/ericdu/meili/eric.du_dacs_at_okg.com/114/.claude-tmp/claude-502"
+		base = "/tmp"
 	}
 	dir, err := os.MkdirTemp(base, "nexbox-test-*")
 	if err != nil {

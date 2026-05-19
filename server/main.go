@@ -65,6 +65,13 @@ func (c *chromeEnablerImpl) EnableChrome(sessionID string) (string, []string, er
 }
 
 func main() {
+	// CLI subcommands (`nexbox add-user`, `list-users`, etc.) are dispatched
+	// before flag parsing so they can take positional args without colliding
+	// with the server's --flag options.
+	if handled, code := runCLISubcommand(defaultDataDir()); handled {
+		os.Exit(code)
+	}
+
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	listen := flag.String("listen", "127.0.0.1", "Listen address")
 	port := flag.Int("port", 9040, "Server port")
@@ -189,6 +196,7 @@ func main() {
 	srv := &api.Server{
 		Store:            dataStore,
 		Config:           cfgMgr,
+		Auth:             api.NewAuthenticator(),
 		Agent:            defaultAgent,
 		AgentName:        defaultAgentName,
 		Agents:           allAgents,

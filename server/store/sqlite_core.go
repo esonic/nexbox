@@ -15,12 +15,12 @@ import (
 // Projects
 // ---------------------------------------------------------------------------
 
-const projectColumns = `id, namespace_id, name, description, git_repo_path, gitlab_repo_url, gitlab_token, extra, created_by, version, created_at, updated_at`
+const projectColumns = `id, owner_user_id, namespace_id, name, description, git_repo_path, gitlab_repo_url, gitlab_token, extra, created_by, version, created_at, updated_at`
 
 func scanProject(row interface{ Scan(...interface{}) error }) (*Project, error) {
 	var p Project
 	var ignoredGitLabURL, ignoredToken, ignoredExtra string
-	err := row.Scan(&p.ID, &p.NamespaceID, &p.Name, &p.Description, &p.GitRepoPath, &ignoredGitLabURL, &ignoredToken, &ignoredExtra, &p.CreatedBy, &p.Version, &p.CreatedAt, &p.UpdatedAt)
+	err := row.Scan(&p.ID, &p.OwnerUserID, &p.NamespaceID, &p.Name, &p.Description, &p.GitRepoPath, &ignoredGitLabURL, &ignoredToken, &ignoredExtra, &p.CreatedBy, &p.Version, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -29,24 +29,32 @@ func scanProject(row interface{ Scan(...interface{}) error }) (*Project, error) 
 
 func (s *SQLiteStore) CreateProject(req CreateProjectRequest) (*Project, error) {
 	now := time.Now()
+	createdBy := req.CreatedBy
+	if createdBy == "" {
+		createdBy = "local"
+	}
 	p := &Project{
 		ID:          uuid.New().String(),
+		OwnerUserID: req.OwnerUserID,
 		NamespaceID: "local",
 		Name:        req.Name,
 		Description: req.Description,
 		GitRepoPath: req.GitRepoPath,
-		CreatedBy:   "local",
+		CreatedBy:   createdBy,
 		Version:     1,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO projects (id, namespace_id, name, description, git_repo_path, created_by, version, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.NamespaceID, p.Name, p.Description, p.GitRepoPath, p.CreatedBy, p.Version, p.CreatedAt, p.UpdatedAt,
+		`INSERT INTO projects (id, owner_user_id, namespace_id, name, description, git_repo_path, created_by, version, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.OwnerUserID, p.NamespaceID, p.Name, p.Description, p.GitRepoPath, p.CreatedBy, p.Version, p.CreatedAt, p.UpdatedAt,
 	)
 	if err != nil {
+		if isUniqueConstraintErr(err) {
+			return nil, ErrVersionConflict
+		}
 		return nil, fmt.Errorf("insert project: %w", err)
 	}
 	return p, nil
@@ -71,6 +79,45 @@ func (s *SQLiteStore) ListProjects() ([]Project, error) {
 		return nil, fmt.Errorf("iterate projects: %w", err)
 	}
 	return projects, nil
+}
+
+// ListProjectsByOwner returns projects owned by the given user.
+func (s *SQLiteStore) ListProjectsByOwner(ownerUserID int64) ([]Project, error) {
+	rows, err := s.db.Query(`SELECT `+projectColumns+` FROM projects WHERE owner_user_id = ? ORDER BY updated_at DESC`, ownerUserID)
+	if err != nil {
+		return nil, fmt.Errorf("query projects by owner: %w", err)
+	}
+	defer rows.Close()
+
+	var projects []Project
+	for rows.Next() {
+		p, err := scanProject(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan project: %w", err)
+		}
+		projects = append(projects, *p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate projects by owner: %w", err)
+	}
+	return projects, nil
+}
+
+// GetProjectByNameForOwner returns the project named name owned by ownerUserID,
+// or (nil, nil) when there is no match. Used by the create handler to enforce
+// per-user uniqueness before attempting the insert.
+func (s *SQLiteStore) GetProjectByNameForOwner(ownerUserID int64, name string) (*Project, error) {
+	p, err := scanProject(s.db.QueryRow(
+		`SELECT `+projectColumns+` FROM projects WHERE owner_user_id = ? AND name = ? LIMIT 1`,
+		ownerUserID, name,
+	))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get project by owner+name: %w", err)
+	}
+	return p, nil
 }
 
 func (s *SQLiteStore) GetProject(id string) (*Project, error) {

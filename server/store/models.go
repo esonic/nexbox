@@ -11,6 +11,7 @@ import (
 
 type Project struct {
 	ID          string    `json:"id"`
+	OwnerUserID int64     `json:"owner_user_id"`
 	NamespaceID string    `json:"namespace_id"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
@@ -22,10 +23,12 @@ type Project struct {
 }
 
 type CreateProjectRequest struct {
+	OwnerUserID int64  `json:"-"` // set by server from auth context, never from body
 	NamespaceID string `json:"namespace_id,omitempty"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	GitRepoPath string `json:"git_repo_path"`
+	CreatedBy   string `json:"-"` // set by server from auth context
 }
 
 type UpdateProjectRequest struct {

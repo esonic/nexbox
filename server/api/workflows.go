@@ -40,7 +40,7 @@ func (s *Server) createWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userEmail := s.currentUser()
+	userEmail := s.currentUser(r)
 	projectID := r.URL.Query().Get("project_id")
 
 	if projectID == "" {

@@ -533,6 +533,15 @@ func (db *DB) migrate() error {
 			name TEXT NOT NULL DEFAULT '',
 			added_at INTEGER NOT NULL DEFAULT 0
 		)`,
+
+		// Local user accounts. Populated only via the `nexbox add-user` CLI;
+		// there is no self-registration endpoint.
+		`CREATE TABLE IF NOT EXISTS users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL UNIQUE,
+			password_hash TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
 	}
 
 	for _, m := range migrations {
@@ -591,6 +600,13 @@ func (db *DB) migrate() error {
 		{
 			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='is_hidden'`,
 			alter: `ALTER TABLE sessions ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0`,
+		},
+		// Phase 5: per-user project ownership. Default '' is used during the
+		// brief window between this column being added and the first user being
+		// created via `nexbox add-user`.
+		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='owner_user_id'`,
+			alter: `ALTER TABLE projects ADD COLUMN owner_user_id INTEGER NOT NULL DEFAULT 0`,
 		},
 	}
 	for _, cm := range colMigrations {

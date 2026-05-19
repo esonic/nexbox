@@ -13,7 +13,8 @@ import (
 	"github.com/esonic/nexbox/store"
 )
 
-// newWorktreeServer creates a minimal Server backed by an in-memory SQLite store.
+// newWorktreeServer creates a minimal Server backed by an in-memory SQLite store
+// with auth pre-seeded for HTTP-level tests.
 func newWorktreeServer(t *testing.T) *Server {
 	t.Helper()
 	db, err := store.New(t.TempDir())
@@ -21,11 +22,31 @@ func newWorktreeServer(t *testing.T) *Server {
 		t.Fatalf("store.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return &Server{
+	s := &Server{
 		Store:   store.NewSQLiteStore(db),
+		Auth:    NewAuthenticator(),
 		Hub:     NewChatHub(),
 		DataDir: t.TempDir(),
 	}
+	if _, err := s.Store.CreateUser("tester", "ignored"); err != nil {
+		t.Fatalf("create test user: %v", err)
+	}
+	return s
+}
+
+// testAuthCookie issues a JWT for the seeded test user and returns it as an
+// http.Cookie that can be attached to a httptest request.
+func testAuthCookie(t *testing.T, s *Server) *http.Cookie {
+	t.Helper()
+	u, err := s.Store.GetUserByUsername("tester")
+	if err != nil {
+		t.Fatalf("get test user: %v", err)
+	}
+	tok, err := s.Auth.issue(u)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	return &http.Cookie{Name: authCookieName, Value: tok}
 }
 
 // createTestSession inserts a session and returns its ID.
@@ -39,6 +60,7 @@ func createTestSession(t *testing.T, s *Server, name string) string {
 }
 
 // doRequest performs a request against the Chi router and returns the response.
+// Requests are auto-authenticated with the seeded test user.
 func doRequest(t *testing.T, s *Server, method, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer
@@ -49,6 +71,7 @@ func doRequest(t *testing.T, s *Server, method, path string, body interface{}) *
 	}
 	req := httptest.NewRequest(method, path, &buf)
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(testAuthCookie(t, s))
 	rr := httptest.NewRecorder()
 	NewRouter(s).ServeHTTP(rr, req)
 	return rr
@@ -178,6 +201,7 @@ func TestSetWorktreeMode_InvalidJSON(t *testing.T) {
 		"/api/sessions/"+id+"/worktree-mode",
 		bytes.NewBufferString("not json"))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(testAuthCookie(t, s))
 	rr := httptest.NewRecorder()
 	NewRouter(s).ServeHTTP(rr, req)
 

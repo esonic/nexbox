@@ -24,6 +24,9 @@ type terminalResize struct {
 // New code should use HandleTerminalSessionWS (/ws/terminal/sessions/{sessionId}).
 // GET /ws/terminal/{projectId}
 func (s *Server) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeWS(w, r) {
+		return
+	}
 	projectID := chi.URLParam(r, "projectId")
 	project, err := s.getProjectWithLocalPath(projectID)
 	if err != nil || project == nil {
@@ -44,6 +47,9 @@ func (s *Server) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 // Working directory follows the session's worktree path when in worktree mode.
 // GET /ws/terminal/sessions/{sessionId}
 func (s *Server) HandleTerminalSessionWS(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeWS(w, r) {
+		return
+	}
 	sessionID := chi.URLParam(r, "sessionId")
 	session, err := s.Store.GetSession(sessionID)
 	if err != nil || session == nil {

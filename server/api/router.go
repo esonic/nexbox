@@ -19,6 +19,7 @@ import (
 type Server struct {
 	Store            *store.SQLiteStore     // unified data access (always sqlite in local-only mode)
 	Config           *config.Manager        // local config
+	Auth             *Authenticator         // JWT signer + token parser
 	Agent            agent.Agent            // Default agent (from config)
 	AgentName        string                 // Default agent name
 	Agents           map[string]agent.Agent // All available agents by name
@@ -71,175 +72,178 @@ func NewRouter(s *Server) *chi.Mux {
 	r.Use(middleware.RequestID)
 
 	r.Route("/api", func(r chi.Router) {
-		// Sessions
-		r.Route("/sessions", func(r chi.Router) {
-			r.Get("/", s.ListSessions)
-			r.Post("/", s.CreateSession)
-			r.Put("/reorder", s.ReorderSessions)
-			r.Get("/trash", s.ListTrashedSessions)
-			r.Delete("/trash", s.EmptyTrash)
-			r.Route("/{sessionId}", func(r chi.Router) {
-				r.Get("/", s.GetSession)
-				r.Put("/", s.UpdateSession)
-				r.Delete("/", s.DeleteSession)
-				r.Post("/restore", s.RestoreSession)
-				r.Post("/fork", s.ForkSession)
-				r.Post("/auto-title", s.AutoTitleSession)
-				r.Get("/messages", s.ListSessionMessages)
-				r.Post("/upload-image", s.UploadImage)
-				r.Get("/image/{filename}", s.ServeImage)
+		// Public auth endpoints (RequireAuth lets these through via isPublicPath).
+		r.Post("/login", s.HandleLogin)
+		r.Post("/logout", s.HandleLogout)
+		r.Get("/auth/me", s.HandleAuthMe)
 
-				// Worktree
-				r.Put("/worktree-mode", s.SetWorktreeMode)
-				r.Get("/worktree-status", s.GetWorktreeStatus)
-
-				// Message queue
-				r.Get("/queue", s.ListQueuedMessages)
-				r.Post("/queue", s.CreateQueuedMessage)
-				r.Put("/queue/{queueId}", s.UpdateQueuedMessage)
-				r.Delete("/queue/{queueId}", s.DeleteQueuedMessage)
-				r.Post("/queue/{queueId}/run", s.HandleRunQueuedMessage)
-			})
+		// Everything else under /api requires a valid JWT.
+		r.Group(func(r chi.Router) {
+			r.Use(s.RequireAuth)
+			registerAuthedAPIRoutes(s, r)
 		})
-
-		// Projects
-		r.Route("/projects", func(r chi.Router) {
-			r.Get("/", s.ListProjects)
-			r.Post("/", s.CreateProject)
-			r.Get("/lookup-by-dir", s.LookupProjectByDir)
-			r.Get("/by-git-dir", s.CheckProjectByGitDir)
-			r.Route("/{projectId}", func(r chi.Router) {
-				r.Get("/", s.GetProject)
-				r.Put("/", s.UpdateProject)
-				r.Delete("/", s.DeleteProject)
-				r.Get("/scratch-session", s.GetOrCreateScratchSession)
-
-				// Git operations (project-level)
-				r.Get("/git-status", s.GetGitStatus)
-				r.Post("/git-commit", s.GitCommit)
-				r.Post("/git-discard", s.GitDiscard)
-				r.Get("/git-log", s.GitLog)
-				r.Get("/git-commit-files", s.GitCommitFiles)
-				r.Get("/git-commit-diff", s.GitCommitDiff)
-				r.Post("/generate-commit-message", s.GenerateCommitMessage)
-				r.Get("/git-branches", s.GetGitBranches)
-				r.Post("/git-checkout", s.GitCheckout)
-				r.Post("/git-stage", s.GitStage)
-				r.Post("/git-unstage", s.GitUnstage)
-				r.Post("/git-push", s.GitPush)
-				r.Post("/git-pull", s.GitPull)
-				r.Get("/diff", s.GetProjectDiff)
-				r.Get("/diff-stats", s.GetProjectDiffStats)
-				r.Get("/file-diff", s.GetProjectFileDiff)
-
-				// File browser
-				r.Get("/files", s.ListProjectFiles)
-				r.Get("/files-flat", s.ListProjectFilesFlat)
-				r.Get("/file-content", s.ReadProjectFile)
-				r.Put("/file-content", s.SaveProjectFile)
-				r.Delete("/file-content", s.DeleteProjectFile)
-				r.Get("/file-search", s.SearchProjectFiles)
-				r.Post("/file-upload", s.UploadProjectFile)
-				r.Get("/file-download", s.DownloadProjectFile)
-				r.Get("/file-serve", s.ServeProjectFile)
-				r.Post("/file-move", s.MoveProjectFile)
-
-				// Labels (project-scoped)
-				r.Get("/labels", s.ListLabels)
-				r.Post("/labels", s.CreateLabel)
-				r.Delete("/labels/{labelId}", s.DeleteLabel)
-			})
-		})
-
-		// Tasks
-		r.Route("/tasks", func(r chi.Router) {
-			r.Get("/", s.ListTasks)
-			r.Post("/", s.CreateTask)
-			r.Route("/{taskId}", func(r chi.Router) {
-				r.Get("/", s.GetTask)
-				r.Put("/", s.UpdateTask)
-				r.Delete("/", s.DeleteTask)
-				r.Put("/parent", s.SetTaskParent)
-				r.Delete("/parent", s.RemoveTaskParent)
-				r.Route("/comments", func(r chi.Router) {
-					r.Get("/", s.ListTaskComments)
-					r.Post("/", s.CreateTaskComment)
-				})
-				r.Route("/labels", func(r chi.Router) {
-					r.Post("/", s.AddLabelToTask)
-					r.Delete("/{labelName}", s.RemoveLabelFromTask)
-				})
-			})
-		})
-		r.Put("/task-comments/{commentId}", s.UpdateTaskComment)
-		r.Delete("/task-comments/{commentId}", s.DeleteTaskComment)
-
-		// Reactions (generic: task, task_comment)
-		r.Route("/reactions/{targetType}/{targetId}", func(r chi.Router) {
-			r.Get("/", s.GetReactions)
-			r.Post("/", s.AddReaction)
-			r.Delete("/", s.RemoveReaction)
-		})
-
-		r.Route("/projects/{projectId}/assets", func(r chi.Router) {
-			r.Get("/", s.ListAssets)
-			r.Post("/", s.CreateAsset)
-		})
-		r.Route("/assets/{assetId}", func(r chi.Router) {
-			r.Get("/", s.GetAsset)
-			r.Put("/", s.UpdateAsset)
-			r.Delete("/", s.DeleteAsset)
-			r.Get("/versions", s.ListAssetVersions)
-			r.Get("/diff", s.DiffAssetVersions)
-			r.Route("/comments", func(r chi.Router) {
-				r.Get("/", s.ListReviewComments)
-				r.Post("/", s.CreateReviewComment)
-			})
-		})
-		r.Put("/comments/{commentId}", s.UpdateReviewComment)
-		r.Delete("/comments/{commentId}", s.DeleteReviewComment)
-
-		// Message part details (lazy loading)
-		r.Get("/messages/{messageId}/details", s.GetMessageDetails)
-
-		// Changes (audit trail)
-		r.Get("/changes", s.ListChanges)
-
-		// Utility
-		r.Post("/validate-path", s.ValidatePath)
-		r.Get("/browse-dir", s.BrowseDir)
-		r.Get("/info", s.GetServerInfo)
-		r.Get("/available-agents", s.ListAvailableAgents)
-		r.Get("/available-models", s.ListAvailableModels)
-		r.Put("/default-agent", s.SetDefaultAgent)
-		r.Get("/settings", s.GetSettings)
-		r.Put("/settings", s.UpdateSettings)
-
-		// Workflows
-		s.RegisterWorkflowRoutes(r)
-
-		// RALPH (parallel task pool)
-		s.RegisterRalphRoutes(r)
-
-		// Marketplace (MCP & Skill registry)
-		s.RegisterMarketplaceRoutes(r)
 	})
-
-	// MCP reverse proxy (top-level so the URL is /mcp-proxy/{name}, not /api/mcp-proxy/{name})
-	r.HandleFunc("/mcp-proxy/{name}/*", s.HandleMCPProxy)
-	r.HandleFunc("/mcp-proxy/{name}", s.HandleMCPProxy)
 
 	// pprof – goroutine dumps, heap profiles, etc. for debugging hangs.
 	// Usage: curl http://localhost:9040/debug/pprof/goroutine?debug=1
 	r.Mount("/debug", http.DefaultServeMux)
 
-	// Global multiplexed WebSocket
-	r.Get("/ws", s.HandleGlobalWS)
+	// MCP reverse proxy (top-level so the URL is /mcp-proxy/{name}). The MCP
+	// auth path is its own scheme (MCP servers are launched as agent
+	// subprocesses) so we do NOT gate this with RequireAuth.
+	r.HandleFunc("/mcp-proxy/{name}/*", s.HandleMCPProxy)
+	r.HandleFunc("/mcp-proxy/{name}", s.HandleMCPProxy)
 
-	// Terminal PTY WebSocket (session-scoped; must be registered before the legacy project route)
+	// WebSocket endpoints. They expect the JWT via either the cookie or an
+	// `?auth=<token>` query parameter (cookies aren't reliable on WS upgrades
+	// across all browsers). Auth is enforced inline in each handler.
+	r.Get("/ws", s.HandleGlobalWS)
 	r.Get("/ws/terminal/sessions/{sessionId}", s.HandleTerminalSessionWS)
-	// Legacy project-scoped terminal (kept for backward compatibility)
 	r.Get("/ws/terminal/{projectId}", s.HandleTerminalWS)
 
 	return r
+}
+
+func registerAuthedAPIRoutes(s *Server, r chi.Router) {
+	// Sessions
+	r.Route("/sessions", func(r chi.Router) {
+		r.Get("/", s.ListSessions)
+		r.Post("/", s.CreateSession)
+		r.Put("/reorder", s.ReorderSessions)
+		r.Get("/trash", s.ListTrashedSessions)
+		r.Delete("/trash", s.EmptyTrash)
+		r.Route("/{sessionId}", func(r chi.Router) {
+			r.Get("/", s.GetSession)
+			r.Put("/", s.UpdateSession)
+			r.Delete("/", s.DeleteSession)
+			r.Post("/restore", s.RestoreSession)
+			r.Post("/fork", s.ForkSession)
+			r.Post("/auto-title", s.AutoTitleSession)
+			r.Get("/messages", s.ListSessionMessages)
+			r.Post("/upload-image", s.UploadImage)
+			r.Get("/image/{filename}", s.ServeImage)
+
+			r.Put("/worktree-mode", s.SetWorktreeMode)
+			r.Get("/worktree-status", s.GetWorktreeStatus)
+
+			r.Get("/queue", s.ListQueuedMessages)
+			r.Post("/queue", s.CreateQueuedMessage)
+			r.Put("/queue/{queueId}", s.UpdateQueuedMessage)
+			r.Delete("/queue/{queueId}", s.DeleteQueuedMessage)
+			r.Post("/queue/{queueId}/run", s.HandleRunQueuedMessage)
+		})
+	})
+
+	// Projects
+	r.Route("/projects", func(r chi.Router) {
+		r.Get("/", s.ListProjects)
+		r.Post("/", s.CreateProject)
+		r.Get("/lookup-by-dir", s.LookupProjectByDir)
+		r.Get("/by-git-dir", s.CheckProjectByGitDir)
+		r.Route("/{projectId}", func(r chi.Router) {
+			r.Get("/", s.GetProject)
+			r.Put("/", s.UpdateProject)
+			r.Delete("/", s.DeleteProject)
+			r.Get("/scratch-session", s.GetOrCreateScratchSession)
+
+			// Git operations (project-level)
+			r.Get("/git-status", s.GetGitStatus)
+			r.Post("/git-commit", s.GitCommit)
+			r.Post("/git-discard", s.GitDiscard)
+			r.Get("/git-log", s.GitLog)
+			r.Get("/git-commit-files", s.GitCommitFiles)
+			r.Get("/git-commit-diff", s.GitCommitDiff)
+			r.Post("/generate-commit-message", s.GenerateCommitMessage)
+			r.Get("/git-branches", s.GetGitBranches)
+			r.Post("/git-checkout", s.GitCheckout)
+			r.Post("/git-stage", s.GitStage)
+			r.Post("/git-unstage", s.GitUnstage)
+			r.Post("/git-push", s.GitPush)
+			r.Post("/git-pull", s.GitPull)
+			r.Get("/diff", s.GetProjectDiff)
+			r.Get("/diff-stats", s.GetProjectDiffStats)
+			r.Get("/file-diff", s.GetProjectFileDiff)
+
+			// File browser
+			r.Get("/files", s.ListProjectFiles)
+			r.Get("/files-flat", s.ListProjectFilesFlat)
+			r.Get("/file-content", s.ReadProjectFile)
+			r.Put("/file-content", s.SaveProjectFile)
+			r.Delete("/file-content", s.DeleteProjectFile)
+			r.Get("/file-search", s.SearchProjectFiles)
+			r.Post("/file-upload", s.UploadProjectFile)
+			r.Get("/file-download", s.DownloadProjectFile)
+			r.Get("/file-serve", s.ServeProjectFile)
+			r.Post("/file-move", s.MoveProjectFile)
+
+			// Labels (project-scoped)
+			r.Get("/labels", s.ListLabels)
+			r.Post("/labels", s.CreateLabel)
+			r.Delete("/labels/{labelId}", s.DeleteLabel)
+		})
+	})
+
+	// Tasks
+	r.Route("/tasks", func(r chi.Router) {
+		r.Get("/", s.ListTasks)
+		r.Post("/", s.CreateTask)
+		r.Route("/{taskId}", func(r chi.Router) {
+			r.Get("/", s.GetTask)
+			r.Put("/", s.UpdateTask)
+			r.Delete("/", s.DeleteTask)
+			r.Put("/parent", s.SetTaskParent)
+			r.Delete("/parent", s.RemoveTaskParent)
+			r.Route("/comments", func(r chi.Router) {
+				r.Get("/", s.ListTaskComments)
+				r.Post("/", s.CreateTaskComment)
+			})
+			r.Route("/labels", func(r chi.Router) {
+				r.Post("/", s.AddLabelToTask)
+				r.Delete("/{labelName}", s.RemoveLabelFromTask)
+			})
+		})
+	})
+	r.Put("/task-comments/{commentId}", s.UpdateTaskComment)
+	r.Delete("/task-comments/{commentId}", s.DeleteTaskComment)
+
+	r.Route("/reactions/{targetType}/{targetId}", func(r chi.Router) {
+		r.Get("/", s.GetReactions)
+		r.Post("/", s.AddReaction)
+		r.Delete("/", s.RemoveReaction)
+	})
+
+	r.Route("/projects/{projectId}/assets", func(r chi.Router) {
+		r.Get("/", s.ListAssets)
+		r.Post("/", s.CreateAsset)
+	})
+	r.Route("/assets/{assetId}", func(r chi.Router) {
+		r.Get("/", s.GetAsset)
+		r.Put("/", s.UpdateAsset)
+		r.Delete("/", s.DeleteAsset)
+		r.Get("/versions", s.ListAssetVersions)
+		r.Get("/diff", s.DiffAssetVersions)
+		r.Route("/comments", func(r chi.Router) {
+			r.Get("/", s.ListReviewComments)
+			r.Post("/", s.CreateReviewComment)
+		})
+	})
+	r.Put("/comments/{commentId}", s.UpdateReviewComment)
+	r.Delete("/comments/{commentId}", s.DeleteReviewComment)
+
+	r.Get("/messages/{messageId}/details", s.GetMessageDetails)
+	r.Get("/changes", s.ListChanges)
+
+	// Utility
+	r.Post("/validate-path", s.ValidatePath)
+	r.Get("/browse-dir", s.BrowseDir)
+	r.Get("/info", s.GetServerInfo)
+	r.Get("/available-agents", s.ListAvailableAgents)
+	r.Get("/available-models", s.ListAvailableModels)
+	r.Put("/default-agent", s.SetDefaultAgent)
+	r.Get("/settings", s.GetSettings)
+	r.Put("/settings", s.UpdateSettings)
+
+	s.RegisterWorkflowRoutes(r)
+	s.RegisterRalphRoutes(r)
+	s.RegisterMarketplaceRoutes(r)
 }

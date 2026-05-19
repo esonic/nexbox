@@ -35,7 +35,7 @@ func (s *Server) CreateTaskComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	author := s.currentUser()
+	author := s.currentUser(r)
 	comment, err := s.Store.CreateTaskComment(taskID, req, author)
 	if writeStoreError(w, err, "CreateTaskComment", "failed to create comment") {
 		return
@@ -164,7 +164,7 @@ func (s *Server) RemoveLabelFromTask(w http.ResponseWriter, r *http.Request) {
 func (s *Server) GetReactions(w http.ResponseWriter, r *http.Request) {
 	targetType := chi.URLParam(r, "targetType")
 	targetID := chi.URLParam(r, "targetId")
-	user := s.currentUser()
+	user := s.currentUser(r)
 	summary, err := s.Store.GetReactionSummary(targetType, targetID, user)
 	if writeStoreError(w, err, "GetReactions", "failed to get reactions") {
 		return
@@ -185,7 +185,7 @@ func (s *Server) AddReaction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "emoji is required")
 		return
 	}
-	author := s.currentUser()
+	author := s.currentUser(r)
 	err := s.Store.AddReaction(targetType, targetID, author, body.Emoji)
 	if writeStoreError(w, err, "AddReaction", "failed to add reaction") {
 		return
@@ -201,7 +201,7 @@ func (s *Server) RemoveReaction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "emoji query param is required")
 		return
 	}
-	author := s.currentUser()
+	author := s.currentUser(r)
 	err := s.Store.RemoveReaction(targetType, targetID, author, emoji)
 	if writeStoreError(w, err, "RemoveReaction", "failed to remove reaction") {
 		return
@@ -209,12 +209,3 @@ func (s *Server) RemoveReaction(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// currentUser returns the username of the caller. Phase 4 will pull this from
-// the auth context; for now we return a stub so other code keeps compiling.
-func (s *Server) currentUser() string {
-	return "local"
-}
