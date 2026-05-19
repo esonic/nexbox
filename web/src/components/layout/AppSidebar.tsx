@@ -790,18 +790,6 @@ export function AppSidebar() {
                   <span className="truncate">{p.name}</span>
                 </button>
               ))}
-              {connectStatus !== "connected" && (
-                <>
-                  {projects.filter((p) => p.name !== UNASSIGNED_PROJECT && p.git_repo_path).length > 0 && <div className="border-t border-border/50" />}
-                  <button
-                    onClick={() => { setShowNewSessionMenu(false); handleNewSession(); }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-                  >
-                    <span className="text-muted-foreground/60">—</span>
-                    <span>No project</span>
-                  </button>
-                </>
-              )}
             </div>
           )}
         </div>
