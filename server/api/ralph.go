@@ -356,7 +356,7 @@ func (s *Server) emitRalphProgress(poolID string, payload map[string]interface{}
 // ---------------------------------------------------------------------------
 
 func (s *Server) execSQL(query string, args ...interface{}) {
-	if localStore := s.LocalStore; localStore != nil {
+	if localStore := s.Store; localStore != nil {
 		if _, err := localStore.DB().Exec(query, args...); err != nil {
 			log.Printf("[ralph] DB exec error: %v", err)
 		}
@@ -364,7 +364,7 @@ func (s *Server) execSQL(query string, args ...interface{}) {
 }
 
 func (s *Server) queryRalphRuns(projectID string, limit int) ([]map[string]interface{}, error) {
-	db := s.LocalStore
+	db := s.Store
 	if db == nil {
 		return nil, fmt.Errorf("no local store")
 	}
@@ -429,7 +429,7 @@ func (s *Server) queryRalphRuns(projectID string, limit int) ([]map[string]inter
 }
 
 func (s *Server) queryRalphWorkerLogs(runID string) ([]map[string]interface{}, error) {
-	db := s.LocalStore
+	db := s.Store
 	if db == nil {
 		return nil, fmt.Errorf("no local store")
 	}

@@ -15,7 +15,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/esonic/nexbox/agent"
-	"github.com/esonic/nexbox/gitlab"
 	"github.com/esonic/nexbox/store"
 )
 
@@ -119,17 +118,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		switch p.Type {
 		case "task_ref":
 			if p.TaskID != "" {
-				if gitlab.IsGitLabTaskID(p.TaskID) {
-					// Fetch from GitLab API
-					if info, iid, err := s.resolveGitLabTask(p.TaskID); err == nil {
-						projectID, _, _ := gitlab.ParseTaskID(p.TaskID)
-						if t, err := s.gitlabGetTask(context.Background(), info, projectID, iid); err == nil {
-							refTasks = append(refTasks, agent.TaskRef{
-								ID: t.ID, Title: t.Title, Description: t.Description, Status: t.Status, Priority: t.Priority,
-							})
-						}
-					}
-				} else if info, err := store.GetTaskInfo(s.Store, p.TaskID); err == nil && info != nil {
+				if info, err := store.GetTaskInfo(s.Store, p.TaskID); err == nil && info != nil {
 					refTasks = append(refTasks, agent.TaskRef{
 						ID: info.ID, Title: info.Title, Description: info.Description, Status: info.Status, Priority: info.Priority,
 					})
@@ -146,13 +135,8 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		}
 	}
 
-	// If no project bound, bind to the system "Unassigned" project (local mode only).
-	// Cloud mode requires every session to have a project.
+	// If no project bound, bind to the system "Unassigned" project.
 	if session.ProjectID == "" {
-		if s.StoreMode == "remote" {
-			s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "session must be bound to a project in cloud mode"})
-			return
-		}
 		unassignedProject, err := s.getOrCreateUnassignedProject()
 		if err != nil {
 			log.Printf("[chat] Failed to get/create unassigned project: %v", err)
@@ -266,21 +250,15 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		}()
 		s.SessionManager.SetCancel(sessionID, cancel)
 
-		isRemote := s.StoreMode == "remote"
-
-		// For local stores, create an empty assistant message upfront so partial
-		// progress survives a process restart. Remote stores don't support
-		// message updates, so we only call CreateMessage once at the end.
-		var assistantMsgID string
-		if !isRemote {
-			assistantMsg, err := s.Store.CreateMessage(sessionID, "assistant", []MessagePart{}, MessageMetadata{})
-			if err != nil {
-				log.Printf("[chat] Failed to create assistant message: %v", err)
-				s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "failed to create message"})
-				return
-			}
-			assistantMsgID = assistantMsg.ID
+		// Create an empty assistant message upfront so partial progress survives
+		// a process restart.
+		assistantMsg, err := s.Store.CreateMessage(sessionID, "assistant", []MessagePart{}, MessageMetadata{})
+		if err != nil {
+			log.Printf("[chat] Failed to create assistant message: %v", err)
+			s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "failed to create message"})
+			return
 		}
+		assistantMsgID := assistantMsg.ID
 
 		var mu sync.Mutex
 		var msgParts []MessagePart
@@ -813,26 +791,14 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		finalMeta := metadata
 		mu.Unlock()
 
-		// Final persist: save full parts to the main message table.
-		// Always update the pre-created message (even if empty) so it is never
-		// left in an un-finalized state that shows as "Thinking" after reload.
-		if assistantMsgID != "" {
-			if err := s.Store.UpdateMessageParts(assistantMsgID, finalParts, finalMeta); err != nil {
-				log.Printf("[chat] Failed to persist final assistant message: %v", err)
-			}
-			if s.MarketplaceStats != nil && len(finalParts) > 0 {
-				s.MarketplaceStats.RecordMessage()
-			}
-		} else if len(finalParts) > 0 {
-			msg, err := s.Store.CreateMessage(sessionID, "assistant", finalParts, finalMeta)
-			if err != nil {
-				log.Printf("[chat] Failed to create final assistant message: %v", err)
-			} else {
-				assistantMsgID = msg.ID
-			}
-			if s.MarketplaceStats != nil {
-				s.MarketplaceStats.RecordMessage()
-			}
+		// Final persist: save full parts to the main message table. Always
+		// update the pre-created message (even if empty) so it is never left
+		// in an un-finalized state that shows as "Thinking" after reload.
+		if err := s.Store.UpdateMessageParts(assistantMsgID, finalParts, finalMeta); err != nil {
+			log.Printf("[chat] Failed to persist final assistant message: %v", err)
+		}
+		if s.MarketplaceStats != nil && len(finalParts) > 0 {
+			s.MarketplaceStats.RecordMessage()
 		}
 
 		stats := &ExecutionStats{

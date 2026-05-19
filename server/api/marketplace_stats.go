@@ -1,10 +1,7 @@
 package api
 
 import (
-	"log"
 	"sync"
-
-	"github.com/esonic/nexbox/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -70,26 +67,3 @@ func (b *MarketplaceStatsBuffer) Flush() (installs, calls map[pkgKey]int64, sess
 	return
 }
 
-func (s *Server) FlushMarketplaceStats() {
-	if s.MarketplaceStats == nil || s.Cloud == nil {
-		return
-	}
-	installs, calls, sessions, messages := s.MarketplaceStats.Flush()
-	if installs == nil && calls == nil && sessions == 0 && messages == 0 {
-		return
-	}
-	report := store.MarketplaceStatsReport{
-		User:     s.Cloud.Info.UserName,
-		Sessions: sessions,
-		Messages: messages,
-	}
-	for k, count := range installs {
-		report.Installs = append(report.Installs, store.NameCount{Name: k.Name, Type: k.PkgType, Count: count})
-	}
-	for k, count := range calls {
-		report.Calls = append(report.Calls, store.NameCount{Name: k.Name, Type: k.PkgType, Count: count})
-	}
-	if err := s.Cloud.ReportMarketplaceStats(report); err != nil {
-		log.Printf("[marketplace] stats flush error: %v", err)
-	}
-}

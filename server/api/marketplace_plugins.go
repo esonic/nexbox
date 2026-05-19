@@ -27,7 +27,7 @@ type InstallPluginEntryRequest struct {
 }
 
 func (s *Server) ListInstalledPluginEntries(w http.ResponseWriter, r *http.Request) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeJSON(w, http.StatusOK, []store.InstalledPluginEntry{})
 		return
 	}
@@ -35,7 +35,7 @@ func (s *Server) ListInstalledPluginEntries(w http.ResponseWriter, r *http.Reque
 	if projectID == "" {
 		projectID = "*"
 	}
-	entries, err := s.LocalStore.ListInstalledPluginEntries(projectID)
+	entries, err := s.Store.ListInstalledPluginEntries(projectID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -44,7 +44,7 @@ func (s *Server) ListInstalledPluginEntries(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) InstallPluginEntry(w http.ResponseWriter, r *http.Request) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "local store not available")
 		return
 	}
@@ -63,7 +63,7 @@ func (s *Server) InstallPluginEntry(w http.ResponseWriter, r *http.Request) {
 
 	// If no explicit install_path, try to resolve from marketplace directory.
 	if srcPath == "" && lspConfig == "" {
-		plugins, _ := loadMarketplacePlugins(s.marketplaceDir(), sourcesByPath(s.LocalStore))
+		plugins, _ := loadMarketplacePlugins(s.marketplaceDir(), sourcesByPath(s.Store))
 		for _, p := range plugins {
 			if p.Name == req.Name {
 				srcPath = p.InstallPath
@@ -155,7 +155,7 @@ func (s *Server) installPluginToProject(name, srcPath, lspConfig, projectID stri
 		InstallPath: installDir,
 		InstalledAt: store.UnixTime(time.Now()),
 	}
-	if err := s.LocalStore.UpsertInstalledPluginEntry(entry); err != nil {
+	if err := s.Store.UpsertInstalledPluginEntry(entry); err != nil {
 		_ = removeInstallDir(installDir)
 		return store.InstalledPluginEntry{}, err
 	}
@@ -163,7 +163,7 @@ func (s *Server) installPluginToProject(name, srcPath, lspConfig, projectID stri
 }
 
 func (s *Server) UninstallPluginEntry(w http.ResponseWriter, r *http.Request) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "local store not available")
 		return
 	}
@@ -173,7 +173,7 @@ func (s *Server) UninstallPluginEntry(w http.ResponseWriter, r *http.Request) {
 	// Collect install paths before deleting DB records so we can clean up the filesystem.
 	globalPluginsPrefix := filepath.Join(s.DataDir, "global-plugins") + string(filepath.Separator)
 	var pathsToRemove []string
-	if entries, err := s.LocalStore.ListInstalledPluginEntries("*"); err == nil {
+	if entries, err := s.Store.ListInstalledPluginEntries("*"); err == nil {
 		for _, e := range entries {
 			if e.Name != name {
 				continue
@@ -200,9 +200,9 @@ func (s *Server) UninstallPluginEntry(w http.ResponseWriter, r *http.Request) {
 
 	var delErr error
 	if projectID == "" {
-		delErr = s.LocalStore.DeleteInstalledPluginEntryByName(name)
+		delErr = s.Store.DeleteInstalledPluginEntryByName(name)
 	} else {
-		delErr = s.LocalStore.DeleteInstalledPluginEntry(name, projectID)
+		delErr = s.Store.DeleteInstalledPluginEntry(name, projectID)
 	}
 	if delErr != nil {
 		writeError(w, http.StatusInternalServerError, delErr.Error())
@@ -252,7 +252,7 @@ func (s *Server) copyGlobalPluginToProjects(pluginName, srcDir string) {
 }
 
 func (s *Server) copyGlobalPluginsToProject(gitRepoPath string) {
-	globalPlugins, err := s.LocalStore.ListInstalledPluginEntries("")
+	globalPlugins, err := s.Store.ListInstalledPluginEntries("")
 	if err != nil {
 		log.Printf("[marketplace] failed to load global plugins for new project: %v", err)
 		return

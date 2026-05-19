@@ -88,7 +88,7 @@ func repoNameFromURL(gitURL string) string {
 }
 
 func (s *Server) AddMarketplaceSource(w http.ResponseWriter, r *http.Request) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "local store not available")
 		return
 	}
@@ -145,7 +145,7 @@ func (s *Server) AddMarketplaceSource(w http.ResponseWriter, r *http.Request) {
 			Name:    repoName,
 			AddedAt: store.UnixTime(time.Now()),
 		}
-		if err := s.LocalStore.UpsertMarketplaceSource(src); err != nil {
+		if err := s.Store.UpsertMarketplaceSource(src); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -190,7 +190,7 @@ func (s *Server) AddMarketplaceSource(w http.ResponseWriter, r *http.Request) {
 			Name:    linkName,
 			AddedAt: store.UnixTime(time.Now()),
 		}
-		if err := s.LocalStore.UpsertMarketplaceSource(src); err != nil {
+		if err := s.Store.UpsertMarketplaceSource(src); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -200,11 +200,11 @@ func (s *Server) AddMarketplaceSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) ListMarketplaceSources(w http.ResponseWriter, r *http.Request) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeJSON(w, http.StatusOK, []store.MarketplaceSource{})
 		return
 	}
-	sources, err := s.LocalStore.ListMarketplaceSources()
+	sources, err := s.Store.ListMarketplaceSources()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -213,16 +213,16 @@ func (s *Server) ListMarketplaceSources(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) RemoveMarketplaceSource(w http.ResponseWriter, r *http.Request) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "local store not available")
 		return
 	}
 	id := chi.URLParam(r, "id")
 
 	// Look up source before deleting so we can clean up the filesystem.
-	src, _ := s.LocalStore.GetMarketplaceSource(id)
+	src, _ := s.Store.GetMarketplaceSource(id)
 
-	if err := s.LocalStore.DeleteMarketplaceSource(id); err != nil {
+	if err := s.Store.DeleteMarketplaceSource(id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -249,47 +249,13 @@ func (s *Server) RemoveMarketplaceSource(w http.ResponseWriter, r *http.Request)
 // Startup: clone official marketplace repos
 // ---------------------------------------------------------------------------
 
-// CloneOfficialMarketplaceRepos clones official repos into dataDir/marketplace asynchronously
-// and registers each as a MarketplaceSource in the store so they appear in the UI.
+// CloneOfficialMarketplaceRepos ensures the marketplace directory exists so
+// users can add their own sources later. The previous default source pointed
+// to a now-gone gitlab.okg.com repo; nexbox now ships with no preconfigured
+// marketplace.
 func CloneOfficialMarketplaceRepos(dataDir string, ls *store.SQLiteStore) {
 	mpDir := filepath.Join(dataDir, "marketplace")
 	if err := os.MkdirAll(mpDir, 0755); err != nil {
 		log.Printf("[marketplace] failed to create marketplace dir: %v", err)
-		return
-	}
-
-	repos := []struct {
-		url  string
-		name string
-	}{
-		{"git@gitlab.okg.com:nexbox/plugin-marketplace.git", "sre-plugin-marketplace"},
-	}
-
-	for _, repo := range repos {
-		dest := filepath.Join(mpDir, repo.name)
-		if _, err := os.Stat(dest); err == nil {
-			continue // already exists
-		}
-		log.Printf("[marketplace] cloning %s → %s", repo.url, dest)
-		cmd := exec.Command("git", "clone", "--depth", "1", repo.url, dest)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			log.Printf("[marketplace] clone %s failed: %v\n%s", repo.url, err, output)
-		} else {
-			log.Printf("[marketplace] cloned %s", repo.name)
-			if ls != nil {
-				hash := sha256.Sum256([]byte(repo.url))
-				src := store.MarketplaceSource{
-					ID:      hex.EncodeToString(hash[:8]),
-					Type:    "git",
-					URL:     repo.url,
-					Path:    dest,
-					Name:    repo.name,
-					AddedAt: store.UnixTime(time.Now()),
-				}
-				if err := ls.UpsertMarketplaceSource(src); err != nil {
-					log.Printf("[marketplace] failed to register source %s: %v", repo.name, err)
-				}
-			}
-		}
 	}
 }

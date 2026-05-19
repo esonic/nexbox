@@ -19,10 +19,10 @@ import (
 // ---------------------------------------------------------------------------
 
 func (s *Server) resolveInstalledMCPsAndMap(projectID string) ([]agentpkg.MCPServerEntry, map[string]string) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		return nil, nil
 	}
-	mcps, err := s.LocalStore.ListInstalledMCPs(projectID)
+	mcps, err := s.Store.ListInstalledMCPs(projectID)
 	if err != nil {
 		log.Printf("[marketplace] failed to load installed MCPs: %v", err)
 		return nil, nil
@@ -121,10 +121,10 @@ func (s *Server) resolveInstalledMCPsAndMap(projectID string) ([]agentpkg.MCPSer
 // If a stored entry has an empty install_path, we attempt to resolve it from
 // the marketplace plugin list as a fallback.
 func (s *Server) resolveInstalledPluginDirs(projectID string) []string {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		return nil
 	}
-	entries, err := s.LocalStore.ListInstalledPluginEntries(projectID)
+	entries, err := s.Store.ListInstalledPluginEntries(projectID)
 	if err != nil {
 		log.Printf("[marketplace] failed to load installed plugins: %v", err)
 		return nil
@@ -151,14 +151,14 @@ func (s *Server) resolveInstalledPluginDirs(projectID string) []string {
 			// Lazy-load marketplace plugins on first miss.
 			if !mpLoaded {
 				mpLoaded = true
-				mpPlugins, _ = loadMarketplacePlugins(s.marketplaceDir(), sourcesByPath(s.LocalStore))
+				mpPlugins, _ = loadMarketplacePlugins(s.marketplaceDir(), sourcesByPath(s.Store))
 			}
 			for _, p := range mpPlugins {
 				if p.Name == e.Name && p.InstallPath != "" {
 					path = p.InstallPath
 					// Backfill the DB so future lookups don't need the fallback.
 					e.InstallPath = path
-					_ = s.LocalStore.UpsertInstalledPluginEntry(e)
+					_ = s.Store.UpsertInstalledPluginEntry(e)
 					log.Printf("[marketplace] backfilled install_path for plugin %s: %s", e.Name, path)
 					break
 				}
@@ -211,23 +211,11 @@ func (s *Server) RegisterMarketplaceRoutes(r chi.Router) {
 // Utility functions
 // ---------------------------------------------------------------------------
 
-// allGitRepoPaths returns the git repo paths for all known projects,
-// applying local path overrides from config in remote store mode.
+// allGitRepoPaths returns the git repo paths for all known projects.
 func (s *Server) allGitRepoPaths() []string {
 	projects, err := s.Store.ListProjects()
 	if err != nil {
 		return nil
-	}
-	if s.StoreMode == "remote" && s.Config != nil {
-		pathMap := make(map[string]string)
-		for _, m := range s.Config.Get().Projects {
-			pathMap[m.RemoteID] = m.GitRepoPath
-		}
-		for i := range projects {
-			if lp, ok := pathMap[projects[i].ID]; ok {
-				projects[i].GitRepoPath = lp
-			}
-		}
 	}
 	var paths []string
 	for _, p := range projects {

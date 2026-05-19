@@ -27,7 +27,7 @@ type InstallSkillRequest struct {
 }
 
 func (s *Server) ListInstalledSkills(w http.ResponseWriter, r *http.Request) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeJSON(w, http.StatusOK, []store.InstalledSkill{})
 		return
 	}
@@ -35,7 +35,7 @@ func (s *Server) ListInstalledSkills(w http.ResponseWriter, r *http.Request) {
 	if projectID == "" {
 		projectID = "*"
 	}
-	skills, err := s.LocalStore.ListInstalledSkills(projectID)
+	skills, err := s.Store.ListInstalledSkills(projectID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -44,7 +44,7 @@ func (s *Server) ListInstalledSkills(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) InstallSkill(w http.ResponseWriter, r *http.Request) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "local store not available")
 		return
 	}
@@ -85,7 +85,7 @@ func (s *Server) InstallSkill(w http.ResponseWriter, r *http.Request) {
 		InstallPath: installDir,
 		InstalledAt: store.UnixTime(time.Now()),
 	}
-	if err := s.LocalStore.UpsertInstalledSkill(skill); err != nil {
+	if err := s.Store.UpsertInstalledSkill(skill); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -107,7 +107,7 @@ func (s *Server) InstallSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) UninstallSkill(w http.ResponseWriter, r *http.Request) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "local store not available")
 		return
 	}
@@ -131,9 +131,9 @@ func (s *Server) UninstallSkill(w http.ResponseWriter, r *http.Request) {
 
 	var delErr error
 	if projectID == "" {
-		delErr = s.LocalStore.DeleteInstalledSkillByName(name)
+		delErr = s.Store.DeleteInstalledSkillByName(name)
 	} else {
-		delErr = s.LocalStore.DeleteInstalledSkill(name, projectID)
+		delErr = s.Store.DeleteInstalledSkill(name, projectID)
 	}
 	if delErr != nil {
 		writeError(w, http.StatusInternalServerError, delErr.Error())
@@ -172,7 +172,7 @@ func (s *Server) skillInstallDir(name, projectID string) (string, error) {
 }
 
 func (s *Server) copyGlobalSkillsToProject(gitRepoPath string) {
-	globalSkills, err := s.LocalStore.ListInstalledSkills("")
+	globalSkills, err := s.Store.ListInstalledSkills("")
 	if err != nil {
 		log.Printf("[marketplace] failed to load global skills for new project: %v", err)
 		return

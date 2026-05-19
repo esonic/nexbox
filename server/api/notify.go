@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"regexp"
 	"strings"
 )
@@ -65,22 +64,9 @@ func notificationDetail(text, recipient, taskID, assetID, commentID, commentPrev
 	return string(b)
 }
 
-// sendNotification inserts a notification change record via the remote store.
-// Returns nil when s.Cloud is nil (local mode) or recipient is empty.
+// sendNotification used to push a notification change to the remote store in
+// cloud mode. In local-only mode there is nowhere to push to, so this is a
+// no-op. Kept as a stub so callers do not need to change.
 func (s *Server) sendNotification(projectID, entityID, summary, text, recipient, taskID, assetID, commentID, commentPreview string, lineNumber *int) error {
-	if s.Cloud == nil || recipient == "" {
-		return nil
-	}
-	if projectID == "" {
-		log.Printf("[notify] skipping notification: entityID=%s has no project_id", entityID)
-		return nil
-	}
-	actor := s.currentUser()
-	detail := notificationDetail(text, recipient, taskID, assetID, commentID, commentPreview, lineNumber)
-	v := 1
-	if err := s.Cloud.InsertChange(projectID, "notification", entityID, "created", summary, detail, actor, &v); err != nil {
-		log.Printf("[notify] InsertChange failed: %v", err)
-		return err
-	}
 	return nil
 }

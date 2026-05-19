@@ -28,7 +28,7 @@ type InstallMCPRequest struct {
 }
 
 func (s *Server) ListInstalledMCPs(w http.ResponseWriter, r *http.Request) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeJSON(w, http.StatusOK, []store.InstalledMCP{})
 		return
 	}
@@ -36,7 +36,7 @@ func (s *Server) ListInstalledMCPs(w http.ResponseWriter, r *http.Request) {
 	if projectID == "" {
 		projectID = "*"
 	}
-	mcps, err := s.LocalStore.ListInstalledMCPs(projectID)
+	mcps, err := s.Store.ListInstalledMCPs(projectID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -45,7 +45,7 @@ func (s *Server) ListInstalledMCPs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "local store not available")
 		return
 	}
@@ -146,7 +146,7 @@ func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
 		AuthType:    authType,
 		InstalledAt: store.UnixTime(time.Now()),
 	}
-	if err := s.LocalStore.UpsertInstalledMCP(mcp); err != nil {
+	if err := s.Store.UpsertInstalledMCP(mcp); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -159,7 +159,7 @@ func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) UninstallMCP(w http.ResponseWriter, r *http.Request) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "local store not available")
 		return
 	}
@@ -167,17 +167,17 @@ func (s *Server) UninstallMCP(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project_id")
 	all := projectID == "" // no project_id means delete all entries for this name
 	if all {
-		if err := s.LocalStore.DeleteInstalledMCPByName(name); err != nil {
+		if err := s.Store.DeleteInstalledMCPByName(name); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		_ = s.LocalStore.DeleteMCPOAuthTokenByName(name)
+		_ = s.Store.DeleteMCPOAuthTokenByName(name)
 	} else {
-		if err := s.LocalStore.DeleteInstalledMCP(name, projectID); err != nil {
+		if err := s.Store.DeleteInstalledMCP(name, projectID); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		_ = s.LocalStore.DeleteMCPOAuthToken(name, projectID)
+		_ = s.Store.DeleteMCPOAuthToken(name, projectID)
 	}
 	log.Printf("[marketplace] uninstalled MCP: %s (project=%q, all=%v)", name, projectID, all)
 	w.WriteHeader(http.StatusNoContent)

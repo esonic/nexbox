@@ -17,8 +17,19 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/esonic/nexbox/agent"
-	"github.com/esonic/nexbox/gitlab"
 )
+
+// getCurrentBranch returns the current branch name from a git working directory.
+func getCurrentBranch(dir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = dir
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
 
 // --- Types ---
 
@@ -510,7 +521,7 @@ func (s *Server) GitPush(w http.ResponseWriter, r *http.Request) {
 	if err := cmd.Run(); err != nil {
 		// If no upstream, try push -u origin <current-branch>
 		if strings.Contains(stderr.String(), "no upstream") || strings.Contains(stderr.String(), "has no upstream") {
-			branch, _ := gitlab.GetCurrentBranch(workDir)
+			branch, _ := getCurrentBranch(workDir)
 			if branch != "" {
 				cmd2 := exec.Command("git", "push", "-u", "origin", branch)
 				cmd2.Dir = workDir

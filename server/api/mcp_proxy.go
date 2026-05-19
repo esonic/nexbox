@@ -29,7 +29,7 @@ import (
 func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -40,7 +40,7 @@ func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	sess, err := s.LocalStore.GetSession(sessionID)
+	sess, err := s.Store.GetSession(sessionID)
 	if err != nil || sess == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -106,8 +106,8 @@ func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 					origin := fwdURL.Scheme + "://" + fwdURL.Host
 					go func() {
 						if _, err := discoverOAuthEndpoints(origin); err == nil {
-							if s.LocalStore != nil {
-								_ = s.LocalStore.UpdateInstalledMCPAuthType(name, mcp.ProjectID, "oauth_discovery")
+							if s.Store != nil {
+								_ = s.Store.UpdateInstalledMCPAuthType(name, mcp.ProjectID, "oauth_discovery")
 							}
 						}
 					}()
@@ -135,17 +135,17 @@ func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 // resolveMCPForProxy fetches the InstalledMCP record for proxying.
 // It tries project-scoped first, then global.
 func (s *Server) resolveMCPForProxy(name, projectID string) (*store.InstalledMCP, error) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		return nil, fmt.Errorf("local store not available")
 	}
 	if projectID != "" {
-		mcp, err := s.LocalStore.GetInstalledMCP(name, projectID)
+		mcp, err := s.Store.GetInstalledMCP(name, projectID)
 		if err == nil && mcp != nil {
 			return mcp, nil
 		}
 	}
 	// Fall back to global record.
-	mcp, err := s.LocalStore.GetInstalledMCP(name, "")
+	mcp, err := s.Store.GetInstalledMCP(name, "")
 	if err != nil || mcp == nil {
 		return nil, fmt.Errorf("MCP %q not installed", name)
 	}
@@ -208,7 +208,7 @@ func (s *Server) apikeyHeader(mcp *store.InstalledMCP) (string, error) {
 }
 
 func (s *Server) oauthHeader(mcp *store.InstalledMCP) (string, error) {
-	tok, err := s.LocalStore.GetMCPOAuthToken(mcp.Name, mcp.ProjectID)
+	tok, err := s.Store.GetMCPOAuthToken(mcp.Name, mcp.ProjectID)
 	if err != nil {
 		return "", fmt.Errorf("get oauth token: %w", err)
 	}
@@ -225,7 +225,7 @@ func (s *Server) oauthHeader(mcp *store.InstalledMCP) (string, error) {
 			if err == nil {
 				refreshed.MCPName = mcp.Name
 				refreshed.ProjectID = mcp.ProjectID
-				_ = s.LocalStore.UpsertMCPOAuthToken(*refreshed)
+				_ = s.Store.UpsertMCPOAuthToken(*refreshed)
 				tok = refreshed
 			} else {
 				log.Printf("[mcp-proxy] %s: token refresh failed: %v", mcp.Name, err)
@@ -310,7 +310,7 @@ func (s *Server) HandleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	projectID := r.URL.Query().Get("project_id")
 
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "local store not available")
 		return
 	}
@@ -342,7 +342,7 @@ func (s *Server) startOAuthFlow(mcp *store.InstalledMCP) (string, error) {
 
 	// If no client_id yet, check a previously stored token record (e.g. from a prior DCR).
 	if clientID == "" {
-		if existing, _ := s.LocalStore.GetMCPOAuthToken(name, mcp.ProjectID); existing != nil && existing.ClientID != "" {
+		if existing, _ := s.Store.GetMCPOAuthToken(name, mcp.ProjectID); existing != nil && existing.ClientID != "" {
 			clientID = existing.ClientID
 		}
 	}
@@ -390,7 +390,7 @@ func (s *Server) startOAuthFlow(mcp *store.InstalledMCP) (string, error) {
 		CodeVerifier:  verifier,
 		UpdatedAt:     time.Now(),
 	}
-	if err := s.LocalStore.UpsertMCPOAuthToken(pending); err != nil {
+	if err := s.Store.UpsertMCPOAuthToken(pending); err != nil {
 		return "", fmt.Errorf("store state: %w", err)
 	}
 
@@ -418,7 +418,7 @@ func (s *Server) HandleMCPProbe(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	projectID := r.URL.Query().Get("project_id")
 
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "local store not available")
 		return
 	}
@@ -495,13 +495,13 @@ func (s *Server) HandleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing code or state", http.StatusBadRequest)
 		return
 	}
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		http.Error(w, "local store not available", http.StatusServiceUnavailable)
 		return
 	}
 
 	// Look up pending OAuth flow by state.
-	pending, err := s.LocalStore.GetMCPOAuthTokenByState(state)
+	pending, err := s.Store.GetMCPOAuthTokenByState(state)
 	if err != nil || pending == nil {
 		http.Error(w, "unknown or expired OAuth state", http.StatusBadRequest)
 		return
@@ -524,13 +524,13 @@ func (s *Server) HandleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	tok.State = ""
 	tok.CodeVerifier = ""
 	tok.UpdatedAt = time.Now()
-	if err := s.LocalStore.UpsertMCPOAuthToken(*tok); err != nil {
+	if err := s.Store.UpsertMCPOAuthToken(*tok); err != nil {
 		http.Error(w, "store token: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	// Upgrade the MCP's auth_type so the proxy uses the OAuth token on future calls.
-	_ = s.LocalStore.UpdateInstalledMCPAuthType(pending.MCPName, pending.ProjectID, "oauth_discovery")
+	_ = s.Store.UpdateInstalledMCPAuthType(pending.MCPName, pending.ProjectID, "oauth_discovery")
 
 	// Notify frontend via WebSocket.
 	if s.Hub != nil {

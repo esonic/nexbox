@@ -13,36 +13,25 @@ import (
 	"github.com/esonic/nexbox/config"
 	chromemcp "github.com/esonic/nexbox/mcp/chrome"
 	"github.com/esonic/nexbox/store"
-	"github.com/esonic/nexbox/updater"
 )
 
 // Server holds all API dependencies
 type Server struct {
-	Store            store.Store            // unified data access (CompositeStore / SQLiteStore)
-	LocalStore       *store.SQLiteStore     // always-on local store; used by ActivateCloud / DeactivateCloud
-	Config           *config.Manager        // local config (default_agent, server_url, token, etc.)
-	Agent            agent.Agent            // Default agent (from --agent flag)
+	Store            *store.SQLiteStore     // unified data access (always sqlite in local-only mode)
+	Config           *config.Manager        // local config
+	Agent            agent.Agent            // Default agent (from config)
 	AgentName        string                 // Default agent name
 	Agents           map[string]agent.Agent // All available agents by name
 	SessionManager   *agent.SessionManager
 	MCPServerURL     string
 	Hub              *ChatHub                 // Hub for session chat messages
-	StoreMode        string                   // "sqlite" or "remote"
 	TerminalMgr      *TerminalManager         // tracks active PTY for run_in_terminal tool
 	DetailCache      *store.DetailCache       // local cache for full message part details
-	Cloud            *store.RemoteStore       // non-nil in cloud mode; for lark chat, change polling, etc.
 	DataDir          string                   // data directory for file storage (images, etc.)
-	Updater          *updater.Updater         // self-update manager (nil in dev mode)
 	Version          string                   // build-time version string
 	ChromeManager    *chromemcp.ChromeManager // Per-session Chrome DevTools MCP manager for E2E testing
-	ListenPort       int                      // actual TCP port the HTTP server is listening on (for OAuth callbacks, MCP proxy URLs)
-	MarketplaceStats *MarketplaceStatsBuffer  // In-memory stats accumulator; flushed by pollChanges
-
-	// OnCloudActivated is called by ActivateCloud to start cloud-mode goroutines
-	// (e.g. pollChanges). Set by main during startup.
-	OnCloudActivated func()
-	// OnCloudDeactivated is called by DeactivateCloud to stop cloud-mode goroutines.
-	OnCloudDeactivated func()
+	ListenPort       int                      // actual TCP port the HTTP server is listening on
+	MarketplaceStats *MarketplaceStatsBuffer  // In-memory stats accumulator
 
 	// humanGates: executionID+":"+nodeID → channel carrying user input for human node continuation
 	humanGatesMu sync.Mutex
@@ -155,19 +144,6 @@ func NewRouter(s *Server) *chi.Mux {
 				r.Get("/file-serve", s.ServeProjectFile)
 				r.Post("/file-move", s.MoveProjectFile)
 
-				// GitLab
-				r.Post("/create-mr", s.CreateMR)
-
-				// Task migration (local DB → GitLab)
-				r.Get("/migration-status", s.GetMigrationStatus)
-				r.Post("/migrate-tasks", s.MigrateTasks)
-
-				// Members
-				r.Get("/members", s.ListProjectMembers)
-				r.Post("/members", s.AddProjectMember)
-				r.Delete("/members/me", s.LeaveProject)
-				r.Delete("/members/{userName}", s.RemoveProjectMember)
-
 				// Labels (project-scoped)
 				r.Get("/labels", s.ListLabels)
 				r.Post("/labels", s.CreateLabel)
@@ -209,7 +185,6 @@ func NewRouter(s *Server) *chi.Mux {
 			r.Get("/", s.ListAssets)
 			r.Post("/", s.CreateAsset)
 		})
-		r.Post("/assets/lark-fetch", s.FetchLarkDoc)
 		r.Route("/assets/{assetId}", func(r chi.Router) {
 			r.Get("/", s.GetAsset)
 			r.Put("/", s.UpdateAsset)
@@ -220,9 +195,6 @@ func NewRouter(s *Server) *chi.Mux {
 				r.Get("/", s.ListReviewComments)
 				r.Post("/", s.CreateReviewComment)
 			})
-			r.Post("/lark-fetch", s.FetchLarkDoc)
-			r.Post("/publish-to-lark", s.PublishLarkDoc)
-r.Put("/lark-doc", s.SetLarkDoc)
 		})
 		r.Put("/comments/{commentId}", s.UpdateReviewComment)
 		r.Delete("/comments/{commentId}", s.DeleteReviewComment)
@@ -233,9 +205,6 @@ r.Put("/lark-doc", s.SetLarkDoc)
 		// Changes (audit trail)
 		r.Get("/changes", s.ListChanges)
 
-		// Members search (namespace-level fuzzy search)
-		r.Get("/members", s.SearchMembers)
-
 		// Utility
 		r.Post("/validate-path", s.ValidatePath)
 		r.Get("/browse-dir", s.BrowseDir)
@@ -245,15 +214,6 @@ r.Put("/lark-doc", s.SetLarkDoc)
 		r.Put("/default-agent", s.SetDefaultAgent)
 		r.Get("/settings", s.GetSettings)
 		r.Put("/settings", s.UpdateSettings)
-
-		// Self-update
-		r.Get("/update/status", s.GetUpdateStatus)
-		r.Post("/update/restart", s.TriggerRestart)
-
-		// Auth (cloud login/logout)
-		r.Get("/auth/login-url", s.GetAuthLoginURL)
-		r.Get("/auth/callback", s.HandleAuthCallback)
-		r.Post("/auth/logout", s.HandleAuthLogout)
 
 		// Workflows
 		s.RegisterWorkflowRoutes(r)

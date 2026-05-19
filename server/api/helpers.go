@@ -26,28 +26,12 @@ func (s *Server) getDefaultAgent() string {
 }
 
 // GetServerInfo returns basic server configuration info.
-// GET /api/info → {"agent": "claude", "mode": "local"|"cloud"|"needs_login"}
+// GET /api/info → {"agent": "claude", "mode": "local", ...}
 func (s *Server) GetServerInfo(w http.ResponseWriter, r *http.Request) {
-	cfg := s.Config.Get()
-
-	mode := "local"
-	if s.StoreMode == "remote" {
-		mode = "cloud"
-	} else if !cfg.DisableCloud && cfg.Token == "" {
-		// Cloud is the default but no token yet — prompt the user to log in
-		mode = "needs_login"
-	}
-
 	info := map[string]interface{}{
 		"agent":   s.getDefaultAgent(),
-		"mode":    mode,
+		"mode":    "local",
 		"version": s.Version,
-	}
-	if s.StoreMode == "remote" {
-		info["server_url"] = cfg.ServerURL
-		if s.Cloud != nil {
-			info["user_name"] = s.Cloud.Info.UserName
-		}
 	}
 	writeJSON(w, http.StatusOK, info)
 }
@@ -166,22 +150,10 @@ func isVisibleChange(c store.Change, joined map[string]bool) bool {
 	return joined[c.ProjectID]
 }
 
-// getProjectWithLocalPath fetches a project and patches git_repo_path from
-// local config in cloud mode (remote store doesn't hold local paths).
+// getProjectWithLocalPath fetches a project. In local-only mode the project's
+// git_repo_path is stored directly in the project row.
 func (s *Server) getProjectWithLocalPath(id string) (*store.Project, error) {
-	project, err := s.Store.GetProject(id)
-	if err != nil || project == nil {
-		return project, err
-	}
-	if s.StoreMode == "remote" {
-		for _, m := range s.Config.Get().Projects {
-			if m.RemoteID == project.ID {
-				project.GitRepoPath = m.GitRepoPath
-				break
-			}
-		}
-	}
-	return project, nil
+	return s.Store.GetProject(id)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -200,16 +172,11 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-// writeStoreError logs the original error and maps remote ApiError to its real status/message.
+// writeStoreError logs the original error and writes a 500 response.
 // Returns true when an error response has been written.
 func writeStoreError(w http.ResponseWriter, err error, op, fallback string) bool {
 	if err == nil {
 		return false
-	}
-	if ae, ok := err.(*store.ApiError); ok {
-		log.Printf("[api] %s remote error: status=%d message=%s", op, ae.StatusCode, ae.Message)
-		writeError(w, ae.StatusCode, ae.Message)
-		return true
 	}
 	log.Printf("[api] %s error: %v", op, err)
 	writeError(w, http.StatusInternalServerError, fallback)
@@ -366,31 +333,10 @@ func (s *Server) ListChanges(w http.ResponseWriter, r *http.Request) {
 // GET /api/settings
 func (s *Server) GetSettings(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Config.Get()
-	maskedToken := ""
-	if cfg.Token != "" {
-		if len(cfg.Token) > 10 {
-			maskedToken = cfg.Token[:6] + "..." + cfg.Token[len(cfg.Token)-4:]
-		} else {
-			maskedToken = "***"
-		}
-	}
-	maskedGitLabToken := ""
-	if cfg.GitLabToken != "" {
-		if len(cfg.GitLabToken) > 10 {
-			maskedGitLabToken = cfg.GitLabToken[:6] + "..." + cfg.GitLabToken[len(cfg.GitLabToken)-4:]
-		} else {
-			maskedGitLabToken = "***"
-		}
-	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"default_agent":       s.getDefaultAgent(),
-		"has_token":           cfg.Token != "",
-		"masked_token":        maskedToken,
-		"has_gitlab_token":    cfg.GitLabToken != "",
-		"masked_gitlab_token": maskedGitLabToken,
-		"disable_cloud":       cfg.DisableCloud,
-		"chrome_headless":     cfg.ChromeHeadless,
-		"enable_file_edit":    cfg.EnableFileEdit,
+		"default_agent":    s.getDefaultAgent(),
+		"chrome_headless":  cfg.ChromeHeadless,
+		"enable_file_edit": cfg.EnableFileEdit,
 	})
 }
 
@@ -399,10 +345,8 @@ func (s *Server) GetSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DefaultAgent   *string `json:"default_agent,omitempty"`
-		Token          *string `json:"token,omitempty"`
-		GitLabToken    *string `json:"gitlab_token,omitempty"`
-		DisableCloud   *bool   `json:"disable_cloud,omitempty"`
 		ChromeHeadless *bool   `json:"chrome_headless,omitempty"`
+		EnableFileEdit *bool   `json:"enable_file_edit,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -423,17 +367,11 @@ func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		if req.DefaultAgent != nil {
 			cfg.DefaultAgent = *req.DefaultAgent
 		}
-		if req.Token != nil {
-			cfg.Token = *req.Token
-		}
-		if req.GitLabToken != nil {
-			cfg.GitLabToken = *req.GitLabToken
-		}
-		if req.DisableCloud != nil {
-			cfg.DisableCloud = *req.DisableCloud
-		}
 		if req.ChromeHeadless != nil {
 			cfg.ChromeHeadless = *req.ChromeHeadless
+		}
+		if req.EnableFileEdit != nil {
+			cfg.EnableFileEdit = *req.EnableFileEdit
 		}
 	}); err != nil {
 		log.Printf("[api] UpdateSettings persist error: %v", err)

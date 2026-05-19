@@ -3,8 +3,6 @@ package store
 import (
 	"encoding/json"
 	"time"
-
-	"github.com/esonic/nexbox/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -12,32 +10,28 @@ import (
 // ---------------------------------------------------------------------------
 
 type Project struct {
-	ID            string              `json:"id"`
-	NamespaceID   string              `json:"namespace_id"`
-	Name          string              `json:"name"`
-	Description   string              `json:"description"`
-	GitRepoPath   string              `json:"git_repo_path"`
-	GitLabRepoURL string              `json:"gitlab_repo_url,omitempty"`
-	OKOne         *config.OKOneConfig `json:"okone,omitempty"` // transient: injected from config.json, not stored
-	CreatedBy     string              `json:"created_by"`
-	Version       int                 `json:"version"`
-	CreatedAt     time.Time           `json:"created_at"`
-	UpdatedAt     time.Time           `json:"updated_at"`
+	ID          string    `json:"id"`
+	NamespaceID string    `json:"namespace_id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	GitRepoPath string    `json:"git_repo_path"`
+	CreatedBy   string    `json:"created_by"`
+	Version     int       `json:"version"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type CreateProjectRequest struct {
-	NamespaceID   string `json:"namespace_id,omitempty"`
-	Name          string `json:"name"`
-	Description   string `json:"description"`
-	GitRepoPath   string `json:"git_repo_path"`
-	GitLabRepoURL string `json:"gitlab_repo_url"`
+	NamespaceID string `json:"namespace_id,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	GitRepoPath string `json:"git_repo_path"`
 }
 
 type UpdateProjectRequest struct {
 	Name            *string `json:"name,omitempty"`
 	Description     *string `json:"description,omitempty"`
 	GitRepoPath     *string `json:"git_repo_path,omitempty"`
-	GitLabRepoURL   *string `json:"gitlab_repo_url,omitempty"`
 	ExpectedVersion *int    `json:"expected_version,omitempty"`
 }
 

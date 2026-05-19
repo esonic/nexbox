@@ -53,7 +53,7 @@ func (s *Server) marketplaceDir() string {
 }
 
 func (s *Server) ListLocalPlugins(w http.ResponseWriter, r *http.Request) {
-	plugins, err := loadMarketplacePlugins(s.marketplaceDir(), sourcesByPath(s.LocalStore))
+	plugins, err := loadMarketplacePlugins(s.marketplaceDir(), sourcesByPath(s.Store))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -86,7 +86,7 @@ func gitSourceLabel(url string) string {
 
 func (s *Server) GetLocalPlugin(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	plugins, err := loadMarketplacePlugins(s.marketplaceDir(), sourcesByPath(s.LocalStore))
+	plugins, err := loadMarketplacePlugins(s.marketplaceDir(), sourcesByPath(s.Store))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

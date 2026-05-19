@@ -19,8 +19,8 @@ const projectColumns = `id, namespace_id, name, description, git_repo_path, gitl
 
 func scanProject(row interface{ Scan(...interface{}) error }) (*Project, error) {
 	var p Project
-	var ignoredToken, ignoredExtra string
-	err := row.Scan(&p.ID, &p.NamespaceID, &p.Name, &p.Description, &p.GitRepoPath, &p.GitLabRepoURL, &ignoredToken, &ignoredExtra, &p.CreatedBy, &p.Version, &p.CreatedAt, &p.UpdatedAt)
+	var ignoredGitLabURL, ignoredToken, ignoredExtra string
+	err := row.Scan(&p.ID, &p.NamespaceID, &p.Name, &p.Description, &p.GitRepoPath, &ignoredGitLabURL, &ignoredToken, &ignoredExtra, &p.CreatedBy, &p.Version, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -30,22 +30,21 @@ func scanProject(row interface{ Scan(...interface{}) error }) (*Project, error) 
 func (s *SQLiteStore) CreateProject(req CreateProjectRequest) (*Project, error) {
 	now := time.Now()
 	p := &Project{
-		ID:            uuid.New().String(),
-		NamespaceID:   "local",
-		Name:          req.Name,
-		Description:   req.Description,
-		GitRepoPath:   req.GitRepoPath,
-		GitLabRepoURL: req.GitLabRepoURL,
-		CreatedBy:     "local",
-		Version:       1,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:          uuid.New().String(),
+		NamespaceID: "local",
+		Name:        req.Name,
+		Description: req.Description,
+		GitRepoPath: req.GitRepoPath,
+		CreatedBy:   "local",
+		Version:     1,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO projects (id, namespace_id, name, description, git_repo_path, gitlab_repo_url, created_by, version, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.NamespaceID, p.Name, p.Description, p.GitRepoPath, p.GitLabRepoURL, p.CreatedBy, p.Version, p.CreatedAt, p.UpdatedAt,
+		`INSERT INTO projects (id, namespace_id, name, description, git_repo_path, created_by, version, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.NamespaceID, p.Name, p.Description, p.GitRepoPath, p.CreatedBy, p.Version, p.CreatedAt, p.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert project: %w", err)
@@ -100,14 +99,11 @@ func (s *SQLiteStore) UpdateProject(id string, req UpdateProjectRequest) (*Proje
 	if req.GitRepoPath != nil {
 		p.GitRepoPath = *req.GitRepoPath
 	}
-	if req.GitLabRepoURL != nil {
-		p.GitLabRepoURL = *req.GitLabRepoURL
-	}
 	newVersion := p.Version + 1
 	p.UpdatedAt = time.Now()
 
-	query := `UPDATE projects SET name=?, description=?, git_repo_path=?, gitlab_repo_url=?, version=?, updated_at=? WHERE id=?`
-	args := []interface{}{p.Name, p.Description, p.GitRepoPath, p.GitLabRepoURL, newVersion, p.UpdatedAt, p.ID}
+	query := `UPDATE projects SET name=?, description=?, git_repo_path=?, version=?, updated_at=? WHERE id=?`
+	args := []interface{}{p.Name, p.Description, p.GitRepoPath, newVersion, p.UpdatedAt, p.ID}
 
 	if req.ExpectedVersion != nil {
 		query += ` AND version=?`

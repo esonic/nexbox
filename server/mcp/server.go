@@ -7,13 +7,11 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	gomcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/esonic/nexbox/gitlab"
 	"github.com/esonic/nexbox/store"
 )
 
@@ -27,7 +25,6 @@ type TerminalWriter interface {
 
 // ConfigGetter abstracts reading local config values.
 type ConfigGetter interface {
-	GitLabToken() string
 	ProjectIDs() []string
 	// GitRepoPath returns the local git repo path for a project (by remote ID).
 	// Returns empty string if not found.
@@ -376,17 +373,6 @@ func (s *Server) registerTools() {
 		),
 	)
 
-	getGitlabMRCommentsTool := gomcp.NewTool("get_gitlab_mr_comments",
-		gomcp.WithDescription(
-			"Fetch review comments from a GitLab Merge Request. "+
-				"Returns structured JSON comments including file paths, line numbers, content, and author. "+
-				"If this tool returns a 'token not configured' error, immediately tell the user to configure their GitLab personal access token in Settings. Do NOT attempt to find or set the token yourself."),
-		gomcp.WithString("mr_url",
-			gomcp.Required(),
-			gomcp.Description("The full GitLab MR URL, e.g. https://gitlab.okg.com/group/project/-/merge_requests/123"),
-		),
-	)
-
 	runInTerminalTool := gomcp.NewTool("run_in_terminal",
 		gomcp.WithDescription(
 			"Send a command to the integrated terminal for execution. "+
@@ -483,7 +469,6 @@ func (s *Server) registerTools() {
 	addTool(listTasksTool, s.handleListTasks)
 	addTool(updateTaskTool, s.handleUpdateTask)
 	addTool(runInTerminalTool, s.handleRunInTerminal)
-	addTool(getGitlabMRCommentsTool, s.handleGetGitlabMRComments)
 	addTool(enableBrowserControlTool, s.handleEnableBrowserControl)
 	addTool(visualizeReadMeTool, s.handleVisualizeReadMe)
 	addTool(visualizeShowWidgetTool, s.handleVisualizeShowWidget)
@@ -773,73 +758,6 @@ func (s *Server) handleCreateTask(ctx context.Context, request gomcp.CallToolReq
 		return errorResult(fmt.Sprintf("invalid priority %q; must be one of: low, medium, high, critical", priority)), nil
 	}
 
-	// Check if the project is GitLab-backed
-	if projectID != "" {
-		project, err := s.store.GetProject(projectID)
-		if err == nil && project != nil && project.GitLabRepoURL != "" {
-			token := s.configGetter.GitLabToken()
-			if token == "" {
-				return errorResult("GitLab personal access token is not configured. Please add it in Settings > GitLab Token."), nil
-			}
-			projectPath, err := gitlab.ProjectPathFromURL(project.GitLabRepoURL)
-			if err != nil {
-				return errorResult(fmt.Sprintf("failed to extract GitLab project path: %v", err)), nil
-			}
-			client := gitlab.NewClient(token)
-
-			// If parentID is set, create as a child Task work item
-			if parentID != "" && gitlab.IsGitLabTaskID(parentID) {
-				_, parentIID, err := gitlab.ParseTaskID(parentID)
-				if err != nil {
-					return errorResult(fmt.Sprintf("invalid parent task id: %v", err)), nil
-				}
-				parentWI, err := client.GetWorkItemInfo(ctx, projectPath, parentIID)
-				if err != nil {
-					return errorResult(fmt.Sprintf("failed to get parent work item: %v", err)), nil
-				}
-				taskTypeID, err := client.GetTaskTypeID(ctx, projectPath)
-				if err != nil {
-					return errorResult(fmt.Sprintf("failed to get task type id: %v", err)), nil
-				}
-				childResult, err := client.CreateChildTask(ctx, projectPath, title, description, parentWI.GID, taskTypeID)
-				if err != nil {
-					return errorResult(fmt.Sprintf("failed to create child task: %v", err)), nil
-				}
-				taskID := gitlab.MakeTaskID(projectID, childResult.IID)
-				s.notifyChange("task", taskID, "created")
-
-				var rb strings.Builder
-				rb.WriteString("Sub-task created successfully:\n")
-				rb.WriteString(fmt.Sprintf("- ID: %s\n- Title: %s\n- Type: Task\n- Parent: %s", taskID, childResult.Title, parentID))
-				rb.WriteString(fmt.Sprintf("\n- Project ID: %s", projectID))
-				log.Printf("[mcp] create_task: created GitLab child task %q (id=%s, parent=%s)", childResult.Title, taskID, parentID)
-				return textResult(rb.String()), nil
-			}
-
-			// No parent — create a top-level Issue
-			issue, err := client.CreateIssue(ctx, projectPath, title, description, assigner, priority, nil, "")
-			if err != nil {
-				log.Printf("[mcp] GitLab CreateIssue error: %v", err)
-				return errorResult(fmt.Sprintf("failed to create GitLab issue: %v", err)), nil
-			}
-			taskID := gitlab.MakeTaskID(projectID, issue.IID)
-			s.notifyChange("task", taskID, "created")
-
-			var rb strings.Builder
-			rb.WriteString("Task created successfully:\n")
-			rb.WriteString(fmt.Sprintf("- ID: %s\n- Title: %s\n- Status: %s\n- Priority: %s", taskID, issue.Title, issue.State, priority))
-			if assigner != "" {
-				rb.WriteString(fmt.Sprintf("\n- Assignee: %s", assigner))
-			}
-			rb.WriteString(fmt.Sprintf("\n- Project ID: %s", projectID))
-			if issue.WebURL != "" {
-				rb.WriteString(fmt.Sprintf("\n- URL: %s", issue.WebURL))
-			}
-			log.Printf("[mcp] create_task: created GitLab issue %q (id=%s)", issue.Title, taskID)
-			return textResult(rb.String()), nil
-		}
-	}
-
 	// Local store — validate parent hierarchy (max 1 level)
 	if parentID != "" {
 		parent, err := s.store.GetTask(parentID)
@@ -883,119 +801,12 @@ func (s *Server) handleCreateTask(ctx context.Context, request gomcp.CallToolReq
 	return textResult(result), nil
 }
 
-// gitlabTaskInfo holds resolved GitLab context for a task.
-type gitlabTaskInfo struct {
-	projectPath string
-	token       string
-}
-
-// resolveGitLabTask resolves a GitLab task ID (gl:projectID:iid) to its project info and IID.
-func (s *Server) resolveGitLabTask(taskID string) (*gitlabTaskInfo, int, error) {
-	projectID, iid, err := gitlab.ParseTaskID(taskID)
-	if err != nil {
-		return nil, 0, err
-	}
-	project, err := s.store.GetProject(projectID)
-	if err != nil || project == nil || project.GitLabRepoURL == "" {
-		return nil, 0, fmt.Errorf("cannot resolve GitLab project for task %s", taskID)
-	}
-	token := s.configGetter.GitLabToken()
-	if token == "" {
-		return nil, 0, fmt.Errorf("GitLab token not configured")
-	}
-	projectPath, err := gitlab.ProjectPathFromURL(project.GitLabRepoURL)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to extract project path: %w", err)
-	}
-	return &gitlabTaskInfo{projectPath: projectPath, token: token}, iid, nil
-}
-
 func (s *Server) handleGetTask(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := request.GetArguments()
 
 	taskID, _ := args["task_id"].(string)
 	if taskID == "" {
 		return errorResult("task_id is required"), nil
-	}
-
-	// GitLab task
-	if gitlab.IsGitLabTaskID(taskID) {
-		info, iid, err := s.resolveGitLabTask(taskID)
-		if err != nil {
-			return errorResult(fmt.Sprintf("failed to resolve GitLab task: %v", err)), nil
-		}
-		projectID, _, _ := gitlab.ParseTaskID(taskID)
-		client := gitlab.NewClient(info.token)
-		issue, err := client.GetIssue(ctx, info.projectPath, iid)
-		if err != nil {
-			return errorResult(fmt.Sprintf("failed to get GitLab issue: %v", err)), nil
-		}
-
-		// Fetch hierarchy (parent + children + type) via GraphQL
-		typeName := "Issue"
-		var parentIID string
-		var children []gitlab.WorkItemChild
-		hierarchy, err := client.FetchWorkItemHierarchy(ctx, info.projectPath, iid)
-		if err != nil {
-			log.Printf("[mcp] get_task: failed to fetch hierarchy for %s: %v", taskID, err)
-		} else {
-			if hierarchy.TypeName != "" {
-				typeName = hierarchy.TypeName
-			}
-			parentIID = hierarchy.ParentIID
-			children = hierarchy.Children
-		}
-
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("ID: %s\n", taskID))
-		sb.WriteString(fmt.Sprintf("Title: %s\n", issue.Title))
-		sb.WriteString(fmt.Sprintf("Type: %s\n", typeName))
-		sb.WriteString(fmt.Sprintf("Status: %s\n", issue.State))
-		if parentIID != "" {
-			parentIIDNum, err := strconv.Atoi(parentIID)
-			if err == nil {
-				sb.WriteString(fmt.Sprintf("Parent: %s\n", gitlab.MakeTaskID(projectID, parentIIDNum)))
-			}
-		}
-		if issue.Author.Username != "" {
-			sb.WriteString(fmt.Sprintf("Created By: %s\n", issue.Author.Username))
-		}
-		if issue.Assignee != nil {
-			sb.WriteString(fmt.Sprintf("Assignee: %s\n", issue.Assignee.Username))
-		}
-		if len(issue.Labels) > 0 {
-			sb.WriteString(fmt.Sprintf("Labels: %s\n", strings.Join(issue.Labels, ", ")))
-		}
-		if issue.WebURL != "" {
-			sb.WriteString(fmt.Sprintf("URL: %s\n", issue.WebURL))
-		}
-		if len(children) > 0 {
-			sb.WriteString(fmt.Sprintf("\nChildren (%d):\n", len(children)))
-			for _, child := range children {
-				childIID, err := strconv.Atoi(child.IID)
-				if err != nil {
-					continue
-				}
-				sb.WriteString(fmt.Sprintf("  - [%s] %s (%s, %s)\n",
-					gitlab.MakeTaskID(projectID, childIID), child.Title, child.Type, child.State))
-			}
-		}
-		if issue.Description != "" {
-			sb.WriteString(fmt.Sprintf("\nDescription:\n%s\n", issue.Description))
-		}
-		// Fetch comments from GitLab
-		comments, err := client.ListIssueComments(ctx, info.projectPath, iid)
-		if err != nil {
-			log.Printf("[mcp] get_task: failed to list GitLab comments for %s: %v", taskID, err)
-		} else if len(comments) > 0 {
-			sb.WriteString(fmt.Sprintf("\nComments (%d):\n", len(comments)))
-			for _, c := range comments {
-				sb.WriteString(fmt.Sprintf("  %s (%s):\n    %s\n",
-					c.Author.Username, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
-			}
-		}
-		log.Printf("[mcp] get_task: returned GitLab task %q (id=%s)", issue.Title, taskID)
-		return textResult(sb.String()), nil
 	}
 
 	task, err := s.store.GetTask(taskID)
@@ -1058,49 +869,6 @@ func (s *Server) handleUpdateTask(ctx context.Context, request gomcp.CallToolReq
 		return errorResult("task_id is required"), nil
 	}
 
-	// GitLab task
-	if gitlab.IsGitLabTaskID(taskID) {
-		info, iid, err := s.resolveGitLabTask(taskID)
-		if err != nil {
-			return errorResult(fmt.Sprintf("failed to resolve GitLab task: %v", err)), nil
-		}
-		client := gitlab.NewClient(info.token)
-		updates := map[string]any{}
-
-		if title, ok := args["title"].(string); ok && title != "" {
-			updates["title"] = title
-		}
-		if desc, ok := args["description"].(string); ok && desc != "" {
-			updates["description"] = desc
-		}
-		if status, ok := args["status"].(string); ok && status != "" {
-			if event := gitlab.MapStatusToGitLab(status); event != "" {
-				updates["state_event"] = event
-			}
-		}
-		if assignee, ok := args["assignee"].(string); ok && assignee != "" {
-			if uid, err := client.GetUserIDByUsername(ctx, assignee); err == nil && uid > 0 {
-				updates["assignee_ids"] = []int{uid}
-			}
-		}
-		if len(updates) == 0 {
-			return errorResult("no fields to update"), nil
-		}
-		issue, err := client.UpdateIssue(ctx, info.projectPath, iid, updates)
-		if err != nil {
-			return errorResult(fmt.Sprintf("failed to update GitLab issue: %v", err)), nil
-		}
-		s.notifyChange("task", taskID, "updated")
-		var sb strings.Builder
-		sb.WriteString("Task updated successfully:\n")
-		sb.WriteString(fmt.Sprintf("- ID: %s\n- Title: %s\n- Status: %s", taskID, issue.Title, issue.State))
-		if issue.WebURL != "" {
-			sb.WriteString(fmt.Sprintf("\n- URL: %s", issue.WebURL))
-		}
-		log.Printf("[mcp] update_task: updated GitLab issue %q (id=%s)", issue.Title, taskID)
-		return textResult(sb.String()), nil
-	}
-
 	req := store.UpdateTaskRequest{}
 	if title, ok := args["title"].(string); ok && title != "" {
 		req.Title = &title
@@ -1152,112 +920,6 @@ func (s *Server) handleListTasks(ctx context.Context, request gomcp.CallToolRequ
 	args := request.GetArguments()
 	statusFilter, _ := args["status"].(string)
 	projectID, _ := args["project_id"].(string)
-
-	// Check if this is a GitLab project — use GraphQL Work Items API for full hierarchy
-	if projectID != "" {
-		project, err := s.store.GetProject(projectID)
-		if err == nil && project != nil && project.GitLabRepoURL != "" {
-			token := s.configGetter.GitLabToken()
-			if token == "" {
-				return errorResult("GitLab personal access token is not configured."), nil
-			}
-			projectPath, err := gitlab.ProjectPathFromURL(project.GitLabRepoURL)
-			if err != nil {
-				return errorResult(fmt.Sprintf("failed to extract GitLab project path: %v", err)), nil
-			}
-			client := gitlab.NewClient(token)
-
-			// Use GraphQL workItems query (same as HTTP API) to get Issues + Tasks with hierarchy
-			entries, err := client.ListWorkItems(ctx, projectPath, 20, 0, "")
-			if err != nil {
-				// Fallback to REST if GraphQL fails
-				log.Printf("[mcp] ListWorkItems failed, falling back to REST: %v", err)
-				issues, restErr := client.ListIssues(ctx, projectPath, 20, 0, "")
-				if restErr != nil {
-					return errorResult(fmt.Sprintf("failed to list GitLab issues: %v", restErr)), nil
-				}
-				entries = make([]gitlab.WorkItemListEntry, 0, len(issues))
-				for _, issue := range issues {
-					entries = append(entries, gitlab.WorkItemListEntry{
-						IID:       strconv.Itoa(issue.IID),
-						Title:     issue.Title,
-						State:     issue.State,
-						TypeName:  "Issue",
-						CreatedAt: issue.CreatedAt,
-						UpdatedAt: issue.UpdatedAt,
-						Weight:    issue.Weight,
-						Labels:    issue.Labels,
-					})
-				}
-			}
-
-			var tasks []store.Task
-			for _, entry := range entries {
-				status := gitlab.MapGitLabStatus(strings.ToLower(entry.State))
-				if statusFilter != "" && status != statusFilter {
-					continue
-				}
-				iid, err := strconv.Atoi(entry.IID)
-				if err != nil {
-					continue
-				}
-				t := store.Task{
-					ID:           gitlab.MakeTaskID(projectID, iid),
-					ProjectID:    projectID,
-					Title:        entry.Title,
-					Status:       status,
-					Priority:     gitlab.PriorityFromWeight(entry.Weight),
-					UpdatedAt:    entry.UpdatedAt,
-					Source:       "gitlab",
-					ExternalType: entry.TypeName,
-					ChildCount:   len(entry.Children),
-				}
-				if entry.ParentIID != "" {
-					parentIID, err := strconv.Atoi(entry.ParentIID)
-					if err == nil {
-						t.ParentID = gitlab.MakeTaskID(projectID, parentIID)
-					}
-				}
-				tasks = append(tasks, t)
-			}
-			if len(tasks) == 0 {
-				return textResult("No tasks found."), nil
-			}
-			type taskInfo struct {
-				ID           string `json:"id"`
-				Title        string `json:"title"`
-				Status       string `json:"status"`
-				Priority     string `json:"priority"`
-				Type         string `json:"type,omitempty"`
-				ParentID     string `json:"parent_id,omitempty"`
-				ChildCount   int    `json:"child_count,omitempty"`
-				Assigner     string `json:"assignee,omitempty"`
-				CreatedBy    string `json:"created_by,omitempty"`
-				UpdatedAt    string `json:"updated_at"`
-			}
-			items := make([]taskInfo, 0, len(tasks))
-			for _, t := range tasks {
-				items = append(items, taskInfo{
-					ID:         t.ID,
-					Title:      t.Title,
-					Status:     t.Status,
-					Priority:   t.Priority,
-					Type:       t.ExternalType,
-					ParentID:   t.ParentID,
-					ChildCount: t.ChildCount,
-					Assigner:   t.Assigner,
-					CreatedBy:  t.CreatedBy,
-					UpdatedAt:  t.UpdatedAt.Format(time.RFC3339),
-				})
-			}
-			data, err := json.MarshalIndent(items, "", "  ")
-			if err != nil {
-				return errorResult(fmt.Sprintf("failed to marshal tasks: %v", err)), nil
-			}
-			log.Printf("[mcp] list_tasks: returned %d GitLab tasks (project_id=%s)", len(items), projectID)
-			return textResult(string(data)), nil
-		}
-	}
 
 	var projectIDs []string
 	if projectID != "" {
@@ -1324,36 +986,6 @@ func (s *Server) handleListTasks(ctx context.Context, request gomcp.CallToolRequ
 
 	log.Printf("[mcp] list_tasks: returned %d tasks (project_id=%s)", len(filtered), projectID)
 	return textResult(string(data)), nil
-}
-
-func (s *Server) handleGetGitlabMRComments(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	args := request.GetArguments()
-	mrURL, _ := args["mr_url"].(string)
-
-	if mrURL == "" {
-		return errorResult("mr_url is required"), nil
-	}
-
-	if s.configGetter == nil {
-		return errorResult("config is not available"), nil
-	}
-	token := s.configGetter.GitLabToken()
-	if token == "" {
-		return errorResult("GitLab personal access token is not configured. Please add it in Settings > GitLab Token."), nil
-	}
-
-	host, projectPath, mrIID, err := parseMRURL(mrURL)
-	if err != nil {
-		return errorResult(err.Error()), nil
-	}
-
-	result, err := fetchMRComments(host, projectPath, mrIID, token)
-	if err != nil {
-		log.Printf("[mcp] get_gitlab_mr_comments error: %v", err)
-		return errorResult(fmt.Sprintf("Failed to fetch MR comments: %v", err)), nil
-	}
-
-	return textResult(result), nil
 }
 
 func (s *Server) handleRunInTerminal(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
