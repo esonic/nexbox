@@ -760,6 +760,39 @@ func TestMergeStandardClaudeAliases_PreservesExisting(t *testing.T) {
 	}
 }
 
+// Regression: when the CLI returns long IDs like "claude-opus-4-7" with
+// display label "Opus", the merge must NOT duplicate them as a separate
+// stub keyed on the bare alias.
+func TestMergeStandardClaudeAliases_LongIDsNotDuplicated(t *testing.T) {
+	in := []ModelInfo{
+		{ID: "claude-opus-4-7", Label: "Opus"},
+		{ID: "claude-haiku-4-5", Label: "Haiku"},
+	}
+	out := mergeStandardClaudeAliases(in)
+	// Should have the two originals + one synthesized sonnet stub. No
+	// duplicate Opus / Haiku rows.
+	labels := []string{}
+	for _, m := range out {
+		labels = append(labels, m.Label)
+	}
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d (labels=%v), want 3", len(out), labels)
+	}
+	seen := map[string]int{}
+	for _, m := range out {
+		seen[strings.ToLower(m.Label)]++
+	}
+	for word, n := range seen {
+		if n > 1 {
+			t.Errorf("%q appears %d times in merged list (labels=%v)", word, n, labels)
+		}
+	}
+	// And sonnet must be present exactly once.
+	if seen["sonnet"] != 1 {
+		t.Errorf("expected one sonnet entry, got %d (labels=%v)", seen["sonnet"], labels)
+	}
+}
+
 func TestStreamEvent_Constants(t *testing.T) {
 	// Verify constant values for documentation/API stability
 	tests := map[string]string{

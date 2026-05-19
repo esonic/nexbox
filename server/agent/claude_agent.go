@@ -749,19 +749,32 @@ var standardClaudeAliases = []struct {
 // model list. Missing entries are appended with a minimal stub — effort
 // levels are copied from any peer that exposes them so the UI's EFFORT picker
 // has reasonable choices.
+//
+// "Already present" is matched case-insensitively against both the ID
+// (claude-sonnet-4-6, sonnet) and the label (Sonnet) — the CLI typically
+// returns the long ID with the short word as the label, so a literal
+// `present[alias.id]` lookup would double-list every family.
 func mergeStandardClaudeAliases(models []ModelInfo) []ModelInfo {
-	present := make(map[string]bool, len(models))
+	hasAlias := func(alias string) bool {
+		for _, m := range models {
+			if strings.Contains(strings.ToLower(m.ID), alias) ||
+				strings.EqualFold(m.Label, alias) {
+				return true
+			}
+		}
+		return false
+	}
+
 	var sampleEfforts []string
 	var sampleDefault string
 	for _, m := range models {
-		present[m.ID] = true
 		if sampleEfforts == nil && len(m.SupportedEfforts) > 0 {
 			sampleEfforts = append([]string(nil), m.SupportedEfforts...)
 			sampleDefault = m.DefaultEffort
 		}
 	}
 	for _, alias := range standardClaudeAliases {
-		if present[alias.id] {
+		if hasAlias(alias.id) {
 			continue
 		}
 		stub := ModelInfo{
