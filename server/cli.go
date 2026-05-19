@@ -36,6 +36,9 @@ func runCLISubcommand(dataDir string) (bool, int) {
 		return false, 0
 	}
 	switch os.Args[1] {
+	case "help", "-h", "-help", "--help":
+		printUsage()
+		return true, 0
 	case "add-user", "del-user", "list-users", "reset-password":
 		// fallthrough; handled below
 	default:
@@ -174,6 +177,44 @@ func cmdResetPassword(s *store.SQLiteStore, args []string) int {
 	}
 	fmt.Printf("password reset for: %s\n", username)
 	return 0
+}
+
+// printUsage writes combined usage text covering both the server flags and
+// the admin subcommands. Installed as flag.Usage and also invoked by the CLI
+// dispatcher for `help` / `-h` / `--help`.
+func printUsage() {
+	out := os.Stderr
+	fmt.Fprintf(out, `nexbox — local-only multi-user agent platform
+
+Usage:
+  nexbox [flags]                 start the HTTP server
+  nexbox <subcommand> [args...]  run an admin subcommand and exit
+
+Server flags:
+  -listen <addr>     Listen address (default 127.0.0.1)
+  -port <port>       Server port (default 9040)
+  -data-dir <path>   Data directory (default: binary's directory; also
+                     overridable via the NEXBOX_DATA_DIR env var)
+  -version           Print version and exit
+  -h, --help         Show this help
+
+Subcommands (all open the data directory and exit):
+  add-user <username> <password>     Create a local user account.
+                                     Username must match ^[A-Za-z0-9_-]{1,32}$.
+  list-users                         List all users.
+  del-user <username|id>             Delete the named user.
+  reset-password <username> <pw>     Set a new password for the user.
+
+For subcommands, the data directory comes from NEXBOX_DATA_DIR if set,
+otherwise the binary's own directory. (--data-dir is a server-only flag.)
+
+Examples:
+  nexbox add-user alice s3cret
+  nexbox list-users
+  NEXBOX_DATA_DIR=/var/lib/nexbox nexbox add-user bob hunter2
+  nexbox --port 9040 --listen 0.0.0.0
+
+`)
 }
 
 // defaultDataDir mirrors the logic in main.go for resolving the data directory
