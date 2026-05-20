@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { toast } from "sonner";
 import { Send, StopCircle, Command, FileText, ChevronDown, Check, X, GitBranch, ImagePlus, Play, Pencil, Workflow, MessageSquare, CircleHelp } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { INPUT_HEIGHT_MIN, INPUT_HEIGHT_MAX } from "@/lib/constants";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -21,6 +22,7 @@ import type { Task, ModelInfo } from "@/types";
 import type { PickedAsset, PickedWorkflow, InlineComment, RichQueuedMessage } from "@/stores/app";
 import type { QueuedMessage } from "@/hooks/useChatSession";
 import { ContextUsageIndicator } from "@/components/chat/ContextUsageIndicator";
+import { WorktreeSelector, type WorktreeSelectorProps } from "@/components/chat/WorktreeSelector";
 
 export interface AttachedImage {
   file: File;
@@ -447,6 +449,7 @@ interface ChatInputProps {
   availableModels: string[];
   availableModelInfos: ModelInfo[];
   sessionHasMessages: boolean;
+  worktree?: WorktreeSelectorProps;
   pickedTasks: Task[];
   pickedAssets: PickedAsset[];
   pickedWorkflows: PickedWorkflow[];
@@ -487,6 +490,7 @@ export function ChatInput({
   availableModels,
   availableModelInfos,
   sessionHasMessages,
+  worktree,
   pickedTasks,
   pickedAssets,
   pickedWorkflows,
@@ -592,8 +596,13 @@ export function ChatInput({
   const filePickerMenuRef = useRef<HTMLDivElement>(null);
   const slashMenuRef = useRef<HTMLDivElement>(null);
 
-  // Input area resize
-  const [inputHeight, setInputHeight] = useState(100);
+  const isMobile = useIsMobile();
+  // Input area resize. Mobile defaults to one row of text + Textarea's
+  // built-in vertical padding (py-2 = 16px) so the message area above gets
+  // back the vertical space the desktop layout wastes. The textarea is
+  // internally scrollable; on desktop the user can drag the handle to grow
+  // it.
+  const [inputHeight, setInputHeight] = useState(() => (isMobile ? 36 : 100));
   const isInputResizing = useRef(false);
   const inputResizeStartY = useRef(0);
   const inputResizeStartH = useRef(0);
@@ -871,12 +880,14 @@ export function ChatInput({
 
   return (
     <div className="shrink-0">
-      {/* Resize handle */}
-      <div
-        className="h-1 cursor-row-resize hover:bg-primary/20 active:bg-primary/40 transition-colors"
-        onMouseDown={handleInputResizeMouseDown}
-      />
-      <div className="max-w-4xl mx-auto px-4 pb-3">
+      {/* Resize handle — drag-resize doesn't apply on touch screens. */}
+      {!isMobile && (
+        <div
+          className="h-1 cursor-row-resize hover:bg-primary/20 active:bg-primary/40 transition-colors"
+          onMouseDown={handleInputResizeMouseDown}
+        />
+      )}
+      <div className="max-w-4xl mx-auto px-2 sm:px-4 pb-2 sm:pb-3">
         {pendingTodo && (
           <TodoPanel todos={pendingTodo.todos} isPending={pendingTodo.isPending} />
         )}
@@ -1152,30 +1163,36 @@ export function ChatInput({
             }}
             placeholder={!isConnected ? "Connecting..." : activeCommand && "inputHint" in activeCommand ? activeCommand.inputHint : "Type a message, / for commands, @ for files..."}
             disabled={!isConnected}
-            className="resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+            className="resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 min-h-0"
             style={{ height: inputHeight }}
-            rows={3}
+            rows={isMobile ? 1 : 3}
           />
 
           {/* Bottom toolbar */}
-          <div className="flex items-center justify-between px-3 pb-2 pt-1">
-            <div className="flex items-center gap-2">
+          <div className="flex items-center justify-between gap-2 px-2 sm:px-3 pb-2 pt-1">
+            <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap min-w-0">
               <span
-                className={`inline-block h-2 w-2 rounded-full ${isConnected ? "bg-green-500" : "bg-red-500"}`}
+                className={`inline-block h-2 w-2 rounded-full shrink-0 ${isConnected ? "bg-green-500" : "bg-red-500"}`}
                 title={isConnected ? "Connected" : "Disconnected"}
                 aria-label={isConnected ? "Connected" : "Disconnected"}
               />
               <span className="sr-only">{isConnected ? "Connected" : "Disconnected"}</span>
+              {worktree && (
+                <>
+                  <span className="text-muted-foreground/40 text-xs hidden sm:inline">·</span>
+                  <WorktreeSelector {...worktree} />
+                </>
+              )}
               {agentName && (
                 <>
-                  <span className="text-muted-foreground/40 text-xs">·</span>
-                  <div className="relative" ref={agentMenuRef}>
+                  <span className="text-muted-foreground/40 text-xs hidden sm:inline">·</span>
+                  <div className="relative shrink-0" ref={agentMenuRef}>
                     <button
                       onClick={() => {
                         if (!sessionHasMessages && availableAgents.length > 1) setShowAgentMenu((v) => !v);
                       }}
                       className={cn(
-                        "text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 transition-colors",
+                        "text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 whitespace-nowrap transition-colors",
                         sessionHasMessages
                           ? "bg-blue-500/15 text-blue-400 cursor-default"
                           : "bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 cursor-pointer"
@@ -1210,11 +1227,11 @@ export function ChatInput({
               )}
               {availableModels.length > 0 && (
                 <>
-                  <span className="text-muted-foreground/40 text-xs">·</span>
-                  <div className="relative" ref={modelMenuRef}>
+                  <span className="text-muted-foreground/40 text-xs hidden sm:inline">·</span>
+                  <div className="relative shrink-0" ref={modelMenuRef}>
                     <button
                       onClick={() => setShowModelMenu((v) => !v)}
-                      className="text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 transition-colors bg-violet-500/15 text-violet-400 hover:bg-violet-500/25 cursor-pointer"
+                      className="text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 whitespace-nowrap transition-colors bg-violet-500/15 text-violet-400 hover:bg-violet-500/25 cursor-pointer"
                       title="Click to change model"
                     >
                       <span>{currentModelLabel}</span>
@@ -1272,14 +1289,16 @@ export function ChatInput({
                       </div>
                     )}
                   </div>
-                  <ContextUsageIndicator
-                    sessionId={sessionId}
-                    fallbackContextWindow={currentModelInfo?.context_window || 0}
-                  />
+                  <div className="hidden sm:flex shrink-0">
+                    <ContextUsageIndicator
+                      sessionId={sessionId}
+                      fallbackContextWindow={currentModelInfo?.context_window || 0}
+                    />
+                  </div>
                 </>
               )}
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 shrink-0">
               <Button
                 variant="ghost"
                 size="icon"

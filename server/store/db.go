@@ -135,9 +135,9 @@ func (db *DB) reconnect() error {
 		return err
 	}
 
-	// Re-apply PRAGMAs on the fresh connection.
+	// Re-apply PRAGMAs on the fresh connection. busy_timeout matches the New() value.
+	newDB.Exec(`PRAGMA busy_timeout=10000`)
 	newDB.Exec(`PRAGMA journal_mode=WAL`)
-	newDB.Exec(`PRAGMA busy_timeout=5000`)
 	newDB.Exec(`PRAGMA temp_store=MEMORY`)
 
 	db.sqlDB = newDB
@@ -164,7 +164,14 @@ func New(dataDir string) (*DB, error) {
 	}
 
 	dbPath := filepath.Join(dataDir, "nexbox.db")
-	dsn := dbPath + "?_journal_mode=WAL&_busy_timeout=5000"
+	// modernc.org/sqlite DSN syntax for connection-time PRAGMAs.
+	// (mattn/go-sqlite3's "?_journal_mode=...&_busy_timeout=..." form is silently
+	// ignored by this driver, leaving busy_timeout=0 and journal=delete during
+	// migrations — which is what caused intermittent SQLITE_BUSY on startup.)
+	dsn := fmt.Sprintf(
+		"file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)",
+		dbPath,
+	)
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
@@ -176,14 +183,25 @@ func New(dataDir string) (*DB, error) {
 	sqlDB.SetMaxOpenConns(1)
 	sqlDB.SetMaxIdleConns(1)
 
+	// Belt-and-suspenders: re-apply PRAGMAs via Exec in case the DSN-level
+	// pragma application failed silently for any reason. busy_timeout must be
+	// set BEFORE migrations so a transient lock during startup gets retried
+	// for up to 10s instead of failing the boot.
+	if _, err := sqlDB.Exec(`PRAGMA busy_timeout=10000`); err != nil {
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
+	if _, err := sqlDB.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		return nil, fmt.Errorf("enable WAL mode: %w", err)
+	}
+	sqlDB.Exec(`PRAGMA temp_store=MEMORY`)
+
 	db := &DB{sqlDB: sqlDB, dsn: dsn}
 	if err := db.migrate(); err != nil {
 		return nil, fmt.Errorf("run migrations: %w", err)
 	}
 
-	// Verify WAL mode is active. The DSN parameter _journal_mode=WAL should
-	// have set it, but we confirm here to catch silent failures (e.g. the pure
-	// Go modernc driver silently ignoring the DSN param).
+	// Verify WAL is actually active (catches the case where another process
+	// holds the DB in a different mode at open time).
 	var journalMode string
 	if err := sqlDB.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
 		return nil, fmt.Errorf("query journal_mode: %w", err)
@@ -193,11 +211,6 @@ func New(dataDir string) (*DB, error) {
 			return nil, fmt.Errorf("enable WAL mode: %w", err)
 		}
 	}
-
-	// Force temp storage to memory so that large sort/group operations never
-	// need to create temp files on disk. This prevents SQLITE_CANTOPEN (14)
-	// errors when the temp directory is inaccessible or full.
-	sqlDB.Exec(`PRAGMA temp_store=MEMORY`)
 
 	return db, nil
 }

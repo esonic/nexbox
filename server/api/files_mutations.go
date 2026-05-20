@@ -165,8 +165,9 @@ func (s *Server) DownloadProjectFile(w http.ResponseWriter, r *http.Request) {
 }
 
 // ServeProjectFile streams a file inline with a Content-Type guessed from its extension.
-// Used by the "open HTML in new tab" feature. Always served with a strict CSP so a
-// hostile HTML file cannot make outbound requests using the caller's auth cookies.
+// Used by the "open HTML in new tab" feature. The CSP sandbox allows scripts and
+// user-initiated top-level navigation so shared HTML behaves like a normal page;
+// acceptable because the platform is closed to a small trusted user set.
 // GET /api/projects/{projectId}/file-serve?path=relative/path&session_id=...
 func (s *Server) ServeProjectFile(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
@@ -206,7 +207,7 @@ func (s *Server) ServeProjectFile(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "sandbox allow-same-origin")
+	w.Header().Set("Content-Security-Policy", "sandbox allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-modals")
 	http.ServeFile(w, r, full)
 }
 

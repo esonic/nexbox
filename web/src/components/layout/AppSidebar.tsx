@@ -15,6 +15,7 @@ import {
   Settings,
   Cloud,
   CloudOff,
+  Menu,
   MoreHorizontal,
   LayoutGrid,
   LogOut,
@@ -23,6 +24,7 @@ import {
   Store,
   Trash2,
 } from "lucide-react";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { toast } from "sonner";
 import { sessionsApi, projectsApi, serverApi, marketplaceApi } from "@/lib/api";
 import type { CloudInfo } from "@/lib/api";
@@ -152,6 +154,22 @@ export function AppSidebar() {
     sidebarCollapsed: collapsed, setSidebarCollapsed: setCollapsed,
     sidebarWidth, setSidebarWidth,
   } = useLayoutStore();
+  const isMobile = useIsMobile();
+
+  // On mobile, the sidebar is a drawer overlay. When closed it shows nothing
+  // inline (just a floating hamburger), regardless of the persisted desktop
+  // `collapsed` state. We start closed on first mount so users see the chat,
+  // not the drawer, on a fresh phone load.
+  const [mobileOpen, setMobileOpen] = useState(false);
+  useEffect(() => {
+    // Whenever we cross the breakpoint, reset the drawer to closed so the
+    // mobile experience is predictable.
+    if (isMobile) setMobileOpen(false);
+  }, [isMobile]);
+  // Close the mobile drawer whenever the route changes — typical drawer UX.
+  useEffect(() => {
+    if (isMobile) setMobileOpen(false);
+  }, [location.pathname, isMobile]);
 
   useSessionNotifications();
 
@@ -696,8 +714,23 @@ export function AppSidebar() {
   }, []);
 
   // ── Collapsed state ──
+  // Desktop: a 40px icon rail. Mobile: nothing inline; just a floating
+  // hamburger pinned to the viewport so the drawer can slide in on demand.
 
-  if (collapsed) {
+  if (isMobile && !mobileOpen) {
+    return (
+      <button
+        onClick={() => setMobileOpen(true)}
+        className="fixed top-2 left-2 z-40 p-2 rounded-md bg-card/90 backdrop-blur border border-border/60 shadow-sm hover:bg-accent transition-colors"
+        title="Open menu"
+        aria-label="Open menu"
+      >
+        <Menu className="h-4 w-4" />
+      </button>
+    );
+  }
+
+  if (!isMobile && collapsed) {
     return (
       <div className="w-10 border-r border-border/50 bg-card flex flex-col h-full items-center shrink-0">
         <div className="py-3 w-full flex flex-col items-center gap-1">
@@ -746,10 +779,27 @@ export function AppSidebar() {
   // ── Render ──
 
   return (
-    <div className="flex h-full shrink-0">
+    <div
+      className={cn(
+        isMobile
+          ? "fixed inset-0 z-50 flex h-full"
+          : "flex h-full shrink-0",
+      )}
+    >
+      {/* Backdrop — mobile only, taps to close. */}
+      {isMobile && (
+        <div
+          className="absolute inset-0 bg-black/40"
+          onClick={() => setMobileOpen(false)}
+          aria-hidden="true"
+        />
+      )}
       <div
-        className="border-r border-border/50 bg-card flex flex-col h-full overflow-hidden"
-        style={{ width: sidebarWidth }}
+        className={cn(
+          "border-r border-border/50 bg-card flex flex-col h-full overflow-hidden",
+          isMobile && "relative z-10 shadow-xl",
+        )}
+        style={{ width: isMobile ? "min(85vw, 320px)" : sidebarWidth }}
       >
         {/* Header */}
         <div className="px-3 py-3 border-b flex items-center justify-between shrink-0">
@@ -763,11 +813,14 @@ export function AppSidebar() {
           <div className="flex items-center gap-0.5">
             <ThemeToggle />
             <button
-              onClick={() => setCollapsed(true)}
+              onClick={() => {
+                if (isMobile) setMobileOpen(false);
+                else setCollapsed(true);
+              }}
               className="p-1.5 rounded hover:bg-accent transition-colors text-muted-foreground hover:text-foreground"
-              title="Collapse sidebar"
+              title={isMobile ? "Close menu" : "Collapse sidebar"}
             >
-              <PanelLeftClose className="h-4 w-4" />
+              {isMobile ? <X className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
             </button>
           </div>
         </div>
@@ -1115,13 +1168,15 @@ export function AppSidebar() {
         />
       )}
 
-      {/* Resize handle */}
-      <div
-        className="w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors flex items-center justify-center shrink-0"
-        onMouseDown={handleResizeMouseDown}
-      >
-        <GripVertical className="h-4 w-4 text-muted-foreground/30" />
-      </div>
+      {/* Resize handle — desktop only; dragging doesn't apply on touch. */}
+      {!isMobile && (
+        <div
+          className="w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors flex items-center justify-center shrink-0"
+          onMouseDown={handleResizeMouseDown}
+        >
+          <GripVertical className="h-4 w-4 text-muted-foreground/30" />
+        </div>
+      )}
     </div>
   );
 }

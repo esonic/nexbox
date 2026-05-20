@@ -219,6 +219,18 @@ export function MarkdownRenderer({
         rehypePlugins={[rehypeRaw]}
         components={{
           ...components,
+          // Wide tables overflow narrow viewports — give every rendered table
+          // its own horizontal scroll container so it stays in the message
+          // column on phones instead of pushing the page wider.
+          table({ children, ...props }) {
+            return (
+              <div className="overflow-x-auto -mx-1 my-2">
+                <table {...props} className="min-w-full">
+                  {children}
+                </table>
+              </div>
+            );
+          },
           code({ className: codeClassName, children, ...props }) {
             const lang = codeClassName?.replace("language-", "").toLowerCase() || "";
             const text = String(children ?? "").replace(/\n$/, "");

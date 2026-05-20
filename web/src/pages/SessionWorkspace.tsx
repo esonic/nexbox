@@ -4,14 +4,12 @@ import {
   X,
   GitBranch,
   Check,
-  ChevronDown,
   PanelRightClose,
   PanelBottom,
   PanelRight,
   GripVertical,
   Loader2,
   FolderGit2,
-  Clock,
   FolderCode,
   TerminalSquare,
   Trash2,
@@ -37,90 +35,12 @@ import { useAppStore } from "@/stores/app";
 import { useLayoutStore } from "@/stores/layout";
 import { globalWS } from "@/lib/ws";
 import { cn } from "@/lib/utils";
-import { formatTotalDuration } from "@/lib/format";
 import {
   UNASSIGNED_PROJECT,
   PANEL_WIDTH_MIN, PANEL_WIDTH_MAX,
   TERMINAL_HEIGHT_MIN, TERMINAL_HEIGHT_MAX,
 } from "@/lib/constants";
 import { toast } from "sonner";
-
-// ── WorktreeSelector ────────────────────────────────────────────────────
-
-function WorktreeSelector({
-  mode,
-  locked,
-  worktreePending,
-  hasGitRepo,
-  onSetMode,
-}: {
-  mode: "local" | "worktree";
-  locked: boolean;
-  worktreePending: boolean;
-  hasGitRepo: boolean;
-  onSetMode: (mode: "local" | "worktree") => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
-
-  // The 8-char session id suffix was useful when debugging multi-cloud sessions
-  // but means nothing to the user in local-only mode — drop it.
-  const label = mode === "worktree" ? "Worktree" : "Local";
-
-  if (locked) {
-    return (
-      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-sm bg-muted text-muted-foreground shrink-0 flex items-center gap-1">
-        {worktreePending && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
-        {label}
-      </span>
-    );
-  }
-
-  return (
-    <div className="relative shrink-0" ref={ref}>
-      <button
-        onClick={() => hasGitRepo && setOpen((o) => !o)}
-        disabled={!hasGitRepo}
-        className={cn(
-          "text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 transition-colors",
-          hasGitRepo
-            ? "bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground cursor-pointer"
-            : "bg-muted text-muted-foreground opacity-40 cursor-not-allowed"
-        )}
-        title="Click to change mode"
-      >
-        {label}
-        <ChevronDown className="h-2.5 w-2.5" />
-      </button>
-      {open && (
-        <div className="absolute left-0 bottom-full z-50 mb-1 w-44 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
-          {(["local", "worktree"] as const).map((m) => (
-            <button
-              key={m}
-              onClick={() => { onSetMode(m); setOpen(false); }}
-              className={cn(
-                "w-full flex items-center justify-between px-3 py-1.5 text-xs hover:bg-accent transition-colors whitespace-nowrap",
-                mode === m && "bg-accent/50 font-medium"
-              )}
-            >
-              <span>{m === "local" ? "Local" : "New worktree"}</span>
-              {mode === m && <Check className="h-3 w-3 text-foreground/50 shrink-0 ml-2" />}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ── ProjectSelector ─────────────────────────────────────────────────────
 
@@ -202,7 +122,7 @@ function GitPanelContent({
 export function SessionWorkspace() {
   const {
     sessions, setSessions, activeSessionId,
-    setCurrentSession, setCurrentProject, sessionTotalDuration,
+    setCurrentSession, setCurrentProject,
     projects, setProjects, setGitDiffStats, chatMessages,
   } = useAppStore();
   const {
@@ -471,8 +391,10 @@ export function SessionWorkspace() {
   return (
     <div ref={containerRef} className="flex flex-col h-full">
       {/* Toolbar — always visible. On phones we drop the button labels so the
-          full row fits in <375px; sm: breakpoints bring them back. */}
-      <div className="flex items-center gap-0.5 sm:gap-1.5 px-2 sm:px-3 py-1.5 border-b bg-muted/20 text-sm shrink-0 min-h-[36px]">
+          full row fits in <375px; sm: breakpoints bring them back. The extra
+          left padding below sm reserves room for the AppSidebar hamburger
+          which floats at the top-left of the viewport. */}
+      <div className="flex items-center gap-0.5 sm:gap-1.5 pl-12 sm:pl-3 pr-2 sm:pr-3 py-1.5 border-b bg-muted/20 text-sm shrink-0 min-h-[36px]">
         <div className="flex-1 min-w-0">
           {activeSession && (
             <span className="text-sm font-medium text-foreground/80 truncate block max-w-[40%] sm:max-w-[50%]">
@@ -566,6 +488,16 @@ export function SessionWorkspace() {
             <ChatPanel
               session={activeSession}
               project={boundProject}
+              worktree={isRealProject ? {
+                mode: activeSession.worktree_mode || "local",
+                locked: !!activeSession.agent_session_id
+                  || preparingWorktrees.has(activeSession.id)
+                  || !!activeSession.worktree_path
+                  || (chatMessages[activeSession.id] || []).some((m) => m.role === "user"),
+                worktreePending: preparingWorktrees.has(activeSession.id) && !activeSession.worktree_path,
+                hasGitRepo: !!boundProject?.git_repo_path,
+                onSetMode: handleSetWorktreeMode,
+              } : undefined}
               onMessageSent={
                 activeSession.worktree_mode === "worktree" && !activeSession.worktree_path
                   ? () => setPreparingWorktrees((prev) => new Set([...prev, activeSession.id]))
@@ -760,44 +692,6 @@ export function SessionWorkspace() {
             </div>
           )}
 
-        </div>
-
-        {/* Session info */}
-        <div className="flex items-center gap-3 px-4 py-1 shrink-0">
-          {isRealProject && (
-            <WorktreeSelector
-              mode={activeSession.worktree_mode || "local"}
-              locked={!!activeSession.agent_session_id || preparingWorktrees.has(activeSession.id) || !!activeSession.worktree_path || (chatMessages[activeSession.id] || []).some(m => m.role === "user")}
-              worktreePending={preparingWorktrees.has(activeSession.id) && !activeSession.worktree_path}
-              hasGitRepo={!!boundProject?.git_repo_path}
-              onSetMode={handleSetWorktreeMode}
-            />
-          )}
-          {hasProjectId && (
-            <div className="flex items-center gap-1.5 min-w-0">
-              <FolderGit2 className="h-3 w-3 text-muted-foreground/60 shrink-0" />
-              <span className="text-[11px] text-muted-foreground/70 truncate">
-                {boundProject?.name || "Loading..."}
-                {(activeSession.worktree_mode === "worktree" && activeSession.worktree_path
-                  ? activeSession.worktree_path
-                  : boundProject?.git_repo_path) && (
-                  <span className="text-muted-foreground/50 ml-1">
-                    ({activeSession.worktree_mode === "worktree" && activeSession.worktree_path
-                      ? activeSession.worktree_path
-                      : boundProject?.git_repo_path})
-                  </span>
-                )}
-              </span>
-            </div>
-          )}
-          {(sessionTotalDuration[activeSession.id] || 0) > 0 && (
-            <div className="flex items-center gap-1 ml-auto shrink-0">
-              <Clock className="h-3 w-3 text-muted-foreground/60" />
-              <span className="text-[11px] text-muted-foreground/70 tabular-nums">
-                {formatTotalDuration(sessionTotalDuration[activeSession.id])}
-              </span>
-            </div>
-          )}
         </div>
 
         {/* Bottom terminal panels — one per session that has ever opened a terminal.

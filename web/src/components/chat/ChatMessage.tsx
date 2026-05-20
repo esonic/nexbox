@@ -318,6 +318,14 @@ const TextBlock = memo(function TextBlock({ content, isStreaming }: { content: s
             {children}
           </pre>
         ),
+        // Wide tables overflow narrow viewports — give every rendered table
+        // its own horizontal scroll container so it stays in the message
+        // column on phones instead of pushing the chat wider than the screen.
+        table: ({ children, ...props }) => (
+          <div className="overflow-x-auto -mx-1 my-2">
+            <table {...props}>{children}</table>
+          </div>
+        ),
         code: ({ className, children, ...props }) => {
           const isInline = !className;
           if (isInline) {

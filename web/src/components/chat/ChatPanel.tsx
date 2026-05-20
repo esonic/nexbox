@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { ChatMessage, CopyButton, ForkButton, extractPlainText } from "@/components/chat/ChatMessage";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ChatInput } from "@/components/chat/ChatInput";
+import type { WorktreeSelectorProps } from "@/components/chat/WorktreeSelector";
 import { useChatSession } from "@/hooks/useChatSession";
 import { diffApi, sessionsApi } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
@@ -28,34 +29,34 @@ const MessageFooter = memo(function MessageFooter({ message }: { message: ChatMe
   return (
     <div
       className={cn(
-        "flex items-center gap-3 px-3 py-1 mt-1 text-[11px] text-muted-foreground/60",
-        isUser ? "justify-end" : "ml-12",
+        "flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 mt-1 text-[11px] text-muted-foreground/60 min-w-0",
+        isUser && "justify-end",
       )}
     >
       {showStats && (
         <>
-          <span className="inline-flex items-center gap-1">
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
             <Circle className="h-2 w-2 fill-green-500/50 text-green-500/50" />
             Completed
           </span>
-          <span className="inline-flex items-center gap-1">
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
             <Clock className="h-3 w-3" />
             {formatDuration(metadata.durationMs!)}
           </span>
           {toolCallCount > 0 && (
-            <span className="inline-flex items-center gap-1">
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
               <Wrench className="h-3 w-3" />
               {toolCallCount} tool calls
             </span>
           )}
           {totalTokens > 0 && (
-            <span className="inline-flex items-center gap-1">
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
               <MessageSquare className="h-3 w-3" />
               {totalTokens.toLocaleString()} tokens
             </span>
           )}
           {metadata.totalCostUsd ? (
-            <span className="inline-flex items-center gap-1">
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
               $
               {metadata.totalCostUsd < 0.01
                 ? metadata.totalCostUsd.toFixed(4)
@@ -64,7 +65,7 @@ const MessageFooter = memo(function MessageFooter({ message }: { message: ChatMe
           ) : null}
         </>
       )}
-      <div className="ml-auto flex items-center gap-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+      <div className="ml-auto flex items-center gap-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity shrink-0">
         {timestamp && <span className="tabular-nums">{timestamp}</span>}
         {plainText && <CopyButton text={plainText} />}
         <ForkButton message={message} />
@@ -76,10 +77,11 @@ const MessageFooter = memo(function MessageFooter({ message }: { message: ChatMe
 interface ChatPanelProps {
   session: Session;
   project: Project | null;
+  worktree?: WorktreeSelectorProps;
   onMessageSent?: () => void;
 }
 
-export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
+export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -317,6 +319,7 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
         availableModels={availableModels}
         availableModelInfos={availableModelInfos}
         sessionHasMessages={sessionHasMessages}
+        worktree={worktree}
         pickedTasks={pickedTasks}
         pickedAssets={pickedAssets}
         pickedWorkflows={pickedWorkflows}
