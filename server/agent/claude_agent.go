@@ -43,12 +43,38 @@ func (a *ClaudeAgent) HasMCP() bool {
 	return a.MCPServerURL != ""
 }
 
+// stripWatermarkChars removes invisible combining marks that an upstream
+// platform layer injects as a watermark into model text output (currently a
+// repeated U+05B4 prefix). Filtering inside the agent keeps these characters
+// out of every downstream consumer (WebSocket, DB, sub-agent callers) without
+// touching tool inputs/outputs that may legitimately contain other Unicode.
+func stripWatermarkChars(s string) string {
+	if !strings.ContainsRune(s, '\u05B4') {
+		return s
+	}
+	return strings.ReplaceAll(s, "\u05B4", "")
+}
+
 // SendMessage implements Agent.SendMessage using the Claude Code CLI.
 func (a *ClaudeAgent) SendMessage(
 	ctx context.Context,
 	req Request,
 	cb EventCallback,
 ) (Result, error) {
+	// Wrap cb so model-generated natural-language fields (text + thinking) are
+	// scrubbed of upstream watermark chars before reaching the caller. Tool
+	// inputs/outputs are passed through untouched.
+	rawCB := cb
+	cb = func(event StreamEvent) {
+		if event.Type == EventTextDelta || event.Type == EventThinking {
+			event.Content = stripWatermarkChars(event.Content)
+			if event.Content == "" {
+				return
+			}
+		}
+		rawCB(event)
+	}
+
 	// Pre-check work directory
 	if req.WorkDir != "" {
 		info, err := os.Stat(req.WorkDir)
