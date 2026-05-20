@@ -608,6 +608,15 @@ func (db *DB) migrate() error {
 			check: `SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='owner_user_id'`,
 			alter: `ALTER TABLE projects ADD COLUMN owner_user_id INTEGER NOT NULL DEFAULT 0`,
 		},
+		// auto_managed_dir is true (1) when the server created the working
+		// directory under data-dir/users/<user>/<name>/. False (0) means the
+		// user supplied an existing external path on create; we must not
+		// rename or delete it. Default 1 for existing rows since the old code
+		// always auto-created.
+		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='auto_managed_dir'`,
+			alter: `ALTER TABLE projects ADD COLUMN auto_managed_dir INTEGER NOT NULL DEFAULT 1`,
+		},
 	}
 	for _, cm := range colMigrations {
 		var count int

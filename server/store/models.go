@@ -17,19 +17,24 @@ type Project struct {
 	Description string    `json:"description"`
 	GitRepoPath string    `json:"git_repo_path"`
 	IsGitRepo   bool      `json:"is_git_repo"` // transient: true if <GitRepoPath>/.git exists
-	CreatedBy   string    `json:"created_by"`
-	Version     int       `json:"version"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	// AutoManagedDir is true when GitRepoPath was created and is owned by the
+	// server (under data-dir/users/<user>/<name>/). When false, the user
+	// supplied an existing path; rename/delete must leave it alone.
+	AutoManagedDir bool      `json:"auto_managed_dir"`
+	CreatedBy      string    `json:"created_by"`
+	Version        int       `json:"version"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type CreateProjectRequest struct {
-	OwnerUserID int64  `json:"-"` // set by server from auth context, never from body
-	NamespaceID string `json:"namespace_id,omitempty"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	GitRepoPath string `json:"git_repo_path"`
-	CreatedBy   string `json:"-"` // set by server from auth context
+	OwnerUserID    int64  `json:"-"` // set by server from auth context, never from body
+	NamespaceID    string `json:"namespace_id,omitempty"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	GitRepoPath    string `json:"git_repo_path"`
+	AutoManagedDir bool   `json:"-"` // set by server based on auto_create_dir
+	CreatedBy      string `json:"-"` // set by server from auth context
 }
 
 type UpdateProjectRequest struct {

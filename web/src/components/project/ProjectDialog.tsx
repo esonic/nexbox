@@ -39,6 +39,11 @@ export function ProjectDialog({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [nameError, setNameError] = useState<string | null>(null);
+  // Create-only: when true (default) the server creates and manages the dir
+  // under data-dir/users/<user>/<name>/. When false, the user supplies an
+  // existing absolute path the server adopts without modification.
+  const [autoCreateDir, setAutoCreateDir] = useState(true);
+  const [customDir, setCustomDir] = useState("");
 
   // Submit / delete state
   const [submitting, setSubmitting] = useState(false);
@@ -55,6 +60,8 @@ export function ProjectDialog({
     } else {
       setName("");
       setDescription("");
+      setAutoCreateDir(true);
+      setCustomDir("");
     }
     setNameError(null);
     setSubmitError("");
@@ -97,10 +104,31 @@ export function ProjectDialog({
           description: description.trim(),
         });
       } else {
-        result = await projectsApi.create({
+        const payload: {
+          name: string;
+          description: string;
+          auto_create_dir: boolean;
+          git_repo_path?: string;
+        } = {
           name: name.trim(),
           description: description.trim(),
-        });
+          auto_create_dir: autoCreateDir,
+        };
+        if (!autoCreateDir) {
+          const dir = customDir.trim();
+          if (!dir) {
+            setSubmitError("Please specify a working directory path.");
+            setSubmitting(false);
+            return;
+          }
+          if (!dir.startsWith("/")) {
+            setSubmitError("Working directory must be an absolute path (start with /).");
+            setSubmitting(false);
+            return;
+          }
+          payload.git_repo_path = dir;
+        }
+        result = await projectsApi.create(payload);
       }
       onSuccess?.(result);
       onOpenChange(false);
@@ -170,7 +198,40 @@ export function ProjectDialog({
             />
           </div>
 
-          {/* Read-only: server-managed working directory */}
+          {/* Create-only: working directory mode */}
+          {!isEdit && (
+            <div className="space-y-1.5">
+              <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5 accent-foreground cursor-pointer"
+                  checked={autoCreateDir}
+                  onChange={(e) => setAutoCreateDir(e.target.checked)}
+                />
+                Auto-create working directory
+              </label>
+              {!autoCreateDir && (
+                <>
+                  <Input
+                    value={customDir}
+                    onChange={(e) => setCustomDir(e.target.value)}
+                    placeholder="/absolute/path/to/existing/directory"
+                    className="h-8 text-sm font-mono"
+                  />
+                  <p className="text-[11px] text-muted-foreground/70">
+                    Must be an existing absolute path. The directory will be adopted as-is and never renamed or deleted by the platform.
+                  </p>
+                </>
+              )}
+              {autoCreateDir && (
+                <p className="text-[11px] text-muted-foreground/70">
+                  A working directory will be created under your user data folder, derived from the project name.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Read-only: working directory shown on edit */}
           {isEdit && project?.git_repo_path && (
             <div className="space-y-1.5">
               <label className="text-xs text-muted-foreground">Working Directory</label>
@@ -178,7 +239,9 @@ export function ProjectDialog({
                 {project.git_repo_path}
               </code>
               <p className="text-[11px] text-muted-foreground/70">
-                Platform-managed. Derived from your username and the project name.
+                {project.auto_managed_dir === false
+                  ? "User-supplied path. Cannot be modified after creation."
+                  : "Platform-managed. Derived from your username and the project name."}
               </p>
             </div>
           )}

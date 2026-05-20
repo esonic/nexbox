@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/esonic/nexbox/store"
@@ -62,15 +63,27 @@ func (s *Server) ListProjects(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, projects)
 }
 
-// CreateProject creates a new project owned by the authenticated user. The
-// working directory is derived server-side; the request body's git_repo_path
-// is intentionally ignored.
+// createProjectBody is the JSON shape accepted by POST /projects. Distinct
+// from store.CreateProjectRequest so that AutoCreateDir can be a pointer (to
+// detect "field omitted" → default true) without leaking into the storage layer.
+type createProjectBody struct {
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	AutoCreateDir  *bool  `json:"auto_create_dir,omitempty"`
+	GitRepoPath    string `json:"git_repo_path,omitempty"`
+}
+
+// CreateProject creates a new project owned by the authenticated user. By
+// default the working directory is derived and created under
+// data-dir/users/<user>/<name>/. When auto_create_dir is explicitly false,
+// the caller must supply an existing absolute git_repo_path, and the server
+// will adopt it without modification (and never rename/delete it later).
 func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 	a := s.requireAuthUser(w, r)
 	if a == nil {
 		return
 	}
-	var req CreateProjectRequest
+	var req createProjectBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -80,29 +93,71 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Per-user uniqueness check before allocating directory.
+	// Default behaviour: auto-create when the flag is omitted.
+	autoCreate := true
+	if req.AutoCreateDir != nil {
+		autoCreate = *req.AutoCreateDir
+	}
+
+	var workDir string
+	var createdDir bool
+	if autoCreate {
+		workDir = s.projectWorkDir(a.Username, req.Name)
+		if err := os.MkdirAll(workDir, 0755); err != nil {
+			writeError(w, http.StatusInternalServerError, "create project dir: "+err.Error())
+			return
+		}
+		createdDir = true
+	} else {
+		workDir = strings.TrimSpace(req.GitRepoPath)
+		if workDir == "" {
+			writeError(w, http.StatusBadRequest, "git_repo_path is required when auto_create_dir is false")
+			return
+		}
+		if !filepath.IsAbs(workDir) {
+			writeError(w, http.StatusBadRequest, "git_repo_path must be an absolute path")
+			return
+		}
+		workDir = filepath.Clean(workDir)
+		info, err := os.Stat(workDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				writeError(w, http.StatusBadRequest, "git_repo_path does not exist: "+workDir)
+				return
+			}
+			writeError(w, http.StatusBadRequest, "git_repo_path stat: "+err.Error())
+			return
+		}
+		if !info.IsDir() {
+			writeError(w, http.StatusBadRequest, "git_repo_path is not a directory")
+			return
+		}
+	}
+
+	// Per-user uniqueness check on name. Done after path validation so the
+	// user sees the more actionable error first.
 	if existing, err := s.Store.GetProjectByNameForOwner(a.UserID, req.Name); err == nil && existing != nil {
+		if createdDir {
+			_ = os.RemoveAll(workDir)
+		}
 		writeError(w, http.StatusConflict, "you already have a project named "+req.Name)
 		return
 	}
 
-	workDir := s.projectWorkDir(a.Username, req.Name)
-	if err := os.MkdirAll(workDir, 0755); err != nil {
-		writeError(w, http.StatusInternalServerError, "create project dir: "+err.Error())
-		return
-	}
-
 	storeReq := store.CreateProjectRequest{
-		OwnerUserID: a.UserID,
-		CreatedBy:   a.Username,
-		Name:        req.Name,
-		Description: req.Description,
-		GitRepoPath: workDir,
+		OwnerUserID:    a.UserID,
+		CreatedBy:      a.Username,
+		Name:           req.Name,
+		Description:    req.Description,
+		GitRepoPath:    workDir,
+		AutoManagedDir: autoCreate,
 	}
 	project, err := s.Store.CreateProject(storeReq)
 	if err != nil {
-		// Roll back the directory we just created so subsequent retries succeed.
-		_ = os.RemoveAll(workDir)
+		if createdDir {
+			// Roll back the directory we just created so subsequent retries succeed.
+			_ = os.RemoveAll(workDir)
+		}
 		if errors.Is(err, store.ErrVersionConflict) {
 			writeError(w, http.StatusConflict, "you already have a project named "+req.Name)
 			return
@@ -195,8 +250,9 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Never let the caller set the working directory; it's always derived
-	// from the project name + owner.
+	// Working directory is never accepted from the request body. For
+	// auto-managed projects we re-derive it from the new name; for
+	// user-supplied paths we leave it alone.
 	req.GitRepoPath = nil
 
 	if req.Name != nil && *req.Name != current.Name {
@@ -208,19 +264,21 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "you already have a project named "+*req.Name)
 			return
 		}
-		newPath := s.projectWorkDir(a.Username, *req.Name)
-		if current.GitRepoPath != "" {
-			if err := os.Rename(current.GitRepoPath, newPath); err != nil {
-				writeError(w, http.StatusInternalServerError, "rename project dir: "+err.Error())
-				return
+		if current.AutoManagedDir {
+			newPath := s.projectWorkDir(a.Username, *req.Name)
+			if current.GitRepoPath != "" {
+				if err := os.Rename(current.GitRepoPath, newPath); err != nil {
+					writeError(w, http.StatusInternalServerError, "rename project dir: "+err.Error())
+					return
+				}
+			} else {
+				if err := os.MkdirAll(newPath, 0755); err != nil {
+					writeError(w, http.StatusInternalServerError, "create project dir: "+err.Error())
+					return
+				}
 			}
-		} else {
-			if err := os.MkdirAll(newPath, 0755); err != nil {
-				writeError(w, http.StatusInternalServerError, "create project dir: "+err.Error())
-				return
-			}
+			req.GitRepoPath = &newPath
 		}
-		req.GitRepoPath = &newPath
 	}
 
 	project, err := s.Store.UpdateProject(id, req)
@@ -265,9 +323,9 @@ func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Best effort: wipe the working directory. We've already lost the row, so
-	// an error here is logged but not surfaced.
-	if current.GitRepoPath != "" {
+	// Best effort: wipe the working directory only when the server originally
+	// created it. User-supplied paths are left untouched on delete.
+	if current.AutoManagedDir && current.GitRepoPath != "" {
 		if err := os.RemoveAll(current.GitRepoPath); err != nil {
 			log.Printf("[projects] remove dir %s: %v", current.GitRepoPath, err)
 		}
@@ -323,10 +381,11 @@ func (s *Server) ensureDefaultProject(u *store.User) error {
 		return err
 	}
 	_, err = s.Store.CreateProject(store.CreateProjectRequest{
-		OwnerUserID: u.ID,
-		CreatedBy:   u.Username,
-		Name:        "Default",
-		GitRepoPath: workDir,
+		OwnerUserID:    u.ID,
+		CreatedBy:      u.Username,
+		Name:           "Default",
+		GitRepoPath:    workDir,
+		AutoManagedDir: true,
 	})
 	return err
 }

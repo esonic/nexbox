@@ -5,6 +5,7 @@ export interface Project {
   description: string;
   git_repo_path: string;
   is_git_repo?: boolean;
+  auto_managed_dir?: boolean;
   owner_user_id?: number;
   created_by?: string;
   created_at: string;

@@ -27,15 +27,26 @@ class GlobalWebSocket {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = 1000;
   private static readonly MAX_RECONNECT_DELAY = 30000;
+  // Grace period before surfacing a disconnect to the UI. Brief drops on
+  // weak networks reconnect within ~1–2s, so debouncing here prevents the
+  // chat input from flapping between connected/disconnected states.
+  private static readonly DISCONNECT_GRACE_MS = 4000;
 
   private handlers = new Map<string, Set<EventHandler>>(); // sessionId -> handler set
   private globalHandlers = new Set<GlobalEventHandler>(); // non-session events (connect module)
 
   private connectionHandlers = new Set<ConnectionHandler>();
   private _connected = false;
+  // _announcedConnected is the last value handed out to subscribers. We use
+  // it to suppress flapping: while waiting out the disconnect grace window
+  // we keep reporting "connected" so the UI stays interactive.
+  private _announcedConnected = false;
+  private pendingDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   get connected(): boolean {
-    return this._connected;
+    // External callers see the announced (debounced) state, matching what
+    // their connection handler will eventually fire.
+    return this._announcedConnected;
   }
 
   connect(): void {
@@ -54,7 +65,12 @@ class GlobalWebSocket {
       if (import.meta.env.DEV) console.log("[ws] Connected");
       this._connected = true;
       this.reconnectDelay = 1000;
-      this.notifyConnection(true);
+      // Cancel any pending disconnect — we recovered inside the grace window.
+      if (this.pendingDisconnectTimer) {
+        clearTimeout(this.pendingDisconnectTimer);
+        this.pendingDisconnectTimer = null;
+      }
+      this.announceConnection(true);
     };
 
     ws.onmessage = (event) => {
@@ -70,7 +86,7 @@ class GlobalWebSocket {
       if (import.meta.env.DEV) console.log("[ws] Disconnected");
       this._connected = false;
       this.ws = null;
-      this.notifyConnection(false);
+      this.scheduleDisconnectAnnouncement();
       this.scheduleReconnect();
     };
 
@@ -84,11 +100,16 @@ class GlobalWebSocket {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.pendingDisconnectTimer) {
+      clearTimeout(this.pendingDisconnectTimer);
+      this.pendingDisconnectTimer = null;
+    }
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
     this._connected = false;
+    this.announceConnection(false);
   }
 
   /**
@@ -153,7 +174,7 @@ class GlobalWebSocket {
 
   onConnection(handler: ConnectionHandler): () => void {
     this.connectionHandlers.add(handler);
-    handler(this._connected);
+    handler(this._announcedConnected);
     return () => {
       this.connectionHandlers.delete(handler);
     };
@@ -191,10 +212,27 @@ class GlobalWebSocket {
     );
   }
 
-  private notifyConnection(connected: boolean): void {
+  private announceConnection(connected: boolean): void {
+    if (this._announcedConnected === connected) return;
+    this._announcedConnected = connected;
     for (const handler of this.connectionHandlers) {
       handler(connected);
     }
+  }
+
+  // scheduleDisconnectAnnouncement debounces transient drops. We only tell
+  // subscribers we're disconnected if the socket fails to come back within
+  // DISCONNECT_GRACE_MS — long enough to swallow the typical 1–2s blip but
+  // short enough that a genuinely dead connection still updates the UI.
+  private scheduleDisconnectAnnouncement(): void {
+    if (!this._announcedConnected) return; // already showing disconnected
+    if (this.pendingDisconnectTimer) return;
+    this.pendingDisconnectTimer = setTimeout(() => {
+      this.pendingDisconnectTimer = null;
+      if (!this._connected) {
+        this.announceConnection(false);
+      }
+    }, GlobalWebSocket.DISCONNECT_GRACE_MS);
   }
 
   private rawSend(data: unknown): void {

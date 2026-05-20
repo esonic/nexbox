@@ -996,9 +996,10 @@ func (s *Server) getOrCreateUnassignedProject() (*Project, error) {
 	}
 
 	return s.Store.CreateProject(CreateProjectRequest{
-		Name:        unassignedProjectName,
-		Description: "System project for sessions without a specific project",
-		GitRepoPath: tmpDir,
+		Name:           unassignedProjectName,
+		Description:    "System project for sessions without a specific project",
+		GitRepoPath:    tmpDir,
+		AutoManagedDir: true,
 	})
 }
 

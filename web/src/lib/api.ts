@@ -143,7 +143,12 @@ export const assetsApi = createAssetsApi("");
 export const projectsApi = {
   list: () => request<Project[]>("/projects"),
   get: (id: string) => request<Project>(`/projects/${id}`),
-  create: (data: { name: string; description?: string }) =>
+  create: (data: {
+    name: string;
+    description?: string;
+    auto_create_dir?: boolean;
+    git_repo_path?: string;
+  }) =>
     request<Project>("/projects", {
       method: "POST",
       body: JSON.stringify(data),

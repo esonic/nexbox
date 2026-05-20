@@ -1,7 +1,7 @@
 import { useMemo, useState, useCallback, useRef, useEffect, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Loader2, Sparkles, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, FileEdit } from "lucide-react";
+import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, FileEdit } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { ToolCallCard, TODO_TOOLS, HIDDEN_TOOLS } from "@/components/chat/ToolCallCard";
@@ -580,16 +580,10 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
   return (
     <div
       className={cn(
-        "flex flex-row gap-4 w-full",
-        isUser && "justify-end",
+        "flex flex-row w-full",
+        isUser ? "justify-end gap-4" : "gap-0",
       )}
     >
-      {!isUser && (
-        <div className="size-8 flex items-center justify-center rounded-full ring-1 ring-border bg-background shrink-0">
-          <Sparkles className="size-4 text-foreground" />
-        </div>
-      )}
-
       <div
         className={cn(
           "flex flex-col gap-1 text-sm leading-relaxed min-w-0",

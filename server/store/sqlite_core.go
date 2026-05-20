@@ -15,15 +15,17 @@ import (
 // Projects
 // ---------------------------------------------------------------------------
 
-const projectColumns = `id, owner_user_id, namespace_id, name, description, git_repo_path, gitlab_repo_url, gitlab_token, extra, created_by, version, created_at, updated_at`
+const projectColumns = `id, owner_user_id, namespace_id, name, description, git_repo_path, gitlab_repo_url, gitlab_token, extra, created_by, version, created_at, updated_at, auto_managed_dir`
 
 func scanProject(row interface{ Scan(...interface{}) error }) (*Project, error) {
 	var p Project
 	var ignoredGitLabURL, ignoredToken, ignoredExtra string
-	err := row.Scan(&p.ID, &p.OwnerUserID, &p.NamespaceID, &p.Name, &p.Description, &p.GitRepoPath, &ignoredGitLabURL, &ignoredToken, &ignoredExtra, &p.CreatedBy, &p.Version, &p.CreatedAt, &p.UpdatedAt)
+	var autoManaged int
+	err := row.Scan(&p.ID, &p.OwnerUserID, &p.NamespaceID, &p.Name, &p.Description, &p.GitRepoPath, &ignoredGitLabURL, &ignoredToken, &ignoredExtra, &p.CreatedBy, &p.Version, &p.CreatedAt, &p.UpdatedAt, &autoManaged)
 	if err != nil {
 		return nil, err
 	}
+	p.AutoManagedDir = autoManaged != 0
 	return &p, nil
 }
 
@@ -34,22 +36,27 @@ func (s *SQLiteStore) CreateProject(req CreateProjectRequest) (*Project, error) 
 		createdBy = "local"
 	}
 	p := &Project{
-		ID:          uuid.New().String(),
-		OwnerUserID: req.OwnerUserID,
-		NamespaceID: "local",
-		Name:        req.Name,
-		Description: req.Description,
-		GitRepoPath: req.GitRepoPath,
-		CreatedBy:   createdBy,
-		Version:     1,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:             uuid.New().String(),
+		OwnerUserID:    req.OwnerUserID,
+		NamespaceID:    "local",
+		Name:           req.Name,
+		Description:    req.Description,
+		GitRepoPath:    req.GitRepoPath,
+		AutoManagedDir: req.AutoManagedDir,
+		CreatedBy:      createdBy,
+		Version:        1,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 
+	autoManagedInt := 0
+	if p.AutoManagedDir {
+		autoManagedInt = 1
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO projects (id, owner_user_id, namespace_id, name, description, git_repo_path, created_by, version, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.OwnerUserID, p.NamespaceID, p.Name, p.Description, p.GitRepoPath, p.CreatedBy, p.Version, p.CreatedAt, p.UpdatedAt,
+		`INSERT INTO projects (id, owner_user_id, namespace_id, name, description, git_repo_path, created_by, version, created_at, updated_at, auto_managed_dir)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.OwnerUserID, p.NamespaceID, p.Name, p.Description, p.GitRepoPath, p.CreatedBy, p.Version, p.CreatedAt, p.UpdatedAt, autoManagedInt,
 	)
 	if err != nil {
 		if isUniqueConstraintErr(err) {
