@@ -26,7 +26,7 @@ type AuthState = "checking" | "authed" | "unauthed";
 
 function MainLayout() {
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="flex h-screen h-dvh overflow-hidden">
       <AppSidebar />
       <main className="flex-1 overflow-hidden">
         <Routes>
@@ -64,7 +64,7 @@ function AppRoutes() {
 
   if (auth === "checking") {
     return (
-      <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">
+      <div className="flex h-screen h-dvh items-center justify-center text-sm text-muted-foreground">
         Loading...
       </div>
     );
