@@ -3,7 +3,6 @@ package api
 import (
 	"log"
 	"net/http"
-	_ "net/http/pprof" // registers pprof handlers on DefaultServeMux
 	"sync"
 	"time"
 
@@ -83,10 +82,6 @@ func NewRouter(s *Server) *chi.Mux {
 			registerAuthedAPIRoutes(s, r)
 		})
 	})
-
-	// pprof – goroutine dumps, heap profiles, etc. for debugging hangs.
-	// Usage: curl http://localhost:9040/debug/pprof/goroutine?debug=1
-	r.Mount("/debug", http.DefaultServeMux)
 
 	// MCP reverse proxy (top-level so the URL is /mcp-proxy/{name}). The MCP
 	// auth path is its own scheme (MCP servers are launched as agent
