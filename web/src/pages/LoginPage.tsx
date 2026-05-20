@@ -44,8 +44,8 @@ export function LoginPage({ onAuthed }: LoginPageProps) {
         className="w-full max-w-sm rounded-lg border bg-card shadow-sm p-6 space-y-4"
       >
         <div className="flex flex-col items-center text-center gap-2">
-          <img src="/favicon.svg" alt="Nexbox" className="w-10 h-10" aria-hidden="true" />
-          <h1 className="text-lg font-semibold">Sign in to Nexbox</h1>
+          <img src="/favicon.svg" alt="NexBox" className="w-10 h-10" aria-hidden="true" />
+          <h1 className="text-lg font-semibold">Sign in to NexBox</h1>
           <p className="text-xs text-muted-foreground">Enter your username and password to continue.</p>
         </div>
 
