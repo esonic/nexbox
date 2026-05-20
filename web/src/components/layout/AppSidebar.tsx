@@ -721,7 +721,7 @@ export function AppSidebar() {
     return (
       <button
         onClick={() => setMobileOpen(true)}
-        className="fixed top-2 left-2 z-40 p-2 rounded-md bg-card/90 backdrop-blur border border-border/60 shadow-sm hover:bg-accent transition-colors"
+        className="fixed top-1 left-2 z-40 p-1.5 rounded-md bg-card/90 backdrop-blur border border-border/60 shadow-sm hover:bg-accent transition-colors"
         title="Open menu"
         aria-label="Open menu"
       >

@@ -389,12 +389,15 @@ export function SessionWorkspace() {
   }, []);
 
   return (
-    <div ref={containerRef} className="flex flex-col h-full">
-      {/* Toolbar — always visible. On phones we drop the button labels so the
-          full row fits in <375px; sm: breakpoints bring them back. The extra
-          left padding below sm reserves room for the AppSidebar hamburger
-          which floats at the top-left of the viewport. */}
-      <div className="flex items-center gap-0.5 sm:gap-1.5 pl-12 sm:pl-3 pr-2 sm:pr-3 py-1.5 border-b bg-muted/20 text-sm shrink-0 min-h-[36px]">
+    <div ref={containerRef} className="flex flex-col h-full pt-9 sm:pt-0">
+      {/* Toolbar — always visible. On phones we pin it to the viewport with
+          position:fixed (matching the hamburger) so it survives the mobile
+          browser-chrome shift that intermittently pushes our top row out of
+          the visible area. sm+ falls back to inline flex layout, since
+          desktop has no chrome quirk. The extra left padding below sm
+          reserves room for the AppSidebar hamburger that floats at the
+          top-left of the viewport. */}
+      <div className="fixed top-0 left-0 right-0 z-30 bg-card border-b sm:static sm:bg-muted/20 flex items-center gap-0.5 sm:gap-1.5 pl-12 sm:pl-3 pr-2 sm:pr-3 py-1.5 text-sm shrink-0 min-h-[36px]">
         <div className="flex-1 min-w-0">
           {activeSession && (
             <span className="text-sm font-medium text-foreground/80 truncate block max-w-[40%] sm:max-w-[50%]">
