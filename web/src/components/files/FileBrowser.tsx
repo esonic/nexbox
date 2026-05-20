@@ -1355,7 +1355,6 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                     title="View source markdown"
                   >
                     <Code2 className="h-3 w-3" />
-                    Source
                   </button>
                   <button
                     onClick={() => setMarkdownMode("rendered")}
@@ -1368,7 +1367,6 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                     title="View rendered markdown"
                   >
                     <Eye className="h-3 w-3" />
-                    Rendered
                   </button>
                 </div>
               )}
@@ -1387,7 +1385,6 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                   title={isDirty ? "Save (Ctrl+S)" : "No changes"}
                 >
                   {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
-                  Save
                 </button>
               )}
               {fileContent && !fileContent.binary && (
