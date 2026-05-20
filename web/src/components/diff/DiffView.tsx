@@ -11,6 +11,8 @@ import {
   Check,
   LayoutList,
   FileCode2,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { splitUnifiedDiffByFile, type ParsedDiffFile } from "@/lib/diff-parser";
@@ -80,6 +82,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   const [generatingMsg, setGeneratingMsg] = useState(false);
   const [discardingFile, setDiscardingFile] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"changes" | "history">("changes");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(null);
   const fileRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
@@ -382,7 +385,21 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
           onNavigate={activeTab === "changes" && activeFile && filteredFiles.length > 0 ? handleNavigate : undefined} />
       )}
       <div className="flex flex-1 min-h-0">
+        {/* Collapsed sidebar strip */}
+        {sidebarCollapsed && (
+          <div className="w-7 shrink-0 border-r flex flex-col items-center py-1.5">
+            <button
+              onClick={() => setSidebarCollapsed(false)}
+              className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+              title="Show changes panel"
+            >
+              <PanelLeftOpen className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* Left sidebar */}
+        {!sidebarCollapsed && (
         <div className="w-72 shrink-0 border-r flex flex-col">
           <div className="flex border-b text-xs">
             {(["changes", "history"] as const).map((tab) => (
@@ -392,6 +409,13 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
                 {tab}
               </button>
             ))}
+            <button
+              onClick={() => setSidebarCollapsed(true)}
+              className="px-2 text-muted-foreground/60 hover:text-foreground transition-colors"
+              title="Hide changes panel"
+            >
+              <PanelLeftClose className="h-3.5 w-3.5" />
+            </button>
           </div>
 
           {activeTab === "changes" ? (
@@ -490,6 +514,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
             history.sidebar
           )}
         </div>
+        )}
 
         {/* Right: Diff content */}
         <div className="flex-1 min-w-0 flex">
