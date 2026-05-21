@@ -451,6 +451,10 @@ type Workflow struct {
 	CreatedAt   time.Time       `json:"created_at"`
 	UpdatedAt   time.Time       `json:"updated_at"`
 	Schedule    string          `json:"schedule,omitempty"` // JSON-encoded WorkflowSchedule, empty = no schedule
+	// ScheduleUpdatedAt is when the local schedule was last saved. Used by the
+	// scheduler to avoid firing retroactively for a slot that already passed
+	// before the user set the schedule. Server-only; not serialised to clients.
+	ScheduleUpdatedAt time.Time `json:"-"`
 	// WorktreeMode controls per-run isolation. "local" (default) uses the project
 	// repo directly. "worktree" creates a fresh git worktree per execution; all
 	// sessions in that run share it, and concurrent runs of the same workflow are

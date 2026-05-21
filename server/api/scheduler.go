@@ -49,7 +49,7 @@ func (s *Server) runScheduledWorkflows() {
 			continue
 		}
 
-		if !s.isDue(wf.ID, sched, now) {
+		if !s.isDue(wf.ID, sched, wf.ScheduleUpdatedAt, now) {
 			continue
 		}
 
@@ -70,7 +70,10 @@ func (s *Server) isWorkflowRunning(workflowID string) bool {
 }
 
 // isDue returns true if the workflow should be triggered now according to its schedule.
-func (s *Server) isDue(workflowID string, sched store.WorkflowSchedule, now time.Time) bool {
+// scheduleUpdatedAt is when the schedule was last saved by the user; we use it
+// to avoid firing retroactively for a slot that had already passed when the
+// schedule was set (e.g. saving "Wed 09:00" on Wed at 14:00 must not fire today).
+func (s *Server) isDue(workflowID string, sched store.WorkflowSchedule, scheduleUpdatedAt time.Time, now time.Time) bool {
 	// Fetch the last completed execution to determine elapsed time / last run day
 	executions, err := s.Store.ListExecutions(workflowID, 1, 0)
 	if err != nil {
@@ -87,7 +90,12 @@ func (s *Server) isDue(workflowID string, sched store.WorkflowSchedule, now time
 			hours = 24
 		}
 		if len(executions) == 0 {
-			return true // never run yet
+			// First run: wait `hours` from when the schedule was set, so that
+			// saving "every 4h" does not fire within the next minute.
+			if scheduleUpdatedAt.IsZero() {
+				return true // legacy schedule from before updated_at was tracked
+			}
+			return now.Sub(scheduleUpdatedAt) >= time.Duration(hours)*time.Hour
 		}
 		last := executions[0]
 		if last.CompletedAt == nil {
@@ -111,6 +119,12 @@ func (s *Server) isDue(workflowID string, sched store.WorkflowSchedule, now time
 		// Check if current time is past the scheduled hour:minute
 		scheduledTime := time.Date(now.Year(), now.Month(), now.Day(), sched.Hour, sched.Minute, 0, 0, now.Location())
 		if now.Before(scheduledTime) {
+			return false
+		}
+		// Don't fire retroactively: the schedule must have existed before
+		// today's scheduled slot. (Zero means a legacy row from before this
+		// column existed — fall through to preserve prior behaviour.)
+		if !scheduleUpdatedAt.IsZero() && scheduleUpdatedAt.After(scheduledTime) {
 			return false
 		}
 		// Check that we haven't already run it today (use local timezone for day boundary)

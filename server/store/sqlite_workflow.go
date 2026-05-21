@@ -43,11 +43,16 @@ func (s *SQLiteStore) GetWorkflow(id string) (*Workflow, error) {
 	}
 
 	w.Definition = []byte(defStr)
+	w.Schedule = s.GetLocalSchedule(id)
 	return &w, nil
 }
 
 // ListWorkflows lists workflows for a project
 func (s *SQLiteStore) ListWorkflows(projectID string) ([]Workflow, error) {
+	// Fetch all local schedules first; opening rows below holds the single
+	// SQLite connection, so a nested query would self-deadlock.
+	schedules := s.GetAllLocalSchedules()
+
 	rows, err := s.db.Query(`
 		SELECT id, project_id, name, description, definition, version, status, created_by, created_at, updated_at, worktree_mode
 		FROM workflows
@@ -67,6 +72,7 @@ func (s *SQLiteStore) ListWorkflows(projectID string) ([]Workflow, error) {
 			return nil, err
 		}
 		w.Definition = []byte(defStr)
+		w.Schedule = schedules[w.ID].Schedule
 		workflows = append(workflows, w)
 	}
 
@@ -98,7 +104,9 @@ func (s *SQLiteStore) ListAllWorkflows() ([]Workflow, error) {
 			return nil, err
 		}
 		w.Definition = []byte(defStr)
-		w.Schedule = schedules[w.ID]
+		entry := schedules[w.ID]
+		w.Schedule = entry.Schedule
+		w.ScheduleUpdatedAt = entry.UpdatedAt
 		workflows = append(workflows, w)
 	}
 
@@ -167,13 +175,21 @@ func (s *SQLiteStore) UpdateWorkflow(id string, req UpdateWorkflowRequest) (*Wor
 	return s.GetWorkflow(id)
 }
 
+// LocalScheduleEntry holds a workflow's locally-stored schedule and the time
+// it was last saved. UpdatedAt lets the scheduler avoid firing a freshly-saved
+// schedule retroactively for a slot earlier today.
+type LocalScheduleEntry struct {
+	Schedule  string
+	UpdatedAt time.Time
+}
+
 // SetLocalSchedule upserts a schedule string for a workflow in the local workflow_schedules table.
 // Used in cloud mode to persist schedule locally without syncing to remote.
 func (s *SQLiteStore) SetLocalSchedule(id, schedule string) error {
 	_, err := s.db.Exec(`
-		INSERT INTO workflow_schedules (workflow_id, schedule) VALUES (?, ?)
-		ON CONFLICT(workflow_id) DO UPDATE SET schedule = excluded.schedule
-	`, id, schedule)
+		INSERT INTO workflow_schedules (workflow_id, schedule, updated_at) VALUES (?, ?, ?)
+		ON CONFLICT(workflow_id) DO UPDATE SET schedule = excluded.schedule, updated_at = excluded.updated_at
+	`, id, schedule, time.Now().Unix())
 	return err
 }
 
@@ -184,19 +200,24 @@ func (s *SQLiteStore) GetLocalSchedule(id string) string {
 	return schedule
 }
 
-// GetAllLocalSchedules returns a map of workflow_id → schedule for all workflows
-// that have a non-empty local schedule. Used to overlay schedules on remote workflows.
-func (s *SQLiteStore) GetAllLocalSchedules() map[string]string {
-	rows, err := s.db.Query(`SELECT workflow_id, schedule FROM workflow_schedules WHERE schedule != ''`)
+// GetAllLocalSchedules returns a map of workflow_id → schedule entry for all
+// workflows that have a non-empty local schedule. Used to overlay schedules on
+// remote workflows.
+func (s *SQLiteStore) GetAllLocalSchedules() map[string]LocalScheduleEntry {
+	rows, err := s.db.Query(`SELECT workflow_id, schedule, updated_at FROM workflow_schedules WHERE schedule != ''`)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
-	result := make(map[string]string)
+	result := make(map[string]LocalScheduleEntry)
 	for rows.Next() {
 		var wfID, schedule string
-		if err := rows.Scan(&wfID, &schedule); err == nil {
-			result[wfID] = schedule
+		var updatedAt int64
+		if err := rows.Scan(&wfID, &schedule, &updatedAt); err == nil {
+			result[wfID] = LocalScheduleEntry{
+				Schedule:  schedule,
+				UpdatedAt: time.Unix(updatedAt, 0),
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {

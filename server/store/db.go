@@ -630,6 +630,15 @@ func (db *DB) migrate() error {
 			check: `SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='auto_managed_dir'`,
 			alter: `ALTER TABLE projects ADD COLUMN auto_managed_dir INTEGER NOT NULL DEFAULT 1`,
 		},
+		// updated_at lets the scheduler distinguish "schedule existed before
+		// today's slot" from "schedule was just saved". Without it, saving a
+		// weekly schedule whose day includes today fires immediately if the
+		// hour:minute has already passed today. Default 0 (epoch) for existing
+		// rows preserves prior behaviour for already-persisted schedules.
+		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('workflow_schedules') WHERE name='updated_at'`,
+			alter: `ALTER TABLE workflow_schedules ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0`,
+		},
 	}
 	for _, cm := range colMigrations {
 		var count int

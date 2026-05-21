@@ -522,7 +522,7 @@ func TestIsDue_Interval_NeverRun(t *testing.T) {
 	s := newSchedulerServer(t)
 	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 4}
 	// No executions exist → always due
-	if !s.isDue("wf-never", sched, time.Now()) {
+	if !s.isDue("wf-never", sched, time.Time{}, time.Now()) {
 		t.Error("workflow that never ran should be due")
 	}
 }
@@ -532,7 +532,7 @@ func TestIsDue_Interval_JustCompleted(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 4}
 	completedExec(t, s, "wf-recent")
 	// Checking immediately (< 4h since completion) → not due
-	if s.isDue("wf-recent", sched, time.Now()) {
+	if s.isDue("wf-recent", sched, time.Time{}, time.Now()) {
 		t.Error("workflow that just completed should not be due yet")
 	}
 }
@@ -542,7 +542,7 @@ func TestIsDue_Interval_OverduePastInterval(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 2}
 	completedExec(t, s, "wf-overdue")
 	// Simulate checking 3 hours later → should be due (3h elapsed, interval=2h)
-	if !s.isDue("wf-overdue", sched, time.Now().Add(3*time.Hour)) {
+	if !s.isDue("wf-overdue", sched, time.Time{}, time.Now().Add(3*time.Hour)) {
 		t.Error("workflow should be due after interval has elapsed")
 	}
 }
@@ -552,7 +552,7 @@ func TestIsDue_Interval_NotYetElapsed(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 8}
 	completedExec(t, s, "wf-not-yet")
 	// Only 1 hour has passed; interval is 8h → not due
-	if s.isDue("wf-not-yet", sched, time.Now().Add(1*time.Hour)) {
+	if s.isDue("wf-not-yet", sched, time.Time{}, time.Now().Add(1*time.Hour)) {
 		t.Error("workflow should not be due before interval has elapsed")
 	}
 }
@@ -563,7 +563,7 @@ func TestIsDue_Interval_StillRunning(t *testing.T) {
 	// Create an execution that hasn't been completed yet (completed_at is nil).
 	runningExec(t, s, "wf-running")
 	// completed_at is nil → isDue returns false to avoid duplicate run
-	if s.isDue("wf-running", sched, time.Now().Add(2*time.Hour)) {
+	if s.isDue("wf-running", sched, time.Time{}, time.Now().Add(2*time.Hour)) {
 		t.Error("workflow with no completed_at (still running) should not be due")
 	}
 }
@@ -574,7 +574,7 @@ func TestIsDue_Interval_ClampMin(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 0}
 	completedExec(t, s, "wf-clamp-min")
 	// Checking 90 minutes later: 90min >= 1h → due
-	if !s.isDue("wf-clamp-min", sched, time.Now().Add(90*time.Minute)) {
+	if !s.isDue("wf-clamp-min", sched, time.Time{}, time.Now().Add(90*time.Minute)) {
 		t.Error("interval clamped to 1h: should be due after 90 minutes")
 	}
 }
@@ -585,11 +585,11 @@ func TestIsDue_Interval_ClampMax(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 100}
 	completedExec(t, s, "wf-clamp-max")
 	// 23 hours is not enough even though user set 100h (clamped to 24h)
-	if s.isDue("wf-clamp-max", sched, time.Now().Add(23*time.Hour)) {
+	if s.isDue("wf-clamp-max", sched, time.Time{}, time.Now().Add(23*time.Hour)) {
 		t.Error("interval clamped to 24h: should not be due after only 23h")
 	}
 	// 25 hours is past the 24h cap → due
-	if !s.isDue("wf-clamp-max", sched, time.Now().Add(25*time.Hour)) {
+	if !s.isDue("wf-clamp-max", sched, time.Time{}, time.Now().Add(25*time.Hour)) {
 		t.Error("interval clamped to 24h: should be due after 25h")
 	}
 }
@@ -600,7 +600,7 @@ func TestIsDue_Weekly_WrongDay(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "weekly", Days: []int{3}, Hour: 9, Minute: 0}
 	// Construct a now that is Monday at 10am
 	now := nextWeekdayAt(1, 10, 0) // Monday
-	if s.isDue("wf-wrong-day", sched, now) {
+	if s.isDue("wf-wrong-day", sched, time.Time{}, now) {
 		t.Error("should not be due on a day not in the schedule")
 	}
 }
@@ -611,7 +611,7 @@ func TestIsDue_Weekly_RightDayBeforeTime(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "weekly", Days: []int{1}, Hour: 14, Minute: 0}
 	// It is Monday but only 10am → before scheduled time
 	now := nextWeekdayAt(1, 10, 0)
-	if s.isDue("wf-before-time", sched, now) {
+	if s.isDue("wf-before-time", sched, time.Time{}, now) {
 		t.Error("should not be due before scheduled time on the correct day")
 	}
 }
@@ -621,7 +621,7 @@ func TestIsDue_Weekly_NeverRun_RightDayAndTime(t *testing.T) {
 	// Schedule on Monday at 9:00; it is Monday at 9:05 and never ran
 	sched := store.WorkflowSchedule{Type: "weekly", Days: []int{1}, Hour: 9, Minute: 0}
 	now := nextWeekdayAt(1, 9, 5)
-	if !s.isDue("wf-weekly-new", sched, now) {
+	if !s.isDue("wf-weekly-new", sched, time.Time{}, now) {
 		t.Error("should be due when it never ran on the correct day past the scheduled time")
 	}
 }
@@ -645,7 +645,7 @@ func TestIsDue_Weekly_AlreadyRanToday(t *testing.T) {
 	sched.Hour = 0
 	sched.Minute = 0
 	now = today.Add(2 * time.Hour) // 2 hours later today
-	if s.isDue("wf-weekly-done", sched, now) {
+	if s.isDue("wf-weekly-done", sched, time.Time{}, now) {
 		t.Error("should not be due when already ran today")
 	}
 }
@@ -664,8 +664,69 @@ func TestIsDue_Weekly_RanYesterday_DueToday(t *testing.T) {
 	}
 	// Simulate 'now' being tomorrow at 00:01 → should be due
 	tomorrow := today.Add(24 * time.Hour)
-	if !s.isDue("wf-weekly-yesterday", sched, tomorrow) {
+	if !s.isDue("wf-weekly-yesterday", sched, time.Time{}, tomorrow) {
 		t.Error("should be due when last run was yesterday (tomorrow is a new day)")
+	}
+}
+
+// Regression: saving a weekly schedule for today AFTER the scheduled hour
+// must not fire today — the slot already passed when the schedule was set.
+func TestIsDue_Weekly_NeverRun_ScheduleSavedAfterSlot(t *testing.T) {
+	s := newSchedulerServer(t)
+	today := time.Now()
+	sched := store.WorkflowSchedule{
+		Type:   "weekly",
+		Days:   []int{int(today.Weekday())},
+		Hour:   today.Hour() - 1, // one hour ago
+		Minute: 0,
+	}
+	if sched.Hour < 0 {
+		// If the test runs in the first hour of the day, use minutes ago instead.
+		sched.Hour = today.Hour()
+		sched.Minute = 0
+		// today.Minute may be 0; ensure a positive offset so the slot is in the past
+		if today.Minute() == 0 {
+			t.Skip("cannot construct a same-day past slot at exactly HH:00")
+		}
+	}
+	// Schedule was saved just now — after today's scheduled slot.
+	scheduleUpdatedAt := today
+	if s.isDue("wf-weekly-saved-late", sched, scheduleUpdatedAt, today) {
+		t.Error("weekly schedule saved after today's slot must not fire today")
+	}
+}
+
+// Companion: if the schedule was saved BEFORE today's slot, firing is expected.
+func TestIsDue_Weekly_NeverRun_ScheduleSavedBeforeSlot(t *testing.T) {
+	s := newSchedulerServer(t)
+	today := time.Now()
+	if today.Hour() < 1 {
+		t.Skip("need at least one hour of headroom to construct a past slot")
+	}
+	sched := store.WorkflowSchedule{
+		Type:   "weekly",
+		Days:   []int{int(today.Weekday())},
+		Hour:   today.Hour() - 1,
+		Minute: 0,
+	}
+	// Schedule saved a week ago — well before today's slot.
+	scheduleUpdatedAt := today.AddDate(0, 0, -7)
+	if !s.isDue("wf-weekly-saved-early", sched, scheduleUpdatedAt, today) {
+		t.Error("weekly schedule saved before today's slot should fire today")
+	}
+}
+
+// Regression: saving an interval schedule must not fire within the same minute.
+func TestIsDue_Interval_NeverRun_JustSaved(t *testing.T) {
+	s := newSchedulerServer(t)
+	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 4}
+	now := time.Now()
+	if s.isDue("wf-interval-just-saved", sched, now, now) {
+		t.Error("interval schedule just saved should not fire immediately")
+	}
+	// But after the interval elapses, it should fire.
+	if !s.isDue("wf-interval-just-saved", sched, now, now.Add(5*time.Hour)) {
+		t.Error("interval schedule should fire once its interval has elapsed since save")
 	}
 }
 
@@ -673,7 +734,7 @@ func TestIsDue_Weekly_EmptyDays(t *testing.T) {
 	s := newSchedulerServer(t)
 	sched := store.WorkflowSchedule{Type: "weekly", Days: []int{}, Hour: 9, Minute: 0}
 	// Empty days → never fires
-	if s.isDue("wf-empty-days", sched, time.Now()) {
+	if s.isDue("wf-empty-days", sched, time.Time{}, time.Now()) {
 		t.Error("weekly schedule with no days should never be due")
 	}
 }
@@ -685,7 +746,7 @@ func TestIsDue_Weekly_EmptyDays(t *testing.T) {
 func TestIsDue_UnknownType(t *testing.T) {
 	s := newSchedulerServer(t)
 	sched := store.WorkflowSchedule{Type: "hourly"} // not a real type
-	if s.isDue("wf-unknown", sched, time.Now()) {
+	if s.isDue("wf-unknown", sched, time.Time{}, time.Now()) {
 		t.Error("unknown schedule type should return false")
 	}
 }
