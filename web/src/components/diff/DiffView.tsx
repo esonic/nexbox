@@ -11,8 +11,6 @@ import {
   Check,
   LayoutList,
   FileCode2,
-  PanelLeftClose,
-  PanelLeftOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { splitUnifiedDiffByFile, type ParsedDiffFile } from "@/lib/diff-parser";
@@ -382,22 +380,11 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
         <BranchToolbar projectId={projectId} sessionId={sessionId} onBranchChanged={handleRefreshAll}
           aheadCount={gitStatus?.ahead}
           navLabel={activeTab === "changes" && activeFile ? navLabel : undefined}
-          onNavigate={activeTab === "changes" && activeFile && filteredFiles.length > 0 ? handleNavigate : undefined} />
+          onNavigate={activeTab === "changes" && activeFile && filteredFiles.length > 0 ? handleNavigate : undefined}
+          sidebarCollapsed={sidebarCollapsed}
+          onToggleSidebar={() => setSidebarCollapsed((v) => !v)} />
       )}
       <div className="flex flex-1 min-h-0">
-        {/* Collapsed sidebar strip */}
-        {sidebarCollapsed && (
-          <div className="w-7 shrink-0 border-r flex flex-col items-center py-1.5">
-            <button
-              onClick={() => setSidebarCollapsed(false)}
-              className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-              title="Show changes panel"
-            >
-              <PanelLeftOpen className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        )}
-
         {/* Left sidebar */}
         {!sidebarCollapsed && (
         <div className="w-72 shrink-0 border-r flex flex-col">
@@ -409,13 +396,6 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
                 {tab}
               </button>
             ))}
-            <button
-              onClick={() => setSidebarCollapsed(true)}
-              className="px-2 text-muted-foreground/60 hover:text-foreground transition-colors"
-              title="Hide changes panel"
-            >
-              <PanelLeftClose className="h-3.5 w-3.5" />
-            </button>
           </div>
 
           {activeTab === "changes" ? (

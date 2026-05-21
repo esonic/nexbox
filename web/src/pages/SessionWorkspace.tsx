@@ -99,7 +99,6 @@ function GitPanelContent({
   diffData: DiffResponse | null;
   loadingDiff: boolean;
   onRefresh: () => void;
-  headerPortalTarget: HTMLDivElement | null;
 }) {
   return (
     <div className="flex flex-col flex-1 overflow-hidden">
@@ -173,7 +172,6 @@ export function SessionWorkspace() {
 
   const gitDiffData = useAppStore((s) => s.gitDiffStats);
   const [loadingGitDiff, setLoadingGitDiff] = useState(false);
-  const [gitHeaderActionsEl, setGitHeaderActionsEl] = useState<HTMLDivElement | null>(null);
   const isResizing = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   // New project dialog
@@ -547,78 +545,77 @@ export function SessionWorkspace() {
                   </div>
                 ) : rightPanel ? (
                   <>
-                {/* Panel header */}
-                <div className="flex items-center justify-between px-4 py-2 border-b gap-2 shrink-0">
-                  <div className="flex items-center gap-1 flex-1 min-w-0">
-                    {rightPanel === "workflow" && wfEditing ? (
-                      <>
-                        <Button variant="ghost" size="sm" className="h-7 w-7 p-0 shrink-0" onClick={() => { setWfNameEditing(false); wfBackRef.current?.(); }}>
-                          <ArrowLeft className="h-4 w-4" />
-                        </Button>
-                        {wfNameEditing ? (
-                          <div className="flex items-center gap-0.5 flex-1 min-w-0">
-                            <input
-                              type="text"
-                              value={wfNameDraft}
-                              onChange={(e) => setWfNameDraft(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-                                  setWfName(wfNameDraft);
-                                  wfNameChangeRef.current?.(wfNameDraft);
-                                  setWfNameEditing(false);
-                                } else if (e.key === 'Escape') {
-                                  setWfNameDraft(wfName);
-                                  setWfNameEditing(false);
-                                }
-                              }}
-                              // eslint-disable-next-line jsx-a11y/no-autofocus
-                              autoFocus
-                              placeholder="Workflow Name"
-                              className="text-sm font-medium bg-transparent border-b border-border outline-none flex-1 min-w-0"
-                            />
-                            <button
-                              onClick={() => { setWfName(wfNameDraft); wfNameChangeRef.current?.(wfNameDraft); setWfNameEditing(false); }}
-                              className="p-1 rounded text-green-500 hover:bg-accent/60 transition-colors shrink-0"
-                              title="Save"
-                            >
-                              <Check className="h-3.5 w-3.5" />
-                            </button>
-                            <button
-                              onClick={() => { setWfNameDraft(wfName); setWfNameEditing(false); }}
-                              className="p-1 rounded text-muted-foreground hover:bg-accent/60 transition-colors shrink-0"
-                              title="Cancel"
-                            >
-                              <X className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="group/wftitle flex items-center gap-1 flex-1 min-w-0">
-                            <span className="text-sm font-medium truncate">{wfName || 'Untitled Workflow'}</span>
-                            {wfNameEditable && (
+                {/* Panel header — workflow only (Files/Task/Git omit it to save space). */}
+                {rightPanel === "workflow" && (
+                  <div className="flex items-center justify-between px-4 py-2 border-b gap-2 shrink-0">
+                    <div className="flex items-center gap-1 flex-1 min-w-0">
+                      {wfEditing ? (
+                        <>
+                          <Button variant="ghost" size="sm" className="h-7 w-7 p-0 shrink-0" onClick={() => { setWfNameEditing(false); wfBackRef.current?.(); }}>
+                            <ArrowLeft className="h-4 w-4" />
+                          </Button>
+                          {wfNameEditing ? (
+                            <div className="flex items-center gap-0.5 flex-1 min-w-0">
+                              <input
+                                type="text"
+                                value={wfNameDraft}
+                                onChange={(e) => setWfNameDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                                    setWfName(wfNameDraft);
+                                    wfNameChangeRef.current?.(wfNameDraft);
+                                    setWfNameEditing(false);
+                                  } else if (e.key === 'Escape') {
+                                    setWfNameDraft(wfName);
+                                    setWfNameEditing(false);
+                                  }
+                                }}
+                                // eslint-disable-next-line jsx-a11y/no-autofocus
+                                autoFocus
+                                placeholder="Workflow Name"
+                                className="text-sm font-medium bg-transparent border-b border-border outline-none flex-1 min-w-0"
+                              />
                               <button
-                                onClick={() => { setWfNameDraft(wfName); setWfNameEditing(true); }}
-                                className="opacity-0 group-hover/wftitle:opacity-100 p-1 rounded text-muted-foreground/60 hover:text-foreground hover:bg-accent/60 transition-all shrink-0"
-                                title="Edit name"
+                                onClick={() => { setWfName(wfNameDraft); wfNameChangeRef.current?.(wfNameDraft); setWfNameEditing(false); }}
+                                className="p-1 rounded text-green-500 hover:bg-accent/60 transition-colors shrink-0"
+                                title="Save"
                               >
-                                <Pencil className="h-3 w-3" />
+                                <Check className="h-3.5 w-3.5" />
                               </button>
-                            )}
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <>
-                        <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setRightPanel(null)}>
-                          <PanelRightClose className="h-4 w-4" />
-                        </Button>
-                        <h3 className="font-medium text-sm">
-                          {rightPanel === "git" ? "Git" : rightPanel === "files" ? "Files" : rightPanel === "task" ? "Tasks" : rightPanel === "asset" ? "Assets" : rightPanel === "workflow" ? "Workflows" : rightPanel === "ralph" ? "RALPH" : rightPanel}
-                        </h3>
-                      </>
-                    )}
+                              <button
+                                onClick={() => { setWfNameDraft(wfName); setWfNameEditing(false); }}
+                                className="p-1 rounded text-muted-foreground hover:bg-accent/60 transition-colors shrink-0"
+                                title="Cancel"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="group/wftitle flex items-center gap-1 flex-1 min-w-0">
+                              <span className="text-sm font-medium truncate">{wfName || 'Untitled Workflow'}</span>
+                              {wfNameEditable && (
+                                <button
+                                  onClick={() => { setWfNameDraft(wfName); setWfNameEditing(true); }}
+                                  className="opacity-0 group-hover/wftitle:opacity-100 p-1 rounded text-muted-foreground/60 hover:text-foreground hover:bg-accent/60 transition-all shrink-0"
+                                  title="Edit name"
+                                >
+                                  <Pencil className="h-3 w-3" />
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setRightPanel(null)}>
+                            <PanelRightClose className="h-4 w-4" />
+                          </Button>
+                          <h3 className="font-medium text-sm">Workflows</h3>
+                        </>
+                      )}
+                    </div>
                   </div>
-                  {rightPanel === "git" && <div ref={setGitHeaderActionsEl} />}
-                </div>
+                )}
 
                 {/* Panel content */}
                 {rightPanel === "git" && boundProject && (
@@ -629,7 +626,6 @@ export function SessionWorkspace() {
                     diffData={gitDiffData}
                     loadingDiff={loadingGitDiff}
                     onRefresh={refreshGitReview}
-                    headerPortalTarget={gitHeaderActionsEl}
                   />
                 )}
                 {rightPanel === "files" && boundProject && (

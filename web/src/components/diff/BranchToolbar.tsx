@@ -11,17 +11,21 @@ import {
   X,
   Loader2,
   RefreshCw,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { gitApi, type GitBranchResponse } from "@/lib/api";
 
-export function BranchToolbar({ projectId, sessionId, onBranchChanged, aheadCount, navLabel, onNavigate }: {
+export function BranchToolbar({ projectId, sessionId, onBranchChanged, aheadCount, navLabel, onNavigate, sidebarCollapsed, onToggleSidebar }: {
   projectId: string;
   sessionId?: string;
   onBranchChanged?: () => void;
   aheadCount?: number;
   navLabel?: string;
   onNavigate?: (direction: "prev" | "next") => void;
+  sidebarCollapsed?: boolean;
+  onToggleSidebar?: () => void;
 }) {
   const [branchData, setBranchData] = useState<GitBranchResponse | null>(null);
   const [showDropdown, setShowDropdown] = useState(false);
@@ -128,6 +132,15 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, aheadCoun
 
   return (
     <div className="flex items-center gap-1 px-2 py-1.5 border-b text-xs">
+      {onToggleSidebar && (
+        <button
+          onClick={onToggleSidebar}
+          className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+          title={sidebarCollapsed ? "Show changes panel" : "Hide changes panel"}
+        >
+          {sidebarCollapsed ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}
+        </button>
+      )}
       <div className="relative" ref={dropdownRef}>
         <button
           onClick={() => setShowDropdown(!showDropdown)}
