@@ -37,6 +37,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 
 const MonacoFileEditor = lazy(() => import("./MonacoFileEditor"));
 
@@ -978,6 +984,17 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     window.open(filesApi.serveUrl(projectId, selectedPath, sessionId), "_blank", "noopener");
   }, [projectId, selectedPath, sessionId]);
 
+  const handleCreatePublicShare = useCallback(async () => {
+    if (!selectedPath) return;
+    try {
+      const { url } = await filesApi.createWebShare(projectId, selectedPath);
+      window.open(url, "_blank", "noopener");
+    } catch (e) {
+      console.error("Create share failed:", e);
+      toast.error("Failed to create share link", { description: String(e) });
+    }
+  }, [projectId, selectedPath]);
+
   const handleDelete = useCallback(async () => {
     if (!selectedPath) return;
     const path = selectedPath;
@@ -1396,13 +1413,30 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                 </span>
               )}
               {selectedPath && isHtmlPath(selectedPath) && (
-                <button
-                  onClick={handleOpenInNewTab}
-                  className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors shrink-0"
-                  title="Open rendered HTML in new tab"
-                >
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </button>
+                <div className="flex items-center shrink-0">
+                  <button
+                    onClick={handleOpenInNewTab}
+                    className="p-1 rounded-l hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                    title="Open rendered HTML in new tab (login required)"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        className="px-0.5 py-1 rounded-r hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                        title="More sharing options"
+                      >
+                        <ChevronDown className="h-3 w-3" />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={handleCreatePublicShare}>
+                        Create public share link
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
               )}
               {selectedPath && (
                 <button

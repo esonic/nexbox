@@ -453,6 +453,11 @@ export const filesApi = {
       `/projects/${projectId}/file-move${sessionId ? `?session_id=${sessionId}` : ""}`,
       { method: "POST", body: JSON.stringify({ from, to }) },
     ),
+  createWebShare: (projectId: string, path: string) =>
+    request<{ id: string; url: string }>(
+      `/projects/${projectId}/web-shares`,
+      { method: "POST", body: JSON.stringify({ path }) },
+    ),
 };
 
 export const diffApi = {

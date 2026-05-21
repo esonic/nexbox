@@ -89,6 +89,12 @@ func NewRouter(s *Server) *chi.Mux {
 	r.HandleFunc("/mcp-proxy/{name}/*", s.HandleMCPProxy)
 	r.HandleFunc("/mcp-proxy/{name}", s.HandleMCPProxy)
 
+	// Public read-only access to shared HTML files. Intentionally outside
+	// the /api group and the RequireAuth middleware: anyone with the link
+	// can view the file. Returns 404 if the share id is unknown or the
+	// underlying file has been deleted.
+	r.Get("/web_share/{id}", s.ServeWebShare)
+
 	// WebSocket endpoints. They expect the JWT via either the cookie or an
 	// `?auth=<token>` query parameter (cookies aren't reliable on WS upgrades
 	// across all browsers). Auth is enforced inline in each handler.
@@ -170,6 +176,7 @@ func registerAuthedAPIRoutes(s *Server, r chi.Router) {
 			r.Get("/file-download", s.DownloadProjectFile)
 			r.Get("/file-serve", s.ServeProjectFile)
 			r.Post("/file-move", s.MoveProjectFile)
+			r.Post("/web-shares", s.CreateWebShare)
 
 			// Labels (project-scoped)
 			r.Get("/labels", s.ListLabels)

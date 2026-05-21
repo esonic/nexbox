@@ -555,6 +555,16 @@ func (db *DB) migrate() error {
 			password_hash TEXT NOT NULL,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
+
+		// Public web shares: maps a random short id to a (project, file) pair
+		// for unauthenticated read-only access via /web_share/{id}.
+		`CREATE TABLE IF NOT EXISTS web_shares (
+			id         TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			path       TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(project_id, path)
+		)`,
 	}
 
 	for _, m := range migrations {

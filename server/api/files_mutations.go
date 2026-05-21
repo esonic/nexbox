@@ -165,9 +165,7 @@ func (s *Server) DownloadProjectFile(w http.ResponseWriter, r *http.Request) {
 }
 
 // ServeProjectFile streams a file inline with a Content-Type guessed from its extension.
-// Used by the "open HTML in new tab" feature. The CSP sandbox allows scripts and
-// user-initiated top-level navigation so shared HTML behaves like a normal page;
-// acceptable because the platform is closed to a small trusted user set.
+// Used by the "open HTML in new tab" feature.
 // GET /api/projects/{projectId}/file-serve?path=relative/path&session_id=...
 func (s *Server) ServeProjectFile(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
@@ -187,6 +185,15 @@ func (s *Server) ServeProjectFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	serveSandboxedFile(w, r, full)
+}
+
+// serveSandboxedFile streams the file at `full` inline, with a sandboxed CSP
+// header so untrusted HTML can render without breaking out of its iframe-like
+// context. allow-scripts lets JS run; allow-top-navigation-by-user-activation
+// lets user-clicked <a href> links navigate. Returns 404 if missing, 400 if
+// it's a directory.
+func serveSandboxedFile(w http.ResponseWriter, r *http.Request, full string) {
 	info, err := os.Stat(full)
 	if err != nil {
 		if os.IsNotExist(err) {

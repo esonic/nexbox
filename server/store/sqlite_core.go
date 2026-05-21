@@ -225,6 +225,7 @@ func (s *SQLiteStore) DeleteProject(id string) error {
 		{`DELETE FROM workflow_schedules WHERE workflow_id IN (SELECT id FROM workflows WHERE project_id = ?)`, "workflow_schedules"},
 		{`DELETE FROM workflows WHERE project_id = ?`, "workflows"},
 		{`DELETE FROM sessions WHERE project_id = ?`, "sessions"},
+		{`DELETE FROM web_shares WHERE project_id = ?`, "web_shares"},
 	}
 	for _, cq := range cascadeQueries {
 		if _, err := tx.Exec(cq.sql, id); err != nil {
