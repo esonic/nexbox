@@ -1289,7 +1289,7 @@ export function ChatInput({
                       </div>
                     )}
                   </div>
-                  <div className="hidden sm:flex shrink-0">
+                  <div className="flex shrink-0">
                     <ContextUsageIndicator
                       sessionId={sessionId}
                       fallbackContextWindow={currentModelInfo?.context_window || 0}
@@ -1309,26 +1309,33 @@ export function ChatInput({
               >
                 <ImagePlus className="h-3.5 w-3.5" />
               </Button>
-              {isStreaming && (
-                <Button
-                  onClick={onStop}
-                  size="icon"
-                  variant="outline"
-                  className="h-7 w-7 rounded-md shrink-0"
-                  title="Stop"
-                >
-                  <StopCircle className="h-3.5 w-3.5" />
-                </Button>
-              )}
-              <Button
-                onClick={handleSend}
-                disabled={!isConnected || uploading || (!input.trim() && !activeCommand && pickedTasks.length === 0 && pickedAssets.length === 0 && pickedWorkflows.length === 0 && pickedComments.length === 0 && attachedImages.length === 0)}
-                size="icon"
-                className="h-7 w-7 rounded-md shrink-0"
-                title={isStreaming ? "Queue message" : "Send message"}
-              >
-                <Send className="h-3.5 w-3.5" />
-              </Button>
+              {(() => {
+                const hasContentToSend = !!(input.trim() || activeCommand || pickedTasks.length > 0 || pickedAssets.length > 0 || pickedWorkflows.length > 0 || pickedComments.length > 0 || attachedImages.length > 0);
+                if (isStreaming && !hasContentToSend) {
+                  return (
+                    <Button
+                      onClick={onStop}
+                      size="icon"
+                      variant="outline"
+                      className="h-7 w-7 rounded-md shrink-0"
+                      title="Stop"
+                    >
+                      <StopCircle className="h-3.5 w-3.5" />
+                    </Button>
+                  );
+                }
+                return (
+                  <Button
+                    onClick={handleSend}
+                    disabled={!isConnected || uploading || !hasContentToSend}
+                    size="icon"
+                    className="h-7 w-7 rounded-md shrink-0"
+                    title={isStreaming ? "Queue message" : "Send message"}
+                  >
+                    <Send className="h-3.5 w-3.5" />
+                  </Button>
+                );
+              })()}
             </div>
           </div>
         </div>
