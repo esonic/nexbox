@@ -1193,20 +1193,6 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
 
   return (
     <div className="flex h-full">
-      {/* Collapsed tree strip — a thin vertical bar with one expand button so
-          the file-content/editor side can use the whole panel width. */}
-      {treeCollapsed && (
-        <div className="w-7 shrink-0 border-r flex flex-col items-center py-1.5">
-          <button
-            onClick={() => setTreeCollapsed(false)}
-            className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-            title="Show file tree"
-          >
-            <PanelLeftOpen className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
-
       {/* File tree sidebar */}
       {!treeCollapsed && (
       <div className="w-56 shrink-0 border-r flex flex-col">
@@ -1243,13 +1229,6 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               title="Refresh"
             >
               <RefreshCw className="h-3 w-3" />
-            </button>
-            <button
-              onClick={() => setTreeCollapsed(true)}
-              className="p-1 rounded hover:bg-accent text-muted-foreground/50 hover:text-muted-foreground transition-colors"
-              title="Hide file tree"
-            >
-              <PanelLeftClose className="h-3.5 w-3.5" />
             </button>
           </div>
         </div>
@@ -1354,9 +1333,20 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
 
       {/* File content viewer */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {selectedPath ? (
-          <>
-            <div className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 text-xs">
+        <div className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 text-xs">
+          <button
+            onClick={() => setTreeCollapsed((v) => !v)}
+            className="p-1 -ml-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors shrink-0"
+            title={treeCollapsed ? "Show file tree" : "Hide file tree"}
+          >
+            {treeCollapsed ? (
+              <PanelLeftOpen className="h-3.5 w-3.5" />
+            ) : (
+              <PanelLeftClose className="h-3.5 w-3.5" />
+            )}
+          </button>
+          {selectedPath ? (
+            <>
               <File className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
               <span className="font-mono truncate text-muted-foreground">{selectedPath}</span>
               {markdownPreviewAvailable && (
@@ -1477,9 +1467,12 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                   </PopoverContent>
                 </Popover>
               )}
-            </div>
+            </>
+          ) : null}
+        </div>
 
-            {loadingFile ? (
+        {selectedPath ? (
+          loadingFile ? (
               <div className="flex-1 flex items-center justify-center">
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
               </div>
@@ -1557,8 +1550,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
                 Failed to load file
               </div>
-            )}
-          </>
+            )
         ) : (
           <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
             Select a file to view
