@@ -6,7 +6,7 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/icons/icon-192.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <meta name="theme-color" content="#1D4ED8" />
+    <meta id="theme-color-meta" name="theme-color" content="#ffffff" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -23,9 +23,13 @@
   <body>
     <script>
       // Apply saved theme immediately to prevent flash
-      if (localStorage.getItem('theme') === 'dark') {
+      var __isDark = localStorage.getItem('theme') === 'dark';
+      if (__isDark) {
         document.body.classList.add('dark');
       }
+      // Sync status bar color (PWA / TWA reads this)
+      var __meta = document.getElementById('theme-color-meta');
+      if (__meta) __meta.setAttribute('content', __isDark ? '#0d0d0d' : '#ffffff');
     </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

@@ -9,6 +9,8 @@ function getTheme(): "light" | "dark" {
 function applyTheme(theme: "light" | "dark") {
   document.body.classList.toggle("dark", theme === "dark");
   localStorage.setItem("theme", theme);
+  const meta = document.getElementById("theme-color-meta");
+  if (meta) meta.setAttribute("content", theme === "dark" ? "#0d0d0d" : "#ffffff");
 }
 
 export function ThemeToggle() {
