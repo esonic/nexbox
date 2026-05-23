@@ -8,6 +8,7 @@ import type { WorktreeSelectorProps } from "@/components/chat/WorktreeSelector";
 import { useChatSession } from "@/hooks/useChatSession";
 import { diffApi, sessionsApi } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
+import { UNASSIGNED_PROJECT } from "@/lib/constants";
 import { formatDuration, formatMessageTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { Session, Project, ChatMessage as ChatMessageType } from "@/types";
@@ -268,6 +269,11 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
                 <p className="text-muted-foreground text-lg">
                   {hasProject ? "How can I help you today?" : "Select a project to get started."}
                 </p>
+                {hasProject && project && project.name !== UNASSIGNED_PROJECT && (
+                  <p className="mt-2 text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground/50">
+                    Project · {project.name}
+                  </p>
+                )}
               </div>
             </div>
           ) : (

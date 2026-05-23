@@ -247,12 +247,19 @@ export function AppSidebar() {
     }
   }, [setSessions, initStreamingSessions]);
 
+  // Tracks whether projectsApi.list has completed at least once. The auto-select
+  // effect waits on this so it doesn't fall through to "first visible session"
+  // before the Default-project check has had a chance to run.
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
+
   const loadProjects = useCallback(async () => {
     try {
       const data = await projectsApi.list();
       setProjects(data || []);
     } catch (e) {
       console.error("Failed to load projects:", e);
+    } finally {
+      setProjectsLoaded(true);
     }
   }, []);
 
@@ -477,42 +484,58 @@ export function AppSidebar() {
     return result;
   }, [sessions, projects, projectMap]);
 
-  // Auto-select first visible session, or clear if active session is not visible
+  // Auto-select a session when no valid one is active.
+  //
+  // Preference order when activeSessionId is missing or stale:
+  //   1. The "Default" project's hidden scratch session (so reloading the page
+  //      lands on a fresh new-session surface instead of an old conversation).
+  //   2. The first visible session in the sidebar.
+  //   3. Clear the selection.
+  //
+  // Waits for projectsLoaded so the Default-project check can run before the
+  // first-visible-session fallback kicks in (loadProjects and loadSessions
+  // race each other on mount).
   useEffect(() => {
+    if (!projectsLoaded) return;
+
     const visibleSessions = groupedSessions.flatMap((g) => g.sessions);
 
-    // All sessions deleted — clear active session so the UI shows empty state
-    if (visibleSessions.length === 0) {
-      // Don't clear when a hidden scratch session is active: that session
-      // is intentionally filtered out of the sidebar list but is the user's
-      // current chat surface and must remain selected.
-      const activeIsScratch = activeSessionId
-        ? sessions.some((s) => s.id === activeSessionId && s.is_hidden)
-        : false;
-      if (activeSessionId && !activeIsScratch) setActiveSessionId(null);
+    const activeIsScratch = activeSessionId
+      ? sessions.some((s) => s.id === activeSessionId && s.is_hidden)
+      : false;
+    const activeExists = activeSessionId
+      ? visibleSessions.some((s) => s.id === activeSessionId) || activeIsScratch
+      : false;
+
+    if (activeExists) return;
+
+    const defaultProject = projects.find(
+      (p) => p.name === "Default" && !!p.git_repo_path,
+    );
+    if (defaultProject) {
+      (async () => {
+        try {
+          const scratch = await projectsApi.scratchSession(defaultProject.id);
+          const current = useAppStore.getState().sessions;
+          if (!current.some((s) => s.id === scratch.id)) {
+            setSessions([scratch, ...current]);
+          }
+          setActiveSessionId(scratch.id);
+        } catch (e) {
+          console.error("Failed to open Default project scratch session:", e);
+          if (visibleSessions.length > 0) setActiveSessionId(visibleSessions[0].id);
+        }
+      })();
       return;
     }
 
-    // If there's an activeSessionId (from persistence or previous selection)
-    if (activeSessionId) {
-      // Check if it still exists — either in the visible list, or as a
-      // hidden scratch session in the full store.
-      const sessionExists =
-        visibleSessions.some((s) => s.id === activeSessionId) ||
-        sessions.some((s) => s.id === activeSessionId && s.is_hidden);
-      if (!sessionExists) {
-        // Session no longer exists, fall back to first session
-        console.log('[AppSidebar] Active session not found, selecting first session');
-        setActiveSessionId(visibleSessions[0].id);
-      }
-      // else: keep the current activeSessionId (it exists)
-      return;
+    if (visibleSessions.length > 0) {
+      console.log('[AppSidebar] No valid active session, selecting first session');
+      setActiveSessionId(visibleSessions[0].id);
+    } else if (activeSessionId && !activeIsScratch) {
+      setActiveSessionId(null);
     }
-
-    // No activeSessionId set, select the first available session
-    console.log('[AppSidebar] No active session, selecting first session');
-    setActiveSessionId(visibleSessions[0].id);
-  }, [groupedSessions, sessions, activeSessionId, setActiveSessionId]);
+  }, [groupedSessions, sessions, activeSessionId, setActiveSessionId, projects, projectsLoaded, setSessions]);
 
   // ── Session actions ──
 
