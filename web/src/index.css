@@ -53,6 +53,11 @@
   * {
     @apply border-border;
   }
+  html, body, #root {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+  }
   body {
     @apply bg-background text-foreground antialiased;
     font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -60,6 +65,22 @@
     font-size: 13px;
     line-height: 1.45;
     letter-spacing: -0.003em;
+    /* iOS PWA standalone with viewport-fit=cover + black-translucent makes the
+       WebView extend under the status bar / Dynamic Island. Body becomes the
+       safe-area boundary so h-full children lay out within the usable rect.
+       We use height:100% (inherited from html) instead of 100dvh — iOS PWA
+       reports an inconsistent dvh when the keyboard is hidden, leaving a
+       blank gap below the chat input that disappears once an input is
+       focused. 100% of html is the layout viewport which iOS keeps stable.
+       Bottom inset is intentionally omitted: the Home Indicator is
+       translucent and a few pixels of overlap look better than a reserved
+       band under the chat input. Position-fixed children (drawer, mobile
+       toolbar) don't honor this padding — they apply their own
+       env(safe-area-inset-top) at the call site. */
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
   }
   /* Smooth transitions on interactive elements */
   button, a, input, textarea, select {
@@ -86,6 +107,17 @@
 
 ::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--muted-foreground) / 0.35);
+}
+
+/* iOS Safari auto-zooms when focusing an input with font-size < 16px and
+   never zooms back, which breaks the PWA viewport. Force ≥16px on phones. */
+@media (max-width: 767px), (max-height: 500px) {
+  input,
+  textarea,
+  select,
+  [contenteditable] {
+    font-size: 16px !important;
+  }
 }
 
 /* Markdown content styling */

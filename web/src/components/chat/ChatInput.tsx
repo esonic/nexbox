@@ -1161,7 +1161,7 @@ export function ChatInput({
                 addImageFiles(imageFiles);
               }
             }}
-            placeholder={!isConnected ? "Connecting..." : activeCommand && "inputHint" in activeCommand ? activeCommand.inputHint : "Type a message, / for commands, @ for files..."}
+            placeholder={!isConnected ? "Connecting..." : activeCommand && "inputHint" in activeCommand ? activeCommand.inputHint : "/ for commands, @ for files..."}
             disabled={!isConnected}
             className="resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 min-h-0"
             style={{ height: inputHeight }}

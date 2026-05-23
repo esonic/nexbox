@@ -38,7 +38,7 @@ export function LoginPage({ onAuthed }: LoginPageProps) {
   };
 
   return (
-    <div className="flex h-screen h-dvh items-center justify-center bg-background px-4">
+    <div className="flex h-full items-center justify-center bg-background px-4">
       <form
         onSubmit={handleSubmit}
         className="w-full max-w-sm rounded-lg border bg-card shadow-sm p-6 space-y-4"

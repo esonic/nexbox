@@ -140,6 +140,13 @@ function SessionRow({
 
 // ── AppSidebar ──────────────────────────────────────────────────────────
 
+// Tracks whether the first auto-select pass has run in this JS runtime.
+// Module-level so it survives React strict-mode double-mounts but resets
+// on every cold app launch (new browser tab, TWA/PWA cold start). This is
+// what makes "land on Default project scratch on every cold open" work
+// even when localStorage still has a valid persisted activeSessionId.
+let initialAutoSelectDone = false;
+
 export function AppSidebar() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -484,17 +491,21 @@ export function AppSidebar() {
     return result;
   }, [sessions, projects, projectMap]);
 
-  // Auto-select a session when no valid one is active.
+  // Auto-select a session.
   //
-  // Preference order when activeSessionId is missing or stale:
-  //   1. The "Default" project's hidden scratch session (so reloading the page
-  //      lands on a fresh new-session surface instead of an old conversation).
-  //   2. The first visible session in the sidebar.
-  //   3. Clear the selection.
+  // On the FIRST run after projectsLoaded (cold app launch — new browser tab,
+  // TWA/PWA reopen), always land on the Default project's scratch session,
+  // even if localStorage still has a valid persisted activeSessionId. Without
+  // this, persisted state would silently win on every TWA reopen.
   //
-  // Waits for projectsLoaded so the Default-project check can run before the
-  // first-visible-session fallback kicks in (loadProjects and loadSessions
-  // race each other on mount).
+  // On SUBSEQUENT runs (session list refetch, project mutation, etc.) we only
+  // step in when the active session is missing or stale, so mid-app refetches
+  // don't yank the user off a real conversation.
+  //
+  // Fallback order in both modes:
+  //   1. Default project scratch session
+  //   2. First visible session in the sidebar
+  //   3. Clear the selection
   useEffect(() => {
     if (!projectsLoaded) return;
 
@@ -507,7 +518,9 @@ export function AppSidebar() {
       ? visibleSessions.some((s) => s.id === activeSessionId) || activeIsScratch
       : false;
 
-    if (activeExists) return;
+    const isFirstPass = !initialAutoSelectDone;
+    if (!isFirstPass && activeExists) return;
+    initialAutoSelectDone = true;
 
     const defaultProject = projects.find(
       (p) => p.name === "Default" && !!p.git_repo_path,
@@ -523,12 +536,15 @@ export function AppSidebar() {
           setActiveSessionId(scratch.id);
         } catch (e) {
           console.error("Failed to open Default project scratch session:", e);
-          if (visibleSessions.length > 0) setActiveSessionId(visibleSessions[0].id);
+          if (!activeExists && visibleSessions.length > 0) {
+            setActiveSessionId(visibleSessions[0].id);
+          }
         }
       })();
       return;
     }
 
+    if (activeExists) return;
     if (visibleSessions.length > 0) {
       console.log('[AppSidebar] No valid active session, selecting first session');
       setActiveSessionId(visibleSessions[0].id);
@@ -744,7 +760,8 @@ export function AppSidebar() {
     return (
       <button
         onClick={() => setMobileOpen(true)}
-        className="fixed top-1 left-2 z-40 p-1.5 rounded-md bg-card/90 backdrop-blur border border-border/60 shadow-sm hover:bg-accent transition-colors"
+        className="fixed left-2 z-40 p-1.5 rounded-md bg-card/90 backdrop-blur border border-border/60 shadow-sm hover:bg-accent transition-colors"
+        style={{ top: "calc(env(safe-area-inset-top) + 0.25rem)" }}
         title="Open menu"
         aria-label="Open menu"
       >
@@ -822,7 +839,12 @@ export function AppSidebar() {
           "border-r border-border/50 bg-card flex flex-col h-full overflow-hidden",
           isMobile && "relative z-10 shadow-xl",
         )}
-        style={{ width: isMobile ? "min(85vw, 320px)" : sidebarWidth }}
+        style={{
+          width: isMobile ? "min(85vw, 320px)" : sidebarWidth,
+          // Drawer container is fixed-positioned and ignores body's safe-area
+          // padding; push the panel's content down past the iOS status bar.
+          ...(isMobile && { paddingTop: "env(safe-area-inset-top)" }),
+        }}
       >
         {/* Header */}
         <div className="px-3 py-3 border-b flex items-center justify-between shrink-0">

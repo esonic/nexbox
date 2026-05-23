@@ -395,7 +395,10 @@ export function SessionWorkspace() {
           desktop has no chrome quirk. The extra left padding below sm
           reserves room for the AppSidebar hamburger that floats at the
           top-left of the viewport. */}
-      <div className="fixed top-0 left-0 right-0 z-30 bg-card border-b sm:static sm:bg-muted/20 flex items-center gap-0.5 sm:gap-1.5 pl-12 sm:pl-3 pr-2 sm:pr-3 py-1.5 text-sm shrink-0 min-h-[36px]">
+      <div
+        className="fixed top-0 left-0 right-0 z-30 bg-card border-b sm:static sm:bg-muted/20 flex items-center gap-0.5 sm:gap-1.5 pl-12 sm:pl-3 pr-2 sm:pr-3 py-1.5 text-sm shrink-0 min-h-[36px]"
+        style={{ top: "env(safe-area-inset-top)" }}
+      >
         <div className="flex-1 min-w-0">
           {activeSession && (
             <span className="text-sm font-medium text-foreground/80 truncate block max-w-[40%] sm:max-w-[50%]">
