@@ -11,6 +11,3 @@ export const PANEL_WIDTH_MAX = 1500;
 
 export const TERMINAL_HEIGHT_MIN = 120;
 export const TERMINAL_HEIGHT_MAX = 600;
-
-export const INPUT_HEIGHT_MIN = 100;
-export const INPUT_HEIGHT_MAX = 500;

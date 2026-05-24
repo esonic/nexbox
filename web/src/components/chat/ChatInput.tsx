@@ -1,9 +1,8 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { toast } from "sonner";
 import { Send, StopCircle, Command, FileText, ChevronDown, Check, X, GitBranch, ImagePlus, Play, Pencil, Workflow, MessageSquare, CircleHelp } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { INPUT_HEIGHT_MIN, INPUT_HEIGHT_MAX } from "@/lib/constants";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -567,35 +566,27 @@ export function ChatInput({
   const slashMenuRef = useRef<HTMLDivElement>(null);
 
   const isMobile = useIsMobile();
-  // Input area resize. Mobile defaults to one row of text + Textarea's
-  // built-in vertical padding (py-2 = 16px) so the message area above gets
-  // back the vertical space the desktop layout wastes. The textarea is
-  // internally scrollable; on desktop the user can drag the handle to grow
-  // it.
-  const [inputHeight, setInputHeight] = useState(() => (isMobile ? 36 : 100));
-  const isInputResizing = useRef(false);
-  const inputResizeStartY = useRef(0);
-  const inputResizeStartH = useRef(0);
+  // Auto-growing textarea: starts at 1 line on mobile / 3 lines on desktop
+  // and grows with content up to 20 lines, after which the textarea scrolls
+  // internally. The min/max include vertical padding (py-2 = 16px) on top of
+  // text-sm's 20px line-height.
+  const TEXTAREA_LINE_HEIGHT = 20;
+  const TEXTAREA_VERTICAL_PADDING = 16;
+  const textareaMinHeight =
+    TEXTAREA_LINE_HEIGHT * (isMobile ? 1 : 3) + TEXTAREA_VERTICAL_PADDING;
+  const textareaMaxHeight = TEXTAREA_LINE_HEIGHT * 19 + TEXTAREA_VERTICAL_PADDING;
 
-  const handleInputResizeMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    isInputResizing.current = true;
-    inputResizeStartY.current = e.clientY;
-    inputResizeStartH.current = inputHeight;
+  const resizeTextarea = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const next = Math.min(textareaMaxHeight, Math.max(textareaMinHeight, el.scrollHeight));
+    el.style.height = `${next}px`;
+  }, [textareaMinHeight, textareaMaxHeight]);
 
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!isInputResizing.current) return;
-      const delta = inputResizeStartY.current - ev.clientY;
-      setInputHeight(Math.min(INPUT_HEIGHT_MAX, Math.max(INPUT_HEIGHT_MIN, inputResizeStartH.current + delta)));
-    };
-    const onMouseUp = () => {
-      isInputResizing.current = false;
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-    };
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  }, [inputHeight]);
+  useLayoutEffect(() => {
+    resizeTextarea();
+  }, [input, resizeTextarea]);
 
   const filteredCommands = SLASH_COMMANDS.filter((cmd) =>
     cmd.name.toLowerCase().includes(slashFilter.toLowerCase()) ||
@@ -674,9 +665,6 @@ export function ChatInput({
     setInput("");
     saveDraft("");
     setAttachedImages([]);
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-    }
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -811,7 +799,10 @@ export function ChatInput({
       setActiveCommand(null);
       return;
     }
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+    // On mobile, Enter inserts a newline (matches WeChat/IME behavior). Use
+    // the Send button to submit. On desktop, Enter sends and Shift+Enter is
+    // a newline.
+    if (!isMobile && e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSend();
     }
@@ -850,13 +841,6 @@ export function ChatInput({
 
   return (
     <div className="shrink-0">
-      {/* Resize handle — drag-resize doesn't apply on touch screens. */}
-      {!isMobile && (
-        <div
-          className="h-1 cursor-row-resize hover:bg-primary/20 active:bg-primary/40 transition-colors"
-          onMouseDown={handleInputResizeMouseDown}
-        />
-      )}
       <div className="max-w-4xl mx-auto px-2 sm:px-4 pb-2 sm:pb-3">
         {pendingTodo && (
           <TodoPanel todos={pendingTodo.todos} isPending={pendingTodo.isPending} />
@@ -1133,9 +1117,8 @@ export function ChatInput({
             }}
             placeholder={!isConnected ? "Connecting..." : activeCommand && "inputHint" in activeCommand ? activeCommand.inputHint : "/ for commands, @ for files..."}
             disabled={!isConnected}
-            className="resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 min-h-0"
-            style={{ height: inputHeight }}
-            rows={isMobile ? 1 : 3}
+            className="resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 min-h-0 overflow-y-auto"
+            rows={1}
           />
 
           {/* Bottom toolbar */}
