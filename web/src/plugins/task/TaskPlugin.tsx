@@ -5,16 +5,13 @@ import { TaskDetail } from "./TaskDetail";
 
 export function TaskPlugin({ projectId }: { projectId: string }) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [initialCommentId, setInitialCommentId] = useState<string | undefined>(undefined);
   const [refreshKey, setRefreshKey] = useState(0);
   const [searchParams, setSearchParams] = useSearchParams();
 
   useEffect(() => {
     const openTask = searchParams.get("open_task");
     if (openTask) {
-      const commentId = searchParams.get("comment_id") || undefined;
       setSelectedTaskId(openTask);
-      setInitialCommentId(commentId);
       setSearchParams((prev) => {
         prev.delete("open_task");
         prev.delete("comment_id");
@@ -28,7 +25,7 @@ export function TaskPlugin({ projectId }: { projectId: string }) {
       <div className={selectedTaskId ? "hidden" : "contents"}>
         <TasksPage
           embedded
-          onSelectTask={(id) => { setSelectedTaskId(id); setInitialCommentId(undefined); }}
+          onSelectTask={(id) => setSelectedTaskId(id)}
           currentProjectId={projectId}
           refreshKey={refreshKey}
         />
@@ -37,7 +34,6 @@ export function TaskPlugin({ projectId }: { projectId: string }) {
         <TaskDetail
           taskId={selectedTaskId}
           onBack={() => { setRefreshKey((k) => k + 1); setSelectedTaskId(null); }}
-          initialCommentId={initialCommentId}
         />
       )}
     </>

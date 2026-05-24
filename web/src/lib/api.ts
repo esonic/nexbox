@@ -1,7 +1,7 @@
 import type {
   Task, Project, Session, Asset, AssetVersion,
   ReviewComment, DiffResult, ChatMessage, MessagePart,
-  TaskLabel, TaskComment, ModelInfo,
+  TaskLabel, ModelInfo,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -58,37 +58,18 @@ function createTasksApi(prefix: string) {
     },
     get: (id: string) =>
       request<Task>(`${prefix}/tasks/${id}`),
-    create: (data: { title: string; parent_id?: string; description?: string; priority?: string; project_id?: string; assigner?: string }) =>
+    create: (data: { title: string; description?: string; priority?: string; project_id?: string }) =>
       request<Task>(`${prefix}/tasks`, {
         method: "POST",
         body: JSON.stringify(data),
       }),
-    update: (id: string, data: Partial<{ title: string; description: string; status: string; priority: string; parent_id: string; project_id: string; assigner: string }>) =>
+    update: (id: string, data: Partial<{ title: string; description: string; status: string; priority: string; project_id: string }>) =>
       request<Task>(`${prefix}/tasks/${id}`, {
         method: "PUT",
         body: JSON.stringify(data),
       }),
     delete: (id: string) =>
       request<void>(`${prefix}/tasks/${id}`, { method: "DELETE" }),
-    setParent: (taskId: string, parentId: string) =>
-      request<void>(`${prefix}/tasks/${taskId}/parent`, { method: "PUT", body: JSON.stringify({ parent_id: parentId }) }),
-    removeParent: (taskId: string) =>
-      request<void>(`${prefix}/tasks/${taskId}/parent`, { method: "DELETE" }),
-    // Task comments
-    listComments: (taskId: string) =>
-      request<TaskComment[]>(`${prefix}/tasks/${taskId}/comments`),
-    createComment: (taskId: string, data: { body: string }) =>
-      request<TaskComment>(`${prefix}/tasks/${taskId}/comments`, {
-        method: "POST",
-        body: JSON.stringify(data),
-      }),
-    updateComment: (commentId: string, data: { body: string }) =>
-      request<TaskComment>(`${prefix}/task-comments/${commentId}`, {
-        method: "PUT",
-        body: JSON.stringify(data),
-      }),
-    deleteComment: (commentId: string) =>
-      request<void>(`${prefix}/task-comments/${commentId}`, { method: "DELETE" }),
     addLabel: (taskId: string, labelName: string) =>
       request<void>(`${prefix}/tasks/${taskId}/labels`, {
         method: "POST",

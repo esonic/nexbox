@@ -15,12 +15,11 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
-import { tasksApi, projectsApi, serverApi } from "@/lib/api";
+import { tasksApi, projectsApi } from "@/lib/api";
 import { globalWS } from "@/lib/ws";
 import { cn } from "@/lib/utils";
 import type { Task, Project } from "@/types";
 import { LabelManager } from "./components/LabelManager";
-import { UserPicker } from "./components/UserPicker";
 import { IssueRow } from "./IssueRow";
 import {
   type TaskStatus,
@@ -46,7 +45,6 @@ interface NewTaskDraft {
   priority: string;
   status: string;
   projectId: string;
-  assigner: string;
 }
 
 const newTaskDraftKey = (projectId: string) => `new-task-draft-${projectId}`;
@@ -67,7 +65,7 @@ const clearNewTaskDraft = (projectId: string) =>
   localStorage.removeItem(newTaskDraftKey(projectId));
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Tree & Grouping
+// Grouping
 // ═══════════════════════════════════════════════════════════════════════════
 
 type GroupBy = "status" | "priority" | "none";
@@ -76,10 +74,6 @@ interface DisplayTask {
   task: Task;
   status: TaskStatus;
   priority: TaskPriority;
-  depth: number;
-  hasChildren: boolean;
-  childCount: number;
-  isExpanded: boolean;
 }
 
 function buildFlatList(tasks: Task[]): DisplayTask[] {
@@ -87,10 +81,6 @@ function buildFlatList(tasks: Task[]): DisplayTask[] {
     task,
     status: normalizeStatus(task.status),
     priority: normalizePriority(task.priority),
-    depth: 0,
-    hasChildren: false,
-    childCount: 0,
-    isExpanded: false,
   }));
 }
 
@@ -212,18 +202,16 @@ function GroupSection({
 // ═══════════════════════════════════════════════════════════════════════════
 
 function NewIssueForm({
-  parentId,
   defaultStatus,
   defaultPriority,
   defaultProjectId,
   onSubmit,
   onCancel,
 }: {
-  parentId: string | null;
   defaultStatus?: TaskStatus;
   defaultPriority?: TaskPriority;
   defaultProjectId?: string;
-  onSubmit: (title: string, parentId: string | null, status?: TaskStatus, priority?: TaskPriority, description?: string, projectId?: string, assigner?: string) => void;
+  onSubmit: (title: string, status?: TaskStatus, priority?: TaskPriority, description?: string, projectId?: string) => void;
   onCancel: () => void;
 }) {
   const draftKey = defaultProjectId ? newTaskDraftKey(defaultProjectId) : null;
@@ -234,7 +222,6 @@ function NewIssueForm({
   const [priority, setPriority] = useState<TaskPriority>((savedDraft?.priority as TaskPriority) ?? defaultPriority ?? "medium");
   const [status, setStatus] = useState<TaskStatus>((savedDraft?.status as TaskStatus) ?? defaultStatus ?? "open");
   const [projectId, setProjectId] = useState(savedDraft?.projectId ?? defaultProjectId ?? "");
-  const [assigner, setAssigner] = useState(savedDraft?.assigner ?? "");
   const titleRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -244,14 +231,14 @@ function NewIssueForm({
   // Persist draft on every change
   useEffect(() => {
     if (!defaultProjectId) return;
-    saveNewTaskDraft(defaultProjectId, { title, description, priority, status, projectId, assigner });
-  }, [title, description, priority, status, projectId, assigner, defaultProjectId]);
+    saveNewTaskDraft(defaultProjectId, { title, description, priority, status, projectId });
+  }, [title, description, priority, status, projectId, defaultProjectId]);
 
   const handleSubmit = () => {
     const t = title.trim();
     if (!t) return;
     if (defaultProjectId) clearNewTaskDraft(defaultProjectId);
-    onSubmit(t, parentId, status, priority, description.trim() || undefined, projectId || undefined, assigner.trim() || undefined);
+    onSubmit(t, status, priority, description.trim() || undefined, projectId || undefined);
   };
 
   const handleCancel = () => {
@@ -268,7 +255,7 @@ function NewIssueForm({
         onKeyDown={(e) => {
           if (e.key === "Escape") handleCancel();
         }}
-        placeholder={parentId ? "Sub-task title…" : "Task title…"}
+        placeholder="Task title…"
         className="w-full text-xs bg-transparent border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring"
       />
       <div className="flex gap-2 flex-wrap">
@@ -290,11 +277,6 @@ function NewIssueForm({
             <option key={p.value} value={p.value}>{p.label}</option>
           ))}
         </select>
-        <UserPicker
-          value={assigner}
-          onChange={(val) => setAssigner(val)}
-          placeholder="Assignee…"
-        />
       </div>
       <textarea
         value={description}
@@ -335,16 +317,11 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
   const [showSearch, setShowSearch]           = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const [projects, setProjects]               = useState<Project[]>([]);
-  type AssignerFilter = "all" | "assigned" | "unassigned" | "mine";
-  const [filterAssigner, setFilterAssigner]   = useState<AssignerFilter>("all");
   const [filterLabels, setFilterLabels]       = useState<Set<string>>(new Set());
-  const [currentUser, setCurrentUser]         = useState("");
   const [showLabelManager, setShowLabelManager] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const PAGE_SIZE = 100;
-  const [activeTab, setActiveTab]             = useState<"active" | "completed">("active");
-  const migratingRef = useRef(false);
   const projectNameMap = useMemo(() => {
     const m = new Map<string, string>();
     for (const p of projects) m.set(p.id, p.name);
@@ -352,12 +329,11 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
   }, [projects]);
 
   const [newIssue, setNewIssue] = useState<{
-    parentId: string | null;
     defaultStatus?: TaskStatus;
     defaultPriority?: TaskPriority;
   } | undefined>(() =>
     // Auto-restore form if a draft was saved for this project
-    currentProjectId && loadNewTaskDraft(currentProjectId) ? { parentId: null } : undefined
+    currentProjectId && loadNewTaskDraft(currentProjectId) ? {} : undefined
   );
 
   // ── Load ──
@@ -395,9 +371,6 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
 
   useEffect(() => {
     load();
-    serverApi.info().then((info: any) => {
-      if (info.user_name) setCurrentUser(info.user_name);
-    }).catch(() => {});
   }, [load]);
 
   // Reload when returning from detail view
@@ -438,7 +411,7 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
       if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
       if (e.key === "c" && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
-        setNewIssue({ parentId: null });
+        setNewIssue({});
       }
       if (e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
@@ -469,39 +442,26 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
   const filteredTasks = useMemo(() => {
     let result = tasks;
 
-    // Filter by tab (active vs completed)
-    if (activeTab === "active") {
-      result = result.filter((t) => t.status !== "closed");
-    } else {
-      result = result.filter((t) => t.status === "closed");
-    }
-
-    // Filter by assigner
-    if (filterAssigner === "assigned") result = result.filter((t) => t.assigner && t.assigner.length > 0);
-    else if (filterAssigner === "unassigned") result = result.filter((t) => !t.assigner);
-    else if (filterAssigner === "mine") result = result.filter((t) => t.assigner && currentUser && t.assigner === currentUser);
-
     // Filter by labels
     if (filterLabels.size > 0) {
       result = result.filter((t) => (t.labels || []).some((name) => filterLabels.has(name)));
     }
 
-    // Sort by updated_at descending (newest first)
-    result.sort((a, b) => {
-      const aTime = new Date(a.updated_at).getTime();
-      const bTime = new Date(b.updated_at).getTime();
-      return bTime - aTime;
+    // Sort: open tasks first, then by updated_at descending
+    result = [...result].sort((a, b) => {
+      const aOpen = a.status !== "closed" ? 0 : 1;
+      const bOpen = b.status !== "closed" ? 0 : 1;
+      if (aOpen !== bOpen) return aOpen - bOpen;
+      return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
     });
 
     return result;
-  }, [tasks, activeTab, filterAssigner, filterLabels, currentUser]);
+  }, [tasks, filterLabels]);
 
   const groups = useMemo(
     () => buildGroupedList(filteredTasks, groupBy, searchQuery),
     [filteredTasks, groupBy, searchQuery]
   );
-
-  const totalCount = tasks.length;
 
   // ── Callbacks ──
 
@@ -510,36 +470,27 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
     []
   );
 
-  const handleAddChild = useCallback(
-    (parentId: string) => {
-      setNewIssue({ parentId });
-    },
-    []
-  );
-
   const handleAddInGroup = useCallback(
     (groupKey: string) => {
       if (groupBy === "status") {
-        setNewIssue({ parentId: null, defaultStatus: groupKey as TaskStatus });
+        setNewIssue({ defaultStatus: groupKey as TaskStatus });
       } else if (groupBy === "priority") {
-        setNewIssue({ parentId: null, defaultPriority: groupKey as TaskPriority });
+        setNewIssue({ defaultPriority: groupKey as TaskPriority });
       } else {
-        setNewIssue({ parentId: null });
+        setNewIssue({});
       }
     },
     [groupBy]
   );
 
   const handleCreate = useCallback(
-    async (title: string, parentId: string | null, status?: TaskStatus, priority?: TaskPriority, description?: string, projectId?: string, assigner?: string) => {
+    async (title: string, status?: TaskStatus, priority?: TaskPriority, description?: string, projectId?: string) => {
       try {
         const task = await tasksApi.create({
           title,
-          parent_id: parentId || undefined,
           priority,
           description,
           project_id: projectId,
-          assigner,
         });
         if (status && status !== "open") {
           const updated = await tasksApi.update(task.id, { status });
@@ -583,6 +534,16 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
     },
     []
   );
+  const handleDelete = useCallback(
+    async (id: string) => {
+      if (!window.confirm("Delete this task? This cannot be undone.")) return;
+      try {
+        await tasksApi.delete(id);
+        setTasks((p) => p.filter((t) => t.id !== id));
+      } catch (e) { console.error(e); toast.error("Failed to delete task", { description: String(e) }); }
+    },
+    []
+  );
 
   // ── Render ──
 
@@ -594,41 +555,16 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
     );
   }
 
-  const activeCount = tasks.filter((t) => t.status !== "closed").length;
-  const completedCount = tasks.filter((t) => t.status === "closed").length;
+  const totalCount = tasks.length;
 
   return (
     <div className="flex flex-col h-full">
       {/* ═══════ Top bar – Linear style ═══════ */}
-      <div className="flex items-center px-5 h-[46px] border-b border-border/20 shrink-0 gap-4">
-        <div className="flex items-center gap-3 min-w-0">
-          {/* Tab Selector */}
-          <div className="flex items-center gap-1 bg-muted/30 rounded-lg p-0.5">
-            <button
-              onClick={() => setActiveTab("active")}
-              className={cn(
-                "px-2.5 py-1 rounded-md text-xs font-medium transition-colors",
-                activeTab === "active"
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              Active
-              <span className="ml-1.5 text-[10px] tabular-nums opacity-70">{activeCount}</span>
-            </button>
-            <button
-              onClick={() => setActiveTab("completed")}
-              className={cn(
-                "px-2.5 py-1 rounded-md text-xs font-medium transition-colors",
-                activeTab === "completed"
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              Closed
-              <span className="ml-1.5 text-[10px] tabular-nums opacity-70">{completedCount}</span>
-            </button>
-          </div>
+      <div className="flex items-center px-3 sm:px-5 h-[46px] border-b border-border/20 shrink-0 gap-1.5 sm:gap-4">
+        <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
+          <span className="text-xs text-muted-foreground tabular-nums shrink-0">
+            {totalCount} {totalCount === 1 ? "task" : "tasks"}
+          </span>
 
           {showSearch ? (
             <div className="flex items-center gap-1.5 bg-accent/30 rounded-md px-2.5 py-1 border border-border/20">
@@ -647,10 +583,10 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
           ) : (
             <button
               onClick={() => { setShowSearch(true); setTimeout(() => searchRef.current?.focus(), 50); }}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground border border-border/30 hover:border-border/50 transition-colors"
+              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground border border-border/30 hover:border-border/50 transition-colors shrink-0"
             >
               <Search className="h-3 w-3" />
-              <span>Filter</span>
+              <span className="hidden sm:inline">Filter</span>
             </button>
           )}
         </div>
@@ -659,26 +595,26 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
 
         <button
           onClick={() => setShowLabelManager(true)}
-          className="p-1.5 rounded-md hover:text-foreground hover:bg-accent/30 transition-colors text-muted-foreground"
+          className="p-1.5 rounded-md hover:text-foreground hover:bg-accent/30 transition-colors text-muted-foreground shrink-0"
           title="Manage labels"
         >
           <Tag className="h-4 w-4" />
         </button>
 
         <button
-          onClick={() => setNewIssue({ parentId: null })}
-          className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-accent/40 border border-border/30 hover:border-border/50 transition-colors"
+          onClick={() => setNewIssue({})}
+          className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-accent/40 border border-border/30 hover:border-border/50 transition-colors shrink-0"
           title="New task"
         >
           <Plus className="h-3.5 w-3.5" />
-          <span>New</span>
+          <span className="hidden sm:inline">New</span>
         </button>
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button className={cn(
-              "p-1.5 rounded-md hover:text-foreground hover:bg-accent/30 transition-colors",
-              (filterAssigner !== "all" || filterLabels.size > 0) ? "text-primary" : "text-muted-foreground"
+              "p-1.5 rounded-md hover:text-foreground hover:bg-accent/30 transition-colors shrink-0",
+              filterLabels.size > 0 ? "text-primary" : "text-muted-foreground"
             )}>
               <SlidersHorizontal className="h-4 w-4" />
             </button>
@@ -700,34 +636,11 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
             >
               <ListFilter className="h-3.5 w-3.5 mr-2" /> Priority
             </DropdownMenuItem>
-            <DropdownMenuSeparator />
             <DropdownMenuItem
               onClick={() => setGroupBy("none")}
               className={cn("text-xs cursor-pointer", groupBy === "none" && "font-semibold text-primary")}
             >
               No grouping
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <div className="px-2 py-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
-              Filter
-            </div>
-            <DropdownMenuItem
-              onClick={() => setFilterAssigner((v) => v === "assigned" ? "all" : "assigned")}
-              className={cn("text-xs cursor-pointer", filterAssigner === "assigned" && "font-semibold text-primary")}
-            >
-              <ListFilter className="h-3.5 w-3.5 mr-2" /> Assigned
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onClick={() => setFilterAssigner((v) => v === "unassigned" ? "all" : "unassigned")}
-              className={cn("text-xs cursor-pointer", filterAssigner === "unassigned" && "font-semibold text-primary")}
-            >
-              <ListFilter className="h-3.5 w-3.5 mr-2" /> Unassigned
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onClick={() => setFilterAssigner((v) => v === "mine" ? "all" : "mine")}
-              className={cn("text-xs cursor-pointer", filterAssigner === "mine" && "font-semibold text-primary")}
-            >
-              <ListFilter className="h-3.5 w-3.5 mr-2" /> Assigned to Me
             </DropdownMenuItem>
             {allLabels.length > 0 && (
               <>
@@ -753,11 +666,11 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
                 })}
               </>
             )}
-            {(filterAssigner !== "all" || filterLabels.size > 0) && (
+            {filterLabels.size > 0 && (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
-                  onClick={() => { setFilterAssigner("all"); setFilterLabels(new Set()); }}
+                  onClick={() => setFilterLabels(new Set())}
                   className="text-xs cursor-pointer text-destructive"
                 >
                   Clear all filters
@@ -771,7 +684,6 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
       {/* ═══════ New issue form ═══════ */}
       {newIssue !== undefined && (
         <NewIssueForm
-          parentId={newIssue.parentId}
           defaultStatus={newIssue.defaultStatus}
           defaultPriority={newIssue.defaultPriority}
           defaultProjectId={currentProjectId}
@@ -799,10 +711,10 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
                     key={item.task.id}
                     task={item.task}
                     grouped={groupBy !== "none"}
-                    onAddChild={!item.task.parent_id ? handleAddChild : undefined}
                     onStatusChange={handleStatus}
                     onPriorityChange={handlePriority}
                     onTitleChange={handleTitle}
+                    onDelete={handleDelete}
                     onPick={onPickTask}
                     onClick={onSelectTask ? (task) => onSelectTask(task.id) : undefined}
                     projectName={item.task.project_id ? projectNameMap.get(item.task.project_id) : undefined}
@@ -828,7 +740,7 @@ export function TasksPage({ embedded = false, onPickTask, onSelectTask, currentP
             </div>
             {!searchQuery && (
               <button
-                onClick={() => setNewIssue({ parentId: null })}
+                onClick={() => setNewIssue({})}
                 className="text-xs text-primary hover:underline mt-1"
               >
                 Create task

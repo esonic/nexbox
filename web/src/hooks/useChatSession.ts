@@ -898,12 +898,10 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       } catch {
         storeAddPickedTask(sessionId, {
           id: detail.id,
-          parent_id: "",
           title: detail.title,
           description: "",
           status: (detail.status as Task["status"]) || "open",
           priority: "medium",
-          comment_count: 0,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         });

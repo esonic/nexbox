@@ -7,7 +7,7 @@
  */
 import { useState, useRef } from "react";
 import { toast } from "sonner";
-import { Plus, CornerRightUp, AtSign, MessageSquare } from "lucide-react";
+import { CornerRightUp, AtSign, Trash2 } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -29,29 +29,18 @@ import {
   shortId,
 } from "./task-config";
 import { formatRelativeDate } from "@/lib/utils";
-import { STATUS_ICONS, PRIORITY_ICONS, TypeIssue, TypeTask } from "./task-icons";
+import { STATUS_ICONS, PRIORITY_ICONS } from "./task-icons";
 
 // ── Props ──
 
 export interface IssueRowProps {
   task: Task;
 
-  /** Indentation depth (default 0). Used for sub-issues. */
-  depth?: number;
-
-  /** Whether this row has children (shows expand toggle). */
-  hasChildren?: boolean;
-  /** Number of child issues. */
-  childCount?: number;
-  /** Whether children are currently expanded. */
-  isExpanded?: boolean;
-
   /** Callbacks — omit any to make that part read-only. */
-  onToggle?: (id: string) => void;
-  onAddChild?: (id: string) => void;
   onStatusChange?: (id: string, status: TaskStatus) => void;
   onPriorityChange?: (id: string, priority: TaskPriority) => void;
   onTitleChange?: (id: string, title: string) => void;
+  onDelete?: (id: string) => void;
   onClick?: (task: Task) => void;
 
   /** Callback to pick/send this task to chat. Shows a pick icon on hover. */
@@ -72,15 +61,10 @@ export interface IssueRowProps {
 
 export function IssueRow({
   task,
-  depth = 0,
-  hasChildren = false,
-  childCount = 0,
-  isExpanded = false,
-  onToggle,
-  onAddChild,
   onStatusChange,
   onPriorityChange,
   onTitleChange,
+  onDelete,
   onClick,
   onPick,
   compact = false,
@@ -198,14 +182,6 @@ export function IssueRow({
       {/* Priority */}
       {priorityCell}
 
-      {/* Type icon (Issue vs Task) */}
-      <span
-        className="shrink-0 w-5 h-5 flex items-center justify-center text-muted-foreground"
-        title={task.external_type || "Issue"}
-      >
-        {task.external_type === "Task" ? <TypeTask /> : <TypeIssue />}
-      </span>
-
       {/* Issue ID */}
       {!compact && (
         <span
@@ -274,15 +250,6 @@ export function IssueRow({
         <div className="flex items-center shrink-0">
           {/* Hover actions */}
           <div className="hidden group-hover/row:flex items-center gap-0 mr-1">
-            {onAddChild && (
-              <button
-                onClick={(e) => { e.stopPropagation(); onAddChild(task.id); }}
-                className="p-1 rounded hover:bg-accent/60 text-muted-foreground/60 hover:text-foreground transition-colors"
-                title="Add sub-task"
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </button>
-            )}
             {onPick && (
               <button
                 onClick={(e) => { e.stopPropagation(); onPick(task); }}
@@ -307,10 +274,19 @@ export function IssueRow({
             {onStatusChange && !isDone && (
               <button
                 onClick={(e) => { e.stopPropagation(); onStatusChange(task.id, "closed"); }}
-                className="p-1 rounded hover:bg-accent/60 text-muted-foreground/60 hover:text-foreground transition-colors"
-                title="Close"
+                className="p-1 rounded hover:bg-accent/60 text-muted-foreground/60 hover:text-emerald-500 transition-colors"
+                title="Mark as done"
               >
                 <STATUS_ICONS.closed className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {onDelete && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onDelete(task.id); }}
+                className="p-1 rounded hover:bg-destructive/10 text-muted-foreground/60 hover:text-destructive transition-colors"
+                title="Delete task"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
               </button>
             )}
           </div>
@@ -319,18 +295,6 @@ export function IssueRow({
           <div className="flex items-center ml-1 gap-2">
             {task.created_by && task.created_by !== "local" && (
               <UserChip userName={task.created_by} className="text-blue-400" />
-            )}
-            {task.assigner && (
-              <UserChip userName={task.assigner} className="text-amber-500" />
-            )}
-            {task.comment_count > 0 && (
-              <span
-                className="shrink-0 flex items-center gap-0.5 text-[10px] text-muted-foreground"
-                title={`${task.comment_count} comment${task.comment_count > 1 ? "s" : ""}`}
-              >
-                <MessageSquare className="h-3 w-3" />
-                {task.comment_count}
-              </span>
             )}
             <span
               className="shrink-0 text-[11px] text-muted-foreground pr-2 ml-2 tabular-nums text-right"

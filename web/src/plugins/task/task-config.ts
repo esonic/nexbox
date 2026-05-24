@@ -6,8 +6,8 @@ import type { Task } from "@/types";
 
 // ── Types ──
 
-export type TaskStatus = Task["status"];
-export type TaskPriority = Task["priority"];
+export type TaskStatus = "open" | "closed";
+export type TaskPriority = "low" | "medium" | "high";
 
 export interface CfgItem<V> {
   value: V;
@@ -18,15 +18,14 @@ export interface CfgItem<V> {
 // ── Status definitions ──
 
 export const STATUS_LIST: CfgItem<TaskStatus>[] = [
-  { value: "open",   label: "Open",   color: "text-blue-500" },
-  { value: "closed", label: "Closed", color: "text-[#8b95a2]" },
+  { value: "open",   label: "Open", color: "text-blue-500" },
+  { value: "closed", label: "Done", color: "text-emerald-500" },
 ];
 
 export const PRIORITY_LIST: CfgItem<TaskPriority>[] = [
-  { value: "low",      label: "Low",      color: "text-[#8b95a2]" },
-  { value: "medium",   label: "Medium",   color: "text-blue-500" },
-  { value: "high",     label: "High",     color: "text-[#f2994a]" },
-  { value: "critical", label: "Critical", color: "text-[#f2555a]" },
+  { value: "low",    label: "Low",    color: "text-[#8b95a2]" },
+  { value: "medium", label: "Medium", color: "text-blue-500" },
+  { value: "high",   label: "High",   color: "text-[#f2994a]" },
 ];
 
 export const STATUS_MAP  = new Map(STATUS_LIST.map((s) => [s.value, s]));

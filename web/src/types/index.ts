@@ -20,13 +20,10 @@ export interface User {
 export interface Task {
   id: string;
   project_id?: string;
-  parent_id: string;
   title: string;
   description: string;
   status: "open" | "closed";
-  priority: "low" | "medium" | "high" | "critical";
-  assigner?: string;
-  comment_count: number;
+  priority: "low" | "medium" | "high";
   created_by?: string;
   created_at: string;
   updated_at: string;
@@ -36,8 +33,6 @@ export interface Task {
   external_id?: string;
   external_url?: string;
   external_type?: string;
-  children?: Task[];
-  child_count?: number;
   due_date?: string;
 }
 
@@ -47,15 +42,6 @@ export interface TaskLabel {
   color: string;
   description: string;
   created_at: string;
-}
-
-export interface TaskComment {
-  id: string;
-  task_id: string;
-  author: string;
-  body: string;
-  created_at: string;
-  updated_at: string;
 }
 
 export interface Session {

@@ -407,7 +407,7 @@ export function SessionWorkspace() {
           )}
         </div>
 
-        {/* Panel toggles — order: Files, Terminal, Task, Workflow, Git */}
+        {/* Panel toggles — order: Files, Task, Workflow, Terminal, Git */}
         {isRealProject && (
           <Button
             variant={rightPanel === "files" ? "secondary" : "ghost"}
@@ -418,18 +418,6 @@ export function SessionWorkspace() {
           >
             <FolderCode className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Files</span>
-          </Button>
-        )}
-        {isRealProject && (
-          <Button
-            variant={showingTerminalInRightSlot ? "secondary" : "ghost"}
-            size="sm"
-            title="Terminal"
-            className="h-7 text-xs gap-1 px-2 sm:px-2.5"
-            onClick={() => activeSessionId && setTerminalShowExclusive(activeSessionId, !showTerminal)}
-          >
-            <TerminalSquare className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Terminal</span>
           </Button>
         )}
         <Button
@@ -452,6 +440,18 @@ export function SessionWorkspace() {
           <Workflow className="h-3.5 w-3.5" />
           <span className="hidden sm:inline">Workflow</span>
         </Button>
+        {isRealProject && (
+          <Button
+            variant={showingTerminalInRightSlot ? "secondary" : "ghost"}
+            size="sm"
+            title="Terminal"
+            className="h-7 text-xs gap-1 px-2 sm:px-2.5"
+            onClick={() => activeSessionId && setTerminalShowExclusive(activeSessionId, !showTerminal)}
+          >
+            <TerminalSquare className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Terminal</span>
+          </Button>
+        )}
         {isRealProject && boundProject?.is_git_repo && (
           <Button
             variant={rightPanel === "git" ? "secondary" : "ghost"}
