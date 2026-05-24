@@ -40,46 +40,16 @@ const AGENT_LABELS: Record<string, string> = {
 
 export const SLASH_COMMANDS = [
   {
-    name: "design",
-    label: "Write Design Doc",
-    description: "Generate a design document for the project",
-    prompt: "Based on the project context, write a detailed design document. If anything is ambiguous, use the ask_question tool to clarify with user before proceeding. Save the final document using the save_asset tool when done.",
-  },
-  {
-    name: "revise",
-    label: "Address Comments",
-    description: "Revise documents based on review comments",
-    prompt: "If session references include assets, use list_asset_comments on those assets, address the feedback, and save via save_asset. If no assets are referenced, call list_assets to get recent ones, then use ask_question to ask the user which asset to revise before proceeding.",
-  },
-  {
-    name: "code",
-    label: "Implement Code",
-    description: "Write code based on design doc or task",
-    prompt: "If session references include assets or tasks, use get_asset_content or get_task as the spec and implement the code. If nothing is referenced, call list_tasks to get recent ones, then use ask_question to ask the user which task to implement before proceeding.",
-  },
-  {
-    name: "review",
-    label: "Code Review",
-    description: "Review code or git diff using Prism rules",
-    prompt: "Review the code based on the user's request. " +
-      "If the user specifies rule group(s), call get_code_review_rules with those IDs to fetch the rules. " +
-      "If no rule group is specified, proceed with general best practices. " +
-      "Get the code via git diff, git show, or file read as appropriate. " +
-      "Report issues grouped by severity (error → warning → info) with file, line, rule name, and suggestion.",
-    needsInput: true,
-    inputHint: "What to review (e.g. 'git diff', 'git diff HEAD~1 using rule group 5')...",
-  },
-  {
-    name: "e2e_test",
-    label: "E2E Browser Test",
-    description: "Run end-to-end tests with Chrome browser",
-    prompt: "You now have Chrome DevTools MCP tools available for end-to-end browser testing. " +
+    name: "browser",
+    label: "Enable Browser Control",
+    description: "Enable Chrome DevTools tools for browser control",
+    prompt: "You now have Chrome DevTools MCP tools available for browser control. " +
       "Use take_snapshot to see the page structure (accessibility tree with UIDs), then interact with elements using their UIDs. " +
       "Typical workflow: navigate_page -> take_snapshot -> click/fill/type_text -> take_screenshot to verify. " +
       "Always call take_snapshot before interacting to get fresh UIDs.",
     features: ["chrome_devtools"],
     needsInput: true,
-    inputHint: "Describe what to test (e.g. URL, flow, expected behavior)...",
+    inputHint: "What should the browser do (e.g. URL, action, expected outcome)...",
   },
 ] as const;
 
