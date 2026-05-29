@@ -187,6 +187,21 @@ func main() {
 	sessionManager := agent.NewSessionManager()
 
 	hub := api.NewChatHub()
+	// Resolve session → project → owner for the hub, so per-session events
+	// only fan out to the owning user's WS connections. Without this, every
+	// user's browser receives every other user's streaming text and "session
+	// complete" notifications.
+	hub.SessionOwnerLookup = func(sessionID string) int64 {
+		sess, err := dataStore.GetSession(sessionID)
+		if err != nil || sess == nil || sess.ProjectID == "" {
+			return 0
+		}
+		proj, err := dataStore.GetProject(sess.ProjectID)
+		if err != nil || proj == nil {
+			return 0
+		}
+		return proj.OwnerUserID
+	}
 
 	termMgr := api.NewTerminalManager()
 	mcpServer.SetTerminalManager(termMgr)

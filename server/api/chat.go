@@ -29,7 +29,8 @@ var upgrader = websocket.Upgrader{
 // HandleGlobalWS is the single global WebSocket endpoint.
 // All sessions are multiplexed over this one connection via subscribe/unsubscribe.
 func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizeWS(w, r) {
+	uid, ok := s.authorizeWS(w, r)
+	if !ok {
 		return
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -39,7 +40,7 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	s.Hub.AddClient(conn)
+	s.Hub.AddClient(conn, uid)
 	defer s.Hub.RemoveClient(conn)
 
 	for {

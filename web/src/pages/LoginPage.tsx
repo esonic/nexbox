@@ -11,6 +11,25 @@ interface LoginPageProps {
   onAuthed?: () => void;
 }
 
+/**
+ * Returns a safe post-login navigation target. Rejects anything that isn't a
+ * same-origin relative path, including:
+ *   - missing/empty values            → "/"
+ *   - protocol-relative URLs ("//x")  → would send the browser to x's origin
+ *   - absolute URLs ("http://x")      → off-site redirect
+ *   - paths starting with "/login"    → would loop back to login
+ *   - bare "\..." / control chars     → some browsers normalize "\\x" to "//x"
+ */
+function safeRedirectTarget(from: string | null): string {
+  if (!from) return "/";
+  // Must start with a single slash, not "//" or "/\" (some browsers treat
+  // "/\\evil.com" as protocol-relative after normalization).
+  if (!from.startsWith("/")) return "/";
+  if (from.startsWith("//") || from.startsWith("/\\")) return "/";
+  if (from.startsWith("/login")) return "/";
+  return from;
+}
+
 export function LoginPage({ onAuthed }: LoginPageProps) {
   const navigate = useNavigate();
   const [params] = useSearchParams();
@@ -27,8 +46,7 @@ export function LoginPage({ onAuthed }: LoginPageProps) {
     try {
       await authApi.login(username, password);
       onAuthed?.();
-      const from = params.get("from");
-      navigate(from && from.startsWith("/") && !from.startsWith("/login") ? from : "/", { replace: true });
+      navigate(safeRedirectTarget(params.get("from")), { replace: true });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg || "Login failed");

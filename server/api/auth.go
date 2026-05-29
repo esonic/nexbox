@@ -5,9 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -15,6 +19,11 @@ import (
 
 	"github.com/esonic/nexbox/store"
 )
+
+// limiterSweepInterval bounds how often loginRateLimiter walks the whole map
+// to drop fully-expired keys. Each rate-limited request opportunistically
+// triggers a sweep if this much wall-time has passed since the last one.
+const limiterSweepInterval = 10 * time.Minute
 
 // authCookieName is the cookie carrying the JWT bearer token.
 const authCookieName = "nexbox_auth"
@@ -24,11 +33,21 @@ const authCookieName = "nexbox_auth"
 // regenerated each boot.
 const jwtTTL = 7 * 24 * time.Hour
 
-// Authenticator owns the per-process JWT signing key. A new random key is
-// generated every time the server starts, so server restarts invalidate every
-// existing session — by design (see nexbox setup notes).
+// Login rate-limit knobs. Counters live only in process memory, so a restart
+// wipes the slate clean.
+const (
+	loginRateWindow      = 15 * time.Minute
+	loginMaxFailsPerIP   = 10
+	loginMaxFailsPerUser = 5
+)
+
+// Authenticator owns the per-process JWT signing key and the in-memory login
+// rate limiters. A new signing key is generated every time the server starts,
+// so restarts invalidate every existing session — by design.
 type Authenticator struct {
-	secret []byte
+	secret      []byte
+	ipLimiter   *loginRateLimiter
+	userLimiter *loginRateLimiter
 }
 
 // NewAuthenticator generates a fresh signing key from crypto/rand.
@@ -37,7 +56,111 @@ func NewAuthenticator() *Authenticator {
 	if _, err := rand.Read(secret); err != nil {
 		log.Fatalf("[auth] failed to seed JWT secret: %v", err)
 	}
-	return &Authenticator{secret: secret}
+	return &Authenticator{
+		secret:      secret,
+		ipLimiter:   newLoginRateLimiter(loginRateWindow, loginMaxFailsPerIP),
+		userLimiter: newLoginRateLimiter(loginRateWindow, loginMaxFailsPerUser),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Login rate limiter (in-memory sliding window)
+// ---------------------------------------------------------------------------
+
+type loginRateLimiter struct {
+	mu        sync.Mutex
+	failures  map[string][]time.Time
+	window    time.Duration
+	maxFails  int
+	lastSweep time.Time
+}
+
+func newLoginRateLimiter(window time.Duration, maxFails int) *loginRateLimiter {
+	return &loginRateLimiter{
+		failures:  make(map[string][]time.Time),
+		window:    window,
+		lastSweep: time.Now(),
+		maxFails:  maxFails,
+	}
+}
+
+// pruneKeyLocked filters key's failure list to entries newer than cutoff and
+// deletes the map entry when nothing remains. Returns the surviving slice.
+// Caller must hold l.mu.
+func (l *loginRateLimiter) pruneKeyLocked(key string, cutoff time.Time) []time.Time {
+	list := l.failures[key]
+	kept := list[:0]
+	for _, t := range list {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) == 0 {
+		delete(l.failures, key)
+	} else {
+		l.failures[key] = kept
+	}
+	return kept
+}
+
+// sweepIfDueLocked walks the entire map and drops fully-expired entries when
+// at least limiterSweepInterval has elapsed since the last sweep. This is
+// what keeps the map from growing unbounded when many distinct attacker IPs
+// or usernames hit the endpoint once and never come back. Caller must hold
+// l.mu.
+func (l *loginRateLimiter) sweepIfDueLocked(now time.Time) {
+	if now.Sub(l.lastSweep) < limiterSweepInterval {
+		return
+	}
+	l.lastSweep = now
+	cutoff := now.Add(-l.window)
+	for k := range l.failures {
+		l.pruneKeyLocked(k, cutoff)
+	}
+}
+
+// allowed prunes expired failures for key and reports whether another attempt
+// is permitted. retryAfter is the wait until the oldest in-window failure
+// expires (so the caller can hint Retry-After to the client).
+func (l *loginRateLimiter) allowed(key string) (ok bool, retryAfter time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	l.sweepIfDueLocked(now)
+	kept := l.pruneKeyLocked(key, now.Add(-l.window))
+	if len(kept) < l.maxFails {
+		return true, 0
+	}
+	return false, kept[0].Add(l.window).Sub(now)
+}
+
+func (l *loginRateLimiter) recordFailure(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	l.sweepIfDueLocked(now)
+	l.failures[key] = append(l.failures[key], now)
+}
+
+func (l *loginRateLimiter) reset(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.failures, key)
+}
+
+// clientIPFromRequest extracts the remote IP for rate-limit keying. We
+// intentionally use r.RemoteAddr and do NOT trust X-Forwarded-For: in a
+// direct-listen deploy that header is attacker-controlled and would let a
+// scripted brute-force trivially bypass per-IP limits by rotating the
+// header. If you put nexbox behind a trusted reverse proxy, strip XFF at
+// the proxy and let it rewrite RemoteAddr (or extend this helper to honor
+// a configured trusted-proxy CIDR).
+func clientIPFromRequest(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // authClaims is the payload embedded in every issued JWT.
@@ -201,6 +324,10 @@ type loginResponse struct {
 // HandleLogin verifies the (username, password) pair and sets the auth cookie.
 // POST /api/login
 func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
+	// Cap the request body so a malicious caller can't ship a huge JSON blob
+	// just to make the parser allocate.
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -210,11 +337,32 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username and password are required")
 		return
 	}
+
+	ip := clientIPFromRequest(r)
+	// Username lookup is case-sensitive in the DB; normalize for limiter keying
+	// so per-user limits can't be bypassed by varying the case in repeated
+	// attempts against the same account.
+	userKey := strings.ToLower(req.Username)
+
+	if ok, retry := s.Auth.ipLimiter.allowed(ip); !ok {
+		writeRateLimited(w, retry, "too many login attempts from this address, try again later")
+		return
+	}
+	if ok, retry := s.Auth.userLimiter.allowed(userKey); !ok {
+		writeRateLimited(w, retry, "too many failed attempts for this account, try again later")
+		return
+	}
+
 	u, err := s.Store.GetUserByUsername(req.Username)
 	if err != nil {
 		if errors.Is(err, store.ErrUserNotFound) {
-			// Use the same error message for "no such user" and "wrong password"
-			// to avoid leaking which usernames exist.
+			// Use the same error message for "no such user" and "wrong
+			// password" so attackers can't enumerate usernames from the
+			// response text. Response timing still differs (this branch
+			// skips bcrypt), but the rate limiter caps how quickly that
+			// signal can be sampled.
+			s.Auth.ipLimiter.recordFailure(ip)
+			s.Auth.userLimiter.recordFailure(userKey)
 			writeError(w, http.StatusUnauthorized, "invalid username or password")
 			return
 		}
@@ -222,9 +370,17 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(req.Password)); err != nil {
+		s.Auth.ipLimiter.recordFailure(ip)
+		s.Auth.userLimiter.recordFailure(userKey)
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
+
+	// Successful login: clear this account's counter so a legit user isn't
+	// punished for typos. Leave the per-IP counter alone — it expires by
+	// window — so a single guessed password on a shared NAT can't unlock
+	// unlimited attempts against other usernames.
+	s.Auth.userLimiter.reset(userKey)
 
 	token, err := s.Auth.issue(u)
 	if err != nil {
@@ -251,24 +407,36 @@ func (s *Server) HandleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // authorizeWS validates the JWT for a WebSocket upgrade request before the
-// connection is upgraded. It writes a 401 and returns false when auth fails,
-// so the caller should `return` immediately on a false result.
-func (s *Server) authorizeWS(w http.ResponseWriter, r *http.Request) bool {
+// connection is upgraded. On success it returns the authenticated user id and
+// true. On failure it writes a 401 and returns (0, false), so the caller
+// should `return` immediately on a false result.
+func (s *Server) authorizeWS(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	raw := readAuthToken(r)
 	if raw == "" {
 		http.Error(w, "not authenticated", http.StatusUnauthorized)
-		return false
+		return 0, false
 	}
 	claims, err := s.Auth.parse(raw)
 	if err != nil {
 		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
-		return false
+		return 0, false
 	}
-	if u, err := s.Store.GetUserByID(claims.UserID); err != nil || u == nil {
+	u, err := s.Store.GetUserByID(claims.UserID)
+	if err != nil || u == nil {
 		http.Error(w, "user no longer exists", http.StatusUnauthorized)
-		return false
+		return 0, false
 	}
-	return true
+	return u.ID, true
+}
+
+// writeRateLimited responds with 429 + a Retry-After hint (in seconds).
+func writeRateLimited(w http.ResponseWriter, retry time.Duration, message string) {
+	secs := int64(retry.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(secs, 10))
+	writeError(w, http.StatusTooManyRequests, fmt.Sprintf("%s (retry in %ds)", message, secs))
 }
 
 // HandleAuthMe returns the current user if authenticated, or 401 when not.

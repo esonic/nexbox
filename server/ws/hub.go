@@ -7,10 +7,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// clientConn wraps a WebSocket connection with its own write mutex
+// clientConn wraps a WebSocket connection with its own write mutex and the
+// authenticated user that owns this connection (0 for legacy/unauthenticated).
 type clientConn struct {
 	conn    *websocket.Conn
 	writeMu sync.Mutex
+	userID  int64
 }
 
 // Hub is the base WebSocket hub that manages client connections and
@@ -29,11 +31,13 @@ func NewHub(label string) Hub {
 	}
 }
 
-// AddClient registers a new WebSocket connection.
-func (h *Hub) AddClient(conn *websocket.Conn) {
+// AddClient registers a new WebSocket connection. userID identifies the
+// authenticated user; pass 0 only for endpoints that intentionally serve
+// unauthenticated traffic.
+func (h *Hub) AddClient(conn *websocket.Conn, userID int64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.clients[conn] = &clientConn{conn: conn}
+	h.clients[conn] = &clientConn{conn: conn, userID: userID}
 	log.Printf("[%s] Client added (%d total)", h.Label, len(h.clients))
 }
 
@@ -54,9 +58,28 @@ func (h *Hub) ClientCount() int {
 
 // BroadcastRaw sends pre-serialized data to all connected clients concurrently.
 func (h *Hub) BroadcastRaw(data []byte) {
+	h.broadcastFiltered(data, 0)
+}
+
+// BroadcastRawToUser sends pre-serialized data only to connections owned by
+// the given user. userID must be > 0; pass 0 to broadcast to everyone via
+// BroadcastRaw instead.
+func (h *Hub) BroadcastRawToUser(data []byte, userID int64) {
+	if userID <= 0 {
+		return
+	}
+	h.broadcastFiltered(data, userID)
+}
+
+// broadcastFiltered fans data out to all connections (when userID == 0) or
+// only to connections whose userID matches.
+func (h *Hub) broadcastFiltered(data []byte, userID int64) {
 	h.mu.RLock()
 	clients := make([]*clientConn, 0, len(h.clients))
 	for _, client := range h.clients {
+		if userID != 0 && client.userID != userID {
+			continue
+		}
 		clients = append(clients, client)
 	}
 	h.mu.RUnlock()
@@ -65,7 +88,6 @@ func (h *Hub) BroadcastRaw(data []byte) {
 		return
 	}
 
-	// Send to all clients concurrently
 	var wg sync.WaitGroup
 	for _, client := range clients {
 		wg.Add(1)

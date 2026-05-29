@@ -28,6 +28,19 @@ type ChatHub struct {
 	subMu       sync.RWMutex
 	subscribers map[string]map[uint64]SessionEventHandler
 	subCounter  uint64
+
+	// SessionOwnerLookup resolves a session id to the user id that owns the
+	// session's project. Set from main.go after the store is wired up. When
+	// it returns 0 (unknown session) the hub falls back to broadcasting —
+	// safer than silently swallowing system events for sessions whose owner
+	// can't be resolved (e.g. very early startup, transient DB issues).
+	SessionOwnerLookup func(sessionID string) int64
+
+	// ownerCache memoizes sessionID → ownerUserID so the hot Emit path
+	// avoids a DB round-trip per text-delta event. Sessions can be moved
+	// between projects, so callers that change ownership should invoke
+	// InvalidateSessionOwner.
+	ownerCache sync.Map // sessionID(string) -> int64
 }
 
 func NewChatHub() *ChatHub {
@@ -36,6 +49,29 @@ func NewChatHub() *ChatHub {
 		active:      make(map[string]bool),
 		subscribers: make(map[string]map[uint64]SessionEventHandler),
 	}
+}
+
+// sessionOwnerID returns the owner user id for a session, consulting the
+// cache first and falling back to SessionOwnerLookup. Returns 0 when the
+// owner can't be determined.
+func (h *ChatHub) sessionOwnerID(sessionID string) int64 {
+	if sessionID == "" || h.SessionOwnerLookup == nil {
+		return 0
+	}
+	if v, ok := h.ownerCache.Load(sessionID); ok {
+		return v.(int64)
+	}
+	uid := h.SessionOwnerLookup(sessionID)
+	if uid > 0 {
+		h.ownerCache.Store(sessionID, uid)
+	}
+	return uid
+}
+
+// InvalidateSessionOwner drops a cached sessionID → ownerUserID mapping. Call
+// after moving a session to a different project, or on delete.
+func (h *ChatHub) InvalidateSessionOwner(sessionID string) {
+	h.ownerCache.Delete(sessionID)
 }
 
 // --- Active state tracking ---
@@ -94,8 +130,12 @@ func (h *ChatHub) SubscribeSession(sessionID string, handler SessionEventHandler
 
 // --- Event emission ---
 
-// Emit broadcasts an event to ALL connected clients (tagged with sessionID),
-// and also notifies server-side subscribers for this session.
+// Emit broadcasts a session event only to WebSocket clients whose
+// authenticated user owns the session's project. This is what stops one
+// user's streaming text/tool/done events (and the resulting "Session
+// complete" browser notification) from leaking into other users' clients.
+// Server-side subscribers are notified regardless, since they are internal
+// (workflow orchestrator etc.).
 func (h *ChatHub) Emit(sessionID string, event ChatEvent) {
 	tagged := TaggedEvent{
 		ChatEvent: event,
@@ -108,7 +148,14 @@ func (h *ChatHub) Emit(sessionID string, event ChatEvent) {
 		return
 	}
 
-	h.BroadcastRaw(data)
+	if uid := h.sessionOwnerID(sessionID); uid > 0 {
+		h.BroadcastRawToUser(data, uid)
+	} else {
+		// Unknown owner — typically only happens for sessions that don't
+		// exist yet or system events. Falling back to broadcast preserves
+		// existing behavior for those edge cases instead of dropping them.
+		h.BroadcastRaw(data)
+	}
 
 	// Notify server-side subscribers
 	h.subMu.RLock()
@@ -123,9 +170,13 @@ func (h *ChatHub) Emit(sessionID string, event ChatEvent) {
 	}
 }
 
-// NotifyChange broadcasts a data-change event to all connected clients.
-// This is used by API handlers and MCP tools to notify the frontend
-// when assets, tasks, or other entities are created/updated/deleted.
+// NotifyChange broadcasts a data-change event to connected clients.
+// For "session" entities we filter to the session's owner so other users
+// don't see sidebar refresh triggers for sessions they can't access.
+// For task/asset/workflow entities we still broadcast to all — the API
+// handlers already gate read access by user, and the change ping just
+// causes a refetch on the client which is a no-op for non-owners. Refining
+// these further is worthwhile follow-up work.
 func (h *ChatHub) NotifyChange(entityType, entityID, action string) {
 	data, _ := json.Marshal(map[string]interface{}{
 		"type":        "change",
@@ -133,6 +184,15 @@ func (h *ChatHub) NotifyChange(entityType, entityID, action string) {
 		"entity_id":   entityID,
 		"action":      action,
 	})
+	if entityType == "session" {
+		if uid := h.sessionOwnerID(entityID); uid > 0 {
+			h.BroadcastRawToUser(data, uid)
+			if action == "deleted" {
+				h.InvalidateSessionOwner(entityID)
+			}
+			return
+		}
+	}
 	h.BroadcastRaw(data)
 }
 
