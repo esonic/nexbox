@@ -984,7 +984,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     window.open(filesApi.serveUrl(projectId, selectedPath, sessionId), "_blank", "noopener");
   }, [projectId, selectedPath, sessionId]);
 
-  const handleCreatePublicShare = useCallback(async () => {
+  const handleOpenShareLink = useCallback(async () => {
     if (!selectedPath) return;
     try {
       const { url } = await filesApi.createWebShare(projectId, selectedPath);
@@ -992,6 +992,19 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     } catch (e) {
       console.error("Create share failed:", e);
       toast.error("Failed to create share link", { description: String(e) });
+    }
+  }, [projectId, selectedPath]);
+
+  const handleCopyShareLink = useCallback(async () => {
+    if (!selectedPath) return;
+    try {
+      const { url } = await filesApi.createWebShare(projectId, selectedPath);
+      const absoluteUrl = new URL(url, window.location.origin).href;
+      await navigator.clipboard.writeText(absoluteUrl);
+      toast.success("Share link copied to clipboard");
+    } catch (e) {
+      console.error("Copy share failed:", e);
+      toast.error("Failed to copy share link", { description: String(e) });
     }
   }, [projectId, selectedPath]);
 
@@ -1421,8 +1434,11 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                       </button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
-                      <DropdownMenuItem onClick={handleCreatePublicShare}>
-                        Create public share link
+                      <DropdownMenuItem onClick={handleOpenShareLink}>
+                        Open share link
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={handleCopyShareLink}>
+                        Copy share link
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
