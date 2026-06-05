@@ -311,7 +311,7 @@ const TextBlock = memo(function TextBlock({ content, isStreaming }: { content: s
   if (!visible) return null;
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
       components={{
         pre: ({ children }) => (
           <pre className="bg-muted rounded-md p-3 overflow-x-auto text-[13px] my-2 font-mono">

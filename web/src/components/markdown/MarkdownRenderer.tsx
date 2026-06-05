@@ -215,7 +215,7 @@ export function MarkdownRenderer({
   return (
     <div className={cn(className)}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
         rehypePlugins={[rehypeRaw]}
         components={{
           ...components,
