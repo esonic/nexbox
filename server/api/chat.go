@@ -245,7 +245,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			}
 		}()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Hour)
 		defer func() {
 			if !released {
 				cancel()
