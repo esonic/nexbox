@@ -27,6 +27,8 @@ import { cn } from "@/lib/utils";
 import { filesApi, serverApi, type FileEntry, type FileContentResponse, type FileSearchResult } from "@/lib/api";
 import { getLangFromPath, ensureLangRegistered, highlightCode } from "@/lib/highlight";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
+import { useLayoutStore } from "@/stores/layout";
+import { FILE_TREE_WIDTH_MIN, FILE_TREE_WIDTH_MAX } from "@/lib/constants";
 import { MarkdownRenderer, isMarkdownPath } from "@/components/markdown/MarkdownRenderer";
 import {
   Dialog,
@@ -639,20 +641,54 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
-  // Persisted state from store
-  const {
-    ownerProjectId, expanded, selectedPath,
-    setSelectedPath, toggleExpand, resetForProject,
-  } = useFileBrowserStore();
+  // Persisted state from store — bucketed per-project so switching projects
+  // (and coming back) preserves both tree expansion and selected file.
+  const EMPTY_EXPANDED = useMemo(() => new Set<string>(), []);
+  const expanded = useFileBrowserStore(
+    (s) => s.projects[projectId]?.expanded ?? EMPTY_EXPANDED
+  );
+  const selectedPath = useFileBrowserStore(
+    (s) => s.projects[projectId]?.selectedPath ?? null
+  );
+  const toggleExpandRaw = useFileBrowserStore((s) => s.toggleExpand);
+  const setSelectedPathRaw = useFileBrowserStore((s) => s.setSelectedPath);
+  const toggleExpand = useCallback(
+    (path: string) => toggleExpandRaw(projectId, path),
+    [toggleExpandRaw, projectId]
+  );
+  const setSelectedPath = useCallback(
+    (path: string | null) => setSelectedPathRaw(projectId, path),
+    [setSelectedPathRaw, projectId]
+  );
+  const { fileTreeWidth, setFileTreeWidth } = useLayoutStore();
 
-  // Reset store state when projectId changes (stale expanded/selectedPath from a
-  // different project must not bleed into the new project view).
+  // Resize handle for the tree/content divider
+  const containerRef = useRef<HTMLDivElement>(null);
+  const isResizingTree = useRef(false);
+  const handleTreeResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    isResizingTree.current = true;
+    e.preventDefault();
+    const onMove = (ev: MouseEvent) => {
+      if (!isResizingTree.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      setFileTreeWidth(
+        Math.min(FILE_TREE_WIDTH_MAX, Math.max(FILE_TREE_WIDTH_MIN, ev.clientX - rect.left))
+      );
+    };
+    const onUp = () => {
+      isResizingTree.current = false;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [setFileTreeWidth]);
+
+  // Clear the in-component highlight when projectId changes; per-project state
+  // from the store is loaded automatically via selectors above.
   useEffect(() => {
-    if (ownerProjectId !== projectId) {
-      resetForProject(projectId);
-      setHighlightedPath(null);
-    }
-  }, [projectId, ownerProjectId, resetForProject]);
+    setHighlightedPath(null);
+  }, [projectId]);
 
   // Fetch the global enable_file_edit flag once on mount. The Monaco editor
   // (and any code paths importing it) are kept behind this flag so disabling
@@ -758,6 +794,25 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
       }
     });
   }, [rootLoading, expanded, childrenMap, loadChildren]);
+
+  // Restore the previously-selected file after remount or project switch.
+  // selectedPath lives in the per-project store bucket, but local fileContent
+  // /highlightedPath do not, so reload them once per root-load cycle.
+  const restoredFileRef = useRef(false);
+  useEffect(() => {
+    if (rootLoading) {
+      restoredFileRef.current = false;
+      return;
+    }
+    if (restoredFileRef.current) return;
+    restoredFileRef.current = true;
+    if (selectedPath) {
+      handleSelectFile(selectedPath);
+    }
+    // handleSelectFile intentionally excluded from deps — we only want this
+    // restore to fire once per (re)mount/project-switch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootLoading, selectedPath, projectId]);
 
   const handleToggleExpand = useCallback((path: string) => {
     const willExpand = !expanded.has(path);
@@ -1205,10 +1260,10 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   }, [fileSearchTotal]);
 
   return (
-    <div className="flex h-full">
+    <div ref={containerRef} className="flex h-full">
       {/* File tree sidebar */}
       {!treeCollapsed && (
-      <div className="w-56 shrink-0 border-r flex flex-col">
+      <div className="shrink-0 border-r flex flex-col" style={{ width: fileTreeWidth }}>
         <div className="flex items-center justify-between px-3 py-1.5 border-b shrink-0">
           <span className="text-xs text-muted-foreground font-medium">Files</span>
           <div className="flex items-center gap-0.5">
@@ -1342,6 +1397,14 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
           )}
         </div>
       </div>
+      )}
+
+      {/* Tree/content resize handle (only when the tree is visible) */}
+      {!treeCollapsed && (
+        <div
+          className="w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors shrink-0"
+          onMouseDown={handleTreeResizeMouseDown}
+        />
       )}
 
       {/* File content viewer */}

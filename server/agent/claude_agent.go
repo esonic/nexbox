@@ -310,7 +310,10 @@ func (a *ClaudeAgent) SendMessage(
 					Type:    EventSubTaskStart,
 					Content: msg.Description,
 					Metadata: map[string]interface{}{
-						"task_id": msg.TaskID,
+						"task_id":       msg.TaskID,
+						"tool_use_id":   msg.ToolUseID,
+						"task_type":     msg.TaskType,
+						"workflow_name": msg.WorkflowName,
 					},
 				})
 			case "task_progress":
@@ -318,8 +321,11 @@ func (a *ClaudeAgent) SendMessage(
 					Type:    EventSubTaskProgress,
 					Content: msg.Description,
 					Metadata: map[string]interface{}{
-						"task_id":        msg.TaskID,
-						"last_tool_name": msg.LastToolName,
+						"task_id":           msg.TaskID,
+						"last_tool_name":    msg.LastToolName,
+						"tool_use_id":       msg.ToolUseID,
+						"task_type":         msg.TaskType,
+						"workflow_progress": msg.WorkflowProgress,
 					},
 				})
 			case "task_notification":
@@ -336,8 +342,11 @@ func (a *ClaudeAgent) SendMessage(
 					Type:    EventSubTaskDone,
 					Content: msg.Summary,
 					Metadata: map[string]interface{}{
-						"task_id": msg.TaskID,
-						"status":  msg.Status,
+						"task_id":           msg.TaskID,
+						"status":            msg.Status,
+						"tool_use_id":       msg.ToolUseID,
+						"task_type":         msg.TaskType,
+						"workflow_progress": msg.WorkflowProgress,
 					},
 				})
 			}

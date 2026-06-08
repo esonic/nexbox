@@ -402,7 +402,7 @@ function DiffLines({ diffText, filename, hideHeaders, onChangeCount }: {
   const canComment = !!chatSessionId && !!filename;
 
   return (
-    <table className="w-full text-xs font-mono">
+    <table className="w-full text-[15px] font-mono">
       <tbody>
         {parsed.lines
           .filter((l) => l.type !== "meta" && !(hideHeaders && l.type === "header"))

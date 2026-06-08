@@ -133,6 +133,16 @@ type StreamMessage struct {
 	Summary      string `json:"summary,omitempty"`
 	LastToolName string `json:"last_tool_name,omitempty"`
 
+	// For the dynamic Workflow tool (task_type == "local_workflow"). ToolUseID
+	// is the Workflow tool_use_id that launched the background run, so progress
+	// can be attached to the right tool card. WorkflowProgress is the structured
+	// phase/agent snapshot — incremental: the first task_progress is a full
+	// snapshot, later ones carry only the changed phase/agent entries.
+	ToolUseID        string          `json:"tool_use_id,omitempty"`
+	TaskType         string          `json:"task_type,omitempty"`
+	WorkflowName     string          `json:"workflow_name,omitempty"`
+	WorkflowProgress json.RawMessage `json:"workflow_progress,omitempty"`
+
 	// For stream_event messages (partial message streaming)
 	Event json.RawMessage `json:"event,omitempty"`
 

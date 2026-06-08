@@ -216,6 +216,46 @@ export interface ChatEvent {
   // "done"). Used to stamp the in-memory ChatMessage so fork-button
   // visibility doesn't have to wait for a page refresh.
   sdk_message_uuid?: string;
+  // Dynamic-workflow progress snapshot (merged server-side) carried on
+  // subtask_progress / subtask_done. tool_id holds the Workflow tool_use_id
+  // so the frontend can attach it to the right tool card.
+  workflow_progress?: WorkflowProgressSnapshot;
+}
+
+// --- Dynamic Workflow (Workflow tool) progress ---
+// Mirrors the server-merged snapshot built from Claude's stream-json
+// `workflow_progress` deltas (see server/api/workflow_progress.go).
+
+export interface WorkflowPhase {
+  type?: "workflow_phase";
+  index: number;
+  title: string;
+}
+
+export interface WorkflowAgentEntry {
+  type?: "workflow_agent";
+  index: number;
+  label: string;
+  phaseIndex?: number;
+  phaseTitle?: string;
+  agentId?: string;
+  model?: string;
+  state?: "start" | "progress" | "done" | string;
+  tokens?: number;
+  toolCalls?: number;
+  lastToolName?: string;
+  lastToolSummary?: string;
+  promptPreview?: string;
+  resultPreview?: string;
+  durationMs?: number;
+  attempt?: number;
+}
+
+export interface WorkflowProgressSnapshot {
+  phases?: WorkflowPhase[];
+  agents?: WorkflowAgentEntry[];
+  status?: string;
+  summary?: string;
 }
 
 // --- Structured message parts ---
@@ -232,7 +272,7 @@ export interface NestedTool {
 
 export type MessagePart =
   | { type: "text"; content: string }
-  | { type: "tool_use"; toolCallId: string; toolName: string; input: string; summary?: string; state: ToolUseState; nestedTools?: NestedTool[]; parentToolCallId?: string }
+  | { type: "tool_use"; toolCallId: string; toolName: string; input: string; summary?: string; state: ToolUseState; nestedTools?: NestedTool[]; parentToolCallId?: string; workflowProgress?: WorkflowProgressSnapshot }
   | { type: "tool_result"; toolCallId: string; output: string; isError?: boolean }
   | { type: "thinking"; content?: string }
   | { type: "tool_group"; count: number }

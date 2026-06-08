@@ -1,6 +1,10 @@
 package api
 
-import "github.com/esonic/nexbox/store"
+import (
+	"encoding/json"
+
+	"github.com/esonic/nexbox/store"
+)
 
 // Type aliases pointing to the canonical definitions in the store package.
 // Existing handler code can continue using api.Project, api.Session, etc.
@@ -97,6 +101,12 @@ type ChatEvent struct {
 	Stats        *ExecutionStats `json:"stats,omitempty"`
 	ContextUsage *ContextUsage   `json:"context_usage,omitempty"`
 	SessionInfo  *SessionInfo    `json:"session_info,omitempty"`
+
+	// WorkflowProgress carries the merged dynamic-workflow snapshot
+	// ({phases, agents, status, summary}) on subtask_progress / subtask_done
+	// events. ToolID is set to the Workflow tool_use_id so the frontend can
+	// attach the tree to the right tool card.
+	WorkflowProgress json.RawMessage `json:"workflow_progress,omitempty"`
 }
 
 type ExecutionStats struct {

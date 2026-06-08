@@ -269,6 +269,11 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		var metadata MessageMetadata
 		dirty := false
 
+		// wfSnapshots accumulates dynamic-workflow progress deltas per Workflow
+		// tool_use_id (merge logic in workflow_progress.go). Only touched from
+		// the serial event handler below, so it needs no separate lock.
+		wfSnapshots := map[string]*wfSnapshot{}
+
 		startTime := time.Now()
 		toolCallCount := 0
 
@@ -497,20 +502,77 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 
 			case agent.EventSubTaskProgress:
 				taskID, _ := event.Metadata["task_id"].(string)
-				s.Hub.Emit(sessionID, ChatEvent{
-					Type:    "subtask_progress",
-					Content: event.Content,
-					TaskID:  taskID,
-				})
+				toolUseID, _ := event.Metadata["tool_use_id"].(string)
+				raw, _ := event.Metadata["workflow_progress"].(json.RawMessage)
+				if toolUseID != "" && len(raw) > 0 {
+					// Dynamic Workflow tool: merge the delta into the full
+					// snapshot, persist it on the Workflow tool_use part (so it
+					// survives refresh), and push the full tree to clients.
+					snap := wfSnapshots[toolUseID]
+					if snap == nil {
+						snap = newWFSnapshot()
+						wfSnapshots[toolUseID] = snap
+					}
+					snap.merge(raw)
+					full := snap.snapshotJSON()
+					attachWorkflowProgress(&mu, msgParts, toolUseID, full, &dirty)
+					s.Hub.Emit(sessionID, ChatEvent{
+						Type:             "subtask_progress",
+						Content:          event.Content,
+						TaskID:           taskID,
+						ToolID:           toolUseID,
+						WorkflowProgress: full,
+					})
+				} else {
+					// Non-workflow background task (Task tool): unchanged — the
+					// sub-agent's own tool calls stream as nested tool_start events.
+					s.Hub.Emit(sessionID, ChatEvent{
+						Type:    "subtask_progress",
+						Content: event.Content,
+						TaskID:  taskID,
+					})
+				}
 
 			case agent.EventSubTaskDone:
 				taskID, _ := event.Metadata["task_id"].(string)
+				toolUseID, _ := event.Metadata["tool_use_id"].(string)
+				status, _ := event.Metadata["status"].(string)
+				raw, _ := event.Metadata["workflow_progress"].(json.RawMessage)
 				log.Printf("[chat] Sub-agent done: %s (task_id=%s)", event.Content, taskID)
-				s.Hub.Emit(sessionID, ChatEvent{
-					Type:    "subtask_done",
-					Content: event.Content,
-					TaskID:  taskID,
-				})
+				snap := wfSnapshots[toolUseID]
+				// Only treat this as a workflow when we actually saw workflow
+				// progress: a snapshot exists from prior task_progress, or this
+				// done event itself carries workflow_progress. Regular Task
+				// sub-agents have a tool_use_id but no workflow data, so they
+				// fall through to the unchanged legacy emit below.
+				if toolUseID != "" && (snap != nil || len(raw) > 0) {
+					if snap == nil {
+						snap = newWFSnapshot()
+						wfSnapshots[toolUseID] = snap
+					}
+					snap.merge(raw)
+					if status != "" {
+						snap.status = status
+					}
+					if event.Content != "" {
+						snap.summary = event.Content
+					}
+					full := snap.snapshotJSON()
+					attachWorkflowProgress(&mu, msgParts, toolUseID, full, &dirty)
+					s.Hub.Emit(sessionID, ChatEvent{
+						Type:             "subtask_done",
+						Content:          event.Content,
+						TaskID:           taskID,
+						ToolID:           toolUseID,
+						WorkflowProgress: full,
+					})
+				} else {
+					s.Hub.Emit(sessionID, ChatEvent{
+						Type:    "subtask_done",
+						Content: event.Content,
+						TaskID:  taskID,
+					})
+				}
 
 			case agent.EventSystem:
 				log.Printf("[chat] System event: %s", event.Content)
@@ -624,7 +686,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			setToolResponseChan(sessionID, responseCh)
 			defer removeToolResponseChan(sessionID)
 
-			inputTimeout := time.NewTimer(5 * time.Minute)
+			inputTimeout := time.NewTimer(1 * time.Hour)
 			defer inputTimeout.Stop()
 
 			select {
@@ -633,7 +695,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				return response, nil
 			case <-inputTimeout.C:
 				log.Printf("[chat] User input timeout for tool %s in session %s", requestID, sessionID)
-				return "", fmt.Errorf("user input timeout after 5 minutes")
+				return "", fmt.Errorf("user input timeout after 1 hour")
 			case <-ctx.Done():
 				return "", ctx.Err()
 			}

@@ -1,62 +1,105 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-interface FileBrowserState {
-  // projectId that the expanded/selected state belongs to
-  ownerProjectId: string | null;
+interface ProjectState {
   expanded: Set<string>;
-  // selectedPath is NOT persisted — stale cross-project selection causes the
-  // "files always show the same directory" bug after page refresh / Go restart.
   selectedPath: string | null;
-  toggleExpand: (path: string) => void;
-  setExpanded: (expanded: Set<string>) => void;
-  setSelectedPath: (path: string | null) => void;
-  resetForProject: (projectId: string) => void;
+}
+
+interface FileBrowserState {
+  // Per-project bucket so switching projects (and coming back) preserves both
+  // expanded folders and the previously-selected file. selectedPath is safe to
+  // persist here because it's keyed by projectId — it can never be applied to a
+  // different project than the one it was recorded in.
+  projects: Record<string, ProjectState>;
+  toggleExpand: (projectId: string, path: string) => void;
+  setSelectedPath: (projectId: string, path: string | null) => void;
+}
+
+const EMPTY: ProjectState = { expanded: new Set(), selectedPath: null };
+
+function ensure(projects: Record<string, ProjectState>, projectId: string): ProjectState {
+  return projects[projectId] ?? EMPTY;
 }
 
 export const useFileBrowserStore = create<FileBrowserState>()(
   persist(
     (set) => ({
-      ownerProjectId: null,
-      expanded: new Set<string>(),
-      selectedPath: null,
-      toggleExpand: (path) =>
+      projects: {},
+      toggleExpand: (projectId, path) =>
         set((state) => {
-          const next = new Set(state.expanded);
-          next.has(path) ? next.delete(path) : next.add(path);
-          return { expanded: next };
+          const prev = ensure(state.projects, projectId);
+          const nextExpanded = new Set(prev.expanded);
+          nextExpanded.has(path) ? nextExpanded.delete(path) : nextExpanded.add(path);
+          return {
+            projects: {
+              ...state.projects,
+              [projectId]: { ...prev, expanded: nextExpanded },
+            },
+          };
         }),
-      setExpanded: (expanded) => set({ expanded }),
-      setSelectedPath: (selectedPath) => set({ selectedPath }),
-      resetForProject: (projectId) =>
-        set({ ownerProjectId: projectId, expanded: new Set(), selectedPath: null }),
+      setSelectedPath: (projectId, selectedPath) =>
+        set((state) => {
+          const prev = ensure(state.projects, projectId);
+          return {
+            projects: {
+              ...state.projects,
+              [projectId]: { ...prev, selectedPath },
+            },
+          };
+        }),
     }),
     {
       name: "nexbox-file-browser",
-      // Only persist ownerProjectId + expanded. Never persist selectedPath.
-      partialize: (state) => ({
-        ownerProjectId: state.ownerProjectId,
-        expanded: state.expanded,
-      }),
+      version: 2,
+      partialize: (state) => ({ projects: state.projects }),
+      // Migrate the pre-v2 single-bucket shape ({ ownerProjectId, expanded })
+      // into the per-project map. Runs after the custom storage has already
+      // turned the persisted Set array back into a real Set.
+      migrate: (persisted: any, version: number) => {
+        if (version < 2 && persisted && persisted.ownerProjectId) {
+          const projects: Record<string, ProjectState> = {
+            [persisted.ownerProjectId]: {
+              expanded:
+                persisted.expanded instanceof Set
+                  ? persisted.expanded
+                  : new Set(Array.isArray(persisted.expanded) ? persisted.expanded : []),
+              selectedPath: null,
+            },
+          };
+          return { projects };
+        }
+        return persisted;
+      },
       storage: {
         getItem: (name) => {
           const str = localStorage.getItem(name);
           if (!str) return null;
           const parsed = JSON.parse(str);
-          if (parsed?.state?.expanded) {
-            parsed.state.expanded = new Set(parsed.state.expanded);
+          // Rehydrate Sets inside each project bucket
+          const projects = parsed?.state?.projects;
+          if (projects && typeof projects === "object") {
+            for (const id of Object.keys(projects)) {
+              const proj = projects[id];
+              if (proj && Array.isArray(proj.expanded)) {
+                proj.expanded = new Set(proj.expanded);
+              }
+            }
           }
           return parsed;
         },
         setItem: (name, value) => {
+          const inProjects = (value.state as any).projects ?? {};
+          const outProjects: Record<string, { expanded: string[]; selectedPath: string | null }> = {};
+          for (const [id, proj] of Object.entries(inProjects) as Array<[string, ProjectState]>) {
+            outProjects[id] = {
+              expanded: proj.expanded instanceof Set ? [...proj.expanded] : [],
+              selectedPath: proj.selectedPath ?? null,
+            };
+          }
           const toStore = {
             ...value,
-            state: {
-              ...value.state,
-              expanded: value.state.expanded instanceof Set
-                ? [...value.state.expanded]
-                : value.state.expanded,
-            },
+            state: { ...(value.state as any), projects: outProjects },
           };
           localStorage.setItem(name, JSON.stringify(toStore));
         },

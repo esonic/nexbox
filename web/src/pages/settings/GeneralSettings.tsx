@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { serverApi, authApi } from "@/lib/api";
 import { ChevronDown, LogOut, Loader2, User as UserIcon } from "lucide-react";
+import { usePreferences, CHAT_FONT_SIZE_LABELS, type ChatFontSize } from "@/stores/preferences";
 
 const AGENT_LABELS: Record<string, string> = {
   codex: "Codex",
@@ -12,6 +13,9 @@ export function GeneralSettings() {
   const [agents, setAgents] = useState<string[]>([]);
   const [defaultAgent, setDefaultAgent] = useState("");
   const [saving, setSaving] = useState(false);
+
+  const chatFontSize = usePreferences((s) => s.chatFontSize);
+  const setChatFontSize = usePreferences((s) => s.setChatFontSize);
 
   const [chromeHeadless, setChromeHeadless] = useState(true);
   const [enableFileEdit, setEnableFileEdit] = useState(false);
@@ -120,6 +124,31 @@ export function GeneralSettings() {
               ))}
             </select>
             <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+          </div>
+        </div>
+      </div>
+
+      {/* Chat Font Size */}
+      <div className="rounded-lg border bg-card">
+        <div className="flex items-center justify-between px-4 py-3">
+          <div>
+            <div className="text-sm font-medium">Chat Font Size</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Font size for messages sent and received in the chat area</div>
+          </div>
+          <div className="flex items-center gap-1 bg-muted rounded-md p-0.5">
+            {(["sm", "md", "lg", "xl"] as ChatFontSize[]).map((size) => (
+              <button
+                key={size}
+                onClick={() => setChatFontSize(size)}
+                className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                  chatFontSize === size
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {CHAT_FONT_SIZE_LABELS[size]}
+              </button>
+            ))}
           </div>
         </div>
       </div>

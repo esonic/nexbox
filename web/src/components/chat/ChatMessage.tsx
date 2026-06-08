@@ -11,6 +11,7 @@ import { IssueRow } from "@/plugins/task/IssueRow";
 import { messagesApi, sessionsApi } from "@/lib/api";
 import { toast } from "sonner";
 import { useAppStore } from "@/stores/app";
+import { usePreferences, CHAT_FONT_SIZE_PX } from "@/stores/preferences";
 import { useSmoothText } from "@/hooks/useSmoothText";
 import type { ChatMessage as ChatMessageType, MessagePart, Task, AssetType } from "@/types";
 
@@ -229,6 +230,7 @@ function CollapsibleToolSteps({ parts }: { parts: MessagePart[] }) {
           state={part.state}
           result={resultMap[part.toolCallId]}
           nestedTools={part.nestedTools}
+          workflowProgress={part.workflowProgress}
         />
       ))}
     </div>
@@ -538,6 +540,7 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
   const [loadedParts, setLoadedParts] = useState<MessagePart[] | null>(null);
   const loadingRef = useRef(false);
   const projectRoot = useAppStore((s) => s.currentProject?.git_repo_path);
+  const chatFontSize = usePreferences((s) => s.chatFontSize);
 
   const effectiveParts = loadedParts || message.parts;
   const groups = useMemo(
@@ -594,11 +597,12 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
     >
       <div
         className={cn(
-          "flex flex-col gap-1 text-sm leading-relaxed min-w-0",
+          "flex flex-col gap-1 leading-relaxed min-w-0",
           isUser
             ? "max-w-[80%]"
             : "w-full",
         )}
+        style={{ fontSize: CHAT_FONT_SIZE_PX[chatFontSize] }}
       >
         {isUser ? (
           <div>

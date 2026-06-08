@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { Loader2 } from "lucide-react";
 
@@ -41,6 +41,11 @@ export default function MonacoFileEditor({
 }) {
   const [theme, setTheme] = useState<"vs-dark" | "vs-light">(getDocumentTheme);
 
+  const onSaveRef = useRef(onSave);
+  useEffect(() => {
+    onSaveRef.current = onSave;
+  }, [onSave]);
+
   useEffect(() => {
     const obs = new MutationObserver(() => setTheme(getDocumentTheme()));
     obs.observe(document.body, { attributes: true, attributeFilter: ["class"] });
@@ -49,7 +54,7 @@ export default function MonacoFileEditor({
 
   const handleMount: OnMount = (editor, monaco) => {
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      onSave?.();
+      onSaveRef.current?.();
     });
   };
 
@@ -64,7 +69,7 @@ export default function MonacoFileEditor({
       loading={<Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />}
       options={{
         minimap: { enabled: false },
-        fontSize: 12,
+        fontSize: 15,
         lineNumbers: "on",
         scrollBeyondLastLine: false,
         automaticLayout: true,

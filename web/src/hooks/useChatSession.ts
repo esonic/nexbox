@@ -591,12 +591,23 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         break;
       }
       case "subtask_progress":
-        // Ignore: real tool_start events carry the same info with proper toolName/input.
+        // Dynamic Workflow tool: the server pushes the full merged snapshot
+        // (workflow_progress) keyed by the Workflow tool_use_id (tool_id);
+        // attach it to that card. Non-workflow Task sub-agents carry no
+        // snapshot — ignore them, since their nested tool calls already stream
+        // as tool_start events with parent_tool_id.
+        if (event.workflow_progress && event.tool_id) {
+          ensureStreaming();
+          gs().setWorkflowProgress(sid, event.tool_id, event.workflow_progress);
+        }
         break;
       case "subtask_done":
-        // No-op: nesting is driven by parent_tool_id on tool_start /
-        // tool_result. The Agent tool_use itself completes via its own
-        // tool_result event.
+        // Workflow finished: persist the final snapshot on the card. Task
+        // sub-agents complete via their own tool_result event (no-op here).
+        if (event.workflow_progress && event.tool_id) {
+          ensureStreaming();
+          gs().setWorkflowProgress(sid, event.tool_id, event.workflow_progress);
+        }
         break;
       case "system":
         if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, `\n\n_[System: ${event.content}]_\n\n`); }

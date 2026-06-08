@@ -32,7 +32,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
-import type { ToolUseState, NestedTool } from "@/types";
+import { WorkflowProgressView } from "@/components/chat/WorkflowProgressView";
+import type { ToolUseState, NestedTool, WorkflowProgressSnapshot } from "@/types";
 
 // ── Helpers ──
 
@@ -550,6 +551,7 @@ interface ToolCallCardProps {
   state: ToolUseState;
   result?: { output: string; isError?: boolean };
   nestedTools?: NestedTool[];
+  workflowProgress?: WorkflowProgressSnapshot;
 }
 
 export const TODO_TOOLS = new Set([
@@ -572,6 +574,7 @@ export const ToolCallCard = memo(function ToolCallCard({
   state,
   result,
   nestedTools,
+  workflowProgress,
 }: ToolCallCardProps) {
   const isAgentTool = toolName === "Agent" || toolName === "Task";
   const [expanded, setExpanded] = useState(isAgentTool && state === "running");
@@ -634,6 +637,12 @@ export const ToolCallCard = memo(function ToolCallCard({
           </span>
         )}
       </CollapsibleTrigger>
+
+      {workflowProgress && (
+        <div className="ml-4 mt-0.5 mb-1">
+          <WorkflowProgressView snapshot={workflowProgress} />
+        </div>
+      )}
 
       <CollapsibleContent>
         <div className="ml-5 pl-3 border-l border-border/40 mt-0.5 mb-1 space-y-1.5">

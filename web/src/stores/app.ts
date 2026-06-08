@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { DiffResponse } from "@/lib/api";
-import type { Project, Session, ChatMessage, MessagePart, Task, AssetType, ExecutionStats, ContextUsage } from "../types";
+import type { Project, Session, ChatMessage, MessagePart, Task, AssetType, ExecutionStats, ContextUsage, WorkflowProgressSnapshot } from "../types";
 
 export interface PickedAsset {
   id: string;
@@ -60,6 +60,7 @@ interface AppState {
   addToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
   appendThinkingDelta: (sessionId: string, text: string) => void;
   setAgentToolSummary: (sessionId: string, summary: string, toolCallId?: string) => void;
+  setWorkflowProgress: (sessionId: string, toolCallId: string, snapshot: WorkflowProgressSnapshot) => void;
   addNestedToolStart: (sessionId: string, agentToolCallId: string, toolCallId: string, toolName: string, input: string) => void;
   updateNestedToolInput: (sessionId: string, toolCallId: string, inputDelta: string) => void;
   addNestedToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
@@ -261,6 +262,25 @@ export const useAppStore = create<AppState>()(
           const p = parts[i];
           if (p.type === "tool_use" && (p.state === "running" || p.state === "streaming")) {
             parts[i] = { ...p, summary };
+            break;
+          }
+        }
+        return parts;
+      })
+    ),
+
+  setWorkflowProgress: (sessionId, toolCallId, snapshot) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) => {
+        // Attach the server-merged workflow snapshot to the matching Workflow
+        // tool_use part (by tool_use_id). The server already merged the deltas
+        // into a full snapshot, so we just replace. Matching works even after
+        // the immediate tool_result flipped the card to "complete" — the
+        // progress tree lives on the part regardless of that state.
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const p = parts[i];
+          if (p.type === "tool_use" && p.toolCallId === toolCallId) {
+            parts[i] = { ...p, workflowProgress: snapshot };
             break;
           }
         }

@@ -14,6 +14,8 @@ interface LayoutState {
   setRightPanel: (panel: string | null) => void;
   panelWidth: number;
   setPanelWidth: (width: number) => void;
+  fileTreeWidth: number;
+  setFileTreeWidth: (width: number) => void;
 
   // Terminal — height/position are global (UI preference), show/key are per-session
   terminalHeight: number;
@@ -40,6 +42,8 @@ export const useLayoutStore = create<LayoutState>()(
       setRightPanel: (panel) => set({ rightPanel: panel }),
       panelWidth: 480,
       setPanelWidth: (width) => set({ panelWidth: width }),
+      fileTreeWidth: 224,
+      setFileTreeWidth: (width) => set({ fileTreeWidth: width }),
 
       terminalHeight: 260,
       setTerminalHeight: (height) => set({ terminalHeight: height }),
@@ -73,6 +77,7 @@ export const useLayoutStore = create<LayoutState>()(
       partialize: (state) => ({
         rightPanel: state.rightPanel,
         panelWidth: state.panelWidth,
+        fileTreeWidth: state.fileTreeWidth,
         terminalHeight: state.terminalHeight,
         terminalPosition: state.terminalPosition,
         // Persist show state per session; reset key to 0 so terminal reconnects on reload

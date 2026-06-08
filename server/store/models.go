@@ -304,6 +304,11 @@ type MessagePart struct {
 	// Widget (visualize_show_widget)
 	WidgetCode      string   `json:"widgetCode,omitempty"`
 	LoadingMessages []string `json:"loadingMessages,omitempty"`
+	// WorkflowProgress holds the merged phase/agent snapshot for a dynamic
+	// Workflow tool call ({phases:[...], agents:[...], status, summary}).
+	// Persisted on the Workflow tool_use part so the progress tree survives a
+	// browser refresh and is replayed by GET /messages.
+	WorkflowProgress json.RawMessage `json:"workflowProgress,omitempty"`
 }
 
 type MessageMetadata struct {

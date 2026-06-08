@@ -131,7 +131,7 @@ export function TerminalPanel({ sessionId, visible = true, onExited }: TerminalP
 
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: 13,
+      fontSize: 15,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace",
       lineHeight: 1.4,
       scrollback: 5000,
