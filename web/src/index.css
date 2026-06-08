@@ -181,6 +181,23 @@
 .dark .hljs-addition { color: #aff5b4 }
 .dark .hljs-deletion { color: #ffdcd7 }
 
+/* Word-level (intra-line) diff highlights — the changed tokens inside a
+   modified line, VSCode-style. They sit on top of the row's fainter tint;
+   color: inherit keeps the syntax highlighting visible underneath. */
+mark.diff-word-add,
+mark.diff-word-del {
+  color: inherit;
+  /* No border-radius/padding: one change often spans several adjacent <mark>
+     segments (split at syntax-highlight tag boundaries), so rounded corners
+     would make a single change read as a row of separate pills. */
+  border-radius: 0;
+  padding: 0;
+}
+mark.diff-word-add { background-color: hsl(142 70% 45% / 0.40); }
+mark.diff-word-del { background-color: hsl(0 72% 51% / 0.38); }
+.dark mark.diff-word-add { background-color: hsl(142 65% 50% / 0.42); }
+.dark mark.diff-word-del { background-color: hsl(0 72% 58% / 0.42); }
+
 /* Notification new-item entrance animation */
 @keyframes notification-in {
   0%   { background-color: hsl(0 84% 60% / 0.14); }

@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useCallback, useEffect } from "react";
+import { useState, useMemo, useRef, useCallback, useEffect, type ReactNode } from "react";
 import { toast } from "sonner";
 import {
   FileText,
@@ -18,6 +18,8 @@ import { cn } from "@/lib/utils";
 import { type ParsedDiffFile } from "@/lib/diff-parser";
 import { diffApi } from "@/lib/api";
 import { getLangFromPath, ensureLangRegistered, highlightCode } from "@/lib/highlight";
+import { applyRangesToHtml } from "@/lib/inline-diff";
+import { computeDiffOps } from "@/lib/vscode-diff";
 import { useAppStore, type InlineComment } from "@/stores/app";
 
 export function getFilePath(f: ParsedDiffFile) {
@@ -221,29 +223,57 @@ interface DiffLineData {
   oldLineNum?: number;
   newLineNum?: number;
   changeIdx?: number;
+  /** Word-level changed ranges, set on lines paired within a modify block. */
+  intraRanges?: [number, number][];
+}
+
+// Re-align one hunk with VSCode's diff engine and append the resulting rows.
+// git groups every touched line into one delete-block + add-block (so a
+// re-indent looks like a full rewrite); re-diffing the reconstructed old/new
+// content recovers unchanged lines as context and lights up only the genuinely
+// changed words, VSCode-style. See web/src/lib/vscode-diff.ts.
+function appendRealignedHunk(out: DiffLineData[], body: string[], oldStart: number, newStart: number) {
+  const entries: { prefix: " " | "+" | "-"; content: string }[] = [];
+  for (const l of body) {
+    if (l.startsWith("\\")) continue; // "\ No newline at end of file"
+    if (l.startsWith("+")) entries.push({ prefix: "+", content: l.slice(1) });
+    else if (l.startsWith("-")) entries.push({ prefix: "-", content: l.slice(1) });
+    else entries.push({ prefix: " ", content: l.startsWith(" ") ? l.slice(1) : l });
+  }
+
+  // Reconstruct the old/new line sequences this hunk represents.
+  const oldLines: string[] = [];
+  const newLines: string[] = [];
+  for (const e of entries) {
+    if (e.prefix === " ") {
+      oldLines.push(e.content);
+      newLines.push(e.content);
+    } else if (e.prefix === "-") {
+      oldLines.push(e.content);
+    } else {
+      newLines.push(e.content);
+    }
+  }
+
+  const ops = computeDiffOps(oldLines, newLines, true /* ignoreTrimWhitespace */);
+  for (const op of ops) {
+    if (op.kind === "equal") {
+      out.push({ type: "context", content: newLines[op.modIdx]!, oldLineNum: oldStart + op.origIdx, newLineNum: newStart + op.modIdx });
+    } else if (op.kind === "delete") {
+      out.push({ type: "deletion", content: oldLines[op.origIdx]!, oldLineNum: oldStart + op.origIdx, intraRanges: op.ranges.length ? op.ranges : undefined });
+    } else {
+      out.push({ type: "addition", content: newLines[op.modIdx]!, newLineNum: newStart + op.modIdx, intraRanges: op.ranges.length ? op.ranges : undefined });
+    }
+  }
 }
 
 function parseDiffLines(diffText: string): { lines: DiffLineData[]; changeCount: number } {
   const rawLines = diffText.split("\n");
   const result: DiffLineData[] = [];
-  let oldLine = 0;
-  let newLine = 0;
-  let inHunk = false;
-  let inChange = false;
-  let changeIdx = 0;
+  let i = 0;
 
-  for (const line of rawLines) {
-    if (line.startsWith("@@")) {
-      const match = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-      if (match) {
-        oldLine = parseInt(match[1]!, 10);
-        newLine = parseInt(match[2]!, 10);
-      }
-      inHunk = true;
-      inChange = false;
-      result.push({ type: "header", content: line });
-      continue;
-    }
+  while (i < rawLines.length) {
+    const line = rawLines[i]!;
 
     if (
       line.startsWith("diff --git") ||
@@ -256,35 +286,78 @@ function parseDiffLines(diffText: string): { lines: DiffLineData[]; changeCount:
       line.startsWith("new mode")
     ) {
       result.push({ type: "meta", content: line });
+      i++;
       continue;
     }
 
-    if (!inHunk) continue;
+    if (line.startsWith("@@")) {
+      const match = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      const oldStart = match ? parseInt(match[1]!, 10) : 0;
+      const newStart = match ? parseInt(match[2]!, 10) : 0;
+      result.push({ type: "header", content: line });
+      i++;
 
-    if (line.startsWith("+")) {
-      const isStart = !inChange;
-      inChange = true;
-      result.push({ type: "addition", content: line.slice(1), newLineNum: newLine, changeIdx: isStart ? changeIdx++ : undefined });
-      newLine++;
-    } else if (line.startsWith("-")) {
-      const isStart = !inChange;
-      inChange = true;
-      result.push({ type: "deletion", content: line.slice(1), oldLineNum: oldLine, changeIdx: isStart ? changeIdx++ : undefined });
-      oldLine++;
-    } else if (line.startsWith(" ") || line === "") {
+      // Collect the hunk body up to the next hunk / file header.
+      const body: string[] = [];
+      while (i < rawLines.length) {
+        const l = rawLines[i]!;
+        if (l.startsWith("@@") || l.startsWith("diff --git")) break;
+        if (
+          l.startsWith("+") ||
+          l.startsWith("-") ||
+          l.startsWith(" ") ||
+          l.startsWith("\\") ||
+          l === ""
+        ) {
+          body.push(l);
+          i++;
+        } else {
+          break;
+        }
+      }
+      appendRealignedHunk(result, body, oldStart, newStart);
+      continue;
+    }
+
+    i++;
+  }
+
+  // Assign a change index to the first row of each add/del run (used by the
+  // minimap and change-to-change navigation). Intra-line ranges are computed
+  // up front by computeDiffOps in appendRealignedHunk.
+  let changeIdx = 0;
+  let inChange = false;
+  for (const ln of result) {
+    if (ln.type === "addition" || ln.type === "deletion") {
+      if (!inChange) {
+        ln.changeIdx = changeIdx++;
+        inChange = true;
+      }
+    } else {
       inChange = false;
-      result.push({
-        type: "context",
-        content: line.startsWith(" ") ? line.slice(1) : line,
-        oldLineNum: oldLine,
-        newLineNum: newLine,
-      });
-      oldLine++;
-      newLine++;
     }
   }
 
   return { lines: result, changeCount: changeIdx };
+}
+
+// Renders plain (unhighlighted) line text with word-level changed ranges
+// wrapped in <mark>. Used as the fallback before syntax highlighting loads.
+function PlainContent({ content, ranges, markClass }: {
+  content: string;
+  ranges?: [number, number][];
+  markClass: string;
+}) {
+  if (!ranges || ranges.length === 0) return <>{content}</>;
+  const nodes: ReactNode[] = [];
+  let pos = 0;
+  ranges.forEach(([s, e], idx) => {
+    if (s > pos) nodes.push(content.slice(pos, s));
+    nodes.push(<mark key={idx} className={markClass}>{content.slice(s, e)}</mark>);
+    pos = e;
+  });
+  if (pos < content.length) nodes.push(content.slice(pos));
+  return <>{nodes}</>;
 }
 
 function CommentInput({ onAdd, onCancel, autoFocus }: {
@@ -419,7 +492,14 @@ function DiffLines({ diffText, filename, hideHeaders, onChangeCount }: {
 
             const prefix =
               line.type === "addition" ? "+" : line.type === "deletion" ? "-" : " ";
-            const highlighted = langReady ? highlightLine(line.content) : "";
+            // Paired modify lines get word-level marks; pure add/del lines stay
+            // fully colored.
+            const hasIntra = !!line.intraRanges && line.intraRanges.length > 0;
+            const markClass = line.type === "deletion" ? "diff-word-del" : "diff-word-add";
+            let highlighted = langReady ? highlightLine(line.content) : "";
+            if (highlighted && hasIntra) {
+              highlighted = applyRangesToHtml(highlighted, line.intraRanges!, markClass);
+            }
 
             const gutterCls =
               line.type === "addition"
@@ -452,8 +532,17 @@ function DiffLines({ diffText, filename, hideHeaders, onChangeCount }: {
                 key={i}
                 className={cn(
                   "group/row",
-                  line.type === "addition" && "bg-green-500/15 dark:bg-green-500/10 hover:bg-green-500/25 dark:hover:bg-green-500/20",
-                  line.type === "deletion" && "bg-red-500/15 dark:bg-red-500/10 hover:bg-red-500/25 dark:hover:bg-red-500/20",
+                  // Modified lines use a faint tint so the word-level marks
+                  // stand out; pure insertions/removals get a solid, clearly
+                  // visible fill (VSCode-style).
+                  line.type === "addition" &&
+                    (hasIntra
+                      ? "bg-green-500/10 dark:bg-green-500/[0.08] hover:bg-green-500/[0.18] dark:hover:bg-green-500/15"
+                      : "bg-green-500/25 dark:bg-green-500/20 hover:bg-green-500/30 dark:hover:bg-green-500/25"),
+                  line.type === "deletion" &&
+                    (hasIntra
+                      ? "bg-red-500/10 dark:bg-red-500/[0.08] hover:bg-red-500/[0.18] dark:hover:bg-red-500/15"
+                      : "bg-red-500/25 dark:bg-red-500/20 hover:bg-red-500/30 dark:hover:bg-red-500/25"),
                   line.type === "context" && "hover:bg-muted/40"
                 )}
                 data-line-type={line.type}
@@ -524,7 +613,7 @@ function DiffLines({ diffText, filename, hideHeaders, onChangeCount }: {
                         line.type === "deletion" && "text-red-800 dark:text-red-200"
                       )}
                     >
-                      {line.content}
+                      <PlainContent content={line.content} ranges={line.intraRanges} markClass={markClass} />
                     </span>
                   )}
                 </td>
