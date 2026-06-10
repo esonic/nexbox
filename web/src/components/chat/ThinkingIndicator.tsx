@@ -1,11 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { Spinner } from "@/components/ui/spinner";
 import { ScrambleText } from "@/components/ui/scramble-text";
 
 /**
  * Whimsical "working" verbs, in the spirit of Claude Code's loading messages.
- * One is picked at random and swapped every few seconds while the model works.
+ * Cycled through in order from a random starting offset (see below).
  */
 const VERBS = [
   "Thinking",
@@ -58,27 +58,76 @@ const VERBS = [
   "Juggling",
   "Orchestrating",
   "Composing",
+  "Calculating",
+  "Computing",
+  "Processing",
+  "Buffering",
+  "Imagining",
+  "Dreaming",
+  "Wondering",
+  "Reckoning",
+  "Speculating",
+  "Hypothesizing",
+  "Brooding",
+  "Meditating",
+  "Reflecting",
+  "Ideating",
+  "Germinating",
+  "Bamboozling",
+  "Cooking",
+  "Stewing",
+  "Steeping",
+  "Fermenting",
+  "Sculpting",
+  "Weaving",
+  "Forging",
+  "Tempering",
+  "Polishing",
+  "Refining",
+  "Calibrating",
+  "Tuning",
+  "Mapping",
+  "Charting",
+  "Surveying",
+  "Excavating",
+  "Sifting",
+  "Parsing",
+  "Compiling",
+  "Assembling",
+  "Bootstrapping",
+  "Marshalling",
+  "Herding",
+  "Disentangling",
+  "Deciphering",
+  "Extrapolating",
+  "Deducing",
+  "Conjecturing",
+  "Formulating",
+  "Devising",
+  "Fabricating",
+  "Crafting",
+  "Prototyping",
+  "Optimizing",
 ];
-
-function randomVerb(exclude?: string): string {
-  let verb = exclude;
-  while (verb === exclude) verb = VERBS[Math.floor(Math.random() * VERBS.length)];
-  return verb as string;
-}
 
 /**
  * Initial "the model is thinking" indicator: a mood-light spinner followed by a
- * verb that swaps every 5s, picked at random from a pool of whimsical gerunds
- * (the first word is random too — "Thinking" is just one of the pool). The verb
+ * whimsical verb that swaps every 5s. To avoid the clustering/repeats of pure
+ * random choice, we pick a random starting offset and then walk the pool in
+ * order — so all of the verbs cycle through before any repeats. The verb
  * "decodes" into place via ScrambleText, and its color drifts through the same
  * pastel hue cycle as the spinner (see `.mood-text` in index.css). font-mono
  * keeps the width stable while characters scramble.
  */
 export function ThinkingIndicator({ className }: { className?: string }) {
-  const [verb, setVerb] = useState(() => randomVerb());
+  const indexRef = useRef(Math.floor(Math.random() * VERBS.length));
+  const [verb, setVerb] = useState(() => VERBS[indexRef.current]);
 
   useEffect(() => {
-    const id = setInterval(() => setVerb((cur) => randomVerb(cur)), 5000);
+    const id = setInterval(() => {
+      indexRef.current = (indexRef.current + 1) % VERBS.length;
+      setVerb(VERBS[indexRef.current]);
+    }, 5000);
     return () => clearInterval(id);
   }, []);
 

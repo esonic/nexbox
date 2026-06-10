@@ -26,12 +26,12 @@ export function ScrambleText({ text, className }: { text: string; className?: st
 
     const length = Math.max(from.length, to.length);
     const queue = Array.from({ length }, (_, i) => {
-      const start = Math.floor(Math.random() * 18);
+      const start = Math.floor(Math.random() * 30);
       return {
         fromChar: from[i] ?? "",
         toChar: to[i] ?? "",
         start,
-        end: start + 12 + Math.floor(Math.random() * 18),
+        end: start + 30 + Math.floor(Math.random() * 30),
         scramble: "",
       };
     });
