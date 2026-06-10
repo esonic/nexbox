@@ -739,7 +739,12 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
                     return null;
                 }
               })}
-              {message.isStreaming && groups.length > 0 && <ThinkingIndicator className="mt-1" />}
+              {message.isStreaming && groups.length > 0 && (
+                // Text groups carry their own trailing margin, so mt-1 reads fine there;
+                // tool-call / thinking / media groups don't, so give the indicator more
+                // breathing room after them.
+                <ThinkingIndicator className={groups[groups.length - 1].type === "text" ? "mt-1" : "mt-3"} />
+              )}
               {!message.isStreaming && fileChanges.length > 0 && (
                 <FileChangesSummary files={fileChanges} projectRoot={projectRoot} />
               )}
