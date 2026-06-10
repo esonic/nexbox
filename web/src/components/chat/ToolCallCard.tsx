@@ -555,8 +555,15 @@ interface ToolCallCardProps {
 }
 
 export const TODO_TOOLS = new Set([
+  // Legacy single-snapshot tools (older Claude / Cursor / Codex agents).
   "TodoWrite", "UpdateTodos", "ReadTodos",
   "updateTodosToolCall", "readTodosToolCall", "todoWriteToolCall",
+  "todo_list",
+  // Current Claude Code granular task tools. Listing them here both hides the
+  // noisy per-call cards from the transcript and lets useChatSession collect
+  // them for the folded TodoPanel. (TaskGet is intentionally omitted — it's a
+  // read/inspection and is shown as a normal tool card.)
+  "TaskCreate", "TaskUpdate", "TaskList",
 ]);
 
 /** Tools whose UI is rendered by dedicated components (not as a tool card). */

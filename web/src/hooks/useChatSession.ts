@@ -7,7 +7,8 @@ import { useAppStore } from "@/stores/app";
 import {
   parseAskQuestionInput,
 } from "@/components/chat/QuestionCard";
-import { TODO_TOOLS, parseTodoOutput, parseTodoInput } from "@/components/chat/ToolCallCard";
+import { TODO_TOOLS } from "@/components/chat/ToolCallCard";
+import { foldTasks, activeTaskLabel, allTasksDone, type TaskCall } from "@/lib/taskFold";
 import type { AttachedImage } from "@/components/chat/ChatInput";
 import { uuid } from "@/lib/utils";
 import type { Session, Task, ChatEvent, ChatMessage as ChatMessageType, ModelInfo } from "@/types";
@@ -211,44 +212,54 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     input: string;
   } | null>(null);
 
-  // Detect pending todos (TodoWrite tool) — only during streaming.
-  // Cleared automatically when streaming ends, so it never gets stuck.
+  // Reconstruct the live task list from the current turn's task tool calls —
+  // only during streaming, so it clears automatically when the turn ends.
+  //
+  // Newer Claude Code emits granular TaskCreate/TaskUpdate/TaskList calls
+  // (instead of a single TodoWrite snapshot), so the list state is spread across
+  // many calls and several assistant messages. We collect every task tool call
+  // since the last user message and fold them back into one list. See taskFold.ts.
   const pendingTodo = useMemo(() => {
     if (!isStreaming) return null;
     type ToolUsePart = Extract<ChatMessageType["parts"][number], { type: "tool_use" }>;
     type ToolResultPart = Extract<ChatMessageType["parts"][number], { type: "tool_result" }>;
 
+    // Walk back to the start of the current turn (last user message).
+    let start = messages.length;
     for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
-      if (msg.role === "user") break;
-      if (msg.role !== "assistant") continue;
-
-      const todoCalls = msg.parts.filter(
-        (p): p is ToolUsePart => p.type === "tool_use" && TODO_TOOLS.has(p.toolName)
-      );
-      if (todoCalls.length === 0) continue;
-
-      const lastTodoCall = todoCalls[todoCalls.length - 1];
-
-      const result = msg.parts.find(
-        (p): p is ToolResultPart => p.type === "tool_result" && p.toolCallId === lastTodoCall.toolCallId
-      );
-
-      const outputTodos = result ? parseTodoOutput(result.output) : [];
-      const todos = outputTodos.length > 0 ? outputTodos : parseTodoInput(lastTodoCall.input);
-      if (todos.length === 0) continue;
-
-      const isPending = msg.isStreaming || lastTodoCall.state === "streaming" || lastTodoCall.state === "running";
-      const allDone = todos.every(
-        (t) => t.status === "completed" || t.status === "TODO_STATUS_COMPLETED" ||
-               t.status === "cancelled" || t.status === "TODO_STATUS_CANCELLED"
-      );
-      if (allDone) return null;
-
-      return { todos, isPending };
+      if (messages[i].role === "user") break;
+      start = i;
     }
 
-    return null;
+    // Map tool_use_id → output text across the whole turn (results may land in a
+    // later assistant message than the originating tool_use).
+    const outputs = new Map<string, string>();
+    for (let i = start; i < messages.length; i++) {
+      for (const p of messages[i].parts) {
+        if (p.type === "tool_result") {
+          outputs.set((p as ToolResultPart).toolCallId, (p as ToolResultPart).output ?? "");
+        }
+      }
+    }
+
+    // Collect task tool calls in chronological order.
+    const calls: TaskCall[] = [];
+    for (let i = start; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg.role !== "assistant") continue;
+      for (const p of msg.parts) {
+        if (p.type === "tool_use" && TODO_TOOLS.has((p as ToolUsePart).toolName)) {
+          const tu = p as ToolUsePart;
+          calls.push({ toolName: tu.toolName, input: tu.input, output: outputs.get(tu.toolCallId) });
+        }
+      }
+    }
+    if (calls.length === 0) return null;
+
+    const todos = foldTasks(calls);
+    if (todos.length === 0 || allTasksDone(todos)) return null;
+
+    return { todos, isPending: true, title: activeTaskLabel(todos) };
   }, [messages, isStreaming]);
 
   // Fetch server default agent and available agents

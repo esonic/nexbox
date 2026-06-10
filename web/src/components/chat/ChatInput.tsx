@@ -423,7 +423,7 @@ interface ChatInputProps {
   pickedAssets: PickedAsset[];
   pickedWorkflows: PickedWorkflow[];
   pendingQuestion: ReturnType<typeof parseAskQuestionInput>;
-  pendingTodo?: { todos: Array<{ id: string; content: string; status: string }>; isPending: boolean } | null;
+  pendingTodo?: { todos: Array<{ id: string; content: string; status: string; blockedBy?: string[] }>; isPending: boolean; title?: string } | null;
   pendingUserInput?: { toolUseId: string; toolName: string; input: string } | null;
   onSendToolResponse?: (toolUseId: string, response: string) => void;
   queue: QueuedMessage[];
@@ -843,7 +843,7 @@ export function ChatInput({
     <div className="shrink-0">
       <div className="max-w-4xl mx-auto px-2 sm:px-4 pb-2 sm:pb-3">
         {pendingTodo && (
-          <TodoPanel todos={pendingTodo.todos} isPending={pendingTodo.isPending} />
+          <TodoPanel todos={pendingTodo.todos} isPending={pendingTodo.isPending} title={pendingTodo.title} />
         )}
 
         {/* Question panel */}
