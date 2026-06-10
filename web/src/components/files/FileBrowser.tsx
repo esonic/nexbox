@@ -64,6 +64,13 @@ function joinPath(dir: string, name: string): string {
   return `${dir}/${name}`;
 }
 
+// The folder a drop on `entry` should target: a directory accepts into itself,
+// a file accepts into its containing folder (so dragging onto any row inside an
+// expanded folder lands in that folder rather than falling through to the root).
+function dropTargetDir(entry: FileEntry): string {
+  return entry.is_dir ? entry.path : dirnameOf(entry.path);
+}
+
 function isHtmlPath(p: string): boolean {
   const ext = p.split(".").pop()?.toLowerCase() || "";
   return ext === "html" || ext === "htm";
@@ -90,7 +97,6 @@ function FileTreeItem({
   dragOverPath,
   onDragStartItem,
   onDragOverItem,
-  onDragLeaveItem,
   onDropOnItem,
   onDragEndItem,
 }: {
@@ -106,7 +112,6 @@ function FileTreeItem({
   dragOverPath: string | null;
   onDragStartItem: (entry: FileEntry, e: React.DragEvent) => void;
   onDragOverItem: (entry: FileEntry, e: React.DragEvent) => void;
-  onDragLeaveItem: (entry: FileEntry, e: React.DragEvent) => void;
   onDropOnItem: (entry: FileEntry, e: React.DragEvent) => void;
   onDragEndItem: () => void;
 }) {
@@ -122,7 +127,6 @@ function FileTreeItem({
         draggable
         onDragStart={(e) => onDragStartItem(entry, e)}
         onDragOver={(e) => onDragOverItem(entry, e)}
-        onDragLeave={(e) => onDragLeaveItem(entry, e)}
         onDrop={(e) => onDropOnItem(entry, e)}
         onDragEnd={onDragEndItem}
         className={cn(
@@ -185,7 +189,6 @@ function FileTreeItem({
             dragOverPath={dragOverPath}
             onDragStartItem={onDragStartItem}
             onDragOverItem={onDragOverItem}
-            onDragLeaveItem={onDragLeaveItem}
             onDropOnItem={onDropOnItem}
             onDragEndItem={onDragEndItem}
           />
@@ -1099,27 +1102,27 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const isFileDrag = (e: React.DragEvent): boolean => e.dataTransfer.types.includes("Files");
 
   const handleDragOverItem = useCallback((entry: FileEntry, e: React.DragEvent) => {
-    if (!entry.is_dir) return;
     const internal = isInternalDrag(e);
     const files = isFileDrag(e);
     if (!internal && !files) return;
+    const targetDir = dropTargetDir(entry);
     // Disallow dropping a node onto itself or into its own subtree.
     if (internal && draggingPath) {
-      if (entry.path === draggingPath || entry.path.startsWith(draggingPath + "/")) return;
+      if (targetDir === draggingPath || targetDir.startsWith(draggingPath + "/")) return;
     }
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = internal ? "move" : "copy";
-    setDragOverPath(entry.path);
-    setRootDragOver(false);
-  }, [draggingPath]);
-
-  const handleDragLeaveItem = useCallback((entry: FileEntry, e: React.DragEvent) => {
-    // Only clear if we're leaving this exact item (not bubbling from a child).
-    if (e.currentTarget === e.target && dragOverPath === entry.path) {
+    if (targetDir === "") {
+      // Resolves to the project root. Skip the no-op of re-rooting a top-level item.
+      if (internal && draggingPath && dirnameOf(draggingPath) === "") return;
       setDragOverPath(null);
+      setRootDragOver(true);
+    } else {
+      setDragOverPath(targetDir);
+      setRootDragOver(false);
     }
-  }, [dragOverPath]);
+  }, [draggingPath]);
 
   const performMove = useCallback(async (fromPath: string, toDir: string) => {
     const name = fromPath.split("/").pop() || fromPath;
@@ -1167,21 +1170,22 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   }, [projectId, sessionId, refreshDir, selectedPath, setSelectedPath]);
 
   const handleDropOnItem = useCallback(async (entry: FileEntry, e: React.DragEvent) => {
-    if (!entry.is_dir) return;
     e.preventDefault();
     e.stopPropagation();
     setDragOverPath(null);
     setRootDragOver(false);
 
+    const targetDir = dropTargetDir(entry);
     const internalPath = e.dataTransfer.getData(INTERNAL_DRAG_TYPE);
     if (internalPath) {
-      if (internalPath === entry.path || entry.path.startsWith(internalPath + "/")) return;
-      await performMove(internalPath, entry.path);
+      // Ignore drops onto the item itself or into its own subtree.
+      if (targetDir === internalPath || targetDir.startsWith(internalPath + "/")) return;
+      await performMove(internalPath, targetDir);
       return;
     }
     const file = e.dataTransfer.files?.[0];
     if (file) {
-      uploadSingleFile(file, entry.path, false);
+      uploadSingleFile(file, targetDir, false);
     }
   }, [performMove, uploadSingleFile]);
 
@@ -1189,20 +1193,30 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     const internal = isInternalDrag(e);
     const files = isFileDrag(e);
     if (!internal && !files) return;
+    // Fires only over empty space below the tree (item rows stop propagation),
+    // so any folder hover-highlight is no longer current.
+    setDragOverPath(null);
     // Only allow root-level drop when the dragged node isn't already a top-level entry.
-    if (internal && draggingPath && dirnameOf(draggingPath) === "") return;
+    if (internal && draggingPath && dirnameOf(draggingPath) === "") {
+      setRootDragOver(false);
+      return;
+    }
     e.preventDefault();
     e.dataTransfer.dropEffect = internal ? "move" : "copy";
     setRootDragOver(true);
   }, [draggingPath]);
 
   const handleRootDragLeave = useCallback((e: React.DragEvent) => {
-    if (e.currentTarget === e.target) setRootDragOver(false);
+    if (e.currentTarget === e.target) {
+      setRootDragOver(false);
+      setDragOverPath(null);
+    }
   }, []);
 
   const handleRootDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     setRootDragOver(false);
+    setDragOverPath(null);
     const internalPath = e.dataTransfer.getData(INTERNAL_DRAG_TYPE);
     if (internalPath) {
       if (dirnameOf(internalPath) === "") return;
@@ -1389,7 +1403,6 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                 dragOverPath={dragOverPath}
                 onDragStartItem={handleDragStartItem}
                 onDragOverItem={handleDragOverItem}
-                onDragLeaveItem={handleDragLeaveItem}
                 onDropOnItem={handleDropOnItem}
                 onDragEndItem={handleDragEndItem}
               />
