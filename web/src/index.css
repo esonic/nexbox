@@ -24,6 +24,10 @@
     --input: 0 0% 92.2%;
     --ring: 0 0% 63.9%;
     --radius: 0.75rem;
+    /* Mood-spinner color: deeper/richer on light theme so it stays legible
+       against the near-white chat bubble. */
+    --spinner-sat: 60%;
+    --spinner-light: 55%;
   }
 
   .dark {
@@ -46,6 +50,9 @@
     --border: 0 0% 17.6%;
     --input: 0 0% 17.6%;
     --ring: 0 0% 40%;
+    /* Lighter, airier pastel on dark theme where it has room to glow. */
+    --spinner-sat: 70%;
+    --spinner-light: 70%;
   }
 }
 
@@ -284,5 +291,41 @@ mark.diff-word-del { background-color: hsl(0 72% 51% / 0.38); }
    The button icons are self-explanatory; aria-label still works for a11y. */
 .workbench-hover-container {
   display: none !important;
+}
+
+/* Mood-light spinner: a fading comet ring that rotates while its hue drifts
+   smoothly through soft pastel tones. Saturation/lightness are held at a gentle
+   70%/70%, so even passing through the red/green hues yields soft coral / mint
+   rather than harsh primaries. The hue is an @property-registered <number> so
+   the color transition interpolates continuously instead of snapping. */
+@property --spinner-hue {
+  syntax: "<number>";
+  initial-value: 0;
+  inherits: false;
+}
+@keyframes spinner-rotate {
+  to { transform: rotate(1turn); }
+}
+@keyframes spinner-hue {
+  to { --spinner-hue: 360; }
+}
+.mood-spinner {
+  background: conic-gradient(from 90deg, transparent, hsl(var(--spinner-hue) var(--spinner-sat) var(--spinner-light)));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  animation: spinner-rotate 1s linear infinite, spinner-hue 8s linear infinite;
+}
+/* Label that drifts through the same pastel hue cycle as .mood-spinner. Both
+   run the identical `spinner-hue` animation and mount together, so their colors
+   stay in sync. (--spinner-hue is inherits:false, so each element animates its
+   own copy — sync comes from equal duration + shared start time, not cascade.) */
+.mood-text {
+  color: hsl(var(--spinner-hue) var(--spinner-sat) var(--spinner-light));
+  animation: spinner-hue 8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Keep a gentle rotation but freeze the color drift. */
+  .mood-spinner { animation: spinner-rotate 1.4s linear infinite; }
+  .mood-text { animation: none; }
 }
 

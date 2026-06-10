@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, FileEdit } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
+import { ThinkingIndicator } from "@/components/chat/ThinkingIndicator";
 import { cn } from "@/lib/utils";
 import { ToolCallCard, TODO_TOOLS, HIDDEN_TOOLS } from "@/components/chat/ToolCallCard";
 import { ThinkingBlock } from "@/components/chat/ThinkingBlock";
@@ -669,12 +670,7 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
         ) : (
           <div>
             <div className="rounded-2xl px-4 py-3 bg-muted/50 max-w-full">
-              {groups.length === 0 && message.isStreaming && (
-                <div className="flex items-center gap-2 text-muted-foreground">
-                  <Loader2 className="size-3 animate-spin" />
-                  <span className="text-sm">Thinking...</span>
-                </div>
-              )}
+              {groups.length === 0 && message.isStreaming && <ThinkingIndicator />}
               {groups.map((group, gi) => {
                 const isLastGroup = gi === groups.length - 1;
                 const textIsStreaming = !!message.isStreaming && isLastGroup && group.type === "text";
@@ -743,11 +739,7 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
                     return null;
                 }
               })}
-              {message.isStreaming && groups.length > 0 && (
-                <span className="inline-flex items-center gap-1 text-muted-foreground mt-1">
-                  <Loader2 className="size-3 animate-spin" />
-                </span>
-              )}
+              {message.isStreaming && groups.length > 0 && <ThinkingIndicator className="mt-1" />}
               {!message.isStreaming && fileChanges.length > 0 && (
                 <FileChangesSummary files={fileChanges} projectRoot={projectRoot} />
               )}
