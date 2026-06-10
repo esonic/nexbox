@@ -81,11 +81,11 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 				s.Hub.SendDirect(conn, "", ChatEvent{Type: "error", Message: "tool_response: missing session_id or tool_use_id"})
 				continue
 			}
-			ch := getToolResponseChan(chatReq.SessionID)
+			ch := getToolResponseChan(chatReq.SessionID, chatReq.ToolUseID)
 			if ch != nil {
-				log.Printf("[ws] Routing tool_response for session %s, tool_use_id=%s", chatReq.SessionID, chatReq.ToolUseID)
+				log.Printf("[ws] Routing tool_response for session %s, tool_use_id=%s (skip=%v)", chatReq.SessionID, chatReq.ToolUseID, chatReq.Skip)
 				select {
-				case ch <- chatReq.ToolResponse:
+				case ch <- toolResponse{Response: chatReq.ToolResponse, Skip: chatReq.Skip}:
 				default:
 					log.Printf("[ws] tool_response channel full or closed for session %s", chatReq.SessionID)
 				}
@@ -682,17 +682,21 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				Input:  input,
 			})
 
-			responseCh := make(chan string, 1)
-			setToolResponseChan(sessionID, responseCh)
-			defer removeToolResponseChan(sessionID)
+			responseCh := make(chan toolResponse, 1)
+			setToolResponseChan(sessionID, requestID, responseCh)
+			defer removeToolResponseChan(sessionID, requestID)
 
 			inputTimeout := time.NewTimer(1 * time.Hour)
 			defer inputTimeout.Stop()
 
 			select {
-			case response := <-responseCh:
-				log.Printf("[chat] Got user response for tool %s: %d bytes", requestID, len(response))
-				return response, nil
+			case resp := <-responseCh:
+				if resp.Skip {
+					log.Printf("[chat] User skipped tool %s in session %s", requestID, sessionID)
+					return "", fmt.Errorf("user skipped the question")
+				}
+				log.Printf("[chat] Got user response for tool %s: %d bytes", requestID, len(resp.Response))
+				return resp.Response, nil
 			case <-inputTimeout.C:
 				log.Printf("[chat] User input timeout for tool %s in session %s", requestID, sessionID)
 				return "", fmt.Errorf("user input timeout after 1 hour")
@@ -1125,25 +1129,39 @@ func containsFeature(features []string, name string) bool {
 // The WS handler writes the response to the channel when it receives a
 // tool_response message.
 
+// toolResponse carries a user's reply to an interactive tool call. Skip marks
+// a deliberate skip, which the UserInputHandler turns into an error (tool
+// denied) instead of an answer.
+type toolResponse struct {
+	Response string
+	Skip     bool
+}
+
 var (
-	toolResponseMu    sync.Mutex
-	toolResponseChans = make(map[string]chan string) // sessionID -> response channel
+	toolResponseMu sync.Mutex
+	// Keyed by "sessionID:toolUseID" so concurrent/stale requests can't
+	// misroute a reply to the wrong pending tool call.
+	toolResponseChans = make(map[string]chan toolResponse)
 )
 
-func setToolResponseChan(sessionID string, ch chan string) {
-	toolResponseMu.Lock()
-	defer toolResponseMu.Unlock()
-	toolResponseChans[sessionID] = ch
+func toolResponseKey(sessionID, toolUseID string) string {
+	return sessionID + ":" + toolUseID
 }
 
-func removeToolResponseChan(sessionID string) {
+func setToolResponseChan(sessionID, toolUseID string, ch chan toolResponse) {
 	toolResponseMu.Lock()
 	defer toolResponseMu.Unlock()
-	delete(toolResponseChans, sessionID)
+	toolResponseChans[toolResponseKey(sessionID, toolUseID)] = ch
 }
 
-func getToolResponseChan(sessionID string) chan string {
+func removeToolResponseChan(sessionID, toolUseID string) {
 	toolResponseMu.Lock()
 	defer toolResponseMu.Unlock()
-	return toolResponseChans[sessionID]
+	delete(toolResponseChans, toolResponseKey(sessionID, toolUseID))
+}
+
+func getToolResponseChan(sessionID, toolUseID string) chan toolResponse {
+	toolResponseMu.Lock()
+	defer toolResponseMu.Unlock()
+	return toolResponseChans[toolResponseKey(sessionID, toolUseID)]
 }

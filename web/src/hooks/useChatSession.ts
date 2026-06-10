@@ -205,12 +205,11 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   }, [messages, isStreaming]);
 
   // Track pending interactive tool calls (AskUserQuestion from Claude CLI).
-  // These arrive as user_input_request events DURING streaming.
-  const [pendingUserInput, setPendingUserInput] = useState<{
-    toolUseId: string;
-    toolName: string;
-    input: string;
-  } | null>(null);
+  // These arrive as user_input_request events DURING streaming. State lives in
+  // the store keyed by session ID, so a popup in one session never clobbers
+  // another's, and it survives switching away from and back to a session.
+  const pendingUserInput = useAppStore((s) => s.pendingUserInputs[sessionId]) ?? null;
+  const setPendingUserInput = useAppStore((s) => s.setPendingUserInput);
 
   // Reconstruct the live task list from the current turn's task tool calls —
   // only during streaming, so it clears automatically when the turn ends.
@@ -577,7 +576,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         break;
       case "user_input_request":
         if (event.tool_id && event.tool) {
-          setPendingUserInput({
+          gs().setPendingUserInput(sid, {
             toolUseId: event.tool_id,
             toolName: event.tool,
             input: event.input || "",
@@ -600,7 +599,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         // display the CLI-resolved model slug, cwd, etc. in the UI.
         break;
       case "done":
-        setPendingUserInput(null);
+        gs().setPendingUserInput(sid, null);
         gs().setStreamingSession(sid, false);
         gs().finishStreaming(sid, event.stats || undefined, event.sdk_message_uuid);
         if (event.stats?.duration_ms) {
@@ -618,7 +617,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         }
         break;
       case "error":
-        setPendingUserInput(null);
+        gs().setPendingUserInput(sid, null);
         if (event.message) { ensureStreaming(); gs().appendTextDelta(sid, `\n\n**Error:** ${event.message}`); }
         gs().setStreamingSession(sid, false);
         gs().finishStreaming(sid);
@@ -776,15 +775,15 @@ export function useChatSession({ session }: UseChatSessionOptions) {
 
   const handleStop = useCallback(() => {
     globalWS.stop(sessionId);
-    setPendingUserInput(null);
+    setPendingUserInput(sessionId, null);
     // Do NOT immediately finishStreaming here — let backend final events settle state.
     window.dispatchEvent(new Event('workflow-stop'));
-  }, [sessionId]);
+  }, [sessionId, setPendingUserInput]);
 
-  const sendToolResponse = useCallback((toolUseId: string, response: string) => {
-    globalWS.sendToolResponse(sessionId, toolUseId, response);
-    setPendingUserInput(null);
-  }, [sessionId]);
+  const sendToolResponse = useCallback((toolUseId: string, response: string, skip = false) => {
+    globalWS.sendToolResponse(sessionId, toolUseId, response, skip);
+    setPendingUserInput(sessionId, null);
+  }, [sessionId, setPendingUserInput]);
 
   const sendQueuedNow = useCallback(async (queuedId: string) => {
     try {

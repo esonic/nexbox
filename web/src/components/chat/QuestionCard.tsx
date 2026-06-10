@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { CircleHelp, ChevronUp, ChevronDown, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 
 // Types matching the MCP tool schema
 interface QuestionOption {
@@ -19,6 +20,8 @@ interface Question {
 export interface QuestionAnswer {
   question_id: string;
   selected_options: string[];
+  // Free-text answer typed when the synthetic "Other" option is selected.
+  custom_text?: string;
 }
 
 interface QuestionCardProps {
@@ -31,6 +34,11 @@ interface QuestionCardProps {
 
 const OPTION_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
+// Synthetic option id appended to every question so the user can supply an
+// answer outside the offered list. Its value comes from a free-text field
+// rather than the option label.
+export const OTHER_OPTION_ID = "__other__";
+
 export function QuestionCard({ title, questions, onSubmit, onSkip, disabled }: QuestionCardProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   // selections: map of question_id -> set of selected option_ids
@@ -41,17 +49,31 @@ export function QuestionCard({ title, questions, onSubmit, onSkip, disabled }: Q
     }
     return init;
   });
+  // Free-text typed for the "Other" option, keyed by question_id.
+  const [otherText, setOtherText] = useState<Record<string, string>>({});
 
   const currentQuestion = questions[currentIndex];
   const isMulti = currentQuestion?.allow_multiple ?? false;
   const currentSelection = selections[currentQuestion?.id] ?? new Set();
-  const hasSelection = currentSelection.size > 0;
   const isLastQuestion = currentIndex === questions.length - 1;
 
+  // A question is answered when it has a selection, and — if "Other" is among
+  // the selections — its free-text field is non-empty.
+  const isAnswered = useCallback(
+    (q: Question) => {
+      const sel = selections[q.id];
+      if (!sel || sel.size === 0) return false;
+      if (sel.has(OTHER_OPTION_ID) && !(otherText[q.id] ?? "").trim()) return false;
+      return true;
+    },
+    [selections, otherText]
+  );
+
+  const hasSelection = currentQuestion ? isAnswered(currentQuestion) : false;
   // Check if all questions have been answered
-  const allAnswered = questions.every((q) => (selections[q.id]?.size ?? 0) > 0);
+  const allAnswered = questions.every((q) => isAnswered(q));
   // Count how many questions have answers
-  const answeredCount = questions.filter((q) => (selections[q.id]?.size ?? 0) > 0).length;
+  const answeredCount = questions.filter((q) => isAnswered(q)).length;
 
   const toggleOption = useCallback(
     (optionId: string) => {
@@ -77,10 +99,14 @@ export function QuestionCard({ title, questions, onSubmit, onSkip, disabled }: Q
   const handleContinue = () => {
     if (isLastQuestion) {
       // Submit all answers
-      const answers: QuestionAnswer[] = questions.map((q) => ({
-        question_id: q.id,
-        selected_options: Array.from(selections[q.id] || []),
-      }));
+      const answers: QuestionAnswer[] = questions.map((q) => {
+        const selected = Array.from(selections[q.id] || []);
+        const answer: QuestionAnswer = { question_id: q.id, selected_options: selected };
+        if (selected.includes(OTHER_OPTION_ID)) {
+          answer.custom_text = (otherText[q.id] ?? "").trim();
+        }
+        return answer;
+      });
       onSubmit(answers);
     } else {
       setCurrentIndex((i) => i + 1);
@@ -159,6 +185,56 @@ export function QuestionCard({ title, questions, onSubmit, onSkip, disabled }: Q
               </button>
             );
           })}
+
+          {/* "Other" — free-text answer outside the offered options */}
+          {(() => {
+            const isSelected = currentSelection.has(OTHER_OPTION_ID);
+            const letter = OPTION_LETTERS[currentQuestion.options.length] || "#";
+            return (
+              <button
+                onClick={() => !disabled && toggleOption(OTHER_OPTION_ID)}
+                disabled={disabled}
+                className={cn(
+                  "flex items-center gap-2.5 w-full text-left px-3 py-2 rounded-md text-sm transition-all",
+                  isSelected
+                    ? "bg-blue-500/15 text-foreground ring-1 ring-blue-500/40"
+                    : "hover:bg-accent/50 text-muted-foreground",
+                  disabled && "opacity-50 cursor-not-allowed"
+                )}
+              >
+                <span
+                  className={cn(
+                    "flex items-center justify-center w-5 h-5 rounded text-xs font-semibold shrink-0 transition-colors",
+                    isSelected ? "bg-blue-500 text-white" : "bg-muted text-muted-foreground"
+                  )}
+                >
+                  {isSelected ? <Check className="h-3 w-3" /> : letter}
+                </span>
+                <span>Other…</span>
+              </button>
+            );
+          })()}
+
+          {currentSelection.has(OTHER_OPTION_ID) && (
+            <Textarea
+              autoFocus
+              value={otherText[currentQuestion.id] ?? ""}
+              onChange={(e) =>
+                setOtherText((prev) => ({ ...prev, [currentQuestion.id]: e.target.value }))
+              }
+              onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing) return;
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  if (!disabled && hasSelection && (!isLastQuestion || allAnswered)) handleContinue();
+                }
+              }}
+              disabled={disabled}
+              placeholder="Type your answer…"
+              className="mt-1 min-h-[36px] max-h-[120px] resize-none text-sm"
+              rows={1}
+            />
+          )}
         </div>
       </div>
 
@@ -232,6 +308,7 @@ export function formatAnswersMessage(
 
     const selectedLabels = ans.selected_options
       .map((optId) => {
+        if (optId === OTHER_OPTION_ID) return ans.custom_text || "Other";
         const opt = q.options.find((o) => o.id === optId);
         return opt ? opt.label : optId;
       })

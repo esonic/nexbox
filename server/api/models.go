@@ -67,6 +67,10 @@ type ChatRequest struct {
 	// For tool_response messages (interactive tool replies, e.g. AskUserQuestion)
 	ToolUseID    string `json:"tool_use_id,omitempty"`
 	ToolResponse string `json:"tool_response,omitempty"`
+	// Skip marks an interactive tool reply as a deliberate skip: the
+	// UserInputHandler returns an error so the tool is denied (same outcome as
+	// the input timeout), rather than passing the text through as an answer.
+	Skip bool `json:"skip,omitempty"`
 }
 
 type ChatEvent struct {

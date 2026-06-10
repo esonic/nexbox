@@ -151,13 +151,18 @@ class GlobalWebSocket {
     this.rawSend({ type: "stop", session_id: sessionId });
   }
 
-  /** Send a tool response for an interactive tool call (e.g., AskUserQuestion). */
-  sendToolResponse(sessionId: string, toolUseId: string, response: string): void {
+  /**
+   * Send a tool response for an interactive tool call (e.g., AskUserQuestion).
+   * Pass skip=true to decline the question: the server fails the tool (same as
+   * the input timeout) instead of treating the text as an answer.
+   */
+  sendToolResponse(sessionId: string, toolUseId: string, response: string, skip = false): void {
     this.rawSend({
       type: "tool_response",
       session_id: sessionId,
       tool_use_id: toolUseId,
       tool_response: response,
+      skip,
     });
   }
 

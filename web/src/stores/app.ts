@@ -75,6 +75,12 @@ interface AppState {
   setStreamingSession: (sessionId: string, active: boolean) => void;
   initStreamingSessions: (activeIds: string[]) => void;
 
+  // Pending interactive tool request per session (AskUserQuestion from Claude CLI).
+  // Keyed by session ID so concurrent sessions don't clobber each other's popup,
+  // and so switching away and back to a session re-shows its pending question.
+  pendingUserInputs: Record<string, { toolUseId: string; toolName: string; input: string } | null>;
+  setPendingUserInput: (sessionId: string, value: { toolUseId: string; toolName: string; input: string } | null) => void;
+
   // Accumulated session duration (ms), keyed by session ID
   sessionTotalDuration: Record<string, number>;
   addSessionDuration: (sessionId: string, ms: number) => void;
@@ -395,7 +401,10 @@ export const useAppStore = create<AppState>()(
     }),
 
   clearChatMessages: (sessionId) =>
-    set((state) => patchMessages(state, sessionId, () => [])),
+    set((state) => ({
+      ...patchMessages(state, sessionId, () => []),
+      pendingUserInputs: { ...state.pendingUserInputs, [sessionId]: null },
+    })),
 
   streamingSessions: {},
   streamingStartedAt: {} as Record<string, number>,
@@ -425,6 +434,12 @@ export const useAppStore = create<AppState>()(
       }
       return { streamingSessions: map };
     }),
+
+  pendingUserInputs: {},
+  setPendingUserInput: (sessionId, value) =>
+    set((state) => ({
+      pendingUserInputs: { ...state.pendingUserInputs, [sessionId]: value },
+    })),
 
   sessionTotalDuration: {},
   addSessionDuration: (sessionId, ms) =>

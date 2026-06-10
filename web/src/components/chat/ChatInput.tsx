@@ -9,6 +9,7 @@ import {
   QuestionCard,
   parseAskQuestionInput,
   formatAnswersMessage,
+  OTHER_OPTION_ID,
   type QuestionAnswer,
 } from "@/components/chat/QuestionCard";
 import { TodoPanel } from "@/components/chat/TodoPanel";
@@ -338,7 +339,11 @@ function UserInputPanel({
               const questionText = questionCardData.questionTextMap[ans.question_id];
               if (!questionText) continue;
               const selectedLabels = ans.selected_options
-                .map((optId) => questionCardData.optionLabelMap[optId] || optId)
+                .map((optId) =>
+                  optId === OTHER_OPTION_ID
+                    ? (ans.custom_text || "Other")
+                    : (questionCardData.optionLabelMap[optId] || optId)
+                )
                 .join(", ");
               answersMap[questionText] = selectedLabels;
             }
@@ -425,7 +430,7 @@ interface ChatInputProps {
   pendingQuestion: ReturnType<typeof parseAskQuestionInput>;
   pendingTodo?: { todos: Array<{ id: string; content: string; status: string; blockedBy?: string[] }>; isPending: boolean; title?: string } | null;
   pendingUserInput?: { toolUseId: string; toolName: string; input: string } | null;
-  onSendToolResponse?: (toolUseId: string, response: string) => void;
+  onSendToolResponse?: (toolUseId: string, response: string, skip?: boolean) => void;
   queue: QueuedMessage[];
   gitDiffStats?: DiffResponse | null;
   onSend: (message: string, images?: AttachedImage[], features?: string[]) => void;
@@ -868,7 +873,7 @@ export function ChatInput({
           <UserInputPanel
             input={pendingUserInput.input}
             onSubmit={(response) => onSendToolResponse(pendingUserInput.toolUseId, response)}
-            onSkip={() => onSendToolResponse(pendingUserInput.toolUseId, "Skip this question, please continue.")}
+            onSkip={() => onSendToolResponse(pendingUserInput.toolUseId, "", true)}
           />
         )}
 
