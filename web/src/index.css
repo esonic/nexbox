@@ -297,17 +297,20 @@ mark.diff-word-del { background-color: hsl(0 72% 51% / 0.38); }
    smoothly through soft pastel tones. Saturation/lightness are held at a gentle
    70%/70%, so even passing through the red/green hues yields soft coral / mint
    rather than harsh primaries. The hue is an @property-registered <number> so
-   the color transition interpolates continuously instead of snapping. */
+   the color transition interpolates continuously instead of snapping.
+   The cycle starts at green (hue 120) — a calm "working" tone — rather than red,
+   which could read as an error, and sweeps a full turn (120 → 480, wrapping
+   seamlessly back to green). */
 @property --spinner-hue {
   syntax: "<number>";
-  initial-value: 0;
+  initial-value: 120;
   inherits: false;
 }
 @keyframes spinner-rotate {
   to { transform: rotate(1turn); }
 }
 @keyframes spinner-hue {
-  to { --spinner-hue: 360; }
+  to { --spinner-hue: 480; }
 }
 .mood-spinner {
   background: conic-gradient(from 90deg, transparent, hsl(var(--spinner-hue) var(--spinner-sat) var(--spinner-light)));
