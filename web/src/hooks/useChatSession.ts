@@ -349,6 +349,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     if (useAppStore.getState().chatMessages[sessionId]?.length) return;
 
     let cancelled = false;
+    let reconcileTimer: ReturnType<typeof setTimeout> | undefined;
     setLoadingHistory(true);
 
     messagesApi.list(sessionId, 20).then(({ messages: persisted, active, has_more }) => {
@@ -391,6 +392,36 @@ export function useChatSession({ session }: UseChatSessionOptions) {
           });
         }
         setStreamingSession(sessionId, true);
+
+        // Fresh-load recovery for a lost `done`. A brand-new WebSocket may
+        // subscribe *after* the server emitted this turn's `done` (the hub
+        // broadcasts live and never replays). Unlike a disconnect→reconnect,
+        // a fresh page load never runs the recovery in the connection effect
+        // below, so the last assistant message would stay stuck
+        // isStreaming=true forever — which also hides the fork button even
+        // though sdkMessageUuid is already persisted. Once the socket has had
+        // time to subscribe, re-check the server's active state; if the turn
+        // already finished, finalize from the DB snapshot (which carries the
+        // persisted metadata) instead of waiting for another manual refresh.
+        reconcileTimer = setTimeout(() => {
+          if (cancelled) return;
+          if (!useAppStore.getState().streamingSessions[sessionId]) return; // a live `done` resolved it
+          messagesApi.list(sessionId, 20).then(({ messages: recovered, active: stillActive, has_more: more }) => {
+            if (cancelled || stillActive) return; // genuinely still running: live events will arrive
+            const gs = useAppStore.getState();
+            if (!gs.streamingSessions[sessionId]) return;
+            const refreshed: ChatMessageType[] = (recovered || [])
+              .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))
+              .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
+            gs.setStreamingSession(sessionId, false);
+            if (refreshed.length > 0) {
+              gs.setChatMessages(sessionId, refreshed);
+              setHasMore(more || false);
+            } else {
+              gs.finishStreaming(sessionId);
+            }
+          }).catch(() => {});
+        }, 1500);
       }
 
       if (mapped.length > 0) {
@@ -403,7 +434,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       if (!cancelled) setLoadingHistory(false);
     });
 
-    return () => { cancelled = true; };
+    return () => { cancelled = true; if (reconcileTimer) clearTimeout(reconcileTimer); };
   }, [sessionId]);
 
   // WS connection state + reconnect recovery

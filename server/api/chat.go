@@ -881,16 +881,23 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			float64(durationMs)/1000.0, toolCallCount,
 			metadata.InputTokens, metadata.OutputTokens, metadata.TotalCostUSD)
 
+		// Clear the active flag *before* emitting `done`. The flag is what
+		// GET /messages reports as `active`, and a client that reloads mid-turn
+		// uses it to decide whether to keep the last assistant message in the
+		// streaming state. Emitting `done` first opens a window where a client
+		// can observe active=true while the `done` it needs has already been
+		// broadcast (the hub never replays), leaving the message stuck
+		// streaming. Ordering clear-then-emit guarantees: active=true ⇒ `done`
+		// not yet sent, so any subscribed socket still receives it.
+		s.SessionManager.SetActive(sessionID, false)
+		s.Hub.ClearActive(sessionID)
+
 		s.Hub.Emit(sessionID, ChatEvent{
 			Type:           "done",
 			SessionID:      session.AgentSessionID,
 			SDKMessageUUID: finalMeta.SDKMessageUUID,
 			Stats:          stats,
 		})
-
-		// Release active state before processing next queued item.
-		s.SessionManager.SetActive(sessionID, false)
-		s.Hub.ClearActive(sessionID)
 		s.Hub.NotifyChange("session", sessionID, "done")
 		s.SessionManager.RemoveCancel(sessionID)
 		cancel()
