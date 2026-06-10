@@ -104,83 +104,111 @@ export function MarketplacePage() {
     setDialogPlugin(plugin);
   };
 
-  const handleInstallConfirm = async (
+  // Install a plugin into a single scope ("" = All Projects / global).
+  const installToScope = async (
     plugin: LocalPlugin,
     projectId: string,
     envValues: Record<string, string>,
   ) => {
+    if (plugin.type === "mcp") {
+      const mcpConfig = plugin.mcp_config ? JSON.parse(plugin.mcp_config) : {};
+      let manifest: Record<string, unknown>;
+      if (mcpConfig.mcpServers) {
+        manifest = { mcpServers: mcpConfig.mcpServers };
+      } else {
+        // .mcp.json uses flat format: {"serverName": {"command":...}}
+        // Wrap it as mcpServers
+        const hasServerEntries = Object.values(mcpConfig).some(
+          (v: any) => v && typeof v === "object" && (v.command || v.url),
+        );
+        manifest = hasServerEntries
+          ? { mcpServers: mcpConfig }
+          : { mcpServers: { [plugin.name]: { command: plugin.command, ...(plugin.args?.length ? { args: plugin.args } : {}) } } };
+      }
+      await marketplaceApi.installMCP({
+        name: plugin.name,
+        version: plugin.version || "0.0.0",
+        mcp_key: plugin.name,
+        manifest,
+        env: envValues,
+        project_id: projectId || undefined,
+        auth_type: plugin.auth_type,
+      });
+      // Probe the MCP server to detect OAuth requirement immediately after install.
+      // If the upstream returns 401, the server broadcasts connector:needs_auth so
+      // the standard "Authorize" toast appears — no custom handling needed here.
+      marketplaceApi.probeMCP(plugin.name, projectId || undefined).catch(() => {
+        // Probe failure is non-fatal — chat-time OAuth flow remains as fallback.
+      });
+    } else if (plugin.type === "skill") {
+      await marketplaceApi.installSkill({
+        name: plugin.name,
+        package_id: plugin.id,
+        version: plugin.version || "0.0.0",
+        install_path: plugin.install_path,
+        project_id: projectId || undefined,
+      });
+    } else if (plugin.type === "plugin" || plugin.type === "lsp") {
+      await marketplaceApi.installPlugin({
+        name: plugin.name,
+        install_path: plugin.install_path || "",
+        lsp_config: plugin.lsp_config || undefined,
+        project_id: projectId || undefined,
+      });
+    }
+  };
+
+  const handleInstallConfirm = async (
+    plugin: LocalPlugin,
+    projectIds: string[],
+    envValues: Record<string, string>,
+  ) => {
     setInstalling(plugin.id);
     setDialogPlugin(null);
+    const scopeName = (id: string) =>
+      id === "" ? "All Projects" : projects.find((p) => p.id === id)?.name ?? id.slice(0, 8);
+    const succeeded: string[] = [];
+    const failures: string[] = [];
     try {
-      if (plugin.type === "mcp") {
-        const mcpConfig = plugin.mcp_config ? JSON.parse(plugin.mcp_config) : {};
-        let manifest: Record<string, unknown>;
-        if (mcpConfig.mcpServers) {
-          manifest = { mcpServers: mcpConfig.mcpServers };
-        } else {
-          // .mcp.json uses flat format: {"serverName": {"command":...}}
-          // Wrap it as mcpServers
-          const hasServerEntries = Object.values(mcpConfig).some(
-            (v: any) => v && typeof v === "object" && (v.command || v.url),
-          );
-          manifest = hasServerEntries
-            ? { mcpServers: mcpConfig }
-            : { mcpServers: { [plugin.name]: { command: plugin.command, ...(plugin.args?.length ? { args: plugin.args } : {}) } } };
+      for (const projectId of projectIds) {
+        try {
+          await installToScope(plugin, projectId, envValues);
+          succeeded.push(scopeName(projectId));
+        } catch (e: any) {
+          failures.push(`${scopeName(projectId)}: ${e.message}`);
         }
-        await marketplaceApi.installMCP({
-          name: plugin.name,
-          version: plugin.version || "0.0.0",
-          mcp_key: plugin.name,
-          manifest,
-          env: envValues,
-          project_id: projectId || undefined,
-          auth_type: plugin.auth_type,
-        });
-        toast.success(`Installed MCP: ${plugin.name}`);
-        // Probe the MCP server to detect OAuth requirement immediately after install.
-        // If the upstream returns 401, the server broadcasts connector:needs_auth so
-        // the standard "Authorize" toast appears — no custom handling needed here.
-        marketplaceApi.probeMCP(plugin.name, projectId || undefined).catch(() => {
-          // Probe failure is non-fatal — chat-time OAuth flow remains as fallback.
-        });
-      } else if (plugin.type === "skill") {
-        await marketplaceApi.installSkill({
-          name: plugin.name,
-          package_id: plugin.id,
-          version: plugin.version || "0.0.0",
-          install_path: plugin.install_path,
-          project_id: projectId || undefined,
-        });
-        toast.success(`Installed skill: ${plugin.name}`);
-      } else if (plugin.type === "plugin" || plugin.type === "lsp") {
-        await marketplaceApi.installPlugin({
-          name: plugin.name,
-          install_path: plugin.install_path || "",
-          lsp_config: plugin.lsp_config || undefined,
-          project_id: projectId || undefined,
-        });
-        toast.success(`Installed plugin: ${plugin.name}`);
+      }
+      if (succeeded.length > 0) {
+        toast.success(`Installed ${plugin.name} → ${succeeded.join(", ")}`);
+      }
+      if (failures.length > 0) {
+        toast.error(`Failed to install ${plugin.name}`, { description: failures.join("\n") });
       }
       await loadData();
-    } catch (e: any) {
-      toast.error(`Failed to install ${plugin.name}`, { description: e.message });
     } finally {
       setInstalling(null);
     }
   };
 
-  const handleUninstall = async (plugin: LocalPlugin) => {
+  // Uninstall a plugin. projectId undefined → remove from ALL scopes (delete-by-name);
+  // a specific id (or "" for the global/All scope) → remove just that scope.
+  const handleUninstall = async (plugin: LocalPlugin, projectId?: string) => {
     setInstalling(plugin.id);
+    const where = projectId === undefined
+      ? ""
+      : projectId === ""
+        ? " (All Projects)"
+        : ` (${projects.find((p) => p.id === projectId)?.name ?? projectId.slice(0, 8)})`;
     try {
       if (plugin.type === "mcp") {
-        await marketplaceApi.uninstallMCP(plugin.name);
-        toast.success(`Uninstalled MCP: ${plugin.name}`);
+        await marketplaceApi.uninstallMCP(plugin.name, projectId || undefined);
+        toast.success(`Uninstalled MCP: ${plugin.name}${where}`);
       } else if (plugin.type === "skill") {
-        await marketplaceApi.uninstallSkill(plugin.name);
-        toast.success(`Uninstalled skill: ${plugin.name}`);
+        await marketplaceApi.uninstallSkill(plugin.name, projectId || undefined);
+        toast.success(`Uninstalled skill: ${plugin.name}${where}`);
       } else if (plugin.type === "plugin" || plugin.type === "lsp") {
-        await marketplaceApi.uninstallPlugin(plugin.name);
-        toast.success(`Uninstalled plugin: ${plugin.name}`);
+        await marketplaceApi.uninstallPlugin(plugin.name, projectId || undefined);
+        toast.success(`Uninstalled plugin: ${plugin.name}${where}`);
       }
       await loadData();
     } catch (e: any) {
@@ -345,7 +373,7 @@ export function MarketplacePage() {
                 projects={projects}
                 installing={installing === plugin.id}
                 onInstall={() => handleInstallClick(plugin)}
-                onUninstall={() => handleUninstall(plugin)}
+                onUninstall={(projectId) => handleUninstall(plugin, projectId)}
               />
             ))}
           </div>
@@ -387,7 +415,7 @@ export function MarketplacePage() {
         <InstallDialog
           plugin={dialogPlugin}
           projects={projects}
-          onConfirm={(projectId, envValues) => handleInstallConfirm(dialogPlugin, projectId, envValues)}
+          onConfirm={(projectIds, envValues) => handleInstallConfirm(dialogPlugin, projectIds, envValues)}
           onClose={() => setDialogPlugin(null)}
         />
       )}
@@ -412,7 +440,7 @@ interface PluginCardProps {
   projects: Project[];
   installing: boolean;
   onInstall: () => void;
-  onUninstall: () => void;
+  onUninstall: (projectId?: string) => void;
 }
 
 const typeStyles: Record<string, { bg: string; text: string; icon: "wrench" | "package" }> = {
@@ -490,9 +518,17 @@ function PluginCard({ plugin, installed, installedScopes, projects, installing, 
                 {installedScopes.map((sid) => (
                   <span
                     key={sid}
-                    className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green-500/10 text-green-600"
+                    className="inline-flex items-center gap-1 text-[10px] font-medium pl-1.5 pr-1 py-0.5 rounded bg-green-500/10 text-green-600"
                   >
                     {scopeLabel(sid)}
+                    <button
+                      onClick={() => onUninstall(sid)}
+                      disabled={installing}
+                      title={`Uninstall from ${scopeLabel(sid)}`}
+                      className="leading-none text-green-600/70 hover:text-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      ×
+                    </button>
                   </span>
                 ))}
               </div>
@@ -505,8 +541,9 @@ function PluginCard({ plugin, installed, installedScopes, projects, installing, 
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
             <button
-              onClick={installed ? onUninstall : onInstall}
+              onClick={installed ? () => onUninstall() : onInstall}
               disabled={installing}
+              title={installed && installedScopes.length > 1 ? "Uninstall from all scopes" : undefined}
               className={cn(
                 "text-xs px-3 py-1 rounded-md font-medium transition-colors",
                 installed
@@ -515,7 +552,7 @@ function PluginCard({ plugin, installed, installedScopes, projects, installing, 
                 installing && "opacity-50 cursor-not-allowed"
               )}
             >
-              {installing ? "..." : installed ? "Uninstall" : "Install"}
+              {installing ? "..." : installed ? (installedScopes.length > 1 ? "Uninstall all" : "Uninstall") : "Install"}
             </button>
           </div>
         </div>
@@ -529,12 +566,14 @@ function PluginCard({ plugin, installed, installedScopes, projects, installing, 
 interface InstallDialogProps {
   plugin: LocalPlugin;
   projects: Project[];
-  onConfirm: (projectId: string, envValues: Record<string, string>) => void;
+  onConfirm: (projectIds: string[], envValues: Record<string, string>) => void;
   onClose: () => void;
 }
 
 function InstallDialog({ plugin, projects, onConfirm, onClose }: InstallDialogProps) {
-  const [scope, setScope] = useState<string>(SCOPE_ALL);
+  // Selected scopes. SCOPE_ALL ("") means "All Projects" (global) and is mutually
+  // exclusive with specific project ids; otherwise any number of projects can be picked.
+  const [scopes, setScopes] = useState<string[]>([]);
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [scopeOpen, setScopeOpen] = useState(false);
@@ -542,7 +581,24 @@ function InstallDialog({ plugin, projects, onConfirm, onClose }: InstallDialogPr
 
   const envVars = plugin.env_vars || [];
   const needsOAuth = plugin.auth_type === "oauth" || plugin.auth_type === "oauth_discovery";
-  const canSubmit = envVars.every((v) => !!envValues[v]?.trim() || needsOAuth);
+  const envOk = envVars.every((v) => !!envValues[v]?.trim() || needsOAuth);
+  const canSubmit = envOk && scopes.length > 0;
+
+  const selectableProjects = projects.filter((p) => p.git_repo_path);
+
+  const toggleScope = (id: string) => {
+    setScopes((prev) => {
+      if (id === SCOPE_ALL) {
+        // "All Projects" is exclusive: selecting it clears specific projects.
+        return prev.includes(SCOPE_ALL) ? [] : [SCOPE_ALL];
+      }
+      // Selecting a specific project clears "All Projects".
+      const withoutAll = prev.filter((s) => s !== SCOPE_ALL);
+      return withoutAll.includes(id)
+        ? withoutAll.filter((s) => s !== id)
+        : [...withoutAll, id];
+    });
+  };
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -554,9 +610,13 @@ function InstallDialog({ plugin, projects, onConfirm, onClose }: InstallDialogPr
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const scopeLabel = scope === SCOPE_ALL
-    ? "All Projects"
-    : projects.find((p) => p.id === scope)?.name ?? scope;
+  const scopeLabel = scopes.length === 0
+    ? "Select project(s)…"
+    : scopes.includes(SCOPE_ALL)
+      ? "All Projects"
+      : scopes.length === 1
+        ? projects.find((p) => p.id === scopes[0])?.name ?? scopes[0]
+        : `${scopes.length} projects`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -569,11 +629,11 @@ function InstallDialog({ plugin, projects, onConfirm, onClose }: InstallDialogPr
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-lg leading-none mt-0.5">&times;</button>
         </div>
 
-        {/* Scope selector */}
+        {/* Scope selector (multi-select) */}
         <div className="flex flex-col gap-1.5">
           <label className="text-sm font-medium">Install scope</label>
           <p className="text-[11px] text-muted-foreground">
-            &quot;All Projects&quot; installs globally for every project.
+            Pick one or more projects, or &quot;All Projects&quot; to install globally for every project.
           </p>
           <div ref={dropRef} className="relative">
             <button
@@ -581,26 +641,38 @@ function InstallDialog({ plugin, projects, onConfirm, onClose }: InstallDialogPr
               onClick={() => setScopeOpen((v) => !v)}
               className="w-full flex items-center justify-between border rounded-lg px-3 py-2.5 text-sm bg-background hover:bg-accent transition-colors"
             >
-              <span>{scopeLabel}</span>
+              <span className={cn(scopes.length === 0 && "text-muted-foreground")}>{scopeLabel}</span>
               <ChevronDown className="h-4 w-4 text-muted-foreground" />
             </button>
             {scopeOpen && (
               <div className="absolute top-full left-0 right-0 mt-1 bg-card border rounded-lg shadow-lg z-10 max-h-48 overflow-y-auto">
                 <button
-                  className={cn("w-full text-left px-3 py-2 text-sm hover:bg-accent transition-colors", scope === SCOPE_ALL && "font-medium")}
-                  onClick={() => { setScope(SCOPE_ALL); setScopeOpen(false); }}
+                  className={cn("w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-accent transition-colors", scopes.includes(SCOPE_ALL) && "font-medium")}
+                  onClick={() => toggleScope(SCOPE_ALL)}
                 >
+                  <span className={cn("flex h-4 w-4 items-center justify-center rounded border", scopes.includes(SCOPE_ALL) ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/40")}>
+                    {scopes.includes(SCOPE_ALL) && <CheckCircle2 className="h-3 w-3" />}
+                  </span>
                   All Projects
                 </button>
-                {projects.filter((p) => p.git_repo_path).map((p) => (
-                  <button
-                    key={p.id}
-                    className={cn("w-full text-left px-3 py-2 text-sm hover:bg-accent transition-colors", scope === p.id && "font-medium")}
-                    onClick={() => { setScope(p.id); setScopeOpen(false); }}
-                  >
-                    {p.name}
-                  </button>
-                ))}
+                {selectableProjects.map((p) => {
+                  const checked = scopes.includes(p.id);
+                  return (
+                    <button
+                      key={p.id}
+                      className={cn("w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-accent transition-colors", checked && "font-medium")}
+                      onClick={() => toggleScope(p.id)}
+                    >
+                      <span className={cn("flex h-4 w-4 items-center justify-center rounded border", checked ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/40")}>
+                        {checked && <CheckCircle2 className="h-3 w-3" />}
+                      </span>
+                      {p.name}
+                    </button>
+                  );
+                })}
+                {selectableProjects.length === 0 && (
+                  <p className="px-3 py-2 text-xs text-muted-foreground">No projects with a local repo path.</p>
+                )}
               </div>
             )}
           </div>
@@ -658,7 +730,7 @@ function InstallDialog({ plugin, projects, onConfirm, onClose }: InstallDialogPr
             Cancel
           </button>
           <button
-            onClick={() => onConfirm(scope, envValues)}
+            onClick={() => onConfirm(scopes, envValues)}
             disabled={!canSubmit}
             className="px-4 py-2 text-sm rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
