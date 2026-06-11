@@ -294,48 +294,40 @@ mark.diff-word-del { background-color: hsl(0 72% 51% / 0.38); }
 }
 
 /* Mood-light spinner: a fading comet ring that rotates while its hue drifts
-   smoothly through soft pastel tones. Saturation/lightness are held at a gentle
-   70%/70%, so even passing through the red/green hues yields soft coral / mint
-   rather than harsh primaries. The hue is an @property-registered <number> so
-   the color transition interpolates continuously instead of snapping.
-   The cycle starts at green (hue 120) — a calm "working" tone — rather than red,
-   which could read as an error, and sweeps a full turn (120 → 480, wrapping
-   seamlessly back to green). */
-@property --spinner-hue {
-  syntax: "<number>";
-  initial-value: 120;
-  inherits: false;
-}
+   smoothly through soft pastel tones. Saturation/lightness are held gentle (see
+   --spinner-sat/--spinner-light per theme), so even passing through red/green
+   yields soft coral / mint rather than harsh primaries. */
 @keyframes spinner-rotate {
   to { transform: rotate(1turn); }
 }
-@keyframes spinner-hue {
-  to { --spinner-hue: 480; }
+/* The hue cycle is driven by `filter: hue-rotate`, NOT an @property custom
+   property: registered-property animations tick a main-thread style recalc
+   every frame for as long as they run (steps() timing doesn't help — it only
+   reduces value changes, not the per-frame tick, which profiling showed was
+   the dominant idle cost). `filter` is compositor-animatable, so the whole
+   color loop runs off the main thread. Both elements paint in the green base
+   color (hue 120 — calm, never opens on red, which can read as an error) and
+   rotate the full wheel from there; red passes ~2/3 through the cycle and the
+   360° loop point is seamless. */
+@keyframes spinner-hue-rotate {
+  to { filter: hue-rotate(360deg); }
 }
 .mood-spinner {
-  background: conic-gradient(from 90deg, transparent, hsl(var(--spinner-hue) var(--spinner-sat) var(--spinner-light)));
+  background: conic-gradient(from 90deg, transparent, hsl(120 var(--spinner-sat) var(--spinner-light)));
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
-  /* The masked conic-gradient can't be GPU-composited (the mask blocks it, and
-     forcing a layer via a ::before pseudo black-screened Chromium), so painting
-     stays on the main thread. The hue STEPS — re-rasterizing ~6×/s instead of
-     60×/s — which is the cheap, effective win. Stepping the rotation too gave no
-     measurable CPU benefit (the residual is the @property animation's per-frame
-     style recalc, not paint frequency), so rotation stays linear for a smooth spin. */
   will-change: transform;
-  animation: spinner-rotate 1s linear infinite, spinner-hue 16s steps(96) infinite;
+  animation: spinner-rotate 1s linear infinite, spinner-hue-rotate 16s linear infinite;
 }
 /* Label that drifts through the same pastel hue cycle as .mood-spinner. Both
-   run the identical `spinner-hue` animation and mount together, so their colors
-   stay in sync. (--spinner-hue is inherits:false, so each element animates its
-   own copy — sync comes from equal duration + shared start time, not cascade.) */
+   run the identical 16s hue-rotate animation and mount together, so their
+   colors stay in sync (equal duration + shared start time). */
 .mood-text {
-  color: hsl(var(--spinner-hue) var(--spinner-sat) var(--spinner-light));
-  /* Stepped to match .mood-spinner: repaint the text color ~6×/s, not 60×/s. */
-  animation: spinner-hue 16s steps(96) infinite;
+  color: hsl(120 var(--spinner-sat) var(--spinner-light));
+  animation: spinner-hue-rotate 16s linear infinite;
 }
 @media (prefers-reduced-motion: reduce) {
-  /* Keep a gentle rotation but freeze the color drift. */
+  /* Keep a gentle rotation but freeze the color drift (static green base). */
   .mood-spinner { animation: spinner-rotate 1.4s linear infinite; }
   .mood-text { animation: none; }
 }
