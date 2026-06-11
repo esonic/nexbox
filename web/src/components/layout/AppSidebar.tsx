@@ -178,6 +178,74 @@ export function AppSidebar() {
     if (isMobile) setMobileOpen(false);
   }, [location.pathname, isMobile]);
 
+  // ── Swipe-to-close (mobile drawer) ──
+  // The drawer hugs the left edge, so dragging it leftward dismisses it. We
+  // attach native touch listeners (React's onTouch* are passive and can't
+  // preventDefault) so an engaged horizontal drag won't also scroll the
+  // session list; vertical and rightward gestures are left untouched.
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [dragX, setDragX] = useState(0);        // live drag offset, ≤ 0
+  const [swiping, setSwiping] = useState(false); // finger down & dragging → no transition
+  const [panelW, setPanelW] = useState(0);
+
+  // Every close path (tap X, backdrop, route change, breakpoint, swipe) resets
+  // the offset so the next open starts flush against the edge.
+  useEffect(() => {
+    if (!mobileOpen) { setDragX(0); setSwiping(false); }
+  }, [mobileOpen]);
+
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!isMobile || !mobileOpen || !el) return;
+    setPanelW(el.offsetWidth);
+
+    let startX = 0, startY = 0, startT = 0, dx = 0;
+    let mode: "pending" | "drag" | "ignore" = "pending";
+
+    const onStart = (e: TouchEvent) => {
+      const t = e.touches[0];
+      startX = t.clientX; startY = t.clientY; startT = performance.now();
+      dx = 0; mode = "pending";
+    };
+    const onMove = (e: TouchEvent) => {
+      const t = e.touches[0];
+      dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      if (mode === "pending") {
+        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return; // wait for clear intent
+        mode = Math.abs(dx) > Math.abs(dy) && dx < 0 ? "drag" : "ignore";
+        if (mode === "drag") setSwiping(true);
+      }
+      if (mode !== "drag") return;
+      e.preventDefault(); // hold the session list still mid-swipe
+      setDragX(Math.min(0, dx));
+    };
+    const onEnd = () => {
+      if (mode !== "drag") { mode = "pending"; return; }
+      setSwiping(false);
+      const width = el.offsetWidth || 1;
+      const velocity = dx / Math.max(1, performance.now() - startT); // px/ms, <0 = left
+      if (-dx > width / 3 || (velocity < -0.4 && -dx > 24)) {
+        setDragX(-width);                                   // finish sliding out…
+        window.setTimeout(() => setMobileOpen(false), 200); // …then unmount
+      } else {
+        setDragX(0);                                        // snap back
+      }
+      mode = "pending";
+    };
+
+    el.addEventListener("touchstart", onStart, { passive: true });
+    el.addEventListener("touchmove", onMove, { passive: false });
+    el.addEventListener("touchend", onEnd);
+    el.addEventListener("touchcancel", onEnd);
+    return () => {
+      el.removeEventListener("touchstart", onStart);
+      el.removeEventListener("touchmove", onMove);
+      el.removeEventListener("touchend", onEnd);
+      el.removeEventListener("touchcancel", onEnd);
+    };
+  }, [isMobile, mobileOpen]);
+
   useSessionNotifications();
 
   // Resize
@@ -826,24 +894,34 @@ export function AppSidebar() {
           : "flex h-full shrink-0",
       )}
     >
-      {/* Backdrop — mobile only, taps to close. */}
+      {/* Backdrop — mobile only; taps to close, fades with the swipe. */}
       {isMobile && (
         <div
-          className="absolute inset-0 bg-black/40"
+          className={cn(
+            "absolute inset-0 bg-black/40",
+            !swiping && "transition-opacity duration-200 ease-out",
+          )}
+          style={{ opacity: panelW ? Math.max(0, Math.min(1, 1 + dragX / panelW)) : 1 }}
           onClick={() => setMobileOpen(false)}
           aria-hidden="true"
         />
       )}
       <div
+        ref={panelRef}
         className={cn(
           "border-r border-border/50 bg-card flex flex-col h-full overflow-hidden",
           isMobile && "relative z-10 shadow-xl",
+          // Animate the snap-back / slide-out, but follow the finger 1:1 mid-drag.
+          isMobile && !swiping && "transition-transform duration-200 ease-out",
         )}
         style={{
           width: isMobile ? "min(85vw, 320px)" : sidebarWidth,
           // Drawer container is fixed-positioned and ignores body's safe-area
           // padding; push the panel's content down past the iOS status bar.
-          ...(isMobile && { paddingTop: "env(safe-area-inset-top)" }),
+          ...(isMobile && {
+            paddingTop: "env(safe-area-inset-top)",
+            transform: `translateX(${dragX}px)`,
+          }),
         }}
       >
         {/* Header */}
