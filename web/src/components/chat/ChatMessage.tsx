@@ -311,8 +311,12 @@ function StepsGroupBlock({
 
 const TextBlock = memo(function TextBlock({ content, isStreaming }: { content: string; isStreaming?: boolean }) {
   const visible = useSmoothText(content, !!isStreaming);
-  if (!visible) return null;
-  return (
+  // Build (and re-parse) the markdown only when `visible` actually changes — not
+  // on every token-driven re-render of this block. Combined with useSmoothText's
+  // render throttle, a long streaming reply re-parses ~15×/s instead of 60×/s.
+  return useMemo(() => {
+    if (!visible) return null;
+    return (
     <ReactMarkdown
       remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
       components={{
@@ -359,7 +363,8 @@ const TextBlock = memo(function TextBlock({ content, isStreaming }: { content: s
     >
       {visible}
     </ReactMarkdown>
-  );
+    );
+  }, [visible]);
 });
 
 export function CopyButton({ text }: { text: string }) {

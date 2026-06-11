@@ -848,7 +848,7 @@ export function ChatInput({
     <div className="shrink-0">
       <div className="max-w-4xl mx-auto px-2 sm:px-4 pb-2 sm:pb-3">
         {pendingTodo && (
-          <TodoPanel todos={pendingTodo.todos} isPending={pendingTodo.isPending} title={pendingTodo.title} />
+          <TodoPanel todos={pendingTodo.todos} title={pendingTodo.title} />
         )}
 
         {/* Question panel */}

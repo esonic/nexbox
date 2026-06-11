@@ -1,4 +1,4 @@
-import { ListChecks, Loader2, CheckCircle2, CircleDot, Circle, CircleDashed, Ban } from "lucide-react";
+import { ListChecks, CheckCircle2, CircleDot, Circle, CircleDashed, Ban } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface TodoItem {
@@ -10,7 +10,6 @@ interface TodoItem {
 
 interface TodoPanelProps {
   todos: TodoItem[];
-  isPending: boolean;
   /** Header label — the in-progress task's activeForm; falls back to "Tasks". */
   title?: string;
 }
@@ -29,7 +28,7 @@ const TODO_ICONS: Record<string, { icon: React.ComponentType<{ className?: strin
 const isDone = (status: string) => status === "TODO_STATUS_COMPLETED" || status === "completed";
 const isActive = (status: string) => status === "TODO_STATUS_IN_PROGRESS" || status === "in_progress";
 
-export function TodoPanel({ todos, isPending, title }: TodoPanelProps) {
+export function TodoPanel({ todos, title }: TodoPanelProps) {
   if (todos.length === 0) return null;
 
   const completedCount = todos.filter((t) => isDone(t.status)).length;
@@ -38,10 +37,7 @@ export function TodoPanel({ todos, isPending, title }: TodoPanelProps) {
   return (
     <div className="border border-border rounded-lg overflow-hidden bg-background mb-3">
       <div className="flex items-center gap-2 px-4 py-2 border-b bg-muted/30">
-        {isPending
-          ? <Loader2 className="h-4 w-4 text-muted-foreground animate-spin shrink-0" />
-          : <ListChecks className="h-4 w-4 text-muted-foreground shrink-0" />
-        }
+        <ListChecks className="h-4 w-4 text-muted-foreground shrink-0" />
         <span className="text-sm font-medium truncate">{title || "Tasks"}</span>
         <span className="ml-auto text-xs text-muted-foreground tabular-nums shrink-0">
           {completedCount} / {totalCount}

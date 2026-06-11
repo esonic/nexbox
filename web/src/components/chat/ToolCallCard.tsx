@@ -12,7 +12,6 @@ import {
   ChevronRight,
   ChevronDown,
   XCircle,
-  Loader2,
   CircleHelp,
   Trash2,
   ListChecks,
@@ -269,7 +268,7 @@ export function StandaloneTodoList({ todos, isPending }: { todos: TodoItem[]; is
           </div>
         );
       })}
-      {isPending && <Loader2 className="h-3 w-3 animate-spin text-blue-500 mt-0.5" />}
+      {isPending && <CircleDot className="h-3 w-3 animate-pulse text-blue-500 mt-0.5" />}
     </div>
   );
 }
@@ -535,7 +534,7 @@ function ToolIcon({ state, icon: Icon }: { state: ToolUseState; icon: React.Comp
   switch (state) {
     case "streaming":
     case "running":
-      return <Loader2 className="h-3 w-3 animate-spin text-blue-500 shrink-0" />;
+      return <CircleDot className="h-3 w-3 animate-pulse text-blue-500 shrink-0" />;
     case "error":
       return <XCircle className="h-3 w-3 text-red-500 shrink-0" />;
     case "complete":

@@ -316,7 +316,14 @@ mark.diff-word-del { background-color: hsl(0 72% 51% / 0.38); }
   background: conic-gradient(from 90deg, transparent, hsl(var(--spinner-hue) var(--spinner-sat) var(--spinner-light)));
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
-  animation: spinner-rotate 1s linear infinite, spinner-hue 16s linear infinite;
+  /* The masked conic-gradient can't be GPU-composited (the mask blocks it, and
+     forcing a layer via a ::before pseudo black-screened Chromium), so painting
+     stays on the main thread. The hue STEPS — re-rasterizing ~6×/s instead of
+     60×/s — which is the cheap, effective win. Stepping the rotation too gave no
+     measurable CPU benefit (the residual is the @property animation's per-frame
+     style recalc, not paint frequency), so rotation stays linear for a smooth spin. */
+  will-change: transform;
+  animation: spinner-rotate 1s linear infinite, spinner-hue 16s steps(96) infinite;
 }
 /* Label that drifts through the same pastel hue cycle as .mood-spinner. Both
    run the identical `spinner-hue` animation and mount together, so their colors
@@ -324,7 +331,8 @@ mark.diff-word-del { background-color: hsl(0 72% 51% / 0.38); }
    own copy — sync comes from equal duration + shared start time, not cascade.) */
 .mood-text {
   color: hsl(var(--spinner-hue) var(--spinner-sat) var(--spinner-light));
-  animation: spinner-hue 16s linear infinite;
+  /* Stepped to match .mood-spinner: repaint the text color ~6×/s, not 60×/s. */
+  animation: spinner-hue 16s steps(96) infinite;
 }
 @media (prefers-reduced-motion: reduce) {
   /* Keep a gentle rotation but freeze the color drift. */
