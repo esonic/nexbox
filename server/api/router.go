@@ -89,6 +89,13 @@ func NewRouter(s *Server) *chi.Mux {
 	r.HandleFunc("/mcp-proxy/{name}/*", s.HandleMCPProxy)
 	r.HandleFunc("/mcp-proxy/{name}", s.HandleMCPProxy)
 
+	// App reverse proxy: forwards a path-prefixed route to a locally-running
+	// side app (e.g. the portfolio tracker on 127.0.0.1:3001) so it is served
+	// through the same public entrypoint. Outside RequireAuth — the proxied
+	// app handles its own auth. See app_proxy.go.
+	r.HandleFunc(appProxyPrefix(), s.HandleAppProxy)
+	r.HandleFunc(appProxyPrefix()+"/*", s.HandleAppProxy)
+
 	// Public read-only access to shared HTML files. Intentionally outside
 	// the /api group and the RequireAuth middleware: anyone with the link
 	// can view the file. Returns 404 if the share id is unknown or the
