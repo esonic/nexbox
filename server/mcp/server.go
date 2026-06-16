@@ -212,66 +212,74 @@ func (s *Server) ToolNames() []string {
 }
 
 func (s *Server) registerTools() {
-	// save_asset: Create or update an asset in a project
-	saveAssetTool := gomcp.NewTool("save_asset",
-		gomcp.WithDescription(
-			"Save a document/asset to the Nexbox platform. "+
-				"If an asset with the same title already exists in the project, "+
-				"a new version is created. Otherwise, a new asset is created. "+
-				"Use this tool whenever you produce a document such as a requirement doc, "+
-				"design doc, test case, or any written artifact that should be persisted."),
-		gomcp.WithString("project_id",
-			gomcp.Required(),
-			gomcp.Description("The project ID to save the asset to"),
-		),
-		gomcp.WithString("type",
-			gomcp.Required(),
-			gomcp.Description("Asset type: requirement_doc, design_doc, code_change, unit_test, or test_case"),
-		),
-		gomcp.WithString("title",
-			gomcp.Required(),
-			gomcp.Description("Title of the asset"),
-		),
-		gomcp.WithString("content",
-			gomcp.Required(),
-			gomcp.Description("Full content of the asset (Markdown supported)"),
-		),
-	)
+	// save_asset: Create or update an asset in a project (disabled)
+	/*
+		saveAssetTool := gomcp.NewTool("save_asset",
+			gomcp.WithDescription(
+				"Save a document/asset to the Nexbox platform. "+
+					"If an asset with the same title already exists in the project, "+
+					"a new version is created. Otherwise, a new asset is created. "+
+					"Use this tool whenever you produce a document such as a requirement doc, "+
+					"design doc, test case, or any written artifact that should be persisted."),
+			gomcp.WithString("project_id",
+				gomcp.Required(),
+				gomcp.Description("The project ID to save the asset to"),
+			),
+			gomcp.WithString("type",
+				gomcp.Required(),
+				gomcp.Description("Asset type: requirement_doc, design_doc, code_change, unit_test, or test_case"),
+			),
+			gomcp.WithString("title",
+				gomcp.Required(),
+				gomcp.Description("Title of the asset"),
+			),
+			gomcp.WithString("content",
+				gomcp.Required(),
+				gomcp.Description("Full content of the asset (Markdown supported)"),
+			),
+		)
+	*/
 
-	// get_asset_content: Retrieve the latest content of an asset by ID
-	getAssetContentTool := gomcp.NewTool("get_asset_content",
-		gomcp.WithDescription(
-			"Retrieve the latest content of a specific asset by its ID. "+
-				"Use this when you need to read or reference an existing document."),
-		gomcp.WithString("asset_id",
-			gomcp.Required(),
-			gomcp.Description("The asset ID"),
-		),
-	)
+	// get_asset_content: Retrieve the latest content of an asset by ID (disabled)
+	/*
+		getAssetContentTool := gomcp.NewTool("get_asset_content",
+			gomcp.WithDescription(
+				"Retrieve the latest content of a specific asset by its ID. "+
+					"Use this when you need to read or reference an existing document."),
+			gomcp.WithString("asset_id",
+				gomcp.Required(),
+				gomcp.Description("The asset ID"),
+			),
+		)
+	*/
 
-	// list_assets: List assets in a project (top 20, most recent first)
-	listAssetsTool := gomcp.NewTool("list_assets",
-		gomcp.WithDescription(
-			"List assets/documents in a project. "+
-				"Returns top 20 assets sorted by most recently updated. "+
-				"Returns asset metadata (id, type, title, version, status) without content."),
-		gomcp.WithString("project_id",
-			gomcp.Required(),
-			gomcp.Description("The project ID"),
-		),
-	)
+	// list_assets: List assets in a project (top 20, most recent first) (disabled)
+	/*
+		listAssetsTool := gomcp.NewTool("list_assets",
+			gomcp.WithDescription(
+				"List assets/documents in a project. "+
+					"Returns top 20 assets sorted by most recently updated. "+
+					"Returns asset metadata (id, type, title, version, status) without content."),
+			gomcp.WithString("project_id",
+				gomcp.Required(),
+				gomcp.Description("The project ID"),
+			),
+		)
+	*/
 
-	// list_asset_comments: List all review comments for an asset
-	listAssetCommentsTool := gomcp.NewTool("list_asset_comments",
-		gomcp.WithDescription(
-			"List all review comments for a specific asset. "+
-				"Review comments may include line numbers for inline comments or be general comments. "+
-				"Use this tool to see user feedback on a document and address their concerns."),
-		gomcp.WithString("asset_id",
-			gomcp.Required(),
-			gomcp.Description("The asset ID to get comments for"),
-		),
-	)
+	// list_asset_comments: List all review comments for an asset (disabled)
+	/*
+		listAssetCommentsTool := gomcp.NewTool("list_asset_comments",
+			gomcp.WithDescription(
+				"List all review comments for a specific asset. "+
+					"Review comments may include line numbers for inline comments or be general comments. "+
+					"Use this tool to see user feedback on a document and address their concerns."),
+			gomcp.WithString("asset_id",
+				gomcp.Required(),
+				gomcp.Description("The asset ID to get comments for"),
+			),
+		)
+	*/
 
 	// ask_question: Present questions to the user and wait for their response
 	askQuestionTool := gomcp.NewTool("ask_question",
@@ -373,16 +381,19 @@ func (s *Server) registerTools() {
 		),
 	)
 
-	runInTerminalTool := gomcp.NewTool("run_in_terminal",
-		gomcp.WithDescription(
-			"Send a command to the integrated terminal for execution. "+
-				"The command is sent asynchronously — like pasting it into the terminal. "+
-				"Output is NOT captured; the user will see the output in their terminal panel."),
-		gomcp.WithString("command",
-			gomcp.Required(),
-			gomcp.Description("The shell command to execute in the terminal"),
-		),
-	)
+	// run_in_terminal (disabled)
+	/*
+		runInTerminalTool := gomcp.NewTool("run_in_terminal",
+			gomcp.WithDescription(
+				"Send a command to the integrated terminal for execution. "+
+					"The command is sent asynchronously — like pasting it into the terminal. "+
+					"Output is NOT captured; the user will see the output in their terminal panel."),
+			gomcp.WithString("command",
+				gomcp.Required(),
+				gomcp.Description("The shell command to execute in the terminal"),
+			),
+		)
+	*/
 
 	addTool := func(tool gomcp.Tool, handler server.ToolHandlerFunc) {
 		name := tool.Name
@@ -459,16 +470,16 @@ func (s *Server) registerTools() {
 		),
 	)
 
-	addTool(saveAssetTool, s.handleSaveAsset)
-	addTool(getAssetContentTool, s.handleGetAssetContent)
-	addTool(listAssetsTool, s.handleListAssets)
-	addTool(listAssetCommentsTool, s.handleListAssetComments)
+	// addTool(saveAssetTool, s.handleSaveAsset) // disabled
+	// addTool(getAssetContentTool, s.handleGetAssetContent) // disabled
+	// addTool(listAssetsTool, s.handleListAssets) // disabled
+	// addTool(listAssetCommentsTool, s.handleListAssetComments) // disabled
 	addTool(askQuestionTool, s.handleAskQuestion)
 	addTool(createTaskTool, s.handleCreateTask)
 	addTool(getTaskTool, s.handleGetTask)
 	addTool(listTasksTool, s.handleListTasks)
 	addTool(updateTaskTool, s.handleUpdateTask)
-	addTool(runInTerminalTool, s.handleRunInTerminal)
+	// addTool(runInTerminalTool, s.handleRunInTerminal) // disabled
 	addTool(enableBrowserControlTool, s.handleEnableBrowserControl)
 	addTool(visualizeReadMeTool, s.handleVisualizeReadMe)
 	addTool(visualizeShowWidgetTool, s.handleVisualizeShowWidget)
