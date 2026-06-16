@@ -47,6 +47,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 const MonacoFileEditor = lazy(() => import("./MonacoFileEditor"));
+// Type-only import: erased at build time, so it does not pull the Monaco chunk eagerly.
+import type { MonacoFileEditorHandle } from "./MonacoFileEditor";
 
 // MIME type detection by extension for the drag-source marker. The exact value
 // is irrelevant; only the presence of this marker distinguishes internal moves
@@ -716,8 +718,14 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const [fileSearchCurrentIndex, setFileSearchCurrentIndex] = useState(0);
   const [fileSearchTotal, setFileSearchTotal] = useState(0);
   const [pendingTargetLine, setPendingTargetLine] = useState<number | null>(null);
+  // Bumped on each content-result click so Monaco re-reveals even when the
+  // query/line are unchanged (e.g. re-clicking the same result).
+  const [searchNavSeq, setSearchNavSeq] = useState(0);
   const skipIndexResetRef = useRef(false);
   const fileContentSelectableRef = useRef<HTMLDivElement>(null);
+  // Imperative handle to the Monaco editor (when file editing is enabled) so
+  // Cmd+F can open Monaco's own find widget instead of the read-only overlay.
+  const monacoEditorRef = useRef<MonacoFileEditorHandle>(null);
 
   // Track if a load is for the current projectId/sessionId; ignore stale results after switch.
   const loadGenRef = useRef(0);
@@ -884,6 +892,16 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
       const key = e.key.toLowerCase();
 
       if (key === "f") {
+        // When the Monaco editor is mounted, let it own find (its native widget
+        // already handles Cmd+F while focused; this covers focus being elsewhere).
+        if (monacoEditorRef.current) {
+          e.preventDefault();
+          monacoEditorRef.current.openFind();
+          return;
+        }
+        // Editing enabled but Monaco not mounted (markdown preview / binary):
+        // there is no in-file search here, so defer to the browser.
+        if (editEnabled) return;
         e.preventDefault();
         setFileSearchVisible(true);
         return;
@@ -946,12 +964,20 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
       setLoadingFile(false);
     }
     if (line != null && searchQuery.trim()) {
-      skipIndexResetRef.current = true;
-      setFileSearchVisible(true);
-      setFileSearchQuery(searchQuery.trim());
-      setPendingTargetLine(line);
+      if (editEnabled) {
+        // Monaco reveals the line and opens its own find widget; the overlay
+        // search bar is only for the read-only CodeViewer.
+        setFileSearchQuery(searchQuery.trim());
+        setPendingTargetLine(line);
+        setSearchNavSeq((seq) => seq + 1);
+      } else {
+        skipIndexResetRef.current = true;
+        setFileSearchVisible(true);
+        setFileSearchQuery(searchQuery.trim());
+        setPendingTargetLine(line);
+      }
     }
-  }, [projectId, sessionId, searchQuery, setSelectedPath]);
+  }, [projectId, sessionId, searchQuery, editEnabled, setSelectedPath]);
 
   // Determine the directory where new uploads should land based on highlight.
   // - Highlighted directory → upload into it
@@ -1574,7 +1600,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               </div>
             ) : fileContent ? (
               <div className="flex-1 min-h-0 relative">
-                {fileSearchVisible && (
+                {fileSearchVisible && !editEnabled && (
                   <FileSearchBar
                     query={fileSearchQuery}
                     caseSensitive={fileSearchCaseSensitive}
@@ -1613,10 +1639,15 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                       }
                     >
                       <MonacoFileEditor
+                        ref={monacoEditorRef}
                         filepath={selectedPath}
                         value={editorValue}
                         onChange={setEditorValue}
                         onSave={handleSave}
+                        searchQuery={fileSearchQuery}
+                        searchCaseSensitive={fileSearchCaseSensitive}
+                        targetLine={pendingTargetLine ?? undefined}
+                        searchNonce={searchNavSeq}
                       />
                     </Suspense>
                   </div>
