@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useRef, useEffect, memo } from "react";
+import { useMemo, useState, useCallback, useRef, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, FileEdit } from "lucide-react";
@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import { useAppStore } from "@/stores/app";
 import { usePreferences, CHAT_FONT_SIZE_PX } from "@/stores/preferences";
 import { useSmoothText } from "@/hooks/useSmoothText";
+import { formatDuration } from "@/lib/format";
 import type { ChatMessage as ChatMessageType, MessagePart, Task, AssetType } from "@/types";
 
 const ASSET_TYPE_CONFIG: Record<string, { label: string; color: string; icon: typeof FileText }> = {
@@ -108,7 +109,9 @@ function groupParts(parts: MessagePart[]): PartGroup[] {
 }
 
 // Collapse a consecutive run of thinking/tools groups into a steps group
-// when the run contains more than 1 tool call in total.
+// when the run contains more than 1 tool call in total. This is the original
+// per-batch "2 tool calls" collapse, preserved as-is; the only addition is the
+// outer "Worked for Xs" wrapper produced by splitTurn below.
 function collapseSteps(groups: PartGroup[]): PartGroup[] {
   type ToolUsePart = Extract<MessagePart, { type: "tool_use" }>;
 
@@ -154,6 +157,55 @@ function collapseSteps(groups: PartGroup[]): PartGroup[] {
   }
 
   return result;
+}
+
+// Split a completed assistant turn into the work that led up to the answer and
+// the answer itself. Everything before the final text group (intermediate text,
+// thinking, and tool calls) becomes the collapsible "Worked for Xs" block; the
+// last text group and anything after it stays visible. The work portion still
+// carries its inner per-batch collapses (steps groups) untouched.
+function splitTurn(groups: PartGroup[]): { worked: PartGroup[] | null; final: PartGroup[] } {
+  let lastTextIdx = -1;
+  for (let i = groups.length - 1; i >= 0; i--) {
+    if (groups[i].type === "text") {
+      lastTextIdx = i;
+      break;
+    }
+  }
+
+  // No final text (e.g. the turn ended on a tool call) → fold the whole turn.
+  const preEnd = lastTextIdx === -1 ? groups.length : lastTextIdx;
+  const pre = groups.slice(0, preEnd);
+
+  // Only collapse when there's actual work to hide — a plain answer with no
+  // preceding steps shouldn't get a "Worked for" header.
+  const hasWork = pre.some((g) => g.type === "tools" || g.type === "thinking" || g.type === "steps");
+  if (!hasWork) return { worked: null, final: groups };
+
+  return { worked: pre, final: groups.slice(preEnd) };
+}
+
+// Fallback header text for turns whose duration wasn't recorded.
+function summarizeWork(groups: PartGroup[]): string {
+  type ToolUsePart = Extract<MessagePart, { type: "tool_use" }>;
+  let tools = 0;
+  let thoughts = 0;
+  for (const g of groups) {
+    if (g.type === "steps") {
+      tools += g.toolCallCount;
+      thoughts += g.thinkingCount;
+    } else if (g.type === "tools") {
+      tools += g.parts.filter(
+        (p): p is ToolUsePart => p.type === "tool_use" && !TODO_TOOLS.has((p as ToolUsePart).toolName) && !HIDDEN_TOOLS.has((p as ToolUsePart).toolName)
+      ).length;
+    } else if (g.type === "thinking") {
+      thoughts += 1;
+    }
+  }
+  const parts: string[] = [];
+  if (tools > 0) parts.push(`${tools} tool call${tools > 1 ? "s" : ""}`);
+  if (thoughts > 0) parts.push(`${thoughts} thought${thoughts > 1 ? "s" : ""}`);
+  return parts.length ? `Worked · ${parts.join(" · ")}` : "Worked";
 }
 
 function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
@@ -249,12 +301,15 @@ function StepsGroupBlock({
 }) {
   // userExpanded: manual toggle state (default collapsed). isStreaming forces open.
   const [userExpanded, setUserExpanded] = useState(false);
-  const expanded = !!isStreaming || userExpanded;
-
-  // When streaming ends, reset to collapsed so the group auto-collapses.
-  useEffect(() => {
+  // Reset to collapsed exactly when streaming ends. Done during render (React's
+  // "adjust state when a prop changes" pattern) rather than in an effect, which
+  // would cascade an extra render. https://react.dev/learn/you-might-not-need-an-effect
+  const [wasStreaming, setWasStreaming] = useState(isStreaming);
+  if (wasStreaming !== isStreaming) {
+    setWasStreaming(isStreaming);
     if (!isStreaming) setUserExpanded(false);
-  }, [isStreaming]);
+  }
+  const expanded = !!isStreaming || userExpanded;
 
   // Only the last thinking subGroup is actively streaming — all earlier ones are complete.
   const lastThinkingSubGroupIdx = isStreaming
@@ -306,6 +361,112 @@ function StepsGroupBlock({
         </div>
       </CollapsibleContent>
     </Collapsible>
+  );
+}
+
+// Renders a single completed (non-streaming) group: text, thinking, a single
+// tool batch, a collapsed multi-tool "steps" block, images, or widget. Used for
+// both the visible final answer and the contents of the "Worked for Xs" block.
+function StaticGroup({
+  group,
+  loadDetails,
+}: {
+  group: PartGroup;
+  loadDetails?: () => Promise<boolean>;
+}) {
+  switch (group.type) {
+    case "text":
+      return (
+        <div className="markdown-content">
+          {group.parts.map((part, pi) =>
+            part.type === "text" ? <TextBlock key={pi} content={part.content} /> : null
+          )}
+        </div>
+      );
+    case "thinking":
+      return (
+        <>
+          {group.parts.map((part, pi) =>
+            part.type === "thinking" ? (
+              <ThinkingBlock
+                key={pi}
+                content={part.content || ""}
+                isStreaming={false}
+                onLoadDetails={loadDetails}
+              />
+            ) : null
+          )}
+        </>
+      );
+    case "images":
+      return (
+        <div className="my-1">
+          <ImageThumbnails parts={group.parts} />
+        </div>
+      );
+    case "widget":
+      return (
+        <>
+          {group.parts.map((part, pi) =>
+            part.type === "widget" ? (
+              <WidgetBlock
+                key={pi}
+                title={part.title}
+                widgetCode={part.widgetCode}
+                loadingMessages={part.loadingMessages}
+              />
+            ) : null
+          )}
+        </>
+      );
+    case "tools":
+      return <CollapsibleToolSteps parts={group.parts} />;
+    case "steps":
+      return <StepsGroupBlock group={group} onLoadDetails={loadDetails} />;
+    default:
+      return null;
+  }
+}
+
+// Collapses everything a completed turn did before its final answer into a
+// single "Worked for Xs ›" header, followed by a divider — the answer renders
+// below it. Mirrors the Codex client's turn summary.
+function WorkedBlock({
+  groups,
+  durationMs,
+  loadDetails,
+}: {
+  groups: PartGroup[];
+  durationMs?: number;
+  loadDetails?: () => Promise<boolean>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const label =
+    durationMs != null && durationMs > 0
+      ? `Worked for ${formatDuration(durationMs)}`
+      : summarizeWork(groups);
+
+  return (
+    <div className="mb-2.5">
+      <Collapsible open={expanded} onOpenChange={setExpanded}>
+        <CollapsibleTrigger className="flex items-center gap-1.5 text-left py-0.5 text-xs text-muted-foreground hover:text-foreground transition-colors outline-none">
+          <span className="font-medium">{label}</span>
+          {expanded ? (
+            <ChevronDown className="h-3 w-3 shrink-0" />
+          ) : (
+            <ChevronRight className="h-3 w-3 shrink-0" />
+          )}
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div className="mt-1 ml-3 pl-2 border-l border-border/30">
+            {groups.map((g, gi) => (
+              <StaticGroup key={gi} group={g} loadDetails={loadDetails} />
+            ))}
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
+      <div className="border-b border-border/40 mt-2" />
+    </div>
   );
 }
 
@@ -423,7 +584,7 @@ export function ForkButton({ message }: { message: ChatMessageType }) {
     } finally {
       setBusy(false);
     }
-  }, [busy, currentSession, message.id, sessions, setSessions, setActiveSessionId]);
+  }, [busy, currentSession, message.metadata?.sdkMessageUuid, sessions, setSessions, setActiveSessionId]);
 
   if (!canFork) return null;
 
@@ -439,6 +600,9 @@ export function ForkButton({ message }: { message: ChatMessageType }) {
   );
 }
 
+// Shared helper imported by ChatPanel; intentionally co-located with the chat
+// components, so this file exports a non-component alongside them.
+// eslint-disable-next-line react-refresh/only-export-components
 export function extractPlainText(parts: MessagePart[]): string {
   return parts
     .filter((p) => p.type === "text")
@@ -549,9 +713,13 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
   const chatFontSize = usePreferences((s) => s.chatFontSize);
 
   const effectiveParts = loadedParts || message.parts;
-  const groups = useMemo(
-    () => message.isStreaming ? groupParts(effectiveParts) : collapseSteps(groupParts(effectiveParts)),
-    [effectiveParts, message.isStreaming],
+  const groups = useMemo(() => groupParts(effectiveParts), [effectiveParts]);
+  // For a completed turn, keep the original per-batch "X tool calls" collapse,
+  // then fold everything before the final answer into the outer "Worked for Xs"
+  // block. Streaming turns stay fully expanded (raw groups, no collapse).
+  const turn = useMemo(
+    () => (message.isStreaming ? null : splitTurn(collapseSteps(groups))),
+    [groups, message.isStreaming],
   );
   // A thinking group is actively streaming only if it's the very last group in the array
   // (meaning nothing has come after it yet). Once tool calls or text appear after it, it's done.
@@ -583,7 +751,7 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
     : [];
 
   const taskRefs = isUser
-    ? (message.parts.filter((p) => p.type === "task_ref" && (p as any).task) as Array<{ type: "task_ref"; taskId: string; task: Task }>)
+    ? (message.parts.filter((p) => p.type === "task_ref" && (p as { task?: Task }).task) as Array<{ type: "task_ref"; taskId: string; task: Task }>)
     : [];
 
   const assetRefs = isUser
@@ -675,83 +843,86 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
         ) : (
           <div>
             <div className="rounded-2xl px-4 py-3 bg-muted/50 max-w-full">
-              {groups.length === 0 && message.isStreaming && <ThinkingIndicator />}
-              {groups.map((group, gi) => {
-                const isLastGroup = gi === groups.length - 1;
-                const textIsStreaming = !!message.isStreaming && isLastGroup && group.type === "text";
-                switch (group.type) {
-                  case "text":
-                    return (
-                      <div key={gi} className="markdown-content">
-                        {group.parts.map((part, pi) => {
-                          if (part.type !== "text") return null;
-                          const isLastTextPart = pi === group.parts.length - 1;
-                          return (
-                            <TextBlock
-                              key={pi}
-                              content={part.content}
-                              isStreaming={textIsStreaming && isLastTextPart}
+              {message.isStreaming ? (
+                <>
+                  {groups.length === 0 && <ThinkingIndicator />}
+                  {groups.map((group, gi) => {
+                    const isLastGroup = gi === groups.length - 1;
+                    const textIsStreaming = isLastGroup && group.type === "text";
+                    switch (group.type) {
+                      case "text":
+                        return (
+                          <div key={gi} className="markdown-content">
+                            {group.parts.map((part, pi) => {
+                              if (part.type !== "text") return null;
+                              const isLastTextPart = pi === group.parts.length - 1;
+                              return (
+                                <TextBlock
+                                  key={pi}
+                                  content={part.content}
+                                  isStreaming={textIsStreaming && isLastTextPart}
+                                />
+                              );
+                            })}
+                          </div>
+                        );
+                      case "thinking":
+                        return group.parts.map((part, pi) =>
+                          part.type === "thinking" ? (
+                            <ThinkingBlock
+                              key={`${gi}-${pi}`}
+                              content={part.content || ""}
+                              isStreaming={gi === activeThinkingGroupIdx}
+                              onLoadDetails={gi === activeThinkingGroupIdx ? undefined : loadDetails}
                             />
-                          );
-                        })}
-                      </div>
-                    );
-                  case "thinking":
-                    return group.parts.map((part, pi) =>
-                      part.type === "thinking" ? (
-                        <ThinkingBlock
-                          key={`${gi}-${pi}`}
-                          content={part.content || ""}
-                          isStreaming={gi === activeThinkingGroupIdx}
-                          onLoadDetails={gi === activeThinkingGroupIdx ? undefined : loadDetails}
-                        />
-                      ) : null
-                    );
-                  case "images":
-                    return (
-                      <div key={gi} className="my-1">
-                        <ImageThumbnails parts={group.parts} />
-                      </div>
-                    );
-                  case "widget":
-                    return group.parts.map((part, pi) =>
-                      part.type === "widget" ? (
-                        <WidgetBlock
-                          key={`${gi}-${pi}`}
-                          title={part.title}
-                          widgetCode={part.widgetCode}
-                          loadingMessages={part.loadingMessages}
-                        />
-                      ) : null
-                    );
-                  case "tools":
-                    return (
-                      <CollapsibleToolSteps
-                        key={gi}
-                        parts={group.parts}
-                      />
-                    );
-                  case "steps":
-                    return (
-                      <StepsGroupBlock
-                        key={gi}
-                        group={group}
-                        isStreaming={message.isStreaming}
-                        onLoadDetails={message.isStreaming ? undefined : loadDetails}
-                      />
-                    );
-                  default:
-                    return null;
-                }
-              })}
-              {message.isStreaming && groups.length > 0 && (
-                // Text groups carry their own trailing margin, so mt-1 reads fine there;
-                // tool-call / thinking / media groups don't, so give the indicator more
-                // breathing room after them.
-                <ThinkingIndicator className={groups[groups.length - 1].type === "text" ? "mt-1" : "mt-3"} />
-              )}
-              {!message.isStreaming && fileChanges.length > 0 && (
-                <FileChangesSummary files={fileChanges} projectRoot={projectRoot} />
+                          ) : null
+                        );
+                      case "images":
+                        return (
+                          <div key={gi} className="my-1">
+                            <ImageThumbnails parts={group.parts} />
+                          </div>
+                        );
+                      case "widget":
+                        return group.parts.map((part, pi) =>
+                          part.type === "widget" ? (
+                            <WidgetBlock
+                              key={`${gi}-${pi}`}
+                              title={part.title}
+                              widgetCode={part.widgetCode}
+                              loadingMessages={part.loadingMessages}
+                            />
+                          ) : null
+                        );
+                      case "tools":
+                        return <CollapsibleToolSteps key={gi} parts={group.parts} />;
+                      default:
+                        return null;
+                    }
+                  })}
+                  {groups.length > 0 && (
+                    // Text groups carry their own trailing margin, so mt-1 reads fine there;
+                    // tool-call / thinking / media groups don't, so give the indicator more
+                    // breathing room after them.
+                    <ThinkingIndicator className={groups[groups.length - 1].type === "text" ? "mt-1" : "mt-3"} />
+                  )}
+                </>
+              ) : (
+                <>
+                  {turn?.worked && turn.worked.length > 0 && (
+                    <WorkedBlock
+                      groups={turn.worked}
+                      durationMs={message.metadata?.durationMs}
+                      loadDetails={loadDetails}
+                    />
+                  )}
+                  {(turn?.final ?? groups).map((group, gi) => (
+                    <StaticGroup key={gi} group={group} loadDetails={loadDetails} />
+                  ))}
+                  {fileChanges.length > 0 && (
+                    <FileChangesSummary files={fileChanges} projectRoot={projectRoot} />
+                  )}
+                </>
               )}
             </div>
           </div>
