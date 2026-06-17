@@ -446,12 +446,6 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
                         <span>{CATEGORY_LABELS[cat]} ({group.length})</span>
                         {projectId && (
                           <div className="ml-auto opacity-0 group-hover/cat:opacity-100 flex items-center gap-0.5 transition-opacity">
-                            {cat !== "staged" && (
-                              <button onClick={() => handleDiscardAll(groupPaths)}
-                                className="p-0.5 hover:text-destructive transition-colors" title="Discard all">
-                                <Trash2 className="h-3 w-3" />
-                              </button>
-                            )}
                             {cat === "staged" ? (
                               <button onClick={() => handleUnstageFiles(groupPaths)}
                                 className="p-0.5 hover:text-orange-500 transition-colors" title="Unstage all">
@@ -461,6 +455,12 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
                               <button onClick={() => handleStageFiles(groupPaths)}
                                 className="p-0.5 hover:text-green-500 transition-colors" title="Stage all">
                                 <Plus className="h-3 w-3" />
+                              </button>
+                            )}
+                            {cat !== "staged" && (
+                              <button onClick={() => handleDiscardAll(groupPaths)}
+                                className="p-0.5 hover:text-destructive transition-colors" title="Discard all">
+                                <Trash2 className="h-3 w-3" />
                               </button>
                             )}
                           </div>
