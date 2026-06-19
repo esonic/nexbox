@@ -130,5 +130,21 @@ func (s *Server) ServeWebShare(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+
+	// HTML shares are rewritten on the fly to carry a correct set of Open Graph
+	// tags so the link renders as a rich card in WeChat/Lark/QQ. Non-HTML (or a
+	// read failure) falls back to the plain sandboxed file server.
+	if strings.EqualFold(filepath.Ext(full), ".html") {
+		if content, readErr := os.ReadFile(full); readErr == nil {
+			shareURL := publicBaseURL(r) + "/web_share/" + id
+			defaultImage := publicBaseURL(r) + "/icons/icon-512.png"
+			out := injectOpenGraph(string(content), shareURL, defaultImage)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Content-Security-Policy", "sandbox allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-modals")
+			_, _ = w.Write([]byte(out))
+			return
+		}
+	}
 	serveSandboxedFile(w, r, full)
 }
