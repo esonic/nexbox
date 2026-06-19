@@ -158,6 +158,52 @@ func writeMeta(b *strings.Builder, prop, content string) {
 	b.WriteString("\">\n")
 }
 
+// wechatShareScript bootstraps WeChat JS-SDK custom share on the page: it loads
+// jweixin, asks our backend to sign the current URL, configures wx, and sets the
+// share card from the og:* tags injectOpenGraph already wrote. Pure client-side
+// progressive enhancement — it no-ops outside WeChat and never blocks rendering.
+const wechatShareScript = `
+<script>
+(function(){
+  var page = location.href.split('#')[0];
+  var dbg = /[?&]wxdebug=1/.test(location.search);
+  function meta(p){var m=document.querySelector('meta[property="'+p+'"]');return m?m.getAttribute('content'):'';}
+  var s=document.createElement('script');
+  s.src='https://res.wx.qq.com/open/js/jweixin-1.6.0.js';
+  s.onerror=function(){if(dbg)alert('failed to load jweixin');};
+  s.onload=function(){
+    if(typeof wx==='undefined'){if(dbg)alert('wx undefined');return;}
+    fetch('/wx/js-config?url='+encodeURIComponent(page)).then(function(r){return r.ok?r.json():null;}).then(function(c){
+      if(!c||!c.signature){if(dbg)alert('no signature from /wx/js-config');return;}
+      wx.error(function(res){if(dbg)alert('wx.config error: '+JSON.stringify(res));});
+      wx.config({debug:dbg,appId:c.appId,timestamp:c.timestamp,nonceStr:c.nonceStr,signature:c.signature,jsApiList:['updateAppMessageShareData','updateTimelineShareData']});
+      wx.ready(function(){
+        var title=meta('og:title')||document.title;
+        var desc=meta('og:description');
+        var img=meta('og:image');
+        if(wx.updateAppMessageShareData)wx.updateAppMessageShareData({title:title,desc:desc,link:page,imgUrl:img});
+        if(wx.updateTimelineShareData)wx.updateTimelineShareData({title:title,link:page,imgUrl:img});
+      });
+    }).catch(function(e){if(dbg)alert('js-config fetch failed: '+e);});
+  };
+  document.head.appendChild(s);
+})();
+</script>
+`
+
+// injectWeChatShare appends the WeChat share bootstrap just before </body> (or
+// at the end if there is no body tag). Returns the input unchanged if it has
+// already been injected.
+func injectWeChatShare(htmlContent string) string {
+	if strings.Contains(htmlContent, "/wx/js-config") {
+		return htmlContent
+	}
+	if idx := strings.LastIndex(strings.ToLower(htmlContent), "</body>"); idx != -1 {
+		return htmlContent[:idx] + wechatShareScript + htmlContent[idx:]
+	}
+	return htmlContent + wechatShareScript
+}
+
 func extractTitle(htmlContent string) string {
 	if m := titleRe.FindStringSubmatch(htmlContent); m != nil {
 		return strings.TrimSpace(html.UnescapeString(m[1]))

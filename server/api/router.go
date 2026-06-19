@@ -6,12 +6,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/esonic/nexbox/agent"
 	"github.com/esonic/nexbox/config"
 	chromemcp "github.com/esonic/nexbox/mcp/chrome"
 	"github.com/esonic/nexbox/store"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 // Server holds all API dependencies
@@ -32,6 +32,7 @@ type Server struct {
 	ChromeManager    *chromemcp.ChromeManager // Per-session Chrome DevTools MCP manager for E2E testing
 	ListenPort       int                      // actual TCP port the HTTP server is listening on
 	MarketplaceStats *MarketplaceStatsBuffer  // In-memory stats accumulator
+	WeChat           *WeChatJSSDK             // optional WeChat JS-SDK share signer (nil when unconfigured)
 
 	// humanGates: executionID+":"+nodeID → channel carrying user input for human node continuation
 	humanGatesMu sync.Mutex
@@ -101,6 +102,10 @@ func NewRouter(s *Server) *chi.Mux {
 	// can view the file. Returns 404 if the share id is unknown or the
 	// underlying file has been deleted.
 	r.Get("/web_share/{id}", s.ServeWebShare)
+
+	// Public WeChat JS-SDK config signer, used by shared pages to enable the
+	// in-app "分享给朋友" rich card. Outside RequireAuth like /web_share.
+	r.Get("/wx/js-config", s.HandleWeChatJSConfig)
 
 	// WebSocket endpoints. They expect the JWT via either the cookie or an
 	// `?auth=<token>` query parameter (cookies aren't reliable on WS upgrades

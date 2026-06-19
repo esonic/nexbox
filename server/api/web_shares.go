@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/esonic/nexbox/store"
+	"github.com/go-chi/chi/v5"
 )
 
 // createWebShareRequest is the POST body for CreateWebShare.
@@ -134,14 +134,25 @@ func (s *Server) ServeWebShare(w http.ResponseWriter, r *http.Request) {
 	// HTML shares are rewritten on the fly to carry a correct set of Open Graph
 	// tags so the link renders as a rich card in WeChat/Lark/QQ. Non-HTML (or a
 	// read failure) falls back to the plain sandboxed file server.
+	//
+	// Deliberately NO "Content-Security-Policy: sandbox" here, unlike the
+	// in-app preview path (serveSandboxedFile): a shared link is opened as a
+	// top-level page and crawled by WeChat/Lark link-preview bots, which refuse
+	// to build a card for a sandboxed document and fall back to a bare link.
+	// The sandbox bought us little anyway — paired with allow-same-origin +
+	// allow-scripts it self-disables. We still send nosniff.
 	if strings.EqualFold(filepath.Ext(full), ".html") {
 		if content, readErr := os.ReadFile(full); readErr == nil {
 			shareURL := publicBaseURL(r) + "/web_share/" + id
 			defaultImage := publicBaseURL(r) + "/icons/icon-512.png"
 			out := injectOpenGraph(string(content), shareURL, defaultImage)
+			// When a WeChat Official Account is configured, also inject the
+			// JS-SDK bootstrap so the in-app "分享给朋友" flow renders a card.
+			if s.WeChat != nil {
+				out = injectWeChatShare(out)
+			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
-			w.Header().Set("Content-Security-Policy", "sandbox allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-modals")
 			_, _ = w.Write([]byte(out))
 			return
 		}

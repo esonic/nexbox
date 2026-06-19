@@ -15,13 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rs/cors"
 	"github.com/esonic/nexbox/agent"
 	"github.com/esonic/nexbox/api"
 	"github.com/esonic/nexbox/config"
 	nexmcp "github.com/esonic/nexbox/mcp"
 	chromemcp "github.com/esonic/nexbox/mcp/chrome"
 	"github.com/esonic/nexbox/store"
+	"github.com/rs/cors"
 )
 
 // Version is injected at build time via -ldflags "-X main.Version=<timestamp>".
@@ -227,6 +227,10 @@ func main() {
 		ChromeManager:    chromeManager,
 		ListenPort:       *port,
 		MarketplaceStats: api.NewMarketplaceStatsBuffer(),
+		WeChat:           api.NewWeChatJSSDK(os.Getenv("WECHAT_APPID"), os.Getenv("WECHAT_APPSECRET")),
+	}
+	if srv.WeChat != nil {
+		log.Printf("  WeChat JS-SDK share: enabled (appID from env)")
 	}
 
 	go api.CloneOfficialMarketplaceRepos(*dataDir, dataStore)
