@@ -176,6 +176,7 @@ func registerAuthedAPIRoutes(s *Server, r chi.Router) {
 			r.Get("/diff", s.GetProjectDiff)
 			r.Get("/diff-stats", s.GetProjectDiffStats)
 			r.Get("/file-diff", s.GetProjectFileDiff)
+			r.Get("/git-file-head", s.GetProjectFileHead)
 
 			// File browser
 			r.Get("/files", s.ListProjectFiles)

@@ -1,6 +1,63 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { Loader2 } from "lucide-react";
+import { computeDiffOps } from "@/lib/vscode-diff";
+
+type DirtyChangeKind = "add" | "modify" | "delete";
+interface DirtyChange {
+  /** 1-based line range in the *current* (modified) document. */
+  startLine: number;
+  endLine: number;
+  kind: DirtyChangeKind;
+}
+
+/**
+ * Diff the committed baseline against the current content and collapse the
+ * per-line op list into VSCode-style dirty-diff regions, expressed in current
+ * document line numbers:
+ *   - add    — lines present only in the current content (green)
+ *   - modify — a region where lines were both removed and added (blue)
+ *   - delete — lines removed with nothing added; marked on the line that now
+ *              sits just below the deletion gap (red wedge)
+ */
+function computeDirtyChanges(baseline: string, current: string): DirtyChange[] {
+  const baseLines = baseline.split("\n");
+  const curLines = current.split("\n");
+  const ops = computeDiffOps(baseLines, curLines);
+  const changes: DirtyChange[] = [];
+
+  let i = 0;
+  while (i < ops.length) {
+    if (ops[i].kind === "equal") {
+      i++;
+      continue;
+    }
+    // Gather a contiguous run of non-equal ops (a single change region).
+    let deletes = 0;
+    const insertModIdx: number[] = [];
+    while (i < ops.length && ops[i].kind !== "equal") {
+      const op = ops[i];
+      if (op.kind === "delete") deletes++;
+      else if (op.kind === "insert") insertModIdx.push(op.modIdx);
+      i++;
+    }
+
+    if (insertModIdx.length > 0) {
+      changes.push({
+        startLine: Math.min(...insertModIdx) + 1,
+        endLine: Math.max(...insertModIdx) + 1,
+        kind: deletes > 0 ? "modify" : "add",
+      });
+    } else if (deletes > 0) {
+      // Pure deletion: anchor the marker on the line that follows the gap in
+      // the current document (the next equal op), or the last line at EOF.
+      const next = ops[i];
+      const line = next && next.kind === "equal" ? next.modIdx + 1 : Math.max(1, curLines.length);
+      changes.push({ startLine: line, endLine: line, kind: "delete" });
+    }
+  }
+  return changes;
+}
 
 const EXT_TO_MONACO: Record<string, string> = {
   js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
@@ -42,6 +99,13 @@ interface MonacoFileEditorProps {
   onChange: (next: string) => void;
   onSave?: () => void;
   /**
+   * Committed (HEAD) content of the file. When provided, the editor renders
+   * VSCode-style dirty-diff markers (gutter bars + scrollbar overview) for the
+   * difference between this baseline and the live `value`. Pass undefined to
+   * disable (e.g. file not in git or baseline still loading).
+   */
+  baseline?: string;
+  /**
    * When set, Monaco reveals the match and opens its native find widget seeded
    * with this query — used when a content search result is clicked.
    */
@@ -58,13 +122,15 @@ interface MonacoFileEditorProps {
 
 const MonacoFileEditor = forwardRef<MonacoFileEditorHandle, MonacoFileEditorProps>(
   function MonacoFileEditor(
-    { filepath, value, onChange, onSave, searchQuery, searchCaseSensitive, targetLine, searchNonce },
+    { filepath, value, onChange, onSave, baseline, searchQuery, searchCaseSensitive, targetLine, searchNonce },
     ref,
   ) {
     const [theme, setTheme] = useState<"vs-dark" | "vs-light">(getDocumentTheme);
     const editorRef = useRef<MonacoStandaloneEditor | null>(null);
     const monacoRef = useRef<MonacoNamespace | null>(null);
     const revealRafRef = useRef<number | null>(null);
+    const dirtyDiffRef = useRef<ReturnType<MonacoStandaloneEditor["createDecorationsCollection"]> | null>(null);
+    const dirtyDiffTimerRef = useRef<number | null>(null);
 
     const onSaveRef = useRef(onSave);
     useEffect(() => {
@@ -167,19 +233,81 @@ const MonacoFileEditor = forwardRef<MonacoFileEditorHandle, MonacoFileEditorProp
     useEffect(
       () => () => {
         if (revealRafRef.current != null) cancelAnimationFrame(revealRafRef.current);
+        if (dirtyDiffTimerRef.current != null) clearTimeout(dirtyDiffTimerRef.current);
       },
       [],
     );
 
+    // Recompute dirty-diff markers (gutter bars + scrollbar overview) from the
+    // committed baseline against the current model text, and apply them as a
+    // single decorations collection. No-op until the editor is mounted.
+    const applyDirtyDiff = useCallback(() => {
+      const editor = editorRef.current;
+      const monaco = monacoRef.current;
+      if (!editor || !monaco) return;
+      const model = editor.getModel();
+      if (!model) return;
+
+      // No baseline (file not in git / still loading) → clear any markers.
+      if (baseline == null) {
+        dirtyDiffRef.current?.set([]);
+        return;
+      }
+
+      const current = model.getValue();
+      const changes = current === baseline ? [] : computeDirtyChanges(baseline, current);
+      const Lane = monaco.editor.OverviewRulerLane;
+      const lineCount = model.getLineCount();
+
+      const decorations = changes.map((c) => {
+        const start = Math.min(c.startLine, lineCount);
+        const end = Math.min(c.endLine, lineCount);
+        const rulerColor =
+          c.kind === "add" ? "#2ea043" : c.kind === "modify" ? "#0c7d9d" : "#f85149";
+        return {
+          range: new monaco.Range(start, 1, end, 1),
+          options: {
+            // Gutter bar lives in the line-decorations margin (left of content).
+            linesDecorationsClassName: `dirty-diff-glyph dirty-diff-${c.kind}`,
+            overviewRuler: { color: rulerColor, position: Lane.Left },
+          },
+        };
+      });
+
+      if (!dirtyDiffRef.current) {
+        dirtyDiffRef.current = editor.createDecorationsCollection(decorations);
+      } else {
+        dirtyDiffRef.current.set(decorations);
+      }
+    }, [baseline]);
+
+    // Recompute on baseline/content change. Debounced so fast typing on large
+    // files doesn't run the diff on every keystroke.
+    useEffect(() => {
+      if (dirtyDiffTimerRef.current != null) clearTimeout(dirtyDiffTimerRef.current);
+      dirtyDiffTimerRef.current = window.setTimeout(applyDirtyDiff, 120);
+      return () => {
+        if (dirtyDiffTimerRef.current != null) clearTimeout(dirtyDiffTimerRef.current);
+      };
+    }, [applyDirtyDiff, value, baseline, filepath]);
+
     const handleMount: OnMount = (editor, monaco) => {
       editorRef.current = editor;
       monacoRef.current = monaco;
+      // This is a standalone single-file editor: the built-in TS worker has no
+      // tsconfig/node_modules/JSX context, so it false-flags nearly every
+      // identifier ("Cannot find name ...") and all JSX. Disable diagnostics so
+      // only syntax highlighting remains.
+      const noValidation = { noSemanticValidation: true, noSyntaxValidation: true };
+      monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions(noValidation);
+      monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions(noValidation);
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
         onSaveRef.current?.();
       });
-      // First load: the effect below already ran (no editor yet); drive the
-      // initial reveal here now that the editor exists.
+      // First load: the effects below already ran (no editor yet); drive the
+      // initial reveal and dirty-diff render here now that the editor exists.
       revealSearchTarget();
+      applyDirtyDiff();
     };
 
     // Track the latest request and re-run on each search selection while the

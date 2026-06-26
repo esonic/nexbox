@@ -205,6 +205,33 @@ mark.diff-word-del { background-color: hsl(0 72% 51% / 0.38); }
 .dark mark.diff-word-add { background-color: hsl(142 65% 50% / 0.42); }
 .dark mark.diff-word-del { background-color: hsl(0 72% 58% / 0.42); }
 
+/* VSCode-style dirty-diff gutter bars in the Monaco editor's line-decorations
+   margin. The decoration element fills the line height; a left border draws the
+   vertical change bar. The scrollbar overview markers are handled by Monaco's
+   own overviewRuler option (see MonacoFileEditor). */
+.dirty-diff-glyph {
+  /* Sit flush against the line-number column; the bar is 3px wide. */
+  margin-left: 3px;
+  width: 3px !important;
+}
+.dirty-diff-add { border-left: 3px solid #2ea043; }
+.dirty-diff-modify { border-left: 3px solid #0c7d9d; }
+/* Deletion has no line of its own: render a downward wedge straddling the gap
+   between the surrounding lines, anchored at the top of the marked line. */
+.dirty-diff-delete {
+  border-left: 3px solid transparent;
+  position: relative;
+}
+.dirty-diff-delete::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: -3px;
+  border-left: 4px solid #f85149;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+}
+
 /* Notification new-item entrance animation */
 @keyframes notification-in {
   0%   { background-color: hsl(0 84% 60% / 0.14); }

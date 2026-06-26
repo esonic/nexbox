@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { filesApi, serverApi, type FileEntry, type FileContentResponse, type FileSearchResult } from "@/lib/api";
+import { filesApi, serverApi, gitApi, type FileEntry, type FileContentResponse, type FileSearchResult, type GitStatusResponse } from "@/lib/api";
 import { getLangFromPath, ensureLangRegistered, highlightCode } from "@/lib/highlight";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { useLayoutStore } from "@/stores/layout";
@@ -84,6 +84,37 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// ── Git status decorations (VSCode-style) ──
+
+// Letter badge + name color for a single git change. `dir` is the aggregate
+// marker shown on folders that contain changes.
+type GitChangeKind = "modified" | "added" | "deleted" | "renamed" | "untracked" | "dir-tracked" | "dir-untracked";
+interface GitDeco {
+  kind: GitChangeKind;
+}
+
+// VSCode's exact git-decoration foreground colors (Light+ / Dark+ themes), which
+// are softer/less saturated than Tailwind's amber-500/green-600. Modified =
+// tan-gold, added/untracked = sage green, deleted = muted red.
+const GIT_DECO_COLOR: Record<GitChangeKind, string> = {
+  modified: "text-[#895503] dark:text-[#e2c08d]",
+  renamed: "text-[#895503] dark:text-[#e2c08d]",
+  added: "text-[#587c0c] dark:text-[#81b88b]",
+  untracked: "text-[#007100] dark:text-[#73c991]",
+  deleted: "text-[#ad0707] dark:text-[#c74e39]",
+  "dir-tracked": "text-[#895503] dark:text-[#e2c08d]",
+  "dir-untracked": "text-[#007100] dark:text-[#73c991]",
+};
+
+// Single-letter badge shown at the right edge of a changed file row.
+const GIT_DECO_LETTER: Partial<Record<GitChangeKind, string>> = {
+  modified: "M",
+  added: "A",
+  deleted: "D",
+  renamed: "R",
+  untracked: "U",
+};
+
 // ── File tree item ──
 
 function FileTreeItem({
@@ -96,6 +127,7 @@ function FileTreeItem({
   onHighlight,
   getChildren,
   isLoading,
+  getGitDecoration,
   dragOverPath,
   onDragStartItem,
   onDragOverItem,
@@ -111,6 +143,7 @@ function FileTreeItem({
   onHighlight: (path: string) => void;
   getChildren: (path: string) => FileEntry[] | undefined;
   isLoading: (path: string) => boolean;
+  getGitDecoration: (path: string, isDir: boolean) => GitDeco | undefined;
   dragOverPath: string | null;
   onDragStartItem: (entry: FileEntry, e: React.DragEvent) => void;
   onDragOverItem: (entry: FileEntry, e: React.DragEvent) => void;
@@ -122,6 +155,9 @@ function FileTreeItem({
   const isDropTarget = entry.is_dir && dragOverPath === entry.path;
   const children = isExpanded && entry.is_dir ? getChildren(entry.path) : undefined;
   const loading = isExpanded && entry.is_dir && children === undefined && isLoading(entry.path);
+  const gitDeco = getGitDecoration(entry.path, entry.is_dir);
+  const gitColor = gitDeco ? GIT_DECO_COLOR[gitDeco.kind] : undefined;
+  const gitLetter = gitDeco ? GIT_DECO_LETTER[gitDeco.kind] : undefined;
 
   return (
     <>
@@ -166,7 +202,14 @@ function FileTreeItem({
             <File className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
           </>
         )}
-        <span className={cn("truncate min-w-0", entry.is_symlink && "italic")}>{entry.name}</span>
+        <span className={cn("truncate min-w-0", entry.is_symlink && "italic", gitColor)}>{entry.name}</span>
+        {/* Git change marker at the right edge: a letter badge for files, a dot
+            for folders that contain changes (VSCode-style). */}
+        {gitLetter ? (
+          <span className={cn("ml-auto pl-1 shrink-0 font-semibold tabular-nums", gitColor)}>{gitLetter}</span>
+        ) : gitDeco && entry.is_dir ? (
+          <span className={cn("ml-auto pl-1 shrink-0 text-base leading-none", gitColor)}>•</span>
+        ) : null}
       </div>
       {isExpanded && entry.is_dir && (
         loading ? (
@@ -188,6 +231,7 @@ function FileTreeItem({
             onHighlight={onHighlight}
             getChildren={getChildren}
             isLoading={isLoading}
+            getGitDecoration={getGitDecoration}
             dragOverPath={dragOverPath}
             onDragStartItem={onDragStartItem}
             onDragOverItem={onDragOverItem}
@@ -628,6 +672,13 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(() => new Set());
   const [rootLoading, setRootLoading] = useState(true);
   const [fileContent, setFileContent] = useState<FileContentResponse | null>(null);
+  // Committed (HEAD) content of the open file — the dirty-diff baseline for the
+  // editor's gutter/scrollbar change markers. undefined while loading or when
+  // the file isn't tracked, which disables the markers.
+  const [fileBaseline, setFileBaseline] = useState<string | undefined>(undefined);
+  // Git status for the whole tree, polled so changed files/folders get VSCode-
+  // style markers. Null until first load or when the project isn't a git repo.
+  const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(null);
   const [loadingFile, setLoadingFile] = useState(false);
   const [markdownMode, setMarkdownMode] = useState<"source" | "rendered">("source");
 
@@ -863,6 +914,20 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
 
   const isDirty = !!fileContent && !fileContent.binary && editorValue !== fileContent.content;
 
+  // Poll git status (like the diff panel) so tree markers stay current with
+  // changes made elsewhere (agent edits, terminal, the git panel's stage/commit).
+  const refreshGitStatus = useCallback(() => {
+    if (!projectId) return;
+    gitApi.status(projectId, sessionId).then(setGitStatus).catch(() => setGitStatus(null));
+  }, [projectId, sessionId]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    refreshGitStatus();
+    const interval = setInterval(refreshGitStatus, 5_000);
+    return () => clearInterval(interval);
+  }, [projectId, refreshGitStatus]);
+
   const handleSave = useCallback(async () => {
     if (!selectedPath || !fileContent || fileContent.binary) return;
     setSaving(true);
@@ -870,13 +935,15 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
       await filesApi.save(projectId, selectedPath, editorValue, sessionId);
       setFileContent({ ...fileContent, content: editorValue, size: new Blob([editorValue]).size });
       toast.success("Saved");
+      // Reflect the new change in the tree markers without waiting for the poll.
+      refreshGitStatus();
     } catch (e) {
       console.error("Save failed:", e);
       toast.error("Save failed", { description: String(e) });
     } finally {
       setSaving(false);
     }
-  }, [projectId, selectedPath, sessionId, fileContent, editorValue]);
+  }, [projectId, selectedPath, sessionId, fileContent, editorValue, refreshGitStatus]);
 
   useEffect(() => {
     if (!selectedPath) return;
@@ -931,10 +998,78 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [selectedPath, fileContent, editEnabled, isDirty, saving, handleSave]);
 
+  // Fetch the committed (HEAD) baseline for dirty-diff markers. Runs in the
+  // background alongside the content load; a monotonic seq guards against a slow
+  // response for a previously-selected file clobbering the current one.
+  const baselineReqRef = useRef(0);
+  const loadFileBaseline = useCallback(async (path: string) => {
+    const seq = ++baselineReqRef.current;
+    try {
+      const res = await filesApi.head(projectId, path, sessionId);
+      if (baselineReqRef.current !== seq) return;
+      // in_repo=false → not a git repo, no markers. Otherwise content is the
+      // HEAD blob, or "" for a new/untracked file (renders as fully added).
+      setFileBaseline(res.in_repo ? res.content : undefined);
+    } catch (e) {
+      if (baselineReqRef.current !== seq) return;
+      console.error("Failed to load file baseline:", e);
+      setFileBaseline(undefined);
+    }
+  }, [projectId, sessionId]);
+
+  // Build the path → marker map and the set of ancestor folders that contain a
+  // change. A file can appear in several status categories at once (staged +
+  // unstaged); the working-tree (unstaged) status wins since it reflects the
+  // current on-disk state, with untracked as its own category.
+  const gitDecorations = useMemo(() => {
+    const files = new Map<string, GitChangeKind>();
+    const dirs = new Map<string, "dir-tracked" | "dir-untracked">();
+    if (!gitStatus) return { files, dirs };
+
+    const statusToKind = (s: string): GitChangeKind =>
+      s === "added" ? "added"
+      : s === "deleted" ? "deleted"
+      : s === "renamed" || s === "copied" ? "renamed"
+      : "modified";
+
+    // staged first, then unstaged overrides (working-tree state is what's shown).
+    for (const e of gitStatus.staged) files.set(e.path, statusToKind(e.status));
+    for (const e of gitStatus.unstaged) files.set(e.path, statusToKind(e.status));
+    for (const e of gitStatus.untracked) files.set(e.path, "untracked");
+
+    // Mark every ancestor folder. Tracked changes outrank untracked-only for the
+    // folder dot color.
+    for (const [path, kind] of files) {
+      const tracked = kind !== "untracked";
+      const parts = path.split("/");
+      let prefix = "";
+      for (let i = 0; i < parts.length - 1; i++) {
+        prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
+        if (tracked) dirs.set(prefix, "dir-tracked");
+        else if (!dirs.has(prefix)) dirs.set(prefix, "dir-untracked");
+      }
+    }
+    return { files, dirs };
+  }, [gitStatus]);
+
+  const getGitDecoration = useCallback(
+    (path: string, isDir: boolean): GitDeco | undefined => {
+      if (isDir) {
+        const kind = gitDecorations.dirs.get(path);
+        return kind ? { kind } : undefined;
+      }
+      const kind = gitDecorations.files.get(path);
+      return kind ? { kind } : undefined;
+    },
+    [gitDecorations],
+  );
+
   const handleSelectFile = useCallback(async (path: string) => {
     setSelectedPath(path);
     setHighlightedPath(path);
     setLoadingFile(true);
+    setFileBaseline(undefined);
+    loadFileBaseline(path);
     try {
       const data = await filesApi.content(projectId, path, sessionId);
       setFileContent(data);
@@ -946,12 +1081,26 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     } finally {
       setLoadingFile(false);
     }
-  }, [projectId, sessionId, setSelectedPath]);
+  }, [projectId, sessionId, setSelectedPath, loadFileBaseline]);
+
+  // Open a file when another panel (e.g. the diff viewer) requests it while the
+  // Files panel is already mounted. The first-mount case is covered by the
+  // restore effect above, which reads the seeded selectedPath from the store.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const path = (e as CustomEvent<{ path?: string }>).detail?.path;
+      if (path) handleSelectFile(path);
+    };
+    window.addEventListener("open-file", handler);
+    return () => window.removeEventListener("open-file", handler);
+  }, [handleSelectFile]);
 
   const handleSelectSearchResult = useCallback(async (path: string, line?: number) => {
     setSelectedPath(path);
     setHighlightedPath(path);
     setLoadingFile(true);
+    setFileBaseline(undefined);
+    loadFileBaseline(path);
     try {
       const data = await filesApi.content(projectId, path, sessionId);
       setFileContent(data);
@@ -977,7 +1126,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
         setPendingTargetLine(line);
       }
     }
-  }, [projectId, sessionId, searchQuery, editEnabled, setSelectedPath]);
+  }, [projectId, sessionId, searchQuery, editEnabled, setSelectedPath, loadFileBaseline]);
 
   // Determine the directory where new uploads should land based on highlight.
   // - Highlighted directory → upload into it
@@ -1426,6 +1575,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                 onHighlight={setHighlightedPath}
                 getChildren={getChildren}
                 isLoading={isLoadingPath}
+                getGitDecoration={getGitDecoration}
                 dragOverPath={dragOverPath}
                 onDragStartItem={handleDragStartItem}
                 onDragOverItem={handleDragOverItem}
@@ -1644,6 +1794,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                         value={editorValue}
                         onChange={setEditorValue}
                         onSave={handleSave}
+                        baseline={fileBaseline}
                         searchQuery={fileSearchQuery}
                         searchCaseSensitive={fileSearchCaseSensitive}
                         targetLine={pendingTargetLine ?? undefined}

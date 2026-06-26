@@ -38,6 +38,8 @@ interface DiffViewProps {
 type FileCategory = "staged" | "unstaged" | "untracked";
 const CATEGORY_LABELS: Record<FileCategory, string> = { staged: "Staged Changes", unstaged: "Changes", untracked: "Untracked Files" };
 const CATEGORY_ORDER: FileCategory[] = ["staged", "unstaged", "untracked"];
+const LEFT_WIDTH_MIN = 200;
+const LEFT_WIDTH_MAX = 600;
 
 export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitted }: DiffViewProps) {
   const isLazyMode = !diffText && !!fileStats;
@@ -83,6 +85,30 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(null);
   const fileRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  // Resizable left list. Width persisted to localStorage, clamped to a sane range.
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const [leftWidth, setLeftWidth] = useState(() => {
+    const saved = parseInt(localStorage.getItem("diffLeftWidth") || "", 10);
+    return Number.isFinite(saved) ? Math.min(LEFT_WIDTH_MAX, Math.max(LEFT_WIDTH_MIN, saved)) : 288;
+  });
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    let latest = leftWidth;
+    const onMove = (ev: MouseEvent) => {
+      const rect = splitContainerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      latest = Math.min(LEFT_WIDTH_MAX, Math.max(LEFT_WIDTH_MIN, ev.clientX - rect.left));
+      setLeftWidth(latest);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      localStorage.setItem("diffLeftWidth", String(Math.round(latest)));
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [leftWidth]);
 
   const [statusTick, setStatusTick] = useState(0);
   // fileRefreshKey is separate from statusTick: only increments on explicit user actions
@@ -333,7 +359,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
     return (
       <div
         key={file.key}
-        className={cn("flex items-center gap-1.5 px-2 py-1.5 cursor-pointer text-xs hover:bg-muted/80 transition-colors group",
+        className={cn("relative flex items-center gap-1.5 px-2 py-1.5 cursor-pointer text-xs hover:bg-muted/80 transition-colors group",
           activeFile === file.key && activeFileCategory === category && "bg-muted", viewedFiles.has(file.key) && "opacity-50")}
         onClick={() => scrollToFile(file.key, category)}
       >
@@ -350,7 +376,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
           </span>
         )}
         {projectId && (
-          <div className="shrink-0 opacity-0 group-hover:opacity-100 flex items-center gap-0.5 transition-opacity">
+          <div className="absolute inset-y-0 right-0 pl-6 pr-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-gradient-to-l from-muted from-60% to-transparent">
             {isStaged ? (
               <button onClick={(e) => { e.stopPropagation(); handleUnstageFiles([path]); }}
                 className="p-0.5 text-muted-foreground hover:text-orange-500 transition-colors" title="Unstage">
@@ -384,10 +410,11 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
           sidebarCollapsed={sidebarCollapsed}
           onToggleSidebar={() => setSidebarCollapsed((v) => !v)} />
       )}
-      <div className="flex flex-1 min-h-0">
-        {/* Left sidebar */}
+      <div className="flex flex-1 min-h-0" ref={splitContainerRef}>
+        {/* Left sidebar (resizable) */}
         {!sidebarCollapsed && (
-        <div className="w-72 shrink-0 border-r flex flex-col">
+        <>
+        <div className="shrink-0 border-r flex flex-col" style={{ width: leftWidth }}>
           <div className="flex border-b text-xs">
             {(["changes", "history"] as const).map((tab) => (
               <button key={tab} onClick={() => setActiveTab(tab)}
@@ -494,6 +521,14 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
             history.sidebar
           )}
         </div>
+
+        {/* Drag handle between the file list and the diff content */}
+        <div
+          className="w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors shrink-0"
+          onMouseDown={handleResizeMouseDown}
+          title="Drag to resize"
+        />
+        </>
         )}
 
         {/* Right: Diff content */}

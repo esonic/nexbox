@@ -31,16 +31,36 @@ export function DiffMinimap({ scrollRef }: { scrollRef: RefObject<HTMLDivElement
     const rows = scroll.querySelectorAll<HTMLElement>(
       '[data-line-type="addition"], [data-line-type="deletion"]',
     );
+    // Coalesce contiguous same-type lines into a single run. Drawing one marker
+    // per line forces each to a 2px floor; adjacent lines then overlap and the
+    // translucent fills compound into uneven dark/light bands. Merging a
+    // continuous change into one marker renders it as one smooth bar.
     const next: Marker[] = [];
+    let run: { topPx: number; bottomPx: number; type: "addition" | "deletion" } | null = null;
+    const flush = () => {
+      if (!run) return;
+      next.push({
+        top: run.topPx / scrollHeight,
+        height: (run.bottomPx - run.topPx) / scrollHeight,
+        type: run.type,
+      });
+      run = null;
+    };
     rows.forEach((row) => {
       const rowRect = row.getBoundingClientRect();
-      const topInContent = rowRect.top - containerRect.top + scroll.scrollTop;
-      next.push({
-        top: topInContent / scrollHeight,
-        height: rowRect.height / scrollHeight,
-        type: (row.dataset.lineType as "addition" | "deletion") ?? "addition",
-      });
+      const topPx = rowRect.top - containerRect.top + scroll.scrollTop;
+      const bottomPx = topPx + rowRect.height;
+      const type = (row.dataset.lineType as "addition" | "deletion") ?? "addition";
+      // Extend the current run if it's the same type and visually contiguous
+      // (next row starts at/before the previous row's bottom, +1px slack).
+      if (run && run.type === type && topPx <= run.bottomPx + 1) {
+        run.bottomPx = Math.max(run.bottomPx, bottomPx);
+      } else {
+        flush();
+        run = { topPx, bottomPx, type };
+      }
     });
+    flush();
     setMarkers(next);
     setThumb({
       top: scroll.scrollTop / scrollHeight,

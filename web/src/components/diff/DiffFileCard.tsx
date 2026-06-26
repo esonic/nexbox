@@ -13,6 +13,7 @@ import {
   MessageSquare,
   Plus,
   X,
+  ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { type ParsedDiffFile } from "@/lib/diff-parser";
@@ -120,32 +121,63 @@ export function DiffFileCard({
   return (
     <div
       className={cn(
-        "overflow-hidden",
+        // overflow-hidden establishes a clip/scroll context that breaks the
+        // sticky header, so omit it in fullFile mode (the header must pin to
+        // the outer scroll container).
+        !fullFile && "overflow-hidden",
         !borderless && "border rounded-lg",
         !borderless && isActive && "ring-1 ring-primary",
         isViewed && "opacity-60"
       )}
     >
-      <div className={cn("flex items-center gap-2 px-3 py-2 bg-muted/50 text-xs", fullFile && "sticky top-0 z-[5]")}>
-        <button
-          onClick={handleExpand}
-          className="flex items-center gap-2 flex-1 min-w-0 text-left hover:bg-muted rounded px-1 -mx-1 transition-colors"
-        >
-          {expanded ? (
-            <ChevronDown className="h-3 w-3 text-muted-foreground shrink-0" />
-          ) : (
-            <ChevronRight className="h-3 w-3 text-muted-foreground shrink-0" />
-          )}
-          <FileIcon
-            className={cn(
-              "h-3.5 w-3.5 shrink-0",
-              file.isNewFile && "text-green-500",
-              file.isDeletedFile && "text-red-500",
-              !file.isNewFile && !file.isDeletedFile && "text-muted-foreground"
+      <div className={cn("flex items-center gap-2 px-3 py-2 text-xs", fullFile ? "sticky top-0 z-[5] bg-muted" : "bg-muted/50")}>
+        {fullFile ? (
+          // Single-file view: the header is not a collapse toggle. The filename
+          // is plain selectable text (so it can be copied), and a button jumps
+          // to the Files panel and opens this file for viewing/editing.
+          <div className="flex items-center gap-2 flex-1 min-w-0">
+            <FileIcon
+              className={cn(
+                "h-3.5 w-3.5 shrink-0",
+                file.isNewFile && "text-green-500",
+                file.isDeletedFile && "text-red-500",
+                !file.isNewFile && !file.isDeletedFile && "text-muted-foreground"
+              )}
+            />
+            <span className="font-mono truncate min-w-0 select-text cursor-text" title={displayPath}>
+              {displayPath}
+            </span>
+            <button
+              onClick={() =>
+                window.dispatchEvent(new CustomEvent("open-file", { detail: { path: displayPath } }))
+              }
+              className="shrink-0 p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+              title="Open in Files panel"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={handleExpand}
+            className="flex items-center gap-2 flex-1 min-w-0 text-left hover:bg-muted rounded px-1 -mx-1 transition-colors"
+          >
+            {expanded ? (
+              <ChevronDown className="h-3 w-3 text-muted-foreground shrink-0" />
+            ) : (
+              <ChevronRight className="h-3 w-3 text-muted-foreground shrink-0" />
             )}
-          />
-          <span className="font-mono truncate min-w-0">{displayPath}</span>
-        </button>
+            <FileIcon
+              className={cn(
+                "h-3.5 w-3.5 shrink-0",
+                file.isNewFile && "text-green-500",
+                file.isDeletedFile && "text-red-500",
+                !file.isNewFile && !file.isDeletedFile && "text-muted-foreground"
+              )}
+            />
+            <span className="font-mono truncate min-w-0">{displayPath}</span>
+          </button>
+        )}
         <div className="flex items-center gap-2 shrink-0">
           {file.isNewFile && (
             <span className="text-[10px] uppercase font-medium text-green-600 dark:text-green-400">

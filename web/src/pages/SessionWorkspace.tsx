@@ -33,6 +33,7 @@ import { ProjectDialog } from "@/components/project/ProjectDialog";
 import type { Project } from "@/types";
 import { useAppStore } from "@/stores/app";
 import { useLayoutStore } from "@/stores/layout";
+import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { globalWS } from "@/lib/ws";
 import { cn } from "@/lib/utils";
 import {
@@ -310,6 +311,21 @@ export function SessionWorkspace() {
     window.addEventListener("open-git-panel", handler);
     return () => window.removeEventListener("open-git-panel", handler);
   }, [handleOpenGit]);
+
+  // Allow other components (e.g. the diff viewer) to reveal a file in the Files
+  // panel. We seed the selected path into the per-project store, then switch to
+  // the Files panel — FileBrowser opens it on mount (or via its own listener if
+  // already mounted).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const path = (e as CustomEvent<{ path?: string }>).detail?.path;
+      if (!path || !boundProject) return;
+      useFileBrowserStore.getState().setSelectedPath(boundProject.id, path);
+      setRightPanelExclusive("files");
+    };
+    window.addEventListener("open-file", handler);
+    return () => window.removeEventListener("open-file", handler);
+  }, [boundProject, setRightPanelExclusive]);
 
   // Auto-show terminal when the backend requests it (e.g. run_in_terminal MCP tool).
   // entity_id carries the session ID so we open the right session's terminal.

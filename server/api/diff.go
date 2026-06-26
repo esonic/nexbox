@@ -165,6 +165,49 @@ func (s *Server) GetProjectFileDiff(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"diff": diff})
 }
 
+// GetProjectFileHead returns the committed (HEAD) version of a single file.
+// The editor uses it as the baseline for VSCode-style dirty-diff gutter markers.
+// Untracked/new files (no HEAD blob) return exists=false with empty content, so
+// the editor renders the whole file as added — matching VSCode.
+// GET /api/projects/{projectId}/git-file-head?path=...[&session_id=xxx]
+func (s *Server) GetProjectFileHead(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectId")
+
+	relPath := r.URL.Query().Get("path")
+	if relPath == "" {
+		writeError(w, http.StatusBadRequest, "path parameter is required")
+		return
+	}
+	// Security: prevent path traversal (mirrors ReadProjectFile).
+	cleanPath := filepath.Clean(relPath)
+	if strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+
+	workDir := s.resolveDiffWorkDir(r, projectID)
+	if workDir == "" || !isGitRepo(workDir) {
+		// Not a git repo: no baseline at all, so the editor shows no markers.
+		// in_repo=false distinguishes this from a new/untracked file (in_repo
+		// true, exists false), which should render as fully added.
+		writeJSON(w, http.StatusOK, map[string]interface{}{"path": cleanPath, "in_repo": false, "exists": false, "content": ""})
+		return
+	}
+
+	// `git show HEAD:<path>` resolves the path relative to the repo root, which
+	// is the same directory the editor's paths are relative to. Use forward
+	// slashes — git pathspecs are always POSIX-style.
+	cmd := exec.Command("git", "show", "HEAD:"+filepath.ToSlash(cleanPath))
+	cmd.Dir = workDir
+	out, err := cmd.Output()
+	if err != nil {
+		// Non-zero exit means the file does not exist at HEAD (new/untracked).
+		writeJSON(w, http.StatusOK, map[string]interface{}{"path": cleanPath, "in_repo": true, "exists": false, "content": ""})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"path": cleanPath, "in_repo": true, "exists": true, "content": string(out)})
+}
+
 // --- Helper functions (unchanged) ---
 
 func isGitRepo(dir string) bool {
