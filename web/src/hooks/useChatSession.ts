@@ -351,12 +351,24 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     let reconcileTimer: ReturnType<typeof setTimeout> | undefined;
     setLoadingHistory(true);
 
-    messagesApi.list(sessionId, 20).then(({ messages: persisted, active, has_more }) => {
+    messagesApi.list(sessionId, 20).then(({ messages: persisted, active, has_more, pending_input }) => {
       if (cancelled) return;
       const liveMessages = useAppStore.getState().chatMessages[sessionId] || [];
       if (liveMessages.length > 0) {
         setHasMore(has_more || false);
         return;
+      }
+
+      // Restore an in-flight interactive request (e.g. AskUserQuestion) that
+      // was pending when the page reloaded. The user_input_request WS event is
+      // never replayed, so without this the question dialog would be lost and
+      // the still-blocked agent turn could not be answered.
+      if (pending_input?.toolUseId) {
+        useAppStore.getState().setPendingUserInput(sessionId, {
+          toolUseId: pending_input.toolUseId,
+          toolName: pending_input.toolName,
+          input: pending_input.input || "",
+        });
       }
       const mapped: ChatMessageType[] = (persisted || [])
         .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))

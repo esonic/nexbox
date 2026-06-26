@@ -682,6 +682,14 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				Input:  input,
 			})
 
+			// Mirror the request so a reloaded client can restore the dialog.
+			setPendingUserInput(sessionID, PendingUserInput{
+				ToolUseID: requestID,
+				ToolName:  toolName,
+				Input:     input,
+			})
+			defer clearPendingUserInput(sessionID, requestID)
+
 			responseCh := make(chan toolResponse, 1)
 			setToolResponseChan(sessionID, requestID, responseCh)
 			defer removeToolResponseChan(sessionID, requestID)
@@ -1164,4 +1172,52 @@ func getToolResponseChan(sessionID, toolUseID string) chan toolResponse {
 	toolResponseMu.Lock()
 	defer toolResponseMu.Unlock()
 	return toolResponseChans[toolResponseKey(sessionID, toolUseID)]
+}
+
+// ---------------------------------------------------------------------------
+// Pending interactive request registry
+// ---------------------------------------------------------------------------
+// The user_input_request WS event is broadcast live and never replayed, so a
+// client that reloads the page mid-question loses the dialog. We mirror each
+// in-flight interactive request here while its UserInputHandler goroutine is
+// blocked (up to the 1-hour timeout, with its response channel still
+// registered). A reloaded client fetches this via ListSessionMessages and
+// re-renders the dialog with the original tool_use_id; the existing
+// tool_response routing then delivers the answer to the still-waiting handler.
+
+// PendingUserInput is the snapshot of an interactive tool request needed to
+// reconstruct the question dialog after a page reload.
+type PendingUserInput struct {
+	ToolUseID string `json:"toolUseId"`
+	ToolName  string `json:"toolName"`
+	Input     string `json:"input"`
+}
+
+var (
+	pendingInputMu    sync.Mutex
+	pendingUserInputs = make(map[string]PendingUserInput) // sessionID -> pending request
+)
+
+func setPendingUserInput(sessionID string, p PendingUserInput) {
+	pendingInputMu.Lock()
+	defer pendingInputMu.Unlock()
+	pendingUserInputs[sessionID] = p
+}
+
+// clearPendingUserInput removes the pending request for a session, but only if
+// it still matches toolUseID — so a newer request can't be wiped by an older
+// handler's deferred cleanup.
+func clearPendingUserInput(sessionID, toolUseID string) {
+	pendingInputMu.Lock()
+	defer pendingInputMu.Unlock()
+	if p, ok := pendingUserInputs[sessionID]; ok && p.ToolUseID == toolUseID {
+		delete(pendingUserInputs, sessionID)
+	}
+}
+
+func getPendingUserInput(sessionID string) (PendingUserInput, bool) {
+	pendingInputMu.Lock()
+	defer pendingInputMu.Unlock()
+	p, ok := pendingUserInputs[sessionID]
+	return p, ok
 }

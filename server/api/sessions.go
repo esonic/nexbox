@@ -587,11 +587,15 @@ func (s *Server) ListSessionMessages(w http.ResponseWriter, r *http.Request) {
 			messages = []ChatMessage{}
 		}
 		active := s.Hub.IsActive(sessionID)
-		writeJSON(w, http.StatusOK, map[string]interface{}{
+		resp := map[string]interface{}{
 			"messages": messages,
 			"has_more": hasMore,
 			"active":   active,
-		})
+		}
+		if pending, ok := getPendingUserInput(sessionID); ok {
+			resp["pending_input"] = pending
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
@@ -604,10 +608,14 @@ func (s *Server) ListSessionMessages(w http.ResponseWriter, r *http.Request) {
 		messages = []ChatMessage{}
 	}
 	active := s.Hub.IsActive(sessionID)
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"messages": messages,
 		"active":   active,
-	})
+	}
+	if pending, ok := getPendingUserInput(sessionID); ok {
+		resp["pending_input"] = pending
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // GetMessageDetails returns full message parts from the local detail cache.

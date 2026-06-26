@@ -206,7 +206,12 @@ export const messagesApi = {
     if (limit !== undefined) params.set('limit', limit.toString());
     if (beforeId) params.set('before', beforeId);
     if (params.toString()) url += `?${params.toString()}`;
-    return request<{ messages: ChatMessage[]; active: boolean; has_more?: boolean }>(url);
+    return request<{
+      messages: ChatMessage[];
+      active: boolean;
+      has_more?: boolean;
+      pending_input?: { toolUseId: string; toolName: string; input: string };
+    }>(url);
   },
   getDetails: (messageId: string) =>
     request<{ parts: MessagePart[] }>(`/messages/${messageId}/details`),
