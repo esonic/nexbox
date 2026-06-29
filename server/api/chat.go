@@ -76,6 +76,17 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 			}
 			s.handleUserMessage(chatReq.SessionID, chatReq.Content, chatReq.Parts, chatReq.Images, chatReq.Features)
 
+		case "interject":
+			if chatReq.SessionID == "" {
+				s.Hub.SendDirect(conn, "", ChatEvent{Type: "error", Message: "interject: missing session_id"})
+				continue
+			}
+			if chatReq.Content == "" && len(chatReq.Images) == 0 && len(chatReq.Parts) == 0 {
+				s.Hub.Emit(chatReq.SessionID, ChatEvent{Type: "error", Message: "empty message"})
+				continue
+			}
+			s.handleInterject(chatReq.SessionID, chatReq.Content, chatReq.Parts, chatReq.Images, chatReq.Features)
+
 		case "tool_response":
 			if chatReq.SessionID == "" || chatReq.ToolUseID == "" {
 				s.Hub.SendDirect(conn, "", ChatEvent{Type: "error", Message: "tool_response: missing session_id or tool_use_id"})
@@ -243,6 +254,8 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				s.SessionManager.SetActive(sessionID, false)
 				s.Hub.ClearActive(sessionID)
 			}
+			// Always drop the live injector — the turn is over, its stdin is gone.
+			s.SessionManager.RemoveInterjector(sessionID)
 		}()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Hour)
@@ -749,6 +762,12 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			}
 		}
 
+		// registerInterject lets the live agent turn expose its stdin so a later
+		// "interject" WS action can inject a queue-jumping user message.
+		registerInterject := func(inject func(content string) error) {
+			s.SessionManager.SetInterjector(sessionID, inject)
+		}
+
 		var agentResult agent.Result
 		var agentErr error
 		if forkPreflightErr != nil {
@@ -774,6 +793,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					UserInputHandler:       agent.UserInputHandler(userInputHandler),
 					ForkFromAgentSessionID: forkFromAgentSID,
 					ForkAtAgentMsgUUID:     forkAtAgentUUID,
+					RegisterInterject:      registerInterject,
 				},
 				eventHandler,
 			)
@@ -818,6 +838,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 					ExtraMCPServers:    extraMCPs,
 					PluginDirs:         pluginDirs,
 					UserInputHandler:   agent.UserInputHandler(userInputHandler),
+					RegisterInterject:  registerInterject,
 				},
 				eventHandler,
 			)
@@ -938,6 +959,42 @@ func (s *Server) resolveImagePaths(sessionID string, filenames []string) []strin
 // ---------------------------------------------------------------------------
 // Message Queue
 // ---------------------------------------------------------------------------
+
+// handleInterject delivers a queue-jumping ("interjection") message into a
+// session's running agent turn. Only the Claude backend keeps a live stdin and
+// registers an injector; the message folds into the current turn (the model
+// reads it at the next turn boundary) without aborting in-flight work. When no
+// live turn accepts it — an idle session, a Codex session, or a turn that just
+// ended — it falls back to the ordinary send/queue path.
+func (s *Server) handleInterject(sessionID, message string, parts []MessagePart, imageFilenames []string, features []string) {
+	imagePaths := s.resolveImagePaths(sessionID, imageFilenames)
+	// Wrap with the interjection framing so the model knows this message arrived
+	// mid-turn (finish current task, then address it). No per-session static/
+	// dynamic context — that already lives in the running turn.
+	content := agent.BuildInterjectPrompt(message, imagePaths)
+
+	ok, err := s.SessionManager.Interject(sessionID, content)
+	if !ok || err != nil {
+		if err != nil {
+			log.Printf("[interject] live injection failed for %s, falling back to queue/send: %v", sessionID, err)
+		}
+		s.handleUserMessage(sessionID, message, parts, imageFilenames, features)
+		return
+	}
+
+	// Delivered into the live turn. Persist + echo the user message so it shows
+	// in the transcript and survives a reload. The frontend already added it
+	// optimistically and ignores this echo while streaming.
+	if len(parts) > 0 {
+		if _, err := s.Store.CreateMessage(sessionID, "user", parts, MessageMetadata{}); err != nil {
+			log.Printf("[interject] Failed to persist user message (with parts): %v", err)
+		}
+	} else if _, err := s.Store.CreateUserMessage(sessionID, message); err != nil {
+		log.Printf("[interject] Failed to persist user message: %v", err)
+	}
+	s.Hub.Emit(sessionID, ChatEvent{Type: "user_message", Content: message})
+	log.Printf("[interject] Delivered queue-jump message into live turn: session=%s", sessionID)
+}
 
 // enqueueMessage auto-queues a message when the session is busy.
 func (s *Server) enqueueMessage(sessionID, message string, imageFilenames []string) {

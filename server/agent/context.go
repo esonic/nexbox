@@ -136,6 +136,26 @@ func BuildPrompt(staticContext, dynamicContext, message string, isNewSession boo
 	return strings.Join(parts, "\n")
 }
 
+// BuildInterjectPrompt frames a mid-turn interjection so the model understands
+// it arrived while it was already working. It mirrors the Claude Code TUI's
+// wrapper (the stream-json interface itself adds none): finish the current task,
+// then address the new message.
+func BuildInterjectPrompt(message string, images []string) string {
+	var sb strings.Builder
+	sb.WriteString("The user sent a new message while you were working:\n\n")
+	if len(images) > 0 {
+		sb.WriteString("[Attached Images]\n")
+		sb.WriteString("The user has attached the following image(s) for analysis. Use the Read tool to view them.\n")
+		for i, img := range images {
+			sb.WriteString(fmt.Sprintf("  Image %d: %s\n", i+1, img))
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString(message)
+	sb.WriteString("\n\nIMPORTANT: After completing your current task, address the message above.")
+	return sb.String()
+}
+
 // isSlashCommand reports whether the message is a bare slash command that
 // should be forwarded to the agent CLI verbatim. It returns true when the
 // first non-whitespace character is '/' and the second character is a letter

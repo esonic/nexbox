@@ -76,6 +76,54 @@ function sendRichQueuedMessageDirect(sid: string, msg: RichQueuedMessage) {
   gs.setStreamingSession(sid, true);
 }
 
+/**
+ * Inject a rich queued message into the CURRENTLY streaming turn (interjection /
+ * "send now"). Unlike sendRichQueuedMessageDirect this does NOT create a new
+ * streaming assistant message or flip the streaming flag — the turn is already
+ * live and the response folds into the existing assistant message. The user
+ * bubble is added optimistically; the backend persists it for reloads.
+ */
+function sendRichInterjectDirect(sid: string, msg: RichQueuedMessage) {
+  const gs = useAppStore.getState();
+
+  const parts: ChatMessageType["parts"] = [];
+  if (msg.images) {
+    for (const img of msg.images) {
+      parts.push({ type: "image", url: img.url, filename: img.filename });
+    }
+  }
+
+  let finalMessage = msg.text;
+  if (msg.pickedComments.length > 0) {
+    const commentBlock = serializeComments(msg.pickedComments);
+    finalMessage = msg.text
+      ? `${msg.text}\n\n[Code Comments]\n${commentBlock}`
+      : `[Code Comments]\n${commentBlock}`;
+  }
+
+  if (finalMessage) parts.push({ type: "text", content: finalMessage });
+  for (const t of msg.pickedTasks) parts.push({ type: "task_ref", taskId: t.id, task: t });
+  for (const a of msg.pickedAssets) parts.push({ type: "asset_ref", assetId: a.id, title: a.title, assetType: a.assetType });
+  for (const w of msg.pickedWorkflows) parts.push({ type: "workflow_ref", workflowId: w.id, name: w.name });
+
+  const imageFilenames = msg.images?.map((i) => i.filename).filter((f): f is string => !!f) ?? [];
+
+  const userMsg: ChatMessageType = { id: uuid(), session_id: sid, role: "user", parts, metadata: {}, created_at: new Date().toISOString() };
+  // Insert the interjection BEFORE the still-streaming assistant message so it
+  // stays the last message — all streaming updates target the last assistant
+  // message (see updateLastAssistant), so the response (which addresses both the
+  // original and interjected messages) keeps flowing into the one bubble. This
+  // also reads naturally: [user] [interjection] [assistant response].
+  const msgs = gs.chatMessages[sid] || [];
+  const last = msgs[msgs.length - 1];
+  if (last && last.role === "assistant" && last.isStreaming) {
+    gs.setChatMessages(sid, [...msgs.slice(0, -1), userMsg, last]);
+  } else {
+    gs.addChatMessage(sid, userMsg);
+  }
+  globalWS.interject(sid, finalMessage, parts, imageFilenames.length > 0 ? imageFilenames : undefined);
+}
+
 // WF[xxxxx] prefix written by the workflow orchestrator. We preserve it
 // when checking for "default" names so workflow sessions also receive an
 // auto-generated title — the backend re-applies the prefix on save.
@@ -822,12 +870,20 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   }, []);
 
   const sendRichQueuedNow = useCallback((msgId: string) => {
-    if (isStreaming) return; // stay in queue while streaming
     const item = (useAppStore.getState().clientQueue[sessionId] || []).find((m: RichQueuedMessage) => m.id === msgId);
     if (!item) return;
+    if (isStreaming) {
+      // Mid-turn: only Claude supports live interjection. Other agents have no
+      // way to jump the queue, so leave the message queued (button is hidden).
+      if (agentName !== "claude") return;
+      dequeueRichMessage(sessionId, msgId);
+      sendRichInterjectDirect(sessionId, item);
+      return;
+    }
+    // Idle: send immediately as a normal message.
     dequeueRichMessage(sessionId, msgId);
     sendRichQueuedMessageDirect(sessionId, item);
-  }, [sessionId, isStreaming, dequeueRichMessage]);
+  }, [sessionId, isStreaming, agentName, dequeueRichMessage]);
 
   const removeRichQueued = useCallback((msgId: string) => {
     dequeueRichMessage(sessionId, msgId);

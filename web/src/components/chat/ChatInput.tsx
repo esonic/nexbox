@@ -135,11 +135,19 @@ function RichQueuedItem({
   onSendNow,
   onRemove,
   onEdit,
+  canSendNow,
+  isFront,
 }: {
   item: RichQueuedMessage;
   onSendNow: () => void;
   onRemove: () => void;
   onEdit: (text: string) => void;
+  // When true, show an "interject" button that jumps this message into the
+  // running turn (Claude only). Other agents have no live-injection path.
+  canSendNow: boolean;
+  // The front (oldest) queued item is also the target of the Enter shortcut,
+  // so its button advertises it.
+  isFront: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.text);
@@ -182,6 +190,15 @@ function RichQueuedItem({
           </span>
         )}
         <div className="flex items-center shrink-0">
+          {!editing && canSendNow && (
+            <button
+              onClick={onSendNow}
+              title={isFront ? "Interject now (Enter)" : "Interject now"}
+              className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-primary"
+            >
+              <Play className="h-3 w-3" />
+            </button>
+          )}
           {editing ? (
             <button onClick={commitEdit} className="p-1 rounded hover:bg-accent text-primary">
               <Check className="h-3 w-3" />
@@ -649,8 +666,17 @@ export function ChatInput({
     return () => document.removeEventListener("mousedown", handler);
   }, [showModelMenu]);
 
+  // Whether the composer has anything to send/queue right now.
+  const hasComposerContent = () =>
+    !!(input.trim() || attachedImages.length > 0 || pickedTasks.length > 0 || pickedAssets.length > 0 || pickedWorkflows.length > 0 || pickedComments.length > 0 || activeCommand);
+
+  // The front (oldest) queued message can be interjected via Enter only for
+  // Claude — other agents have no live-injection path. Mirrors the per-item
+  // Play button's gating (canSendNow).
+  const canInterjectFront = agentName === "claude" && richQueue.length > 0;
+
   const handleSend = () => {
-    const hasContent = input.trim() || attachedImages.length > 0 || pickedTasks.length > 0 || pickedAssets.length > 0 || pickedWorkflows.length > 0 || pickedComments.length > 0 || activeCommand;
+    const hasContent = hasComposerContent();
     if (!hasContent) return;
     if (attachedImages.length > 0 && !attachedImages.every(i => i.filename)) return;
 
@@ -809,6 +835,13 @@ export function ChatInput({
     // a newline.
     if (!isMobile && e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
+      // With an empty composer, Enter acts as the "interject" shortcut: send the
+      // front (oldest) queued message now into Claude's running reply. With
+      // content, it sends/queues that content as usual.
+      if (!hasComposerContent() && canInterjectFront) {
+        onRichQueueSendNow(richQueue[0].id);
+        return;
+      }
       handleSend();
     }
   };
@@ -911,10 +944,12 @@ export function ChatInput({
           {/* Queued messages (rich client-side + legacy server-side) */}
           {(richQueue.length > 0 || queue.length > 0) && (
             <div className="px-3 pt-3 space-y-1">
-              {richQueue.map((item) => (
+              {richQueue.map((item, i) => (
                 <RichQueuedItem
                   key={item.id}
                   item={item}
+                  canSendNow={agentName === "claude"}
+                  isFront={i === 0}
                   onSendNow={() => onRichQueueSendNow(item.id)}
                   onRemove={() => onRichQueueRemove(item.id)}
                   onEdit={(text) => onRichQueueEdit(item.id, text)}

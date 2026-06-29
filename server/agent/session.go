@@ -10,6 +10,11 @@ type SessionManager struct {
 	mu        sync.RWMutex
 	sessions  map[string]*SessionInfo
 	cancelMap map[string]context.CancelFunc
+	// interjectMap holds, per active session, a function that injects an extra
+	// user message into the running agent turn (queue-jump / "interjection").
+	// Only backends that keep a live stdin during the turn register one (Claude);
+	// Codex never does, so its sessions fall back to ordinary queueing.
+	interjectMap map[string]func(content string) error
 }
 
 // SessionInfo stores metadata about an active session.
@@ -23,9 +28,41 @@ type SessionInfo struct {
 // NewSessionManager creates a session manager.
 func NewSessionManager() *SessionManager {
 	return &SessionManager{
-		sessions:  make(map[string]*SessionInfo),
-		cancelMap: make(map[string]context.CancelFunc),
+		sessions:     make(map[string]*SessionInfo),
+		cancelMap:    make(map[string]context.CancelFunc),
+		interjectMap: make(map[string]func(content string) error),
 	}
+}
+
+// SetInterjector registers the live message-injection function for a session.
+// Called by the agent backend once its stdin is ready to accept additional
+// user messages mid-turn.
+func (sm *SessionManager) SetInterjector(sessionID string, fn func(content string) error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.interjectMap[sessionID] = fn
+}
+
+// RemoveInterjector clears a session's injection function (turn finished).
+func (sm *SessionManager) RemoveInterjector(sessionID string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	delete(sm.interjectMap, sessionID)
+}
+
+// Interject delivers content to a session's running turn. It returns
+// (false, nil) when no live injector is registered (idle session, or a backend
+// that doesn't support interjection) so the caller can fall back to queueing.
+// A non-nil error means an injector existed but the write failed (e.g. the turn
+// ended and the pipe closed) — the caller should likewise fall back.
+func (sm *SessionManager) Interject(sessionID, content string) (bool, error) {
+	sm.mu.RLock()
+	fn, ok := sm.interjectMap[sessionID]
+	sm.mu.RUnlock()
+	if !ok {
+		return false, nil
+	}
+	return true, fn(content)
 }
 
 // SetCancel stores the cancel function for a session (used for stop).

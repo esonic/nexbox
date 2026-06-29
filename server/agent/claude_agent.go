@@ -114,6 +114,9 @@ func (a *ClaudeAgent) SendMessage(
 	// Wire up interactive tool support (AskUserQuestion)
 	opts.UserInputHandler = req.UserInputHandler
 
+	// Wire up live message injection (interjection) when the API layer requested it.
+	opts.RegisterInterject = req.RegisterInterject
+
 	// Claude has its own built-in AskUserQuestion tool, so block the MCP version
 	// to avoid confusion. Codex doesn't have a built-in equivalent, so it uses
 	// the MCP ask_question tool instead.

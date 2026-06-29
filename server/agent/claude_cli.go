@@ -65,6 +65,12 @@ type QueryOptions struct {
 	// When true, CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1 is also set.
 	IncludePartialMessages bool
 
+	// RegisterInterject, when set, is called once the CLI process is live and the
+	// initial user message has been sent. It receives a function that writes an
+	// additional user message to the still-open stdin — the CLI folds it into the
+	// running turn (the model reads it at the next turn boundary). See Request.
+	RegisterInterject func(inject func(content string) error)
+
 	// UserInputHandler, when set, handles interactive tool calls (e.g. AskUserQuestion).
 	// The handler is called with (requestID, toolName, inputJSON) and should block
 	// until the user responds.
@@ -388,6 +394,29 @@ func (c *ClaudeClient) Query(
 
 	// Keep stdin open — needed for control_response messages.
 	defer closeStdin()
+
+	// Expose live message injection ("interjection"): writing another user
+	// message to the still-open stdin makes the CLI fold it into the running
+	// turn (the model reads it at the next turn boundary, without aborting).
+	// writeStdin is mutex-guarded, so this is safe to call from other goroutines
+	// (the API layer) concurrently with control_response writes. A write error
+	// (e.g. the turn already ended and the pipe closed) propagates to the caller,
+	// which falls back to ordinary queueing.
+	if opts.RegisterInterject != nil {
+		injectSessionID := userMsg.SessionID
+		opts.RegisterInterject(func(content string) error {
+			im := UserInput{
+				Type:      "user",
+				Message:   UserInputMessage{Role: "user", Content: content},
+				SessionID: injectSessionID,
+			}
+			data, mErr := json.Marshal(im)
+			if mErr != nil {
+				return mErr
+			}
+			return writeStdin(append(data, '\n'))
+		})
+	}
 
 	// Read and process output.
 	scanner := bufio.NewScanner(stdout)

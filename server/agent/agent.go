@@ -63,6 +63,15 @@ type Request struct {
 	PluginDirs         []string         // Extra plugin directories (--plugin-dir) from installed marketplace plugins
 	UserInputHandler   UserInputHandler // Optional: handle interactive tool calls (e.g., AskUserQuestion)
 
+	// RegisterInterject, when set, is invoked by backends that keep a live stdin
+	// during the turn (currently only Claude) once the process is ready. It
+	// receives a function that injects an additional user message into the
+	// running turn (queue-jump / interjection); the model picks it up at the
+	// next turn boundary without aborting current work. The API layer stores it
+	// per session so a later "interject" action can deliver a message mid-turn.
+	// Backends without this capability (e.g. Codex) never call it.
+	RegisterInterject func(inject func(content string) error)
+
 	// ForkFromAgentSessionID, when set with ForkAtAgentMsgUUID, instructs the
 	// agent to fork the named upstream CLI session at that message instead of
 	// resuming or starting fresh. Currently only the Claude backend honors

@@ -146,6 +146,22 @@ class GlobalWebSocket {
     });
   }
 
+  /**
+   * Inject a queue-jumping message into a session's running turn ("interjection").
+   * Only meaningful for Claude sessions with a live turn; the backend folds it
+   * into the current turn, or falls back to ordinary queue/send if no live turn.
+   */
+  interject(sessionId: string, message: string, parts?: MessagePart[], images?: string[], features?: string[]): void {
+    this.rawSend({
+      type: "interject",
+      session_id: sessionId,
+      content: message,
+      ...(parts && parts.length > 0 ? { parts } : {}),
+      ...(images && images.length > 0 ? { images } : {}),
+      ...(features && features.length > 0 ? { features } : {}),
+    });
+  }
+
   /** Send stop signal for a session. */
   stop(sessionId: string): void {
     this.rawSend({ type: "stop", session_id: sessionId });
