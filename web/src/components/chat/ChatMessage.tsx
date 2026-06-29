@@ -1,6 +1,7 @@
-import { useMemo, useState, useCallback, useRef, memo } from "react";
-import ReactMarkdown from "react-markdown";
+import { useMemo, useState, useCallback, useRef, useEffect, memo, type ReactNode } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { resolveLang, ensureLangRegistered, highlightCode } from "@/lib/highlight";
 import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, FileEdit, Sparkles, ArrowRight } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { ThinkingIndicator } from "@/components/chat/ThinkingIndicator";
@@ -470,6 +471,75 @@ function WorkedBlock({
   );
 }
 
+// One fenced code block: lazily registers its language with highlight.js core
+// (per-language dynamic import keeps the bundle small), renders the highlighted
+// HTML, and shows a single copy button on hover. Falls back to plain text until
+// the grammar loads, and for languages we don't bundle.
+function ChatCodeBlock({ code, lang }: { code: string; lang: string }) {
+  const resolved = useMemo(() => resolveLang(lang), [lang]);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    if (!resolved) return;
+    let cancelled = false;
+    ensureLangRegistered(resolved).then((ok) => {
+      if (ok && !cancelled) setReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [resolved]);
+  const html = useMemo(
+    () => (resolved && ready ? highlightCode(code, resolved) : ""),
+    [resolved, ready, code],
+  );
+  return (
+    <div className="relative group/code">
+      <CopyButton
+        text={code}
+        className="absolute right-1.5 top-1.5 bg-background/70 backdrop-blur-sm opacity-0 group-hover/code:opacity-100"
+      />
+      <pre>
+        <code className={resolved ? `language-${resolved}` : undefined}>
+          {html ? <span dangerouslySetInnerHTML={{ __html: html }} /> : code}
+        </code>
+      </pre>
+    </div>
+  );
+}
+
+// Renders inline code or a syntax-highlighted fenced block.
+function MdCode({ className, children }: { className?: string; children?: ReactNode }) {
+  const text = String(children ?? "").replace(/\n$/, "");
+  const lang = /language-([\w#+.-]+)/.exec(className || "")?.[1] ?? "";
+  const isBlock = !!className || text.includes("\n");
+  if (!isBlock) return <code>{children}</code>;
+  return <ChatCodeBlock code={text} lang={lang} />;
+}
+
+const MD_COMPONENTS: Components = {
+  // pre is unwrapped — MdCode (rendered from `code`) owns the <pre>.
+  pre: ({ children }) => <>{children}</>,
+  code: MdCode,
+  // Wide tables overflow narrow viewports — give every rendered table its own
+  // horizontal scroll container so it stays in the message column on phones
+  // instead of pushing the chat wider than the screen.
+  table: ({ children, ...props }) => (
+    <div className="overflow-x-auto -mx-1 my-2">
+      <table {...props}>{children}</table>
+    </div>
+  ),
+  a: ({ href, children }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-primary underline underline-offset-2 decoration-primary/40 hover:decoration-primary transition-colors"
+    >
+      {children}
+    </a>
+  ),
+};
+
 const TextBlock = memo(function TextBlock({ content, isStreaming }: { content: string; isStreaming?: boolean }) {
   // Hide the trailing <next-actions> block (and any partial one mid-stream) —
   // it's surfaced separately as quick-reply buttons, not shown as raw text.
@@ -482,47 +552,7 @@ const TextBlock = memo(function TextBlock({ content, isStreaming }: { content: s
     return (
     <ReactMarkdown
       remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
-      components={{
-        pre: ({ children }) => (
-          <pre className="bg-muted rounded-md p-3 overflow-x-auto text-[13px] my-2 font-mono">
-            {children}
-          </pre>
-        ),
-        // Wide tables overflow narrow viewports — give every rendered table
-        // its own horizontal scroll container so it stays in the message
-        // column on phones instead of pushing the chat wider than the screen.
-        table: ({ children, ...props }) => (
-          <div className="overflow-x-auto -mx-1 my-2">
-            <table {...props}>{children}</table>
-          </div>
-        ),
-        code: ({ className, children, ...props }) => {
-          const isInline = !className;
-          if (isInline) {
-            return (
-              <code className="bg-muted px-1.5 py-0.5 rounded text-[13px] font-mono" {...props}>
-                {children}
-              </code>
-            );
-          }
-          return (
-            <code className={className} {...props}>
-              {children}
-            </code>
-          );
-        },
-        a: ({ href, children, ...props }) => (
-          <a
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-primary underline underline-offset-2 decoration-primary/40 hover:decoration-primary transition-colors"
-            {...props}
-          >
-            {children}
-          </a>
-        ),
-      }}
+      components={MD_COMPONENTS}
     >
       {visible}
     </ReactMarkdown>
@@ -530,7 +560,7 @@ const TextBlock = memo(function TextBlock({ content, isStreaming }: { content: s
   }, [visible]);
 });
 
-export function CopyButton({ text }: { text: string }) {
+export function CopyButton({ text, className }: { text: string; className?: string }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(() => {
@@ -544,7 +574,7 @@ export function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={handleCopy}
-      className="p-1 rounded-md text-muted-foreground/60 hover:text-foreground hover:bg-muted transition-colors"
+      className={cn("p-1 rounded-md text-muted-foreground/60 hover:text-foreground hover:bg-muted transition-colors", className)}
       title="Copy"
     >
       {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
