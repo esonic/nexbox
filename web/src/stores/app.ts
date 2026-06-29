@@ -604,7 +604,15 @@ export const useAppStore = create<AppState>()(
   setConnectStatus: (status) => set({ connectStatus: status }),
 
   gitDiffStats: null,
-  setGitDiffStats: (stats) => set({ gitDiffStats: stats }),
+  // Keep the same reference when the new stats are byte-for-byte identical so the
+  // 10s diff-stats poll doesn't re-render every subscriber (and re-derive the
+  // whole DiffView file list) when nothing actually changed on disk.
+  setGitDiffStats: (stats) =>
+    set((s) =>
+      s.gitDiffStats && stats && JSON.stringify(s.gitDiffStats) === JSON.stringify(stats)
+        ? {}
+        : { gitDiffStats: stats },
+    ),
 
   marketplaceUpdateCount: 0,
   setMarketplaceUpdateCount: (count) => set({ marketplaceUpdateCount: count }),

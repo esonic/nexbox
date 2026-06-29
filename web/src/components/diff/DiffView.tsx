@@ -116,16 +116,32 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   // This prevents DiffFileCard from reloading and losing scroll position every 5s.
   const [fileRefreshKey, setFileRefreshKey] = useState(0);
 
+  // Apply a fetched git status but keep the previous reference when it's
+  // byte-for-byte identical, so the 5s auto-poll doesn't trigger a needless
+  // re-render (and full diff-list reconciliation) when nothing changed on disk.
+  const applyGitStatus = useCallback((data: GitStatusResponse | null) => {
+    setGitStatus((prev) =>
+      prev && data && JSON.stringify(prev) === JSON.stringify(data) ? prev : data,
+    );
+  }, []);
+
   const refreshGitStatus = useCallback(() => {
     if (!projectId) return;
-    gitApi.status(projectId, sessionId).then(setGitStatus).catch(() => setGitStatus(null));
-  }, [projectId, sessionId]);
+    gitApi.status(projectId, sessionId).then(applyGitStatus).catch(() => applyGitStatus(null));
+  }, [projectId, sessionId, applyGitStatus]);
 
-  // Auto-refresh git status every 5s when git panel is open
+  // Auto-refresh git status every 5s when the git panel is open — but skip the
+  // poll while the tab is hidden (a background tab shouldn't burn CPU), and
+  // refresh once as soon as it becomes visible again.
   useEffect(() => {
     if (!projectId) return;
-    const interval = setInterval(() => setStatusTick((t) => t + 1), 5_000);
-    return () => clearInterval(interval);
+    const poll = () => { if (!document.hidden) setStatusTick((t) => t + 1); };
+    const interval = setInterval(poll, 5_000);
+    document.addEventListener("visibilitychange", poll);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", poll);
+    };
   }, [projectId]);
 
   const gitStatusKeyRef = useRef<string | null>(null);
@@ -133,8 +149,8 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
     const key = `${projectId}:${diffText?.length ?? 0}:${statusTick}`;
     if (!projectId || gitStatusKeyRef.current === key) return;
     gitStatusKeyRef.current = key;
-    gitApi.status(projectId, sessionId).then(setGitStatus).catch(() => setGitStatus(null));
-  }, [projectId, sessionId, diffText, statusTick]);
+    gitApi.status(projectId, sessionId).then(applyGitStatus).catch(() => applyGitStatus(null));
+  }, [projectId, sessionId, diffText, statusTick, applyGitStatus]);
 
   const filteredFiles = useMemo(() => {
     if (!fileFilter.trim()) return files;

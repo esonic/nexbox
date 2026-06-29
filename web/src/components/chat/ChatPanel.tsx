@@ -216,8 +216,14 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
   useEffect(() => {
     if (!hasGitRepo) { setGitDiffStats(null); return; }
     fetchDiffStats();
-    const interval = setInterval(fetchDiffStats, 10_000);
-    return () => clearInterval(interval);
+    // Skip the poll while the tab is hidden; refresh once when it comes back.
+    const poll = () => { if (!document.hidden) fetchDiffStats(); };
+    const interval = setInterval(poll, 10_000);
+    document.addEventListener("visibilitychange", poll);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", poll);
+    };
   }, [hasGitRepo, fetchDiffStats, setGitDiffStats]);
 
   // Refresh diff stats when streaming stops (agent may have changed files)
