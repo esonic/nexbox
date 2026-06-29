@@ -546,7 +546,7 @@ const TextBlock = memo(function TextBlock({ content, isStreaming }: { content: s
   const visible = useSmoothText(stripNextActions(content), !!isStreaming);
   // Build (and re-parse) the markdown only when `visible` actually changes — not
   // on every token-driven re-render of this block. Combined with useSmoothText's
-  // render throttle, a long streaming reply re-parses ~15×/s instead of 60×/s.
+  // adaptive render throttle, a long streaming reply parses fewer times/sec.
   return useMemo(() => {
     if (!visible) return null;
     return (

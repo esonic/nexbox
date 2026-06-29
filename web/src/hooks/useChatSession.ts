@@ -505,6 +505,12 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   // nested-tool helpers. Populated at tool_start from parent_tool_id and
   // drained on tool_result.
   const nestedToolIdsRef = useRef<Set<string>>(new Set());
+  // Sessions whose next text_delta must start a fresh text part. Set when a
+  // sub-agent (nested) tool event arrives: nested tools don't add a top-level
+  // part, so without this the main-agent text on either side of the sub-agent's
+  // run would merge into one block (the server keeps every tool_use top-level,
+  // which is why a reload shows the correct split). Drained on the next text_delta.
+  const textBreakRef = useRef<Set<string>>(new Set());
   const seenDisconnectRef = useRef(false);
   useEffect(() => {
     seenDisconnectRef.current = false;
@@ -593,7 +599,11 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         }
         break;
       case "text_delta":
-        if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, event.content); }
+        if (event.content) {
+          ensureStreaming();
+          const startNewPart = textBreakRef.current.delete(sid);
+          gs().appendTextDelta(sid, event.content, startNewPart);
+        }
         break;
       case "tool_start":
         if (event.tool && event.tool_id) {
@@ -605,6 +615,9 @@ export function useChatSession({ session }: UseChatSessionOptions) {
             // own parent reference rather than relying on a shared
             // "currently active agent" pointer.
             nestedToolIdsRef.current.add(event.tool_id);
+            // Nested tools add no top-level part, so break the text run to keep
+            // main-agent text before/after the sub-agent from merging.
+            textBreakRef.current.add(sid);
             gs().addNestedToolStart(sid, event.parent_tool_id, event.tool_id, event.tool, event.input || "");
           } else {
             gs().addToolStart(sid, event.tool_id, event.tool, event.input);
@@ -625,6 +638,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
           const isNested = !!event.parent_tool_id || nestedToolIdsRef.current.has(event.tool_id);
           if (isNested) {
             gs().addNestedToolResult(sid, event.tool_id, event.output || "", event.is_error);
+            textBreakRef.current.add(sid);
             nestedToolIdsRef.current.delete(event.tool_id);
           } else {
             gs().addToolResult(sid, event.tool_id, event.output || "", event.is_error);

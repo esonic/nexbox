@@ -54,7 +54,7 @@ interface AppState {
   addChatMessage: (sessionId: string, message: ChatMessage) => void;
 
   // Fine-grained streaming updates
-  appendTextDelta: (sessionId: string, text: string) => void;
+  appendTextDelta: (sessionId: string, text: string, startNewPart?: boolean) => void;
   addToolStart: (sessionId: string, toolCallId: string, toolName: string, input?: string) => void;
   updateToolInput: (sessionId: string, toolCallId: string, inputDelta: string) => void;
   addToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
@@ -193,11 +193,17 @@ export const useAppStore = create<AppState>()(
   addChatMessage: (sessionId, message) =>
     set((state) => patchMessages(state, sessionId, (msgs) => [...msgs, message])),
 
-  appendTextDelta: (sessionId, text) =>
+  // startNewPart forces a fresh text part even when the last part is already
+  // text. Needed because sub-agent (nested) tool calls don't create a top-level
+  // part — without this, main-agent text before and after a sub-agent's activity
+  // would merge into one part, dropping the visual break the server persists
+  // (the server keeps every tool_use top-level). See the nested-tool handling in
+  // useChatSession's processEvent.
+  appendTextDelta: (sessionId, text, startNewPart) =>
     set((state) =>
       updateLastAssistant(state, sessionId, (parts) => {
         const last = parts[parts.length - 1];
-        if (last && last.type === "text") {
+        if (last && last.type === "text" && !startNewPart) {
           parts[parts.length - 1] = { ...last, content: last.content + text };
         } else {
           parts.push({ type: "text", content: text });
