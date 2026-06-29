@@ -701,8 +701,8 @@ function stripNextActions(text: string): string {
 function NextActions({ actions, sessionId }: { actions: string[]; sessionId: string }) {
   if (actions.length === 0) return null;
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-1.5">
-      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground mr-0.5">
+    <div className="mt-2 flex flex-wrap items-start gap-1.5">
+      <span className="inline-flex items-center gap-1 mt-1.5 text-[11px] font-medium text-muted-foreground mr-0.5">
         <Sparkles className="h-3 w-3" /> Next
       </span>
       {actions.map((a, i) => (
@@ -715,8 +715,8 @@ function NextActions({ actions, sessionId }: { actions: string[]; sessionId: str
           }
           className="group inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 px-2.5 py-1 text-xs text-foreground/80 hover:bg-accent hover:text-foreground transition-colors max-w-full"
         >
-          <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground transition-colors" />
-          <span className="truncate max-w-[280px]">{a}</span>
+          <ArrowRight className="h-3 w-3 shrink-0 mt-[3px] self-start text-muted-foreground group-hover:text-foreground transition-colors" />
+          <span className="text-left break-words">{a}</span>
         </button>
       ))}
     </div>
