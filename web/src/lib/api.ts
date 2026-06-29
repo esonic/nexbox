@@ -571,8 +571,8 @@ export const serverApi = {
       body: JSON.stringify({ agent }),
     }),
   getSettings: () =>
-    request<{ default_agent: string; chrome_headless: boolean; enable_file_edit: boolean }>("/settings"),
-  updateSettings: (data: { default_agent?: string; chrome_headless?: boolean; enable_file_edit?: boolean }) =>
+    request<{ default_agent: string; chrome_headless: boolean; enable_file_edit: boolean; suggest_next_actions: boolean }>("/settings"),
+  updateSettings: (data: { default_agent?: string; chrome_headless?: boolean; enable_file_edit?: boolean; suggest_next_actions?: boolean }) =>
     request<void>("/settings", {
       method: "PUT",
       body: JSON.stringify(data),

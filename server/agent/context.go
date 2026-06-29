@@ -39,6 +39,23 @@ type MindmapRef struct {
 	Title string
 }
 
+// NextActionsInstruction asks the model to end every reply with a small,
+// machine-parseable block listing 2-3 things the user might do next. The UI
+// parses the <next-actions> block out of the reply and renders the items as
+// quick-reply buttons (clicking one fills the composer). Kept terse so it costs
+// few tokens and the model reliably emits the exact tag format.
+const NextActionsInstruction = `[Next-Actions Suggestions]
+
+End EVERY reply with this block, at the very end of the message:
+
+<next-actions>
+- <what the user might type next, in their voice — imperative, not a question>
+- <a 2nd item, a different angle>
+- <an optional 3rd item>
+</next-actions>
+
+0~3 items. Match the user's language. Plain dash-prefixed lines only.`
+
 // BuildStaticContext constructs the fixed part of the prompt.
 // This is only sent once when creating a new session.
 func BuildStaticContext(project ProjectInfo, sessionID string) string {

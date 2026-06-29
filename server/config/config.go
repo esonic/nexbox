@@ -13,6 +13,11 @@ type Config struct {
 	DefaultAgent   string `json:"default_agent"`
 	ChromeHeadless bool   `json:"chrome_headless"`
 	EnableFileEdit bool   `json:"enable_file_edit"`
+	// SuggestNextActions controls whether new sessions get a system-prompt
+	// instruction asking the model to end each reply with a <next-actions> block
+	// (rendered as quick-reply buttons). Pointer so "absent" defaults to ON —
+	// nil means enabled; only an explicit false disables it.
+	SuggestNextActions *bool `json:"suggest_next_actions,omitempty"`
 }
 
 // Manager provides thread-safe load/save operations for Config.

@@ -19,6 +19,7 @@ export function GeneralSettings() {
 
   const [chromeHeadless, setChromeHeadless] = useState(true);
   const [enableFileEdit, setEnableFileEdit] = useState(false);
+  const [suggestNextActions, setSuggestNextActions] = useState(true);
   const [signingOut, setSigningOut] = useState(false);
   const [currentUser, setCurrentUser] = useState<string>("");
 
@@ -34,6 +35,7 @@ export function GeneralSettings() {
       .then((data) => {
         setChromeHeadless(!!data.chrome_headless);
         setEnableFileEdit(!!data.enable_file_edit);
+        setSuggestNextActions(data.suggest_next_actions !== false);
       })
       .catch((e) => console.error("Failed to load settings:", e));
 
@@ -68,6 +70,22 @@ export function GeneralSettings() {
     } catch (e) {
       setEnableFileEdit(prev);
       console.error("Failed to update file edit:", e);
+      toast.error("Failed to update setting", { description: String(e) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSuggestNextActionsChange = async (next: boolean) => {
+    if (next === suggestNextActions || saving) return;
+    const prev = suggestNextActions;
+    setSuggestNextActions(next);
+    setSaving(true);
+    try {
+      await serverApi.updateSettings({ suggest_next_actions: next });
+    } catch (e) {
+      setSuggestNextActions(prev);
+      console.error("Failed to update next-actions setting:", e);
       toast.error("Failed to update setting", { description: String(e) });
     } finally {
       setSaving(false);
@@ -196,6 +214,30 @@ export function GeneralSettings() {
           >
             <span
               className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-background shadow ring-0 transition-transform ${enableFileEdit ? "translate-x-5" : "translate-x-0"}`}
+            />
+          </button>
+        </div>
+      </div>
+
+      {/* Suggested Next Actions */}
+      <div className="rounded-lg border bg-card">
+        <div className="flex items-center justify-between px-4 py-3">
+          <div>
+            <div className="text-sm font-medium">Suggest Next Actions</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              After each reply, the assistant suggests a few next steps, shown as quick-reply buttons.
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={suggestNextActions}
+            disabled={saving}
+            onClick={() => handleSuggestNextActionsChange(!suggestNextActions)}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${suggestNextActions ? "bg-primary" : "bg-input"}`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-background shadow ring-0 transition-transform ${suggestNextActions ? "translate-x-5" : "translate-x-0"}`}
             />
           </button>
         </div>

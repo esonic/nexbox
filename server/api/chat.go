@@ -199,6 +199,9 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			Description: project.Description,
 			GitRepoPath: workDir,
 		}, sessionID)
+		if s.nextActionsEnabled() {
+			staticContext += "\n\n" + agent.NextActionsInstruction
+		}
 	}
 
 	dynamicContext := agent.BuildDynamicContext(&agent.ProjectInfo{
@@ -819,6 +822,9 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				Description: project.Description,
 				GitRepoPath: workDir,
 			}, sessionID)
+			if s.nextActionsEnabled() {
+				newStaticContext += "\n\n" + agent.NextActionsInstruction
+			}
 
 			agentResult, agentErr = sessionAgent.SendMessage(
 				ctx,

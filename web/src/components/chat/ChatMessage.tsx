@@ -1,7 +1,7 @@
 import { useMemo, useState, useCallback, useRef, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, FileEdit } from "lucide-react";
+import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, FileEdit, Sparkles, ArrowRight } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { ThinkingIndicator } from "@/components/chat/ThinkingIndicator";
 import { cn } from "@/lib/utils";
@@ -471,7 +471,9 @@ function WorkedBlock({
 }
 
 const TextBlock = memo(function TextBlock({ content, isStreaming }: { content: string; isStreaming?: boolean }) {
-  const visible = useSmoothText(content, !!isStreaming);
+  // Hide the trailing <next-actions> block (and any partial one mid-stream) —
+  // it's surfaced separately as quick-reply buttons, not shown as raw text.
+  const visible = useSmoothText(stripNextActions(content), !!isStreaming);
   // Build (and re-parse) the markdown only when `visible` actually changes — not
   // on every token-driven re-render of this block. Combined with useSmoothText's
   // render throttle, a long streaming reply re-parses ~15×/s instead of 60×/s.
@@ -670,6 +672,57 @@ function toRelativePath(absPath: string, projectRoot: string | undefined): strin
   return absPath;
 }
 
+// The model is asked (when the setting is on) to end replies with a
+// <next-actions> block of dash-prefixed suggestions. parseNextActions extracts
+// them (only once the closing tag is present, i.e. the reply is complete);
+// stripNextActions removes the block from the rendered text — including a
+// dangling, not-yet-closed block during streaming so the raw tag never flashes.
+const NEXT_ACTIONS_RE = /<next-actions>([\s\S]*?)<\/next-actions>/i;
+
+function parseNextActions(text: string): string[] {
+  const m = text.match(NEXT_ACTIONS_RE);
+  if (!m) return [];
+  return m[1]
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("-"))
+    .map((l) => l.replace(/^-+\s*/, "").trim())
+    .filter(Boolean)
+    .slice(0, 3);
+}
+
+function stripNextActions(text: string): string {
+  const stripped = text.replace(/\n*<next-actions>[\s\S]*?(?:<\/next-actions>|$)/i, "");
+  // Only trim when we actually removed a block, so messages without one render
+  // byte-for-byte as before.
+  return stripped === text ? text : stripped.trimEnd();
+}
+
+function NextActions({ actions, sessionId }: { actions: string[]; sessionId: string }) {
+  if (actions.length === 0) return null;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground mr-0.5">
+        <Sparkles className="h-3 w-3" /> Next
+      </span>
+      {actions.map((a, i) => (
+        <button
+          key={i}
+          type="button"
+          title={a}
+          onClick={() =>
+            window.dispatchEvent(new CustomEvent("nexbox:set-composer", { detail: { sessionId, text: a } }))
+          }
+          className="group inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 px-2.5 py-1 text-xs text-foreground/80 hover:bg-accent hover:text-foreground transition-colors max-w-full"
+        >
+          <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground transition-colors" />
+          <span className="truncate max-w-[280px]">{a}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function FileChangesSummary({ files, projectRoot }: { files: FileChangeEntry[]; projectRoot?: string }) {
   const [expanded, setExpanded] = useState(true);
   if (files.length === 0) return null;
@@ -730,6 +783,10 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
   const fileChanges = useMemo(
     () => (isUser ? [] : extractFileChanges(effectiveParts)),
     [isUser, effectiveParts],
+  );
+  const nextActions = useMemo(
+    () => (isUser ? [] : parseNextActions(plainText)),
+    [isUser, plainText],
   );
 
   const loadDetails = useCallback(async (): Promise<boolean> => {
@@ -919,6 +976,7 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
                   {(turn?.final ?? groups).map((group, gi) => (
                     <StaticGroup key={gi} group={group} loadDetails={loadDetails} />
                   ))}
+                  <NextActions actions={nextActions} sessionId={message.session_id} />
                   {fileChanges.length > 0 && (
                     <FileChangesSummary files={fileChanges} projectRoot={projectRoot} />
                   )}

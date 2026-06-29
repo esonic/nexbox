@@ -334,10 +334,18 @@ func (s *Server) ListChanges(w http.ResponseWriter, r *http.Request) {
 func (s *Server) GetSettings(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Config.Get()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"default_agent":    s.getDefaultAgent(),
-		"chrome_headless":  cfg.ChromeHeadless,
-		"enable_file_edit": cfg.EnableFileEdit,
+		"default_agent":        s.getDefaultAgent(),
+		"chrome_headless":      cfg.ChromeHeadless,
+		"enable_file_edit":     cfg.EnableFileEdit,
+		"suggest_next_actions": s.nextActionsEnabled(),
 	})
+}
+
+// nextActionsEnabled reports whether new sessions should get the next-actions
+// system-prompt instruction. Defaults to ON when the setting was never set.
+func (s *Server) nextActionsEnabled() bool {
+	v := s.Config.Get().SuggestNextActions
+	return v == nil || *v
 }
 
 // UpdateSettings updates settings.
@@ -345,8 +353,9 @@ func (s *Server) GetSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DefaultAgent   *string `json:"default_agent,omitempty"`
-		ChromeHeadless *bool   `json:"chrome_headless,omitempty"`
-		EnableFileEdit *bool   `json:"enable_file_edit,omitempty"`
+		ChromeHeadless     *bool `json:"chrome_headless,omitempty"`
+		EnableFileEdit     *bool `json:"enable_file_edit,omitempty"`
+		SuggestNextActions *bool `json:"suggest_next_actions,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -372,6 +381,9 @@ func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.EnableFileEdit != nil {
 			cfg.EnableFileEdit = *req.EnableFileEdit
+		}
+		if req.SuggestNextActions != nil {
+			cfg.SuggestNextActions = req.SuggestNextActions
 		}
 	}); err != nil {
 		log.Printf("[api] UpdateSettings persist error: %v", err)

@@ -587,6 +587,21 @@ export function ChatInput({
   const filePickerMenuRef = useRef<HTMLDivElement>(null);
   const slashMenuRef = useRef<HTMLDivElement>(null);
 
+  // Fill the composer when a "Next" quick-reply button is clicked in this
+  // session's chat (see NextActions in ChatMessage). It only fills the box —
+  // the user still chooses to send or edit.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId: string; text: string }>).detail;
+      if (!detail || detail.sessionId !== sessionId || !detail.text) return;
+      setInput(detail.text);
+      saveDraft(detail.text);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    };
+    window.addEventListener("nexbox:set-composer", handler);
+    return () => window.removeEventListener("nexbox:set-composer", handler);
+  }, [sessionId, saveDraft]);
+
   const isMobile = useIsMobile();
   // Auto-growing textarea: starts at 1 line on mobile / 3 lines on desktop
   // and grows with content up to 20 lines, after which the textarea scrolls
