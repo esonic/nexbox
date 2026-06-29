@@ -194,10 +194,14 @@ func (s *Server) GetProjectFileHead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// `git show HEAD:<path>` resolves the path relative to the repo root, which
-	// is the same directory the editor's paths are relative to. Use forward
-	// slashes — git pathspecs are always POSIX-style.
-	cmd := exec.Command("git", "show", "HEAD:"+filepath.ToSlash(cleanPath))
+	// `git show HEAD:<path>` resolves <path> relative to the *repo root*, not to
+	// cmd.Dir. When the project is a subdirectory of its git repo (e.g. a Maven
+	// module within a monorepo), that would read the wrong file — the editor's
+	// paths are relative to the project dir (cmd.Dir), not the repo root. The
+	// `./` prefix forces git to resolve <path> relative to the working dir, so
+	// it matches whatever file the editor is showing. Use forward slashes —
+	// git pathspecs are always POSIX-style.
+	cmd := exec.Command("git", "show", "HEAD:./"+filepath.ToSlash(cleanPath))
 	cmd.Dir = workDir
 	out, err := cmd.Output()
 	if err != nil {
