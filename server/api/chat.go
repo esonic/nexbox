@@ -891,6 +891,16 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		mu.Lock()
 		metadata.DurationMs = durationMs
 		metadata.ToolCalls = toolCallCount
+		// Fork anchor fallback: a stopped or errored turn never emits the `done`
+		// (EventDone) that normally sets SDKMessageUUID, but the agent still
+		// returns the last assistant uuid it saw. Persist it here so the fork
+		// button survives — interrupted turns were the main reason it went
+		// missing after a reload.
+		if metadata.SDKMessageUUID == "" && agentResult.Metadata != nil {
+			if v, ok := agentResult.Metadata["lastAssistantUuid"].(string); ok && v != "" {
+				metadata.SDKMessageUUID = v
+			}
+		}
 		finalParts := make([]MessagePart, len(msgParts))
 		copy(finalParts, msgParts)
 		finalMeta := metadata

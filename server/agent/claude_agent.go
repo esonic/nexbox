@@ -658,7 +658,14 @@ func (a *ClaudeAgent) SendMessage(
 		return Result{}, ErrSessionExpired
 	}
 	if err != nil {
-		return Result{}, fmt.Errorf("claude query: %w", err)
+		// A stopped or errored turn never reaches the `case "result"` branch
+		// that populates result.Metadata, so surface the last assistant uuid we
+		// saw during streaming. Without this the partial turn is persisted with
+		// no fork anchor (sdkMessageUuid) and its fork button never appears.
+		if lastAssistantUUID != "" && result.Metadata == nil {
+			result.Metadata = map[string]interface{}{"lastAssistantUuid": lastAssistantUUID}
+		}
+		return result, fmt.Errorf("claude query: %w", err)
 	}
 
 	// Use session ID from query result if not set from result event
