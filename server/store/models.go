@@ -321,6 +321,10 @@ type MessageMetadata struct {
 	TotalCostUSD             float64 `json:"totalCostUsd,omitempty"`
 	DurationMs               int64   `json:"durationMs,omitempty"`
 	ToolCalls                int     `json:"toolCalls,omitempty"`
+	// Interjected marks a user message that was injected into a running turn
+	// (queue-jump), so the UI can tag it — its position relative to the reply
+	// is intentional, not a misordering.
+	Interjected bool `json:"interjected,omitempty"`
 }
 
 type ChatMessage struct {

@@ -292,6 +292,9 @@ export interface MessageMetadata {
   totalCostUsd?: number;
   durationMs?: number;
   toolCalls?: number;
+  // Set on a user message that was injected into a running turn ("interjection"),
+  // so the UI can tag it — its position relative to the reply is intentional.
+  interjected?: boolean;
 }
 
 export interface ChatMessage {

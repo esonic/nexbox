@@ -2,7 +2,7 @@ import { useMemo, useState, useCallback, useRef, useEffect, memo, type ReactNode
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { resolveLang, ensureLangRegistered, highlightCode } from "@/lib/highlight";
-import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, FileEdit, Sparkles, ArrowRight } from "lucide-react";
+import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, FileEdit, Sparkles, ArrowRight, CornerDownRight } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { ThinkingIndicator } from "@/components/chat/ThinkingIndicator";
 import { cn } from "@/lib/utils";
@@ -833,6 +833,8 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
     }
   }, [message.id, loadedParts]);
 
+  const interjected = isUser && !!message.metadata?.interjected;
+
   const userImages = isUser
     ? message.parts.filter((p) => p.type === "image")
     : [];
@@ -869,17 +871,28 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
           <div>
             <div className="inline-block max-w-full space-y-2">
               {(plainText || userImages.length > 0) && (
-                <div className="rounded-2xl px-4 py-2.5 bg-muted overflow-hidden">
-                  {userImages.length > 0 && (
-                    <div className="mb-2">
-                      <ImageThumbnails parts={userImages} />
-                    </div>
+                <div className="flex items-center justify-end gap-2">
+                  {interjected && (
+                    <span
+                      className="flex shrink-0 items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/50"
+                      title="Sent while the assistant was working"
+                    >
+                      <CornerDownRight className="h-3 w-3" />
+                      Interjected
+                    </span>
                   )}
-                  {plainText && (
-                    <div className="markdown-content break-words [&>*:last-child]:mb-0">
-                      <TextBlock content={plainText} />
-                    </div>
-                  )}
+                  <div className="rounded-2xl px-4 py-2.5 bg-muted overflow-hidden min-w-0">
+                    {userImages.length > 0 && (
+                      <div className="mb-2">
+                        <ImageThumbnails parts={userImages} />
+                      </div>
+                    )}
+                    {plainText && (
+                      <div className="markdown-content break-words [&>*:last-child]:mb-0">
+                        <TextBlock content={plainText} />
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
               {taskRefs.length > 0 && (

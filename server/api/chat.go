@@ -1016,11 +1016,11 @@ func (s *Server) handleInterject(sessionID, message string, parts []MessagePart,
 	// Delivered into the live turn. Persist + echo the user message so it shows
 	// in the transcript and survives a reload. The frontend already added it
 	// optimistically and ignores this echo while streaming.
-	if len(parts) > 0 {
-		if _, err := s.Store.CreateMessage(sessionID, "user", parts, MessageMetadata{}); err != nil {
-			log.Printf("[interject] Failed to persist user message (with parts): %v", err)
-		}
-	} else if _, err := s.Store.CreateUserMessage(sessionID, message); err != nil {
+	persistParts := parts
+	if len(persistParts) == 0 {
+		persistParts = []MessagePart{{Type: "text", Content: message}}
+	}
+	if _, err := s.Store.CreateMessage(sessionID, "user", persistParts, MessageMetadata{Interjected: true}); err != nil {
 		log.Printf("[interject] Failed to persist user message: %v", err)
 	}
 	s.Hub.Emit(sessionID, ChatEvent{Type: "user_message", Content: message})

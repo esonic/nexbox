@@ -108,7 +108,7 @@ function sendRichInterjectDirect(sid: string, msg: RichQueuedMessage) {
 
   const imageFilenames = msg.images?.map((i) => i.filename).filter((f): f is string => !!f) ?? [];
 
-  const userMsg: ChatMessageType = { id: uuid(), session_id: sid, role: "user", parts, metadata: {}, created_at: new Date().toISOString() };
+  const userMsg: ChatMessageType = { id: uuid(), session_id: sid, role: "user", parts, metadata: { interjected: true }, created_at: new Date().toISOString() };
   // Insert the interjection BEFORE the still-streaming assistant message so it
   // stays the last message — all streaming updates target the last assistant
   // message (see updateLastAssistant), so the response (which addresses both the
