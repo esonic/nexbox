@@ -58,6 +58,9 @@ interface AppState {
   addToolStart: (sessionId: string, toolCallId: string, toolName: string, input?: string) => void;
   updateToolInput: (sessionId: string, toolCallId: string, inputDelta: string) => void;
   addToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
+  // Mark an Agent/Task tool_use complete once its sub-agent truly finishes (its
+  // own tool_result returns immediately at launch, so it can't complete the card).
+  completeAgentTool: (sessionId: string, toolCallId: string) => void;
   appendThinkingDelta: (sessionId: string, text: string) => void;
   setAgentToolSummary: (sessionId: string, summary: string, toolCallId?: string) => void;
   setWorkflowProgress: (sessionId: string, toolCallId: string, snapshot: WorkflowProgressSnapshot) => void;
@@ -236,10 +239,34 @@ export const useAppStore = create<AppState>()(
   addToolResult: (sessionId, toolCallId, output, isError) =>
     set((state) =>
       updateLastAssistant(state, sessionId, (parts) => {
-        patchToolUse(parts, toolCallId, (p) => ({ ...p, state: isError ? "error" : "complete" }));
+        patchToolUse(parts, toolCallId, (p) => {
+          // Agent/Task tool_result returns immediately: the sub-agent is launched
+          // in the background and keeps streaming nested tool calls afterward. So
+          // a *successful* result must NOT flip the card to complete — doing so
+          // collapses it and hides the nested calls still to come (that was the
+          // "sub-agent card finishes the instant it appears" bug). Keep it running
+          // until the sub-agent truly finishes (completeAgentTool on subtask_done,
+          // or finishStreaming as the turn-end backstop). Errors are terminal.
+          const isAgent = p.toolName === "Agent" || p.toolName === "Task";
+          if (isAgent && !isError) return p;
+          return { ...p, state: isError ? "error" : "complete" };
+        });
         parts.push({ type: "tool_result", toolCallId, output, isError });
         return parts;
       }),
+    ),
+
+  completeAgentTool: (sessionId, toolCallId) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) =>
+        patchToolUse(parts, toolCallId, (p) => ({
+          ...p,
+          state: "complete",
+          nestedTools: p.nestedTools?.map((n) =>
+            n.state === "running" || n.state === "streaming" ? { ...n, state: "complete" as const } : n,
+          ),
+        })),
+      ),
     ),
 
   appendThinkingDelta: (sessionId, text) =>

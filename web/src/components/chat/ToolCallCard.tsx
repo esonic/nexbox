@@ -667,7 +667,11 @@ export const ToolCallCard = memo(function ToolCallCard({
               ))}
             </div>
           )}
-          {result && (meta.renderOutput
+          {/* Agent/Task tool_result is just the "Async agent launched…" launch
+              receipt — no value to show, and because it arrives ~20ms after
+              launch (long before the nested calls) it renders out of order,
+              below them. Hide it; the card's substance is its nested calls. */}
+          {result && !isAgentTool && (meta.renderOutput
             ? meta.renderOutput(result.output ?? "", result.isError)
             : <RawOutput output={result.output ?? ""} isError={result.isError} />
           )}

@@ -717,11 +717,17 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         }
         break;
       case "subtask_done":
-        // Workflow finished: persist the final snapshot on the card. Task
-        // sub-agents complete via their own tool_result event (no-op here).
         if (event.workflow_progress && event.tool_id) {
+          // Workflow finished: persist the final snapshot on the card.
           ensureStreaming();
           gs().setWorkflowProgress(sid, event.tool_id, event.workflow_progress);
+        } else {
+          // Regular Task sub-agent finished. Its Agent tool_result returned
+          // immediately at launch (kept "running" on purpose), so this is the
+          // signal that truly completes the card; finishStreaming is the
+          // turn-end backstop if this event never arrives.
+          const agentId = event.tool_id || event.task_id;
+          if (agentId) { ensureStreaming(); gs().completeAgentTool(sid, agentId); }
         }
         break;
       case "system":

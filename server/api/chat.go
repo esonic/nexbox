@@ -583,10 +583,25 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 						WorkflowProgress: full,
 					})
 				} else {
+					// Regular background sub-agent (Agent tool) finished. Its own
+					// tool_result returned immediately at launch and left the card
+					// "running", so complete it now — both in the persisted parts
+					// (so a mid-turn refresh stays consistent) and live to clients.
+					if toolUseID != "" {
+						mu.Lock()
+						for i := range msgParts {
+							if msgParts[i].Type == "tool_use" && msgParts[i].ToolCallID == toolUseID && msgParts[i].State == "running" {
+								msgParts[i].State = "complete"
+								dirty = true
+							}
+						}
+						mu.Unlock()
+					}
 					s.Hub.Emit(sessionID, ChatEvent{
 						Type:    "subtask_done",
 						Content: event.Content,
 						TaskID:  taskID,
+						ToolID:  toolUseID,
 					})
 				}
 

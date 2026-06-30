@@ -149,6 +149,13 @@ type StreamMessage struct {
 	WorkflowName     string          `json:"workflow_name,omitempty"`
 	WorkflowProgress json.RawMessage `json:"workflow_progress,omitempty"`
 
+	// For system.task_updated: the changed fields (status, end_time, result…).
+	// A background sub-agent's terminal completion can arrive ONLY here — as a
+	// task_updated whose patch.status is terminal, with no task_notification.
+	// Mirrors TaskUpdatedMessage in the Claude Agent SDK; status lives in the
+	// patch, NOT at the top level.
+	Patch map[string]interface{} `json:"patch,omitempty"`
+
 	// For stream_event messages (partial message streaming)
 	Event json.RawMessage `json:"event,omitempty"`
 

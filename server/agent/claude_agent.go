@@ -55,6 +55,102 @@ func stripWatermarkChars(s string) string {
 	return strings.ReplaceAll(s, "\u05B4", "")
 }
 
+// terminalTaskStatuses mirrors TERMINAL_TASK_STATUSES in the Claude Agent SDK:
+// a task with one of these statuses has finished. task_notification reports
+// "stopped" (the CLI's mapped form of a killed task) while task_updated reports
+// the raw "killed" — treat both the same. Non-terminal: pending/running/paused.
+var terminalTaskStatuses = map[string]bool{
+	"completed": true,
+	"failed":    true,
+	"stopped":   true,
+	"killed":    true,
+}
+
+func isTerminalTaskStatus(status string) bool { return terminalTaskStatuses[status] }
+
+// translateAssistantContent converts the content blocks of one complete
+// `assistant` stream-json message into unified StreamEvents.
+//
+// parentToolUseID is the `parent_tool_use_id` of the message: empty for the
+// main agent, set when the message was produced by a sub-agent (Task tool).
+//
+// Sub-agent text/thinking belongs to that sub-agent's context, NOT the main
+// transcript. The CLI delivers a sub-agent's narration as ordinary `assistant`
+// messages (carrying parent_tool_use_id) with NO partial streaming — verified
+// against the real CLI in claude_subagent_stream_test.go. Forwarding it as a
+// top-level text/thinking event leaked the sub-agent's words into the main
+// reply (and merged them with the main agent's prose). So we suppress text and
+// thinking from sub-agent messages here: their tool calls still stream (nested
+// under the Agent card via ParentToolID), and their outcome flows back to the
+// main agent through the Task tool_result plus the subtask summary.
+//
+// hasPartialText/hasPartialThinking indicate the main agent already streamed
+// this block via stream_event deltas, so the consolidated copy is skipped to
+// avoid duplication (only meaningful for the main agent — sub-agents never set
+// these because they don't stream partials).
+func translateAssistantContent(
+	content []AssistantContent,
+	parentToolUseID string,
+	hasPartialText, hasPartialThinking bool,
+	cb EventCallback,
+) {
+	isSubAgent := parentToolUseID != ""
+	for _, c := range content {
+		switch c.Type {
+		case "text":
+			if isSubAgent {
+				continue // sub-agent narration: not part of the main transcript
+			}
+			if !hasPartialText {
+				cb(StreamEvent{Type: EventTextDelta, Content: c.Text})
+			}
+
+		case "tool_use":
+			inputJSON, _ := json.Marshal(c.Input)
+			cb(StreamEvent{
+				Type:         EventToolStart,
+				ToolID:       c.ID,
+				ToolName:     c.Name,
+				Input:        string(inputJSON),
+				ParentToolID: parentToolUseID,
+			})
+
+		case "thinking":
+			if isSubAgent || c.Thinking == "" {
+				continue // sub-agent reasoning is internal to the Agent card
+			}
+			if hasPartialThinking {
+				continue // already streamed via stream_event deltas
+			}
+			var thinkingMeta map[string]interface{}
+			if c.Signature != "" {
+				thinkingMeta = map[string]interface{}{"signature": c.Signature}
+			}
+			cb(StreamEvent{
+				Type:     EventThinking,
+				ToolID:   c.ID,
+				ToolName: "Thinking",
+				Content:  c.Thinking,
+				Metadata: thinkingMeta,
+			})
+
+		case "redacted_thinking":
+			if isSubAgent {
+				continue
+			}
+			log.Printf("[claude-agent] Redacted thinking block (content hidden)")
+			cb(StreamEvent{
+				Type:     EventThinking,
+				ToolName: "Thinking",
+				Content:  "[Thinking content redacted]",
+			})
+
+		default:
+			log.Printf("[claude-agent] Unhandled content block type=%q id=%s", c.Type, c.ID)
+		}
+	}
+}
+
 // SendMessage implements Agent.SendMessage using the Claude Code CLI.
 func (a *ClaudeAgent) SendMessage(
 	ctx context.Context,
@@ -258,6 +354,16 @@ func (a *ClaudeAgent) SendMessage(
 	// assistant uuid of that turn.
 	var lastAssistantUUID string
 
+	// Maps a sub-agent's task_id → the Agent tool_use_id that launched it. Built
+	// from task_started (which carries both ids). A background sub-agent signals
+	// completion with a `task_updated` message that carries ONLY task_id (no
+	// tool_use_id), so we need this map to translate it back to the tool_use_id
+	// the UI's Agent card is keyed on. Verified against the real CLI in
+	// claude_subagent_stream_test.go: sync tools finish via task_notification
+	// (with tool_use_id), but async sub-agents finish via task_updated. Accessed
+	// only from the single stream-reading goroutine, so no lock needed.
+	subAgentTaskTool := map[string]string{}
+
 	resultSessionID, err := client.Query(ctx, combinedPrompt, opts, func(msg StreamMessage, parsed *AssistantMessage) {
 		if msg.Type != "stream_event" {
 			log.Printf("[claude-agent] Received: type=%s, subtype=%s, session=%s", msg.Type, msg.Subtype, msg.SessionID)
@@ -309,6 +415,9 @@ func (a *ClaudeAgent) SendMessage(
 				log.Printf("[claude-agent] Initialize response: %d models", len(msg.InitModels))
 				a.updateModelCacheFromInit(msg.InitModels)
 			case "task_started":
+				if msg.TaskID != "" && msg.ToolUseID != "" {
+					subAgentTaskTool[msg.TaskID] = msg.ToolUseID
+				}
 				cb(StreamEvent{
 					Type:    EventSubTaskStart,
 					Content: msg.Description,
@@ -352,6 +461,29 @@ func (a *ClaudeAgent) SendMessage(
 						"workflow_progress": msg.WorkflowProgress,
 					},
 				})
+			case "task_updated":
+				// A background sub-agent (Agent tool) can signal terminal completion
+				// ONLY via task_updated — no task_notification (that's for sync
+				// tools). Per the Claude Agent SDK (TaskUpdatedMessage): the status
+				// lives in `patch`, not at top level, and only a TERMINAL status
+				// means done — pending/running/paused (or a patch with no status)
+				// must NOT complete the card. Translate task_id → the launching
+				// Agent tool_use_id and emit once (drop from the map).
+				patchStatus, _ := msg.Patch["status"].(string)
+				if isTerminalTaskStatus(patchStatus) {
+					if toolUseID := subAgentTaskTool[msg.TaskID]; toolUseID != "" {
+						delete(subAgentTaskTool, msg.TaskID)
+						cb(StreamEvent{
+							Type:    EventSubTaskDone,
+							Content: msg.Summary,
+							Metadata: map[string]interface{}{
+								"task_id":     msg.TaskID,
+								"status":      patchStatus,
+								"tool_use_id": toolUseID,
+							},
+						})
+					}
+				}
 			}
 
 		case "assistant":
@@ -359,59 +491,7 @@ func (a *ClaudeAgent) SendMessage(
 				lastAssistantUUID = msg.UUID
 			}
 			if parsed != nil {
-				for _, content := range parsed.Content {
-					switch content.Type {
-					case "text":
-						if hasPartialText {
-							// Text already streamed via stream_event deltas; skip duplication.
-						} else {
-							cb(StreamEvent{
-								Type:    EventTextDelta,
-								Content: content.Text,
-							})
-						}
-
-					case "tool_use":
-						inputJSON, _ := json.Marshal(content.Input)
-						cb(StreamEvent{
-							Type:         EventToolStart,
-							ToolID:       content.ID,
-							ToolName:     content.Name,
-							Input:        string(inputJSON),
-							ParentToolID: msg.ParentToolUseID,
-						})
-
-					case "thinking":
-						if content.Thinking != "" {
-							if hasPartialThinking {
-								// Thinking already streamed via stream_event deltas; skip duplication.
-								continue
-							}
-							var thinkingMeta map[string]interface{}
-							if content.Signature != "" {
-								thinkingMeta = map[string]interface{}{"signature": content.Signature}
-							}
-							cb(StreamEvent{
-								Type:     EventThinking,
-								ToolID:   content.ID,
-								ToolName: "Thinking",
-								Content:  content.Thinking,
-								Metadata: thinkingMeta,
-							})
-						}
-
-					case "redacted_thinking":
-						log.Printf("[claude-agent] Redacted thinking block (content hidden)")
-						cb(StreamEvent{
-							Type:     EventThinking,
-							ToolName: "Thinking",
-							Content:  "[Thinking content redacted]",
-						})
-
-					default:
-						log.Printf("[claude-agent] Unhandled content block type=%q id=%s", content.Type, content.ID)
-					}
-				}
+				translateAssistantContent(parsed.Content, msg.ParentToolUseID, hasPartialText, hasPartialThinking, cb)
 				// Reset partial flags after processing the complete assistant message.
 				hasPartialText = false
 				hasPartialThinking = false
