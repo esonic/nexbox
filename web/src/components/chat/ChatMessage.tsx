@@ -888,8 +888,8 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
                       </div>
                     )}
                     {plainText && (
-                      <div className="markdown-content break-words [&>*:last-child]:mb-0">
-                        <TextBlock content={plainText} />
+                      <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
+                        {plainText}
                       </div>
                     )}
                   </div>
