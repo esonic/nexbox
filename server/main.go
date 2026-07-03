@@ -167,11 +167,15 @@ func main() {
 
 	cx := agent.NewCodexAgent()
 	cx.MCPServerURL = mcpServer.URL()
-	{
-		warmCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Same async warmup as Claude above: pre-populate the model catalog
+	// without letting a slow `codex app-server` spawn block startup.
+	// 15s, not 5s: cold app-server initialize routinely exceeds 5s (see
+	// "model/list failed: context deadline exceeded" in past startup logs).
+	go func() {
+		warmCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
 		cx.WarmupSupportedModels(warmCtx)
-		cancel()
-	}
+	}()
 	allAgents["codex"] = cx
 
 	defaultAgentName := cfgMgr.Get().DefaultAgent
