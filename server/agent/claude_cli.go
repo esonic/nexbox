@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,10 +10,44 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
+
+// taskNotificationIDRe extracts <task-id>…</task-id> from a re-invocation
+// `<task-notification>` that the CLI injects as a user message when a background
+// task (Workflow) completes. Used to clear the task from the running set even
+// when the completion is delivered only via this user-message path.
+var taskNotificationIDRe = regexp.MustCompile(`<task-id>([^<]+)</task-id>`)
+
+// taskNotificationIDs returns the task ids referenced by a `<task-notification>`
+// in a raw user-message payload, or nil if the payload carries none.
+func taskNotificationIDs(raw []byte) []string {
+	if !bytes.Contains(raw, []byte("task-notification")) {
+		return nil
+	}
+	matches := taskNotificationIDRe.FindAllSubmatch(raw, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(matches))
+	for _, m := range matches {
+		ids = append(ids, string(m[1]))
+	}
+	return ids
+}
+
+// postTurnExitGrace bounds how long we wait for the CLI process to exit AFTER
+// the turn's terminal result was received and the read loop broke. Normally the
+// process exits in well under a second; if a leftover background task (e.g. an
+// orphaned Workflow from earlier in the session) keeps it alive, it can linger
+// up to the CLI's own 600s background-wait ceiling, blocking wg.Wait()/cmd.Wait()
+// and stranding the turn as "processing". The turn is already decided complete,
+// so after this grace we force-kill the process group and return cleanly.
+const postTurnExitGrace = 30 * time.Second
 
 // outboundCtrlSeq is a monotonically increasing counter for generating unique
 // request IDs in outbound control_request messages sent to the CLI.
@@ -429,6 +464,28 @@ func (c *ClaudeClient) Query(
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024) // 10 MB max line size
 
+	// sawContent flips true once the turn produces real assistant output. It
+	// gates the premature-result skip below: a no-op `result` is only treated
+	// as a catch-up artifact when it arrives *before* any turn content.
+	var sawContent bool
+	// prematureResultSkips bounds how many no-op catch-up results we skip before
+	// giving up and breaking — a safety valve so a pathological stream can never
+	// wedge the read loop waiting for a real result that never comes.
+	prematureResultSkips := 0
+
+	// runningBgTasks tracks detached background Workflows (task_type
+	// "local_workflow") that outlive the foreground turn: task_started adds; a
+	// task_notification/task_updated (system) OR a <task-notification>
+	// re-invocation (user message) removes. While the set is non-empty, a
+	// `result` only means the foreground turn went idle — the turn is NOT over —
+	// so we keep the stream open (see the result handling below).
+	runningBgTasks := map[string]bool{}
+	// workflowResultSwallows caps how many results we swallow while waiting on a
+	// Workflow, so a task that never signals completion (bug / unusual delivery)
+	// can't wedge the read loop forever — after the cap we break and the
+	// post-turn grace-kill reaps the process.
+	workflowResultSwallows := 0
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -499,9 +556,89 @@ func (c *ClaudeClient) Query(
 			sessionID = msg.SessionID
 		}
 
+		// Track detached background Workflows so the result handling below knows
+		// whether the exchange is really over. A Workflow's tool call returns
+		// immediately and the run continues in the background: its task_started
+		// lands before the foreground turn's result, and its terminal
+		// notification only much later, when it completes.
+		if msg.Type == "system" {
+			switch msg.Subtype {
+			case "task_started":
+				if msg.TaskID != "" && msg.TaskType == "local_workflow" {
+					runningBgTasks[msg.TaskID] = true
+				}
+			case "task_notification":
+				// task_notification IS the terminal "done" signal for a task
+				// (the SDK/agent layer treats it as Sub-agent done regardless of
+				// the status vocabulary), so clear unconditionally by task_id.
+				if msg.TaskID != "" {
+					delete(runningBgTasks, msg.TaskID)
+				}
+			case "task_updated":
+				if msg.TaskID != "" {
+					if st, _ := msg.Patch["status"].(string); isTerminalTaskStatus(st) {
+						delete(runningBgTasks, msg.TaskID)
+					}
+				}
+			}
+		}
+		// A Workflow's completion is also delivered as a `<task-notification>`
+		// re-invocation (a user message) — the path that outlives the foreground
+		// turn. Clear the running set on it too, so the round can end even when
+		// no system task_notification/task_updated is seen for that workflow.
+		if msg.Type == "user" && len(runningBgTasks) > 0 && len(msg.Message) > 0 {
+			for _, id := range taskNotificationIDs(msg.Message) {
+				delete(runningBgTasks, id)
+			}
+		}
+
+		// A `result` while a Workflow is still running does NOT end the exchange:
+		// the foreground turn merely went idle. The CLI keeps the session open,
+		// and when the Workflow completes it injects a task-notification on this
+		// same stream that re-invokes the agent (auto-continuation). Breaking
+		// here would tear the process down — killing the still-running Workflow
+		// and losing the follow-up (exactly the "workflow 老是停" symptom). So
+		// swallow the interim result and keep reading; the turn ends only when a
+		// result coincides with no outstanding Workflow. A wedged Workflow is
+		// bounded by the user's Stop button (ctx cancel → process-group kill) —
+		// intentionally no internal timeout.
+		if msg.Type == "result" && !msg.IsError && len(runningBgTasks) > 0 {
+			workflowResultSwallows++
+			if workflowResultSwallows > 64 {
+				log.Printf("[claude] Swallowed %d results with %d Workflow(s) still marked running; giving up waiting and ending turn (session=%s)",
+					workflowResultSwallows, len(runningBgTasks), sessionID)
+				// Fall through to break — the post-turn grace-kill reaps the CLI.
+			} else {
+				log.Printf("[claude] Foreground result received but %d Workflow(s) still running; keeping stream open for auto-continuation (session=%s)",
+					len(runningBgTasks), sessionID)
+				continue
+			}
+		}
+
+		// Skip premature "catch-up" results. On --resume, when a background task
+		// (e.g. a Workflow interrupted by a previous CLI process exiting) has a
+		// pending notification, the CLI flushes it and emits a no-op `result`
+		// (num_turns==0, cost==0) *before* the real turn runs. Breaking on it
+		// ends the read loop before the actual assistant turn streams, so the
+		// message is persisted empty even though the CLI goes on to answer — the
+		// reply lands in the CLI transcript but never reaches BeeHub. The Agent
+		// SDK keeps a single stdout open across turns and never stops reading on
+		// a result (see claude-agent-sdk _read_messages), so the real turn
+		// arrives on this same stream: skip the no-op result and keep reading.
+		// Gated on !sawContent (only pre-turn) and a skip cap so the loop can
+		// never wedge waiting for a real result.
+		if msg.Type == "result" && !msg.IsError && msg.NumTurns == 0 && msg.TotalCostUSD == 0 &&
+			!sawContent && prematureResultSkips < 8 {
+			prematureResultSkips++
+			log.Printf("[claude] Skipping premature catch-up result #%d (num_turns=0, cost=0, pre-turn); session=%s",
+				prematureResultSkips, sessionID)
+			continue
+		}
+
 		// Parse assistant message content if present.
 		var assistantMsg *AssistantMessage
 		if msg.Type == "assistant" && len(msg.Message) > 0 {
+			sawContent = true
 			var am AssistantMessage
 			if err := json.Unmarshal(msg.Message, &am); err == nil {
 				assistantMsg = &am
@@ -523,6 +660,31 @@ func (c *ClaudeClient) Query(
 	// Close stdin to signal the CLI process to exit (flushing stderr).
 	closeStdin()
 
+	// The turn is complete (we broke on its terminal result). Give the CLI a
+	// short grace to exit on its own; if a lingering background task keeps it
+	// alive past the grace, force-kill the process group so wg.Wait()/cmd.Wait()
+	// below don't block up to the CLI's 600s ceiling and strand the turn as
+	// "processing". A force-kill here is a clean completion, not an error — the
+	// result was already delivered to the callback.
+	var graceKilled atomic.Bool
+	procExited := make(chan struct{})
+	go func() {
+		select {
+		case <-procExited:
+		case <-time.After(postTurnExitGrace):
+			if cmd.Process != nil {
+				if pgid, perr := syscall.Getpgid(cmd.Process.Pid); perr == nil {
+					log.Printf("[claude] CLI still alive %s after turn end (lingering background task); force-killing process group %d", postTurnExitGrace, pgid)
+					graceKilled.Store(true)
+					_ = syscall.Kill(-pgid, syscall.SIGKILL)
+				} else {
+					graceKilled.Store(true)
+					_ = cmd.Process.Kill()
+				}
+			}
+		}
+	}()
+
 	// Wait for stderr reader.
 	wg.Wait()
 
@@ -530,14 +692,21 @@ func (c *ClaudeClient) Query(
 	close(doneCh)
 
 	// Wait for process to exit.
-	if err := cmd.Wait(); err != nil {
+	werr := cmd.Wait()
+	close(procExited)
+	if werr != nil {
+		// A force-kill we issued after the turn ended is a clean completion.
+		if graceKilled.Load() {
+			log.Printf("[claude] Turn complete; force-killed lingering CLI after %s", postTurnExitGrace)
+			return sessionID, nil
+		}
 		if ctx.Err() != nil {
 			return sessionID, context.Canceled
 		}
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr, ok := werr.(*exec.ExitError); ok {
 			return sessionID, fmt.Errorf("claude CLI exited with code %d: %s", exitErr.ExitCode(), string(stderrBuf))
 		}
-		return sessionID, fmt.Errorf("wait for claude CLI: %w", err)
+		return sessionID, fmt.Errorf("wait for claude CLI: %w", werr)
 	}
 
 	return sessionID, nil
