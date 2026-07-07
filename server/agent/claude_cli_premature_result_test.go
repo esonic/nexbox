@@ -154,6 +154,58 @@ func TestQuery_KeepsStreamOpenWhileWorkflowRuns(t *testing.T) {
 	}
 }
 
+// TestQuery_KeepsStreamOpenWhileAgentSubagentRuns is the Agent-subagent analogue
+// of the Workflow case: a background Agent subagent has task_type "local_agent"
+// (not "local_workflow") and detaches — the CLI emits an interim result while
+// the subagent still runs (verified live: result at ~7s, subagent ~30s). The
+// loop must track local_agent too and swallow that result, else the subagent is
+// dropped and the agent never auto-continues ("没执行完就结束了").
+func TestQuery_KeepsStreamOpenWhileAgentSubagentRuns(t *testing.T) {
+	lines := []string{
+		`{"type":"system","subtype":"init","session_id":"S5","model":"claude-opus-4-8"}`,
+		`{"type":"assistant","session_id":"S5","uuid":"u1","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"LAUNCHING_AGENT"}]}}`,
+		`{"type":"assistant","session_id":"S5","uuid":"u2","message":{"role":"assistant","id":"m1","content":[{"type":"tool_use","id":"toolu_ag","name":"Task","input":{}}]}}`,
+		`{"type":"system","subtype":"task_started","session_id":"S5","task_id":"ag1","task_type":"local_agent","tool_use_id":"toolu_ag","description":"subagent","uuid":"u3"}`,
+		`{"type":"user","session_id":"S5","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_ag","content":"launched"}]}}`,
+		// Interim foreground result — MUST be swallowed, subagent ag1 still running.
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.4,"session_id":"S5","duration_ms":100}`,
+		// Subagent completes (async, via task_updated + task_notification).
+		`{"type":"system","subtype":"task_updated","session_id":"S5","task_id":"ag1","patch":{"status":"completed"},"uuid":"u4"}`,
+		`{"type":"system","subtype":"task_notification","session_id":"S5","task_id":"ag1","status":"completed","summary":"done","uuid":"u5"}`,
+		// Main agent auto-continues on the same stream.
+		`{"type":"assistant","session_id":"S5","uuid":"u6","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"AGENT_CONTINUATION"}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.7,"session_id":"S5","duration_ms":200}`,
+	}
+	client := &ClaudeClient{CLIPath: writeFakeCLI(t, lines)}
+
+	var gotText strings.Builder
+	var resultNumTurns []int
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := client.Query(ctx, "run it", QueryOptions{}, func(msg StreamMessage, parsed *AssistantMessage) {
+		if msg.Type == "result" {
+			resultNumTurns = append(resultNumTurns, msg.NumTurns)
+		}
+		if parsed != nil {
+			for _, c := range parsed.Content {
+				if c.Type == "text" {
+					gotText.WriteString(c.Text)
+				}
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("Query returned error: %v", err)
+	}
+	if !strings.Contains(gotText.String(), "AGENT_CONTINUATION") {
+		t.Errorf("continuation dropped (local_agent not tracked as a background task); got %q", gotText.String())
+	}
+	if len(resultNumTurns) != 1 || resultNumTurns[0] != 2 {
+		t.Errorf("results delivered to callback = %v, want exactly [2] (interim swallowed)", resultNumTurns)
+	}
+}
+
 // TestQuery_ClearsWorkflowViaUserTaskNotification covers the delivery path that
 // hung in production: the interim foreground result is swallowed while a
 // Workflow runs, and the Workflow's completion arrives ONLY as a

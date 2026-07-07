@@ -473,18 +473,22 @@ func (c *ClaudeClient) Query(
 	// wedge the read loop waiting for a real result that never comes.
 	prematureResultSkips := 0
 
-	// runningBgTasks tracks detached background Workflows (task_type
-	// "local_workflow") that outlive the foreground turn: task_started adds; a
+	// runningBgTasks tracks detached background tasks that outlive the foreground
+	// turn: the dynamic Workflow tool (task_type "local_workflow") AND background
+	// Agent subagents (task_type "local_agent"). Both return from their tool call
+	// immediately and keep running in the background — the CLI can emit the
+	// turn's `result` while they're still running (verified: local_agent detaches
+	// at ~7s while the subagent runs ~30s). task_started adds; a
 	// task_notification/task_updated (system) OR a <task-notification>
 	// re-invocation (user message) removes. While the set is non-empty, a
 	// `result` only means the foreground turn went idle — the turn is NOT over —
 	// so we keep the stream open (see the result handling below).
 	runningBgTasks := map[string]bool{}
-	// workflowResultSwallows caps how many results we swallow while waiting on a
-	// Workflow, so a task that never signals completion (bug / unusual delivery)
-	// can't wedge the read loop forever — after the cap we break and the
-	// post-turn grace-kill reaps the process.
-	workflowResultSwallows := 0
+	// bgResultSwallows caps how many results we swallow while waiting on a
+	// background task, so a task that never signals completion (bug / unusual
+	// delivery) can't wedge the read loop forever — after the cap we break and
+	// the post-turn grace-kill reaps the process.
+	bgResultSwallows := 0
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -556,15 +560,17 @@ func (c *ClaudeClient) Query(
 			sessionID = msg.SessionID
 		}
 
-		// Track detached background Workflows so the result handling below knows
-		// whether the exchange is really over. A Workflow's tool call returns
-		// immediately and the run continues in the background: its task_started
-		// lands before the foreground turn's result, and its terminal
-		// notification only much later, when it completes.
+		// Track detached background tasks so the result handling below knows
+		// whether the exchange is really over. A Workflow / background Agent
+		// subagent returns from its tool call immediately and keeps running in
+		// the background: its task_started lands before the foreground turn's
+		// result, and its terminal notification only later, when it completes.
 		if msg.Type == "system" {
 			switch msg.Subtype {
 			case "task_started":
-				if msg.TaskID != "" && msg.TaskType == "local_workflow" {
+				// "local_workflow" = dynamic Workflow tool; "local_agent" =
+				// background Agent subagent. Both outlive the foreground turn.
+				if msg.TaskID != "" && (msg.TaskType == "local_workflow" || msg.TaskType == "local_agent") {
 					runningBgTasks[msg.TaskID] = true
 				}
 			case "task_notification":
@@ -592,24 +598,25 @@ func (c *ClaudeClient) Query(
 			}
 		}
 
-		// A `result` while a Workflow is still running does NOT end the exchange:
-		// the foreground turn merely went idle. The CLI keeps the session open,
-		// and when the Workflow completes it injects a task-notification on this
-		// same stream that re-invokes the agent (auto-continuation). Breaking
-		// here would tear the process down — killing the still-running Workflow
-		// and losing the follow-up (exactly the "workflow 老是停" symptom). So
-		// swallow the interim result and keep reading; the turn ends only when a
-		// result coincides with no outstanding Workflow. A wedged Workflow is
-		// bounded by the user's Stop button (ctx cancel → process-group kill) —
+		// A `result` while a detached background task (Workflow or Agent subagent)
+		// is still running does NOT end the exchange: the foreground turn merely
+		// went idle. The CLI keeps the session open, and when the task completes
+		// it injects a task-notification on this same stream that re-invokes the
+		// agent (auto-continuation). Breaking here would tear the process down —
+		// killing the still-running task and losing the follow-up (the "没执行完
+		// 就结束了" symptom, for both Workflows and Agent subagents). So swallow
+		// the interim result and keep reading; the turn ends only when a result
+		// coincides with no outstanding background task. A wedged task is bounded
+		// by the user's Stop button (ctx cancel → process-group kill) —
 		// intentionally no internal timeout.
 		if msg.Type == "result" && !msg.IsError && len(runningBgTasks) > 0 {
-			workflowResultSwallows++
-			if workflowResultSwallows > 64 {
-				log.Printf("[claude] Swallowed %d results with %d Workflow(s) still marked running; giving up waiting and ending turn (session=%s)",
-					workflowResultSwallows, len(runningBgTasks), sessionID)
+			bgResultSwallows++
+			if bgResultSwallows > 64 {
+				log.Printf("[claude] Swallowed %d results with %d background task(s) still marked running; giving up waiting and ending turn (session=%s)",
+					bgResultSwallows, len(runningBgTasks), sessionID)
 				// Fall through to break — the post-turn grace-kill reaps the CLI.
 			} else {
-				log.Printf("[claude] Foreground result received but %d Workflow(s) still running; keeping stream open for auto-continuation (session=%s)",
+				log.Printf("[claude] Foreground result received but %d background task(s) still running; keeping stream open for auto-continuation (session=%s)",
 					len(runningBgTasks), sessionID)
 				continue
 			}
