@@ -118,6 +118,30 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// persistSessionAgent writes the effective agent onto the session row when it
+// was never set, mutating session.Agent in place on success. Scratch sessions
+// are created with agent='' and (unless the user manually switches the agent
+// dropdown) promoted in place without ever writing the column — UnhideSession
+// only flips is_hidden, and the turn still runs because ResolveAgent falls back
+// to the server default. But the empty column then hides the fork button for
+// the *whole* session, since the frontend gates it on `agent === "claude"`.
+// Stamping the agent on first use makes the DB the source of truth so the fork
+// button shows up without any read-time fallback. No-op once agent is set.
+func (s *Server) persistSessionAgent(session *Session) {
+	if session == nil || session.Agent != "" {
+		return
+	}
+	_, agentName := s.ResolveAgent(session)
+	if agentName == "" {
+		return
+	}
+	if _, err := s.Store.UpdateSession(session.ID, UpdateSessionRequest{Agent: &agentName}); err != nil {
+		log.Printf("[chat] Failed to persist resolved agent %q on session %s: %v", agentName, session.ID, err)
+		return
+	}
+	session.Agent = agentName
+}
+
 // handleUserMessage resolves context and starts the agent goroutine for a session.
 func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePart, imageFilenames []string, features []string) {
 	session, err := s.Store.GetSession(sessionID)
@@ -232,6 +256,9 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			log.Printf("[chat] Failed to persist user message: %v", err)
 		}
 	}
+	// Stamp the effective agent onto the session row before promoting it, so
+	// every session ends up with a concrete agent the first time it is used.
+	s.persistSessionAgent(session)
 	// Promote a scratch (hidden) session in place when the user sends their
 	// first message. Broadcast a session change so every connected client
 	// pulls the freshly-visible session into their sidebar list.
