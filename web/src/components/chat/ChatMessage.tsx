@@ -2,7 +2,7 @@ import { useMemo, useState, useCallback, useRef, useEffect, memo, type ReactNode
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { resolveLang, ensureLangRegistered, highlightCode } from "@/lib/highlight";
-import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, FileEdit, Sparkles, ArrowRight, CornerDownRight } from "lucide-react";
+import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, ChevronUp, FileEdit, Sparkles, ArrowRight, CornerDownRight } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { ThinkingIndicator } from "@/components/chat/ThinkingIndicator";
 import { cn } from "@/lib/utils";
@@ -464,6 +464,19 @@ function WorkedBlock({
               <StaticGroup key={gi} group={g} loadDetails={loadDetails} />
             ))}
           </div>
+          {/* Second collapse control at the tail of the expanded steps, so the
+              user can fold the block in place after scrolling to the bottom
+              instead of scrolling back up to the header. Lives inside
+              CollapsibleContent so it only exists while expanded. */}
+          <button
+            type="button"
+            onClick={() => setExpanded(false)}
+            className="mt-1.5 flex w-full items-center gap-1.5 py-0.5 text-xs text-muted-foreground/70 hover:text-foreground transition-colors outline-none"
+            title="Collapse"
+          >
+            <ChevronUp className="h-3 w-3 shrink-0" />
+            <span className="font-medium">Collapse</span>
+          </button>
         </CollapsibleContent>
       </Collapsible>
       <div className="border-b border-border/40 mt-2" />
