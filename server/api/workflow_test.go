@@ -932,6 +932,8 @@ type mockAgent struct {
 	err      error
 }
 
+func (m *mockAgent) Capabilities() agent.Capabilities { return agent.Capabilities{} }
+
 func (m *mockAgent) SendMessage(_ context.Context, _ agent.Request, cb agent.EventCallback) (agent.Result, error) {
 	if m.err != nil {
 		return agent.Result{}, m.err
@@ -1020,6 +1022,8 @@ func TestRunEphemeralAgent_FallsBackToDefault(t *testing.T) {
 
 // blockingAgent blocks until its context is cancelled.
 type blockingAgent struct{}
+
+func (b *blockingAgent) Capabilities() agent.Capabilities { return agent.Capabilities{} }
 
 func (b *blockingAgent) SendMessage(ctx context.Context, _ agent.Request, _ agent.EventCallback) (agent.Result, error) {
 	<-ctx.Done()

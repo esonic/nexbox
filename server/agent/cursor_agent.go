@@ -36,6 +36,10 @@ func NewCursorAgent() *CursorAgent {
 // Ensure CursorAgent implements Agent at compile time.
 var _ Agent = (*CursorAgent)(nil)
 
+func (a *CursorAgent) Capabilities() Capabilities {
+	return Capabilities{}
+}
+
 // ---------------------------------------------------------------------------
 // Cursor CLI JSONL event types (from `agent --print --output-format stream-json --stream-partial-output`)
 //
@@ -91,6 +95,9 @@ func (a *CursorAgent) SendMessage(
 	req Request,
 	cb EventCallback,
 ) (Result, error) {
+	if req.Fork != nil {
+		return Result{}, fmt.Errorf("cursor agent does not support fork")
+	}
 	// Pre-check work directory
 	if req.WorkDir != "" {
 		info, err := os.Stat(req.WorkDir)

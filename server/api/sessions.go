@@ -307,23 +307,16 @@ func (s *Server) ReorderSessions(w http.ResponseWriter, r *http.Request) {
 
 // ForkSessionRequest is the JSON body of POST /api/sessions/{sessionId}/fork.
 type ForkSessionRequest struct {
-	// SDKMessageUUID identifies the assistant turn to fork at. It is the
-	// CLI-side message uuid stored in message.metadata.sdkMessageUuid and
-	// is the durable identity of a turn — it's emitted by the agent and
-	// persisted alongside the message, so it survives across reloads and
-	// across the gap between local streaming and the first history fetch.
-	// Nexbox-side message row ids are deliberately not part of this API:
-	// during that gap the frontend only has a client-side uuid that never
-	// reached the DB.
-	SDKMessageUUID string `json:"sdk_message_uuid"`
+	// MessageID is the durable Nexbox assistant message to fork through.
+	// Its agent checkpoint is resolved server-side and never interpreted here.
+	MessageID string `json:"message_id"`
 	// Name for the new session. If empty, defaults to "<parent name> (fork)".
 	Name string `json:"name,omitempty"`
 }
 
 // ForkSession creates a new session that is a fork of the session in the URL,
-// branched at the given message. Currently supported only for Claude sessions
-// because the CLI-level fork mechanism is Claude-specific (`--fork-session` +
-// `--resume-session-at`).
+// branched at the given message. Backend-specific checkpoint semantics stay
+// inside the selected agent adapter.
 //
 // On success, the new session is fully populated in the Nexbox DB (with a
 // copy of the parent's messages up to the cut point) but its
@@ -337,11 +330,10 @@ func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.SDKMessageUUID == "" {
-		writeError(w, http.StatusBadRequest, "sdk_message_uuid is required")
+	if req.MessageID == "" {
+		writeError(w, http.StatusBadRequest, "message_id is required")
 		return
 	}
-
 	parent, err := s.Store.GetSession(parentID)
 	if writeStoreError(w, err, "ForkSession", "failed to load parent session") {
 		return
@@ -357,34 +349,38 @@ func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Today fork is wired only for Claude. Other backends should not show a
-	// fork button on the frontend, but defend in depth on the server too.
-	resolvedAgent := parent.Agent
-	if resolvedAgent == "" {
-		resolvedAgent = s.getDefaultAgent()
-	}
-	if resolvedAgent != "claude" {
-		writeError(w, http.StatusBadRequest, "fork is only supported for Claude sessions")
+	backend, resolvedAgent := s.ResolveAgent(parent)
+	if backend == nil || !backend.Capabilities().Fork {
+		writeError(w, http.StatusBadRequest, "fork is not supported by this agent")
 		return
 	}
 
-	// Find the cut-point message by SDK uuid scoped to the parent session.
-	atMsg, err := s.Store.GetMessageBySDKUUID(parentID, req.SDKMessageUUID)
+	// Resolve the cut point exclusively by BeeHub identity. The opaque agent
+	// checkpoint stored with the message is passed through without inspection.
+	atMsg, err := s.Store.GetMessage(req.MessageID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load message: "+err.Error())
 		return
 	}
 	if atMsg == nil {
-		writeError(w, http.StatusNotFound, "message not found in this session")
+		writeError(w, http.StatusNotFound, "message not found")
+		return
+	}
+	if atMsg.SessionID != parentID {
+		writeError(w, http.StatusBadRequest, "message does not belong to parent session")
 		return
 	}
 	if atMsg.Role != "assistant" {
 		writeError(w, http.StatusBadRequest, "fork must be anchored on an assistant message")
 		return
 	}
+	if atMsg.Metadata.AgentCheckpoint == "" {
+		writeError(w, http.StatusBadRequest, "message has no fork checkpoint")
+		return
+	}
 
 	// Create new session row + copy messages.
-	newSess, err := s.Store.ForkSession(parentID, req.Name, atMsg.ID, req.SDKMessageUUID)
+	newSess, err := s.Store.ForkSession(parentID, req.Name, atMsg.ID, atMsg.Metadata.AgentCheckpoint)
 	if err != nil {
 		log.Printf("[sessions] Fork failed (parent=%s, atMsg=%s): %v", parentID, atMsg.ID, err)
 		writeError(w, http.StatusInternalServerError, "failed to fork session: "+err.Error())
@@ -400,8 +396,8 @@ func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
 		s.cloneWorktreeForFork(newSess, parent)
 	}
 
-	log.Printf("[sessions] Forked session %s from %s at message %s (sdkUuid=%s)",
-		newSess.ID, parentID, atMsg.ID, atMsg.Metadata.SDKMessageUUID)
+	log.Printf("[sessions] Forked %s session %s from %s at message %s",
+		resolvedAgent, newSess.ID, parentID, atMsg.ID)
 
 	if s.MarketplaceStats != nil {
 		s.MarketplaceStats.RecordSession()

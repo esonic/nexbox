@@ -123,10 +123,9 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 // are created with agent='' and (unless the user manually switches the agent
 // dropdown) promoted in place without ever writing the column — UnhideSession
 // only flips is_hidden, and the turn still runs because ResolveAgent falls back
-// to the server default. But the empty column then hides the fork button for
-// the *whole* session, since the frontend gates it on `agent === "claude"`.
-// Stamping the agent on first use makes the DB the source of truth so the fork
-// button shows up without any read-time fallback. No-op once agent is set.
+// to the server default. Persisting the resolved name lets clients associate
+// the session with its advertised capabilities without a separate fallback.
+// No-op once agent is set.
 func (s *Server) persistSessionAgent(session *Session) {
 	if session == nil || session.Agent != "" {
 		return
@@ -284,7 +283,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				s.SessionManager.SetActive(sessionID, false)
 				s.Hub.ClearActive(sessionID)
 			}
-			// Always drop the live injector — the turn is over, its stdin is gone.
+			// Always drop the live injector when the owning turn is over.
 			s.SessionManager.RemoveInterjector(sessionID)
 		}()
 
@@ -700,10 +699,8 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			case agent.EventDone:
 				mu.Lock()
 				metadata.SessionID = event.SessionID
+				metadata.AgentCheckpoint = event.Checkpoint
 				if event.Metadata != nil {
-					if v, ok := event.Metadata["lastAssistantUuid"].(string); ok && v != "" {
-						metadata.SDKMessageUUID = v
-					}
 					if v, ok := event.Metadata["inputTokens"].(int); ok {
 						metadata.InputTokens = v
 					}
@@ -784,10 +781,8 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		// emits an error event — instead of silently dropping the fork
 		// (the static context built above is empty, so a "fresh new
 		// session" fallback would produce a model with no project context).
-		var (
-			forkFromAgentSID, forkAtAgentUUID string
-			forkPreflightErr                  error
-		)
+		var forkContext *agent.ForkContext
+		var forkPreflightErr error
 		if isFirstForkTurn {
 			parentSess, perr := s.Store.GetSession(session.ForkedFromSessionID)
 			switch {
@@ -801,14 +796,18 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 				log.Printf("[chat] Fork %s: parent %s has no agent_session_id (likely cleared by expiry retry)",
 					sessionID, session.ForkedFromSessionID)
 				forkPreflightErr = fmt.Errorf("fork failed: parent session has no active CLI session to fork from")
+			case session.ForkedAtAgentCheckpoint == "":
+				forkPreflightErr = fmt.Errorf("fork failed: fork checkpoint is missing")
 			default:
-				forkFromAgentSID = parentSess.AgentSessionID
-				forkAtAgentUUID = session.ForkedAtAgentMsgUUID
+				forkContext = &agent.ForkContext{
+					SessionID:  parentSess.AgentSessionID,
+					Checkpoint: session.ForkedAtAgentCheckpoint,
+				}
 			}
 		}
 
-		// registerInterject lets the live agent turn expose its stdin so a later
-		// "interject" WS action can inject a queue-jumping user message.
+		// registerInterject exposes a backend-neutral active-turn control handle
+		// for later queue-jumping messages.
 		registerInterject := func(inject func(content string) error) {
 			s.SessionManager.SetInterjector(sessionID, inject)
 		}
@@ -821,24 +820,23 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			agentResult, agentErr = sessionAgent.SendMessage(
 				ctx,
 				agent.Request{
-					ConversationID:         sessionID,
-					SessionID:              session.AgentSessionID,
-					WorkDir:                workDir,
-					Model:                  session.Model,
-					Effort:                 session.Effort,
-					StaticContext:          staticContext,
-					DynamicContext:         dynamicContext,
-					Message:                message,
-					Images:                 imagePaths,
-					Features:               activeFeatures,
-					ChromeMCPURL:           chromeMCPURL,
-					ChromeMCPToolNames:     chromeMCPToolNames,
-					ExtraMCPServers:        extraMCPs,
-					PluginDirs:             pluginDirs,
-					UserInputHandler:       agent.UserInputHandler(userInputHandler),
-					ForkFromAgentSessionID: forkFromAgentSID,
-					ForkAtAgentMsgUUID:     forkAtAgentUUID,
-					RegisterInterject:      registerInterject,
+					ConversationID:     sessionID,
+					SessionID:          session.AgentSessionID,
+					WorkDir:            workDir,
+					Model:              session.Model,
+					Effort:             session.Effort,
+					StaticContext:      staticContext,
+					DynamicContext:     dynamicContext,
+					Message:            message,
+					Images:             imagePaths,
+					Features:           activeFeatures,
+					ChromeMCPURL:       chromeMCPURL,
+					ChromeMCPToolNames: chromeMCPToolNames,
+					ExtraMCPServers:    extraMCPs,
+					PluginDirs:         pluginDirs,
+					UserInputHandler:   agent.UserInputHandler(userInputHandler),
+					Fork:               forkContext,
+					RegisterInterject:  registerInterject,
 				},
 				eventHandler,
 			)
@@ -933,15 +931,10 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		mu.Lock()
 		metadata.DurationMs = durationMs
 		metadata.ToolCalls = toolCallCount
-		// Fork anchor fallback: a stopped or errored turn never emits the `done`
-		// (EventDone) that normally sets SDKMessageUUID, but the agent still
-		// returns the last assistant uuid it saw. Persist it here so the fork
-		// button survives — interrupted turns were the main reason it went
-		// missing after a reload.
-		if metadata.SDKMessageUUID == "" && agentResult.Metadata != nil {
-			if v, ok := agentResult.Metadata["lastAssistantUuid"].(string); ok && v != "" {
-				metadata.SDKMessageUUID = v
-			}
+		// Stopped/error turns may not emit EventDone, so preserve the typed
+		// checkpoint returned by the adapter as a fallback.
+		if metadata.AgentCheckpoint == "" {
+			metadata.AgentCheckpoint = agentResult.Checkpoint
 		}
 		finalParts := make([]MessagePart, len(msgParts))
 		copy(finalParts, msgParts)
@@ -984,10 +977,11 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		s.Hub.ClearActive(sessionID)
 
 		s.Hub.Emit(sessionID, ChatEvent{
-			Type:           "done",
-			SessionID:      session.AgentSessionID,
-			SDKMessageUUID: finalMeta.SDKMessageUUID,
-			Stats:          stats,
+			Type:            "done",
+			SessionID:       session.AgentSessionID,
+			MessageID:       assistantMsgID,
+			AgentCheckpoint: finalMeta.AgentCheckpoint,
+			Stats:           stats,
 		})
 		s.Hub.NotifyChange("session", sessionID, "done")
 		s.SessionManager.RemoveCancel(sessionID)
@@ -1019,11 +1013,9 @@ func (s *Server) resolveImagePaths(sessionID string, filenames []string) []strin
 // ---------------------------------------------------------------------------
 
 // handleInterject delivers a queue-jumping ("interjection") message into a
-// session's running agent turn. Only the Claude backend keeps a live stdin and
-// registers an injector; the message folds into the current turn (the model
-// reads it at the next turn boundary) without aborting in-flight work. When no
-// live turn accepts it — an idle session, a Codex session, or a turn that just
-// ended — it falls back to the ordinary send/queue path.
+// session's running agent turn through the backend's registered control
+// handle. When no live turn accepts it, the request falls back to the ordinary
+// send/queue path.
 func (s *Server) handleInterject(sessionID, message string, parts []MessagePart, imageFilenames []string, features []string) {
 	imagePaths := s.resolveImagePaths(sessionID, imageFilenames)
 	// Wrap with the interjection framing so the model knows this message arrived

@@ -37,15 +37,18 @@ func (s *Server) GetServerInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListAvailableAgents returns all registered agent backends.
-// GET /api/available-agents → {"agents": ["claude","codex"], "default": "claude"}
+// GET /api/available-agents returns names plus backend-neutral capabilities.
 func (s *Server) ListAvailableAgents(w http.ResponseWriter, r *http.Request) {
 	names := make([]string, 0, len(s.Agents))
-	for name := range s.Agents {
+	capabilities := make(map[string]agent.Capabilities, len(s.Agents))
+	for name, backend := range s.Agents {
 		names = append(names, name)
+		capabilities[name] = backend.Capabilities()
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"agents":  names,
-		"default": s.getDefaultAgent(),
+		"agents":       names,
+		"default":      s.getDefaultAgent(),
+		"capabilities": capabilities,
 	})
 }
 

@@ -597,28 +597,28 @@ export function CopyButton({ text, className }: { text: string; className?: stri
 
 // ForkButton lets the user create a new session branched from a specific
 // assistant message. Renders nothing when fork is not applicable (user
-// message, still streaming, non-Claude backend, or no SDK message UUID
-// to anchor the cut on).
-export function ForkButton({ message }: { message: ChatMessageType }) {
+// message, still streaming, unsupported backend, or no durable backend
+// anchor to identify the cut point).
+export function ForkButton({ message, supported }: { message: ChatMessageType; supported: boolean }) {
   const currentSession = useAppStore((s) => s.currentSession);
   const sessions = useAppStore((s) => s.sessions);
   const setSessions = useAppStore((s) => s.setSessions);
   const setActiveSessionId = useAppStore((s) => s.setActiveSessionId);
   const [busy, setBusy] = useState(false);
 
+  const hasForkAnchor = !!message.metadata?.agentCheckpoint;
   const canFork =
+    supported &&
     message.role === "assistant" &&
     !message.isStreaming &&
-    currentSession?.agent === "claude" &&
-    !!message.metadata?.sdkMessageUuid;
+    hasForkAnchor;
 
   const onClick = useCallback(async () => {
     if (busy || !currentSession) return;
     setBusy(true);
     try {
-      const sdkUuid = message.metadata?.sdkMessageUuid;
-      if (!sdkUuid) return;
-      const newSess = await sessionsApi.fork(currentSession.id, sdkUuid);
+      if (!hasForkAnchor) return;
+      const newSess = await sessionsApi.fork(currentSession.id, message.id);
       setSessions([newSess, ...sessions.filter((s) => s.id !== newSess.id)]);
       setActiveSessionId(newSess.id);
     } catch (err) {
@@ -629,7 +629,7 @@ export function ForkButton({ message }: { message: ChatMessageType }) {
     } finally {
       setBusy(false);
     }
-  }, [busy, currentSession, message.metadata?.sdkMessageUuid, sessions, setSessions, setActiveSessionId]);
+  }, [busy, currentSession, hasForkAnchor, message.id, sessions, setSessions, setActiveSessionId]);
 
   if (!canFork) return null;
 

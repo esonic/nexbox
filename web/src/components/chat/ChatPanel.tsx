@@ -13,7 +13,7 @@ import { formatDuration, formatMessageTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { Session, Project, ChatMessage as ChatMessageType } from "@/types";
 
-const MessageFooter = memo(function MessageFooter({ message }: { message: ChatMessageType }) {
+const MessageFooter = memo(function MessageFooter({ message, canFork }: { message: ChatMessageType; canFork: boolean }) {
   const plainText = useMemo(() => extractPlainText(message.parts), [message.parts]);
 
   if (message.isStreaming || message.role === "system") return null;
@@ -69,7 +69,7 @@ const MessageFooter = memo(function MessageFooter({ message }: { message: ChatMe
       <div className="ml-auto flex items-center gap-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity shrink-0">
         {timestamp && <span className="tabular-nums">{timestamp}</span>}
         {plainText && <CopyButton text={plainText} />}
-        <ForkButton message={message} />
+        <ForkButton message={message} supported={canFork} />
       </div>
     </div>
   );
@@ -101,6 +101,7 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
     pendingUserInput,
     sendToolResponse,
     agentName,
+    capabilities,
     modelName,
     effort,
     availableAgents,
@@ -294,7 +295,7 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
                   <ErrorBoundary key={msg.id}>
                     <div className="group/msg">
                       <ChatMessage message={msg} />
-                      <MessageFooter message={msg} />
+                      <MessageFooter message={msg} canFork={capabilities.fork} />
                     </div>
                   </ErrorBoundary>
                 ))}
@@ -325,6 +326,7 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
         isConnected={isConnected}
         isStreaming={isStreaming}
         agentName={agentName}
+        canInterject={capabilities.interject}
         modelName={modelName}
         effort={effort}
         availableAgents={availableAgents}

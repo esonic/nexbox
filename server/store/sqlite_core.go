@@ -355,7 +355,7 @@ func (s *SQLiteStore) UnhideSession(id string) (bool, error) {
 
 // sessionColumns is the canonical column list for SELECTing a Session row.
 // Keep this in sync with scanSession.
-const sessionColumns = `id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, forked_from_session_id, forked_from_message_id, forked_at_agent_msg_uuid, is_hidden, created_by, created_at, updated_at, deleted_at`
+const sessionColumns = `id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, forked_from_session_id, forked_from_message_id, forked_at_agent_checkpoint, is_hidden, created_by, created_at, updated_at, deleted_at`
 
 func scanSession(row interface{ Scan(...interface{}) error }) (*Session, error) {
 	var sess Session
@@ -364,7 +364,7 @@ func scanSession(row interface{ Scan(...interface{}) error }) (*Session, error) 
 	if err := row.Scan(&sess.ID, &sess.NamespaceID, &sess.Name, &sess.ProjectID, &sess.Agent,
 		&sess.Model, &sess.Effort, &sess.AgentSessionID, &sess.StreamID, &sess.SortOrder, &sess.Features,
 		&sess.WorktreeMode, &sess.WorktreePath,
-		&sess.ForkedFromSessionID, &sess.ForkedFromMessageID, &sess.ForkedAtAgentMsgUUID,
+		&sess.ForkedFromSessionID, &sess.ForkedFromMessageID, &sess.ForkedAtAgentCheckpoint,
 		&isHidden,
 		&sess.CreatedBy, &sess.CreatedAt, &sess.UpdatedAt, &deletedAt); err != nil {
 		return nil, err
@@ -476,9 +476,8 @@ func (s *SQLiteStore) UpdateSession(id string, req UpdateSessionRequest) (*Sessi
 // (parent) session ending with the message identified by atMessageID. The new
 // session inherits agent/model/effort/project/namespace/worktree_mode/features
 // from its parent, has its own ID, and starts with `agent_session_id` empty
-// so the next chat turn triggers the CLI-side fork (Claude `--fork-session`
-// + `--resume-session-at`). The new session also records its lineage via
-// forked_from_session_id / forked_from_message_id / forked_at_agent_msg_uuid.
+// so the next chat turn triggers the backend fork. The new session also
+// records its lineage and opaque agent checkpoint.
 //
 // Messages are copied in chronological order until the row whose id matches
 // atMessageID is hit (inclusive), then the iteration stops. Each copy gets a
@@ -486,7 +485,7 @@ func (s *SQLiteStore) UpdateSession(id string, req UpdateSessionRequest) (*Sessi
 // UI renders the forked prefix immediately and the parent is left untouched.
 //
 // Returns the newly created Session.
-func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, forkedAtAgentMsgUUID string) (*Session, error) {
+func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint string) (*Session, error) {
 	if parentID == "" || atMessageID == "" {
 		return nil, fmt.Errorf("ForkSession: parentID and atMessageID required")
 	}
@@ -506,7 +505,7 @@ func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, forkedAtAgentMsgU
 	).Scan(&parent.ID, &parent.NamespaceID, &parent.Name, &parent.ProjectID, &parent.Agent,
 		&parent.Model, &parent.Effort, &parent.AgentSessionID, &parent.StreamID, &parent.SortOrder, &parent.Features,
 		&parent.WorktreeMode, &parent.WorktreePath,
-		&parent.ForkedFromSessionID, &parent.ForkedFromMessageID, &parent.ForkedAtAgentMsgUUID,
+		&parent.ForkedFromSessionID, &parent.ForkedFromMessageID, &parent.ForkedAtAgentCheckpoint,
 		&parentIsHidden,
 		&parent.CreatedBy, &parent.CreatedAt, &parent.UpdatedAt, &deletedAt)
 	_ = parentIsHidden // forks always produce a visible session, parent's hidden flag is irrelevant
@@ -532,21 +531,21 @@ func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, forkedAtAgentMsgU
 
 	now := time.Now()
 	newSess := &Session{
-		ID:                   uuid.New().String(),
-		NamespaceID:          parent.NamespaceID,
-		Name:                 name,
-		ProjectID:            parent.ProjectID,
-		Agent:                parent.Agent,
-		Model:                parent.Model,
-		Effort:               parent.Effort,
-		Features:             parent.Features, // inherit per-session UI features (e.g. chrome_devtools)
-		WorktreeMode:         parent.WorktreeMode,
-		ForkedFromSessionID:  parent.ID,
-		ForkedFromMessageID:  atMessageID,
-		ForkedAtAgentMsgUUID: forkedAtAgentMsgUUID,
-		CreatedBy:            parent.CreatedBy,
-		CreatedAt:            now,
-		UpdatedAt:            now,
+		ID:                      uuid.New().String(),
+		NamespaceID:             parent.NamespaceID,
+		Name:                    name,
+		ProjectID:               parent.ProjectID,
+		Agent:                   parent.Agent,
+		Model:                   parent.Model,
+		Effort:                  parent.Effort,
+		Features:                parent.Features, // inherit per-session UI features (e.g. chrome_devtools)
+		WorktreeMode:            parent.WorktreeMode,
+		ForkedFromSessionID:     parent.ID,
+		ForkedFromMessageID:     atMessageID,
+		ForkedAtAgentCheckpoint: checkpoint,
+		CreatedBy:               parent.CreatedBy,
+		CreatedAt:               now,
+		UpdatedAt:               now,
 	}
 	if newSess.Name == "" {
 		base := parent.Name
@@ -561,14 +560,14 @@ func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, forkedAtAgentMsgU
 			(id, namespace_id, name, project_id, agent, model, effort,
 			 agent_session_id, stream_id, sort_order, features,
 			 worktree_mode, worktree_path,
-			 forked_from_session_id, forked_from_message_id, forked_at_agent_msg_uuid,
+			 forked_from_session_id, forked_from_message_id, forked_at_agent_checkpoint,
 			 created_by, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, ?, '', ?, ?, ?, ?, ?, ?)`,
 		newSess.ID, newSess.NamespaceID, newSess.Name, newSess.ProjectID, newSess.Agent,
 		newSess.Model, newSess.Effort,
 		newSess.Features,
 		newSess.WorktreeMode,
-		newSess.ForkedFromSessionID, newSess.ForkedFromMessageID, newSess.ForkedAtAgentMsgUUID,
+		newSess.ForkedFromSessionID, newSess.ForkedFromMessageID, newSess.ForkedAtAgentCheckpoint,
 		newSess.CreatedBy, newSess.CreatedAt, newSess.UpdatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("insert forked session: %w", err)
@@ -842,41 +841,6 @@ func (s *SQLiteStore) GetMessage(id string) (*ChatMessage, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get message: %w", err)
-	}
-	if partsJSON != "" && partsJSON != "[]" {
-		if err := json.Unmarshal([]byte(partsJSON), &m.Parts); err != nil {
-			return nil, fmt.Errorf("unmarshal parts: %w", err)
-		}
-	}
-	if metadataJSON != "" && metadataJSON != "{}" {
-		if err := json.Unmarshal([]byte(metadataJSON), &m.Metadata); err != nil {
-			return nil, fmt.Errorf("unmarshal metadata: %w", err)
-		}
-	}
-	return &m, nil
-}
-
-// GetMessageBySDKUUID returns the message in sessionID whose metadata
-// `sdkMessageUuid` equals sdkUUID. Returns (nil, nil) when no such
-// message exists. Uses SQLite's json_extract — schema for `metadata`
-// is the same JSON blob produced by MessageMetadata.MarshalJSON.
-func (s *SQLiteStore) GetMessageBySDKUUID(sessionID, sdkUUID string) (*ChatMessage, error) {
-	if sessionID == "" || sdkUUID == "" {
-		return nil, nil
-	}
-	var m ChatMessage
-	var partsJSON, metadataJSON string
-	err := s.db.QueryRow(
-		`SELECT id, session_id, role, parts, metadata, created_at FROM chat_messages
-		 WHERE session_id = ? AND json_extract(metadata, '$.sdkMessageUuid') = ?
-		 ORDER BY created_at ASC LIMIT 1`,
-		sessionID, sdkUUID,
-	).Scan(&m.ID, &m.SessionID, &m.Role, &partsJSON, &metadataJSON, &m.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get message by sdk uuid: %w", err)
 	}
 	if partsJSON != "" && partsJSON != "[]" {
 		if err := json.Unmarshal([]byte(partsJSON), &m.Parts); err != nil {

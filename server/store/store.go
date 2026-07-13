@@ -104,11 +104,8 @@ type SessionStore interface {
 	UpdateSessionWorktree(id, mode, path string) error
 	// ForkSession creates a fork of parentID at atMessageID, copying messages
 	// from the parent up to and including atMessageID into the new session.
-	// forkedAtAgentMsgUUID is the parent message's CLI-side message UUID
-	// (e.g. Claude's SDK message UUID), used on the first turn of the new
-	// session to drive `--resume-session-at`. Empty string is allowed but
-	// the caller should reject if the agent requires it.
-	ForkSession(parentID, name, atMessageID, forkedAtAgentMsgUUID string) (*Session, error)
+	// checkpoint is opaque to the store and interpreted only by the agent.
+	ForkSession(parentID, name, atMessageID, checkpoint string) (*Session, error)
 	GetExpiredSessionWorktrees(olderThan time.Time) ([]string, error) // returns worktree_paths for soon-to-be-purged sessions
 	DeleteSession(id string) error   // soft delete (move to trash)
 	RestoreSession(id string) error  // restore from trash
@@ -135,11 +132,6 @@ type MessageStore interface {
 	CreateMessage(sessionID, role string, parts []MessagePart, metadata MessageMetadata) (*ChatMessage, error)
 	UpdateMessageParts(messageID string, parts []MessagePart, metadata MessageMetadata) error
 	GetMessage(id string) (*ChatMessage, error)
-	// GetMessageBySDKUUID looks up a message within a session by the
-	// CLI-side message UUID stored in its metadata. Used by the fork API
-	// to anchor on a turn even when the caller's Nexbox message id is a
-	// pre-persistence client-side UUID. Returns (nil, nil) when not found.
-	GetMessageBySDKUUID(sessionID, sdkUUID string) (*ChatMessage, error)
 	ListMessages(sessionID string) ([]ChatMessage, error)
 	ListMessagesPaginated(sessionID string, limit int, beforeID string) ([]ChatMessage, bool, error)
 	DeleteMessagesBySession(sessionID string) error

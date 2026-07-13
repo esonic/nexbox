@@ -11,7 +11,7 @@ import { TODO_TOOLS } from "@/components/chat/ToolCallCard";
 import { foldTasks, activeTaskLabel, allTasksDone, type TaskCall } from "@/lib/taskFold";
 import type { AttachedImage } from "@/components/chat/ChatInput";
 import { uuid } from "@/lib/utils";
-import type { Session, Task, ChatEvent, ChatMessage as ChatMessageType, ModelInfo } from "@/types";
+import type { Session, Task, ChatEvent, ChatMessage as ChatMessageType, ModelInfo, AgentCapabilities } from "@/types";
 import type { PickedAsset, PickedWorkflow, RichQueuedMessage } from "@/stores/app";
 
 export type { QueuedMessage } from "@/lib/api";
@@ -179,6 +179,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   const [hasMore, setHasMore] = useState(false);
   const [serverAgent, setServerAgent] = useState<string>("");
   const [availableAgents, setAvailableAgents] = useState<string[]>([]);
+  const [agentCapabilities, setAgentCapabilities] = useState<Record<string, AgentCapabilities>>({});
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [availableModelInfos, setAvailableModelInfos] = useState<ModelInfo[]>([]);
   // Which agent the currently held available models belong to. Used to guard
@@ -189,6 +190,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
 
   const agentName = session.agent || serverAgent;
+  const capabilities = agentCapabilities[agentName] || { fork: false, interject: false };
   const modelName = session.model || (availableModels[0] || "");
   const sessionId = session.id;
   const sessionIdRef = useRef(sessionId);
@@ -312,7 +314,10 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   // Fetch server default agent and available agents
   useEffect(() => {
     serverApi.info().then((info) => setServerAgent(info.agent)).catch(() => {});
-    serverApi.availableAgents().then((data) => setAvailableAgents(data.agents || [])).catch(() => {});
+    serverApi.availableAgents().then((data) => {
+      setAvailableAgents(data.agents || []);
+      setAgentCapabilities(data.capabilities || {});
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -458,7 +463,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         // a fresh page load never runs the recovery in the connection effect
         // below, so the last assistant message would stay stuck
         // isStreaming=true forever — which also hides the fork button even
-        // though sdkMessageUuid is already persisted. Once the socket has had
+        // though its fork checkpoint is already persisted. Once the socket has had
         // time to subscribe, re-check the server's active state; if the turn
         // already finished, finalize from the DB snapshot (which carries the
         // persisted metadata) instead of waiting for another manual refresh.
@@ -675,7 +680,12 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       case "done":
         gs().setPendingUserInput(sid, null);
         gs().setStreamingSession(sid, false);
-        gs().finishStreaming(sid, event.stats || undefined, event.sdk_message_uuid);
+        gs().finishStreaming(
+          sid,
+          event.stats || undefined,
+          event.message_id,
+          event.agent_checkpoint,
+        );
         if (event.stats?.duration_ms) {
           gs().addSessionDuration(sid, event.stats.duration_ms);
         }
@@ -893,9 +903,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     const item = (useAppStore.getState().clientQueue[sessionId] || []).find((m: RichQueuedMessage) => m.id === msgId);
     if (!item) return;
     if (isStreaming) {
-      // Mid-turn: only Claude supports live interjection. Other agents have no
-      // way to jump the queue, so leave the message queued (button is hidden).
-      if (agentName !== "claude") return;
+      if (!capabilities.interject) return;
       dequeueRichMessage(sessionId, msgId);
       sendRichInterjectDirect(sessionId, item);
       return;
@@ -903,7 +911,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     // Idle: send immediately as a normal message.
     dequeueRichMessage(sessionId, msgId);
     sendRichQueuedMessageDirect(sessionId, item);
-  }, [sessionId, isStreaming, agentName, dequeueRichMessage]);
+  }, [sessionId, isStreaming, capabilities.interject, dequeueRichMessage]);
 
   const removeRichQueued = useCallback((msgId: string) => {
     dequeueRichMessage(sessionId, msgId);
@@ -1063,6 +1071,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     pendingUserInput,
     sendToolResponse,
     agentName,
+    capabilities,
     modelName,
     effort: session.effort || "",
     availableAgents,

@@ -12,8 +12,8 @@ type SessionManager struct {
 	cancelMap map[string]context.CancelFunc
 	// interjectMap holds, per active session, a function that injects an extra
 	// user message into the running agent turn (queue-jump / "interjection").
-	// Only backends that keep a live stdin during the turn register one (Claude);
-	// Codex never does, so its sessions fall back to ordinary queueing.
+	// Backends advertising the capability register their own opaque control
+	// closure. Others fall back to ordinary queueing.
 	interjectMap map[string]func(content string) error
 }
 
@@ -35,8 +35,7 @@ func NewSessionManager() *SessionManager {
 }
 
 // SetInterjector registers the live message-injection function for a session.
-// Called by the agent backend once its stdin is ready to accept additional
-// user messages mid-turn.
+// Called by the agent backend once its active turn can accept more input.
 func (sm *SessionManager) SetInterjector(sessionID string, fn func(content string) error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

@@ -90,12 +90,10 @@ type ChatEvent struct {
 	SessionID    string `json:"session_id,omitempty"`
 	Message      string `json:"message,omitempty"`
 
-	// SDKMessageUUID is the CLI-side message uuid for the assistant turn just
-	// finished. Sent on the "done" event so the frontend can stamp the in-
-	// memory message with it (the WebSocket-driven message in the React
-	// store otherwise stays without this field until a page refresh
-	// re-fetches from the API). Required by the fork button visibility check.
-	SDKMessageUUID string `json:"sdk_message_uuid,omitempty"`
+	// MessageID replaces the frontend's temporary streaming id with the
+	// durable BeeHub message id. AgentCheckpoint is opaque to API clients.
+	MessageID       string `json:"message_id,omitempty"`
+	AgentCheckpoint string `json:"agent_checkpoint,omitempty"`
 
 	// Widget (visualize_show_widget)
 	WidgetTitle     string   `json:"widget_title,omitempty"`

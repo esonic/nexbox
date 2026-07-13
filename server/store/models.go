@@ -178,19 +178,17 @@ type Session struct {
 	Features       string     `json:"features"`
 	WorktreeMode   string     `json:"worktree_mode"` // "local" | "worktree"
 	WorktreePath   string     `json:"worktree_path"` // empty until worktree is created
-	// Fork lineage. When this session was created via fork from another
 	// session, these record the parent and the Nexbox message at which the
-	// fork was taken. ForkedAtAgentMsgUUID is the parent's CLI-side message
-	// UUID (Claude SDK message UUID), passed to `--resume-session-at` on the
-	// first turn of this forked session.
-	ForkedFromSessionID  string     `json:"forked_from_session_id,omitempty"`
-	ForkedFromMessageID  string     `json:"forked_from_message_id,omitempty"`
-	ForkedAtAgentMsgUUID string     `json:"forked_at_agent_msg_uuid,omitempty"`
-	IsHidden             bool       `json:"is_hidden"`
-	CreatedBy            string     `json:"created_by"`
-	CreatedAt            time.Time  `json:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at"`
-	DeletedAt            *time.Time `json:"deleted_at,omitempty"`
+	// fork was taken. ForkedAtAgentCheckpoint is an opaque value interpreted
+	// only by the selected agent adapter on the first turn of the fork.
+	ForkedFromSessionID     string     `json:"forked_from_session_id,omitempty"`
+	ForkedFromMessageID     string     `json:"forked_from_message_id,omitempty"`
+	ForkedAtAgentCheckpoint string     `json:"forked_at_agent_checkpoint,omitempty"`
+	IsHidden                bool       `json:"is_hidden"`
+	CreatedBy               string     `json:"created_by"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
+	DeletedAt               *time.Time `json:"deleted_at,omitempty"`
 }
 
 type CreateSessionRequest struct {
@@ -313,7 +311,7 @@ type MessagePart struct {
 
 type MessageMetadata struct {
 	SessionID                string  `json:"sessionId,omitempty"`
-	SDKMessageUUID           string  `json:"sdkMessageUuid,omitempty"`
+	AgentCheckpoint          string  `json:"agentCheckpoint,omitempty"`
 	InputTokens              int     `json:"inputTokens,omitempty"`
 	OutputTokens             int     `json:"outputTokens,omitempty"`
 	CacheReadInputTokens     int     `json:"cacheReadInputTokens,omitempty"`

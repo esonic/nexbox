@@ -62,7 +62,7 @@ export interface Session {
   // Fork lineage. Set when this session was created via POST /sessions/:id/fork.
   forked_from_session_id?: string;
   forked_from_message_id?: string;
-  forked_at_agent_msg_uuid?: string;
+  forked_at_agent_checkpoint?: string;
   // Hidden scratch session: per-project staging surface produced by
   // GET /api/projects/:id/scratch-session. Filtered out of the visible
   // session list and count, and promoted (is_hidden -> false) by the
@@ -212,10 +212,9 @@ export interface ChatEvent {
   stats?: ExecutionStats;
   context_usage?: ContextUsage;
   session_info?: SessionInfo;
-  // CLI-side message uuid for the just-finished assistant turn (sent on
-  // "done"). Used to stamp the in-memory ChatMessage so fork-button
-  // visibility doesn't have to wait for a page refresh.
-  sdk_message_uuid?: string;
+  // Durable BeeHub message id and opaque fork checkpoint for a completed turn.
+  message_id?: string;
+  agent_checkpoint?: string;
   // Dynamic-workflow progress snapshot (merged server-side) carried on
   // subtask_progress / subtask_done. tool_id holds the Workflow tool_use_id
   // so the frontend can attach it to the right tool card.
@@ -284,7 +283,7 @@ export type MessagePart =
 
 export interface MessageMetadata {
   sessionId?: string;
-  sdkMessageUuid?: string;
+  agentCheckpoint?: string;
   inputTokens?: number;
   outputTokens?: number;
   cacheReadInputTokens?: number;
@@ -295,6 +294,11 @@ export interface MessageMetadata {
   // Set on a user message that was injected into a running turn ("interjection"),
   // so the UI can tag it — its position relative to the reply is intentional.
   interjected?: boolean;
+}
+
+export interface AgentCapabilities {
+  fork: boolean;
+  interject: boolean;
 }
 
 export interface ChatMessage {

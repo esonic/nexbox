@@ -69,7 +69,12 @@ interface AppState {
   addNestedToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
   addWidgetPart: (sessionId: string, title: string, widgetCode: string, loadingMessages?: string[]) => void;
 
-  finishStreaming: (sessionId: string, stats?: ExecutionStats, sdkMessageUuid?: string) => void;
+  finishStreaming: (
+    sessionId: string,
+    stats?: ExecutionStats,
+    messageId?: string,
+    agentCheckpoint?: string,
+  ) => void;
   clearChatMessages: (sessionId: string) => void;
 
   // Per-session streaming state (global, survives tab switches)
@@ -387,7 +392,7 @@ export const useAppStore = create<AppState>()(
       }),
     ),
 
-  finishStreaming: (sessionId, stats?, sdkMessageUuid?) =>
+  finishStreaming: (sessionId, stats?, messageId?, agentCheckpoint?) =>
     set((state) => {
       const msgs = state.chatMessages[sessionId] || [];
       const lastMsg = msgs[msgs.length - 1];
@@ -401,11 +406,9 @@ export const useAppStore = create<AppState>()(
           }
           return p;
         });
-        // Merge execution stats and CLI-side message uuid into the message
-        // metadata. sdkMessageUuid is required for the fork button to render
-        // — without it, the message appears unforkable until the next page
-        // refresh re-fetches from the API.
-        const updatedMetadata = stats || sdkMessageUuid
+        // Merge execution stats and the opaque fork checkpoint. The durable
+        // server message id replaces the optimistic streaming id.
+        const updatedMetadata = stats || agentCheckpoint
           ? {
               ...lastMsg.metadata,
               ...(stats ? {
@@ -417,7 +420,7 @@ export const useAppStore = create<AppState>()(
                 totalCostUsd: stats.total_cost_usd,
                 toolCalls: stats.tool_calls,
               } : {}),
-              ...(sdkMessageUuid ? { sdkMessageUuid } : {}),
+              ...(agentCheckpoint ? { agentCheckpoint } : {}),
             }
           : lastMsg.metadata;
         return {
@@ -425,7 +428,13 @@ export const useAppStore = create<AppState>()(
             ...state.chatMessages,
             [sessionId]: [
               ...msgs.slice(0, -1),
-              { ...lastMsg, parts: finalParts, isStreaming: false, metadata: updatedMetadata },
+              {
+                ...lastMsg,
+                ...(messageId ? { id: messageId } : {}),
+                parts: finalParts,
+                isStreaming: false,
+                metadata: updatedMetadata,
+              },
             ],
           },
         };

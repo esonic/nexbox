@@ -30,7 +30,7 @@ func TestForkSession_HappyPath(t *testing.T) {
 		t.Fatalf("CreateMessage u1: %v", err)
 	}
 	time.Sleep(2 * time.Millisecond)
-	mA1, err := s.CreateMessage(parent.ID, "assistant", []MessagePart{{Type: "text", Content: "hi"}}, MessageMetadata{SDKMessageUUID: "uuid-a1"})
+	mA1, err := s.CreateMessage(parent.ID, "assistant", []MessagePart{{Type: "text", Content: "hi"}}, MessageMetadata{AgentCheckpoint: "checkpoint-a1"})
 	if err != nil {
 		t.Fatalf("CreateMessage a1: %v", err)
 	}
@@ -40,13 +40,13 @@ func TestForkSession_HappyPath(t *testing.T) {
 		t.Fatalf("CreateMessage u2: %v", err)
 	}
 	time.Sleep(2 * time.Millisecond)
-	mA2, err := s.CreateMessage(parent.ID, "assistant", []MessagePart{{Type: "text", Content: "more reply"}}, MessageMetadata{SDKMessageUUID: "uuid-a2"})
+	mA2, err := s.CreateMessage(parent.ID, "assistant", []MessagePart{{Type: "text", Content: "more reply"}}, MessageMetadata{AgentCheckpoint: "checkpoint-a2"})
 	if err != nil {
 		t.Fatalf("CreateMessage a2: %v", err)
 	}
 
 	// Fork at the FIRST assistant message — only u1 + a1 should be copied.
-	forked, err := s.ForkSession(parent.ID, "", mA1.ID, "uuid-a1")
+	forked, err := s.ForkSession(parent.ID, "", mA1.ID, "checkpoint-a1")
 	if err != nil {
 		t.Fatalf("ForkSession: %v", err)
 	}
@@ -68,8 +68,8 @@ func TestForkSession_HappyPath(t *testing.T) {
 	if forked.ForkedFromMessageID != mA1.ID {
 		t.Errorf("ForkedFromMessageID = %q, want %q", forked.ForkedFromMessageID, mA1.ID)
 	}
-	if forked.ForkedAtAgentMsgUUID != "uuid-a1" {
-		t.Errorf("ForkedAtAgentMsgUUID = %q, want %q", forked.ForkedAtAgentMsgUUID, "uuid-a1")
+	if forked.ForkedAtAgentCheckpoint != "checkpoint-a1" {
+		t.Errorf("ForkedAtAgentCheckpoint = %q, want %q", forked.ForkedAtAgentCheckpoint, "checkpoint-a1")
 	}
 	if !strings.HasSuffix(forked.Name, "(fork)") {
 		t.Errorf("auto-generated name = %q, want ...(fork)", forked.Name)
@@ -83,7 +83,7 @@ func TestForkSession_HappyPath(t *testing.T) {
 	if got == nil {
 		t.Fatalf("forked session not found")
 	}
-	if got.ForkedFromSessionID != parent.ID || got.ForkedAtAgentMsgUUID != "uuid-a1" {
+	if got.ForkedFromSessionID != parent.ID || got.ForkedAtAgentCheckpoint != "checkpoint-a1" {
 		t.Errorf("Get round-trip lost fork fields: %+v", got)
 	}
 
@@ -98,8 +98,8 @@ func TestForkSession_HappyPath(t *testing.T) {
 	if forkedMsgs[0].Role != "user" || forkedMsgs[1].Role != "assistant" {
 		t.Errorf("role order = [%s, %s], want [user, assistant]", forkedMsgs[0].Role, forkedMsgs[1].Role)
 	}
-	if forkedMsgs[1].Metadata.SDKMessageUUID != "uuid-a1" {
-		t.Errorf("forked a1 metadata SDKMessageUUID lost: got %q", forkedMsgs[1].Metadata.SDKMessageUUID)
+	if forkedMsgs[1].Metadata.AgentCheckpoint != "checkpoint-a1" {
+		t.Errorf("forked a1 metadata checkpoint lost: got %q", forkedMsgs[1].Metadata.AgentCheckpoint)
 	}
 	for _, m := range forkedMsgs {
 		if m.SessionID != forked.ID {
@@ -136,12 +136,12 @@ func TestForkSession_AtLastMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(2 * time.Millisecond)
-	a, err := s.CreateMessage(parent.ID, "assistant", []MessagePart{{Type: "text", Content: "2"}}, MessageMetadata{SDKMessageUUID: "u"})
+	a, err := s.CreateMessage(parent.ID, "assistant", []MessagePart{{Type: "text", Content: "2"}}, MessageMetadata{AgentCheckpoint: "checkpoint"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	forked, err := s.ForkSession(parent.ID, "named", a.ID, "u")
+	forked, err := s.ForkSession(parent.ID, "named", a.ID, "checkpoint")
 	if err != nil {
 		t.Fatalf("ForkSession: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestGetMessage(t *testing.T) {
 	sess, _ := s.CreateSession(CreateSessionRequest{Name: "p", Agent: "claude"})
 	created, err := s.CreateMessage(sess.ID, "assistant",
 		[]MessagePart{{Type: "text", Content: "hi"}},
-		MessageMetadata{SDKMessageUUID: "u"})
+		MessageMetadata{AgentCheckpoint: "checkpoint"})
 	if err != nil {
 		t.Fatalf("CreateMessage: %v", err)
 	}
@@ -177,8 +177,8 @@ func TestGetMessage(t *testing.T) {
 	if got.ID != created.ID || got.SessionID != sess.ID || got.Role != "assistant" {
 		t.Errorf("round-trip mismatch: %+v", got)
 	}
-	if got.Metadata.SDKMessageUUID != "u" {
-		t.Errorf("metadata round-trip lost SDKMessageUUID: %q", got.Metadata.SDKMessageUUID)
+	if got.Metadata.AgentCheckpoint != "checkpoint" {
+		t.Errorf("metadata round-trip lost AgentCheckpoint: %q", got.Metadata.AgentCheckpoint)
 	}
 	if len(got.Parts) != 1 || got.Parts[0].Content != "hi" {
 		t.Errorf("parts round-trip mismatch: %+v", got.Parts)
@@ -193,46 +193,65 @@ func TestGetMessage(t *testing.T) {
 	}
 }
 
-// TestGetMessageBySDKUUID covers the lookup helper used by the fork
-// HTTP endpoint when the caller only has a CLI-side message uuid (the
-// frontend's `message.id` is a client-side UUID until the page reloads).
-func TestGetMessageBySDKUUID(t *testing.T) {
+func TestForkSession_PersistsOpaqueCheckpoint(t *testing.T) {
 	s := newTestDB(t)
-	sess, _ := s.CreateSession(CreateSessionRequest{Name: "p", Agent: "claude"})
-	other, _ := s.CreateSession(CreateSessionRequest{Name: "o", Agent: "claude"})
-	created, err := s.CreateMessage(sess.ID, "assistant",
-		[]MessagePart{{Type: "text", Content: "hi"}},
-		MessageMetadata{SDKMessageUUID: "sdk-abc"})
+	parent, _ := s.CreateSession(CreateSessionRequest{Name: "p", Agent: "codex"})
+	message, err := s.CreateMessage(parent.ID, "assistant",
+		[]MessagePart{{Type: "text", Content: "done"}},
+		MessageMetadata{AgentCheckpoint: "opaque-turn-2"})
 	if err != nil {
 		t.Fatalf("CreateMessage: %v", err)
 	}
-	// A message with the same SDK uuid in a different session must not
-	// shadow the parent-scoped lookup.
-	_, _ = s.CreateMessage(other.ID, "assistant",
-		[]MessagePart{{Type: "text", Content: "no"}},
-		MessageMetadata{SDKMessageUUID: "sdk-abc"})
 
-	got, err := s.GetMessageBySDKUUID(sess.ID, "sdk-abc")
+	forked, err := s.ForkSession(parent.ID, "", message.ID, "opaque-turn-2")
 	if err != nil {
-		t.Fatalf("GetMessageBySDKUUID: %v", err)
+		t.Fatalf("ForkSession: %v", err)
 	}
-	if got == nil || got.ID != created.ID {
-		t.Fatalf("expected to find message %s, got %+v", created.ID, got)
+	if forked.ForkedAtAgentCheckpoint != "opaque-turn-2" {
+		t.Fatalf("unexpected fork checkpoint: %+v", forked)
 	}
-
-	missing, err := s.GetMessageBySDKUUID(sess.ID, "nope")
+	got, err := s.GetSession(forked.ID)
 	if err != nil {
-		t.Fatalf("GetMessageBySDKUUID missing: %v", err)
+		t.Fatalf("GetSession: %v", err)
 	}
-	if missing != nil {
-		t.Errorf("expected nil for unknown sdk uuid, got %+v", missing)
+	if got.ForkedAtAgentCheckpoint != "opaque-turn-2" {
+		t.Fatalf("checkpoint round-trip = %q, want opaque-turn-2", got.ForkedAtAgentCheckpoint)
 	}
+}
 
-	if r, _ := s.GetMessageBySDKUUID("", "sdk-abc"); r != nil {
-		t.Errorf("empty sessionID should return nil")
+func TestMigrate_LegacyClaudeForkCheckpoint(t *testing.T) {
+	s := newTestDB(t)
+	parent, _ := s.CreateSession(CreateSessionRequest{Name: "legacy", Agent: "claude"})
+	message, _ := s.CreateMessage(parent.ID, "assistant",
+		[]MessagePart{{Type: "text", Content: "done"}}, MessageMetadata{})
+	turnMessage, _ := s.CreateMessage(parent.ID, "assistant",
+		[]MessagePart{{Type: "text", Content: "later"}}, MessageMetadata{})
+	if _, err := s.db.Exec(`UPDATE chat_messages SET metadata = ? WHERE id = ?`,
+		`{"sdkMessageUuid":"legacy-message"}`, message.ID); err != nil {
+		t.Fatal(err)
 	}
-	if r, _ := s.GetMessageBySDKUUID(sess.ID, ""); r != nil {
-		t.Errorf("empty sdkUUID should return nil")
+	if _, err := s.db.Exec(`UPDATE sessions SET forked_at_agent_msg_uuid = ? WHERE id = ?`,
+		"legacy-session", parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE chat_messages SET metadata = ? WHERE id = ?`,
+		`{"agentTurnId":"legacy-turn"}`, turnMessage.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	gotMessage, _ := s.GetMessage(message.ID)
+	if gotMessage.Metadata.AgentCheckpoint != "legacy-message" {
+		t.Fatalf("message checkpoint = %q", gotMessage.Metadata.AgentCheckpoint)
+	}
+	gotTurnMessage, _ := s.GetMessage(turnMessage.ID)
+	if gotTurnMessage.Metadata.AgentCheckpoint != "legacy-turn" {
+		t.Fatalf("turn checkpoint = %q", gotTurnMessage.Metadata.AgentCheckpoint)
+	}
+	gotSession, _ := s.GetSession(parent.ID)
+	if gotSession.ForkedAtAgentCheckpoint != "legacy-session" {
+		t.Fatalf("session checkpoint = %q", gotSession.ForkedAtAgentCheckpoint)
 	}
 }
 
@@ -242,14 +261,14 @@ func TestForkSession_RejectsBadInput(t *testing.T) {
 	s := newTestDB(t)
 	parent, _ := s.CreateSession(CreateSessionRequest{Name: "p", Agent: "claude"})
 	other, _ := s.CreateSession(CreateSessionRequest{Name: "o", Agent: "claude"})
-	otherMsg, _ := s.CreateMessage(other.ID, "assistant", []MessagePart{{Type: "text", Content: "x"}}, MessageMetadata{SDKMessageUUID: "u"})
+	otherMsg, _ := s.CreateMessage(other.ID, "assistant", []MessagePart{{Type: "text", Content: "x"}}, MessageMetadata{AgentCheckpoint: "checkpoint"})
 
 	cases := []struct {
-		name      string
-		parent    string
-		atMsg     string
-		uuid      string
-		wantErrIn string
+		name       string
+		parent     string
+		atMsg      string
+		checkpoint string
+		wantErrIn  string
 	}{
 		{"missing parent", "", "any", "u", "required"},
 		{"missing message", parent.ID, "", "u", "required"},
@@ -258,7 +277,7 @@ func TestForkSession_RejectsBadInput(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := s.ForkSession(tc.parent, "", tc.atMsg, tc.uuid)
+			_, err := s.ForkSession(tc.parent, "", tc.atMsg, tc.checkpoint)
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tc.wantErrIn)
 			}

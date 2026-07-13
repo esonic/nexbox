@@ -41,6 +41,10 @@ func NewCodexAgent() *CodexAgent {
 // Ensure CodexAgent implements Agent.
 var _ Agent = (*CodexAgent)(nil)
 
+func (a *CodexAgent) Capabilities() Capabilities {
+	return Capabilities{Fork: true, Interject: true}
+}
+
 // --- app-server payloads (subset) -------------------------------------------------------------
 
 type codexThreadResponse struct {
@@ -53,6 +57,10 @@ type codexTurnStartResponse struct {
 	Turn struct {
 		ID string `json:"id"`
 	} `json:"turn"`
+}
+
+type codexTurnSteerResponse struct {
+	TurnID string `json:"turnId"`
 }
 
 type codexThreadStartedNotification struct {
@@ -302,9 +310,14 @@ func (a *CodexAgent) SendMessage(
 		doneEmitted = true
 		usage := latestTokenUsage
 		sessionID := result.SessionID
+		activeTurnID := currentTurnID
 		stateMu.Unlock()
 
 		metadata := map[string]interface{}{}
+		if turnID == "" {
+			turnID = activeTurnID
+		}
+		result.Checkpoint = turnID
 		if usage != nil {
 			metadata["inputTokens"] = int(usage.TokenUsage.Last.InputTokens)
 			metadata["outputTokens"] = int(usage.TokenUsage.Last.OutputTokens)
@@ -330,9 +343,10 @@ func (a *CodexAgent) SendMessage(
 		}
 
 		cb(StreamEvent{
-			Type:      EventDone,
-			SessionID: sessionID,
-			Metadata:  metadata,
+			Type:       EventDone,
+			SessionID:  sessionID,
+			Checkpoint: turnID,
+			Metadata:   metadata,
 		})
 
 		turnDoneOnce.Do(func() { turnDone <- struct{}{} })
@@ -1077,8 +1091,18 @@ func (a *CodexAgent) SendMessage(
 		return Result{}, fmt.Errorf("initialize app-server: %w", err)
 	}
 
-	// Start or resume thread.
-	if req.SessionID != "" {
+	// Start, resume, or fork a thread. A Codex fork must happen before the
+	// first turn so turn/start appends to the new thread rather than the parent.
+	if req.Fork != nil {
+		if req.Fork.SessionID == "" || req.Fork.Checkpoint == "" {
+			return Result{}, errors.New("codex fork requires session id and checkpoint")
+		}
+		var resp codexThreadResponse
+		if err := client.Request(ctx, "thread/fork", a.buildThreadForkParams(req), &resp); err != nil {
+			return Result{}, fmt.Errorf("fork codex thread: %w", err)
+		}
+		result.SessionID = resp.Thread.ID
+	} else if req.SessionID != "" {
 		var resp codexThreadResponse
 		err := client.Request(ctx, "thread/resume", a.buildThreadResumeParams(req), &resp)
 		if err != nil {
@@ -1121,6 +1145,30 @@ func (a *CodexAgent) SendMessage(
 		stateMu.Lock()
 		currentTurnID = turnResp.Turn.ID
 		stateMu.Unlock()
+		if req.RegisterInterject != nil {
+			threadID := result.SessionID
+			turnID := turnResp.Turn.ID
+			req.RegisterInterject(func(content string) error {
+				if strings.TrimSpace(content) == "" {
+					return errors.New("codex steer input must not be empty")
+				}
+				steerCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+				var resp codexTurnSteerResponse
+				if err := client.Request(
+					steerCtx,
+					"turn/steer",
+					buildCodexTurnSteerParams(threadID, turnID, content),
+					&resp,
+				); err != nil {
+					return fmt.Errorf("steer codex turn: %w", err)
+				}
+				if resp.TurnID != "" && resp.TurnID != turnID {
+					return fmt.Errorf("steer accepted by unexpected turn %s", resp.TurnID)
+				}
+				return nil
+			})
+		}
 	}
 
 	// Wait for completion or termination.
@@ -1279,7 +1327,7 @@ func (a *CodexAgent) listModelsViaAppServer(ctx context.Context) ([]ModelInfo, e
 
 // buildPrompt constructs the combined prompt.
 func (a *CodexAgent) buildPrompt(req Request) string {
-	isNewSession := req.SessionID == ""
+	isNewSession := req.SessionID == "" && req.Fork == nil
 	return BuildPrompt(req.StaticContext, req.DynamicContext, req.Message, isNewSession, req.Images)
 }
 
@@ -1326,8 +1374,28 @@ func (a *CodexAgent) buildThreadResumeParams(req Request) map[string]interface{}
 	return params
 }
 
+func (a *CodexAgent) buildThreadForkParams(req Request) map[string]interface{} {
+	params := a.buildThreadStartParams(req)
+	params["threadId"] = req.Fork.SessionID
+	params["lastTurnId"] = req.Fork.Checkpoint
+	return params
+}
+
+func buildCodexTurnSteerParams(threadID, turnID, content string) map[string]interface{} {
+	return map[string]interface{}{
+		"threadId":       threadID,
+		"expectedTurnId": turnID,
+		"input": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": content,
+			},
+		},
+	}
+}
+
 // buildCodexConfigOverrides translates request-level preferences into the
-// `config` map that `thread/start` / `thread/resume` accept. Codex's
+// `config` map that `thread/start`, `thread/resume`, and `thread/fork` accept. Codex's
 // ReasoningEffort enum accepts: none, minimal, low, medium, high, xhigh —
 // notably NOT "max" (which Claude supports). This method validates the
 // requested effort against the live model catalog before forwarding it,

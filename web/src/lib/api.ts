@@ -1,7 +1,7 @@
 import type {
   Task, Project, Session, Asset, AssetVersion,
   ReviewComment, DiffResult, ChatMessage, MessagePart,
-  TaskLabel, ModelInfo,
+  TaskLabel, TaskComment, ModelInfo, AgentCapabilities,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -186,10 +186,13 @@ export const sessionsApi = {
     }),
   getWorktreeStatus: (id: string) =>
     request<{ dirty: boolean; worktree_path?: string }>(`/sessions/${id}/worktree-status`),
-  fork: (id: string, sdkMessageUuid: string, name?: string) =>
+  fork: (id: string, messageId: string, name?: string) =>
     request<Session>(`/sessions/${id}/fork`, {
       method: "POST",
-      body: JSON.stringify({ sdk_message_uuid: sdkMessageUuid, name }),
+      body: JSON.stringify({
+        message_id: messageId,
+        name,
+      }),
     }),
   autoTitle: (id: string, message: string) =>
     request<Session>(`/sessions/${id}/auto-title`, {
@@ -563,7 +566,11 @@ export interface ServerInfo {
 
 export const serverApi = {
   info: () => request<ServerInfo>("/info"),
-  availableAgents: () => request<{ agents: string[]; default: string }>("/available-agents"),
+  availableAgents: () => request<{
+    agents: string[];
+    default: string;
+    capabilities: Record<string, AgentCapabilities>;
+  }>("/available-agents"),
   availableModels: (agent: string) => request<{ agent: string; models: string[]; models_info?: ModelInfo[]; source: string }>(`/available-models?agent=${encodeURIComponent(agent)}`),
   setDefaultAgent: (agent: string) =>
     request<{ default: string }>("/default-agent", {

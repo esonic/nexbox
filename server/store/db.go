@@ -605,6 +605,10 @@ func (db *DB) migrate() error {
 			alter: `ALTER TABLE sessions ADD COLUMN forked_at_agent_msg_uuid TEXT NOT NULL DEFAULT ''`,
 		},
 		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='forked_at_agent_checkpoint'`,
+			alter: `ALTER TABLE sessions ADD COLUMN forked_at_agent_checkpoint TEXT NOT NULL DEFAULT ''`,
+		},
+		{
 			check: `SELECT COUNT(*) FROM pragma_table_info('installed_mcps') WHERE name='auth_type'`,
 			alter: `ALTER TABLE installed_mcps ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'none'`,
 		},
@@ -657,6 +661,36 @@ func (db *DB) migrate() error {
 				return fmt.Errorf("column migration failed: %w\nSQL: %s", err, cm.alter)
 			}
 		}
+	}
+
+	// Normalize legacy Claude message/session anchors into the backend-agnostic
+	// checkpoint field. These updates are idempotent and preserve the old keys
+	// so an older BeeHub binary can still read the database after a rollback.
+	if _, err := db.Exec(`UPDATE sessions
+		SET forked_at_agent_checkpoint = forked_at_agent_msg_uuid
+		WHERE forked_at_agent_checkpoint = '' AND forked_at_agent_msg_uuid != ''`); err != nil {
+		return fmt.Errorf("fork checkpoint session backfill failed: %w", err)
+	}
+	// Some development databases may contain the short-lived Codex-specific
+	// column from builds predating the opaque checkpoint model.
+	var hasLegacyTurnColumn int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='forked_at_agent_turn_id'`).Scan(&hasLegacyTurnColumn); err != nil {
+		return fmt.Errorf("fork checkpoint legacy column check failed: %w", err)
+	}
+	if hasLegacyTurnColumn > 0 {
+		if _, err := db.Exec(`UPDATE sessions
+			SET forked_at_agent_checkpoint = forked_at_agent_turn_id
+			WHERE forked_at_agent_checkpoint = '' AND forked_at_agent_turn_id != ''`); err != nil {
+			return fmt.Errorf("fork checkpoint legacy turn backfill failed: %w", err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE chat_messages
+		SET metadata = json_set(metadata, '$.agentCheckpoint',
+			COALESCE(json_extract(metadata, '$.agentTurnId'), json_extract(metadata, '$.sdkMessageUuid')))
+		WHERE json_valid(metadata)
+		  AND COALESCE(json_extract(metadata, '$.agentCheckpoint'), '') = ''
+		  AND COALESCE(json_extract(metadata, '$.agentTurnId'), json_extract(metadata, '$.sdkMessageUuid'), '') != ''`); err != nil {
+		return fmt.Errorf("fork checkpoint message backfill failed: %w", err)
 	}
 
 	// At most one live scratch session per project. Partial unique index ensures

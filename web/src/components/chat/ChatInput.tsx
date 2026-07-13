@@ -143,7 +143,7 @@ function RichQueuedItem({
   onRemove: () => void;
   onEdit: (text: string) => void;
   // When true, show an "interject" button that jumps this message into the
-  // running turn (Claude only). Other agents have no live-injection path.
+  // running turn through the agent's advertised control capability.
   canSendNow: boolean;
   // The front (oldest) queued item is also the target of the Enter shortcut,
   // so its button advertises it.
@@ -434,6 +434,7 @@ interface ChatInputProps {
   isConnected: boolean;
   isStreaming: boolean;
   agentName: string;
+  canInterject: boolean;
   modelName: string;
   effort: string;
   availableAgents: string[];
@@ -475,6 +476,7 @@ export function ChatInput({
   isConnected,
   isStreaming,
   agentName,
+  canInterject,
   modelName,
   effort,
   availableAgents,
@@ -685,10 +687,7 @@ export function ChatInput({
   const hasComposerContent = () =>
     !!(input.trim() || attachedImages.length > 0 || pickedTasks.length > 0 || pickedAssets.length > 0 || pickedWorkflows.length > 0 || pickedComments.length > 0 || activeCommand);
 
-  // The front (oldest) queued message can be interjected via Enter only for
-  // Claude — other agents have no live-injection path. Mirrors the per-item
-  // Play button's gating (canSendNow).
-  const canInterjectFront = agentName === "claude" && richQueue.length > 0;
+  const canInterjectFront = canInterject && richQueue.length > 0;
 
   const handleSend = () => {
     const hasContent = hasComposerContent();
@@ -851,7 +850,7 @@ export function ChatInput({
     if (!isMobile && e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       // With an empty composer, Enter acts as the "interject" shortcut: send the
-      // front (oldest) queued message now into Claude's running reply. With
+      // front (oldest) queued message into the active reply. With
       // content, it sends/queues that content as usual.
       if (!hasComposerContent() && canInterjectFront) {
         onRichQueueSendNow(richQueue[0].id);
@@ -963,7 +962,7 @@ export function ChatInput({
                 <RichQueuedItem
                   key={item.id}
                   item={item}
-                  canSendNow={agentName === "claude"}
+                  canSendNow={canInterject}
                   isFront={i === 0}
                   onSendNow={() => onRichQueueSendNow(item.id)}
                   onRemove={() => onRichQueueRemove(item.id)}

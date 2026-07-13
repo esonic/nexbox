@@ -38,6 +38,10 @@ func NewClaudeAgent() *ClaudeAgent {
 // Ensure ClaudeAgent implements Agent at compile time.
 var _ Agent = (*ClaudeAgent)(nil)
 
+func (a *ClaudeAgent) Capabilities() Capabilities {
+	return Capabilities{Fork: true, Interject: true}
+}
+
 // HasMCP returns whether MCP is configured for this agent.
 func (a *ClaudeAgent) HasMCP() bool {
 	return a.MCPServerURL != ""
@@ -299,10 +303,13 @@ func (a *ClaudeAgent) SendMessage(
 	// Resume / fork: a fork is just a resume of the parent's CLI session id
 	// with --fork-session (and optionally --resume-session-at <uuid>) layered
 	// on. The new session id is reported back via the result message.
-	if req.ForkFromAgentSessionID != "" {
-		opts.Resume = req.ForkFromAgentSessionID
+	if req.Fork != nil {
+		if req.Fork.SessionID == "" || req.Fork.Checkpoint == "" {
+			return Result{}, fmt.Errorf("claude fork requires session id and checkpoint")
+		}
+		opts.Resume = req.Fork.SessionID
 		opts.ForkSession = true
-		opts.ResumeAtMessageUUID = req.ForkAtAgentMsgUUID
+		opts.ResumeAtMessageUUID = req.Fork.Checkpoint
 	} else if req.SessionID != "" {
 		opts.Resume = req.SessionID
 	}
@@ -317,15 +324,15 @@ func (a *ClaudeAgent) SendMessage(
 	// Build the combined prompt. A fork inherits the parent's context, so
 	// it's effectively a resume — the new session is "new" only on the
 	// Nexbox side, not in terms of model context.
-	isNewSession := req.SessionID == "" && req.ForkFromAgentSessionID == ""
+	isNewSession := req.SessionID == "" && req.Fork == nil
 	combinedPrompt := BuildPrompt(req.StaticContext, req.DynamicContext, req.Message, isNewSession, req.Images)
 
 	// Log request details
 	log.Printf("[claude-agent] ========== Request ==========")
 	log.Printf("[claude-agent] conversationID: %s", req.ConversationID)
 	log.Printf("[claude-agent] sessionID: %s (new: %v)", req.SessionID, isNewSession)
-	if req.ForkFromAgentSessionID != "" {
-		log.Printf("[claude-agent] fork: parent=%s atUUID=%s", req.ForkFromAgentSessionID, req.ForkAtAgentMsgUUID)
+	if req.Fork != nil {
+		log.Printf("[claude-agent] fork: parent=%s", req.Fork.SessionID)
 	}
 	log.Printf("[claude-agent] workDir: %s", req.WorkDir)
 	log.Printf("[claude-agent] message: %s", req.Message)
@@ -339,7 +346,7 @@ func (a *ClaudeAgent) SendMessage(
 	var result Result
 	// A fork is still "resuming" the parent CLI session under the hood, so a
 	// missing parent session should surface as ErrSessionExpired.
-	isResumeAttempt := req.SessionID != "" || req.ForkFromAgentSessionID != ""
+	isResumeAttempt := req.SessionID != "" || req.Fork != nil
 	resumeFailed := false
 	var accInputTokens int
 	var hasPartialText, hasPartialThinking bool
@@ -682,17 +689,15 @@ func (a *ClaudeAgent) SendMessage(
 				cb(StreamEvent{Type: EventContextUsage, Metadata: meta})
 			}
 
-			if lastAssistantUUID != "" {
-				metadata["lastAssistantUuid"] = lastAssistantUUID
-			}
-
 			result.SessionID = msg.SessionID
+			result.Checkpoint = lastAssistantUUID
 			result.Metadata = metadata
 
 			cb(StreamEvent{
-				Type:      EventDone,
-				SessionID: msg.SessionID,
-				Metadata:  metadata,
+				Type:       EventDone,
+				SessionID:  msg.SessionID,
+				Checkpoint: lastAssistantUUID,
+				Metadata:   metadata,
 			})
 
 		case "stream_event":
@@ -741,10 +746,8 @@ func (a *ClaudeAgent) SendMessage(
 		// A stopped or errored turn never reaches the `case "result"` branch
 		// that populates result.Metadata, so surface the last assistant uuid we
 		// saw during streaming. Without this the partial turn is persisted with
-		// no fork anchor (sdkMessageUuid) and its fork button never appears.
-		if lastAssistantUUID != "" && result.Metadata == nil {
-			result.Metadata = map[string]interface{}{"lastAssistantUuid": lastAssistantUUID}
-		}
+		// no durable checkpoint unless we surface the last assistant identity.
+		result.Checkpoint = lastAssistantUUID
 		return result, fmt.Errorf("claude query: %w", err)
 	}
 

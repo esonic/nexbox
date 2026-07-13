@@ -148,8 +148,8 @@ class GlobalWebSocket {
 
   /**
    * Inject a queue-jumping message into a session's running turn ("interjection").
-   * Only meaningful for Claude sessions with a live turn; the backend folds it
-   * into the current turn, or falls back to ordinary queue/send if no live turn.
+   * Capable agents fold it into the current turn; unsupported/idle sessions
+   * fall back to ordinary queue/send.
    */
   interject(sessionId: string, message: string, parts?: MessagePart[], images?: string[], features?: string[]): void {
     this.rawSend({

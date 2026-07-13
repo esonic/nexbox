@@ -5,18 +5,34 @@ import (
 	"errors"
 )
 
-// ErrSessionExpired is returned when a --resume attempt fails because the
-// Claude CLI session no longer exists or is corrupted. Callers should clear
-// the stored AgentSessionID and retry as a new session.
+// ErrSessionExpired is returned when a backend can no longer resume its stored
+// session. Callers should clear AgentSessionID and retry as a new session.
 var ErrSessionExpired = errors.New("agent session expired or not found")
 
 // Agent is the interface that all coding agent backends must implement.
 // Each backend (Claude Code, Codex CLI, etc.) provides its own implementation
 // that translates between this unified protocol and the backend-specific CLI/API.
 type Agent interface {
+	// Capabilities reports optional interaction features without exposing the
+	// backend or protocol used to implement them.
+	Capabilities() Capabilities
 	// SendMessage sends a user message to the agent and streams events back via callback.
 	// Returns the result (including session ID for future resumption) or an error.
 	SendMessage(ctx context.Context, req Request, cb EventCallback) (Result, error)
+}
+
+// Capabilities describes backend features understood by the shared API/UI.
+// Callers must branch on these flags, never on concrete agent names.
+type Capabilities struct {
+	Fork      bool `json:"fork"`
+	Interject bool `json:"interject"`
+}
+
+// ForkContext identifies a durable point in an existing agent session. The
+// checkpoint is opaque outside the backend adapter that produced it.
+type ForkContext struct {
+	SessionID  string
+	Checkpoint string
 }
 
 // MCPServerEntry describes an extra MCP server to inject into the agent runtime.
@@ -63,27 +79,25 @@ type Request struct {
 	PluginDirs         []string         // Extra plugin directories (--plugin-dir) from installed marketplace plugins
 	UserInputHandler   UserInputHandler // Optional: handle interactive tool calls (e.g., AskUserQuestion)
 
-	// RegisterInterject, when set, is invoked by backends that keep a live stdin
-	// during the turn (currently only Claude) once the process is ready. It
-	// receives a function that injects an additional user message into the
+	// RegisterInterject, when set, is invoked by capable backends during an
+	// active turn.
+	// It receives a function that injects an additional user message into the
 	// running turn (queue-jump / interjection); the model picks it up at the
 	// next turn boundary without aborting current work. The API layer stores it
 	// per session so a later "interject" action can deliver a message mid-turn.
-	// Backends without this capability (e.g. Codex) never call it.
+	// Backends without this capability never call it.
 	RegisterInterject func(inject func(content string) error)
 
-	// ForkFromAgentSessionID, when set with ForkAtAgentMsgUUID, instructs the
-	// agent to fork the named upstream CLI session at that message instead of
-	// resuming or starting fresh. Currently only the Claude backend honors
-	// this; for other backends, the agent should reject or no-op.
-	ForkFromAgentSessionID string
-	ForkAtAgentMsgUUID     string // CLI-side assistant message UUID to fork at (inclusive)
+	// Fork asks the backend to branch from an opaque durable checkpoint. Only
+	// agents advertising Capabilities.Fork receive this field.
+	Fork *ForkContext
 }
 
 // Result contains the outcome of an agent message exchange.
 type Result struct {
-	SessionID string                 // Session ID for future resumption
-	Metadata  map[string]interface{} // Optional metadata (tokens, cost, duration, etc.)
+	SessionID  string                 // Session ID for future resumption
+	Checkpoint string                 // Opaque durable checkpoint for this completed turn
+	Metadata   map[string]interface{} // Optional metadata (tokens, cost, duration, etc.)
 }
 
 // ---------------------------------------------------------------------------
@@ -169,9 +183,10 @@ type StreamEvent struct {
 	// calls made by the main agent.
 	ParentToolID string `json:"parent_tool_id,omitempty"`
 
-	// Session and metadata (used by EventDone)
-	SessionID string                 `json:"session_id,omitempty"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	// Session, checkpoint, and metadata (used by EventDone)
+	SessionID  string                 `json:"session_id,omitempty"`
+	Checkpoint string                 `json:"checkpoint,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // EventCallback is called for each streaming event from the agent.
