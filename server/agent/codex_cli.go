@@ -223,6 +223,14 @@ func (c *CodexAppServerClient) Initialize(ctx context.Context, clientName, clien
 
 // Request sends a JSON-RPC request and waits for the matching response.
 func (c *CodexAppServerClient) Request(ctx context.Context, method string, params interface{}, out interface{}) error {
+	// An already-cancelled context must not reach the wire at all: callers
+	// (e.g. the steer path) rely on errCodexRequestNotSent to know the
+	// request definitely wasn't delivered. Cancellation that lands between
+	// this check and the write is still reported as a plain ctx error after
+	// the write, i.e. outcome unknown.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %s: %v", errCodexRequestNotSent, method, err)
+	}
 	id := atomic.AddInt64(&c.nextRequestID, 1)
 	idKey := strconv.FormatInt(id, 10)
 

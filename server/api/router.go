@@ -38,16 +38,9 @@ type Server struct {
 	humanGatesMu sync.Mutex
 	humanGates   map[string]chan string
 
-	// interjectMus serializes interjections per session: they run off the WS
-	// read loop (a Codex steer is a network round-trip), but concurrent
-	// interjects for one session must still deliver and persist in order.
-	interjectMus sync.Map // sessionID → *sync.Mutex
-}
-
-// interjectLock returns the per-session mutex serializing interject handling.
-func (s *Server) interjectLock(sessionID string) *sync.Mutex {
-	mu, _ := s.interjectMus.LoadOrStore(sessionID, &sync.Mutex{})
-	return mu.(*sync.Mutex)
+	// interjectQ serializes interjections per session in arrival order while
+	// keeping them off the WS read loop (see interjectQueue).
+	interjectQ interjectQueue
 }
 
 // ResolveAgent returns the agent for a given session, falling back to the default.

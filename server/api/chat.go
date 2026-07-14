@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -88,15 +89,13 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 			// Dispatch off the read loop: unlike Claude's near-instant stdin
 			// write, an interject can be a network round-trip to the backend
 			// (Codex turn/steer, up to 30s). Running it inline would stall
-			// every frame on this connection — including "stop". The
-			// per-session lock keeps rapid-fire interjects delivering and
-			// persisting in arrival order.
-			go func(req ChatRequest) {
-				mu := s.interjectLock(req.SessionID)
-				mu.Lock()
-				defer mu.Unlock()
+			// every frame on this connection — including "stop". Enqueueing
+			// here, synchronously in the read loop, preserves arrival order;
+			// the per-session drainer then executes strictly FIFO.
+			req := chatReq
+			s.interjectQ.enqueue(req.SessionID, func() {
 				s.handleInterject(req.SessionID, req.Content, req.Parts, req.Images, req.Features)
-			}(chatReq)
+			})
 
 		case "tool_response":
 			if chatReq.SessionID == "" || chatReq.ToolUseID == "" {
@@ -289,13 +288,17 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 
 	go func() {
 		released := false
+		// interjectGen records the generation of the injector THIS turn
+		// registered (0 = never). This defer runs after processNextQueued has
+		// potentially started the next turn, so removal must be scoped to our
+		// own registration or it would strip the successor's injector.
+		var interjectGen atomic.Uint64
 		defer func() {
 			if !released {
 				s.SessionManager.SetActive(sessionID, false)
 				s.Hub.ClearActive(sessionID)
 			}
-			// Always drop the live injector when the owning turn is over.
-			s.SessionManager.RemoveInterjector(sessionID)
+			s.SessionManager.RemoveInterjector(sessionID, interjectGen.Load())
 		}()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Hour)
@@ -817,9 +820,11 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		}
 
 		// registerInterject exposes a backend-neutral active-turn control handle
-		// for later queue-jumping messages.
+		// for later queue-jumping messages. The generation token feeds the
+		// deferred removal above so this turn can only unregister its own
+		// injector, never a successor turn's.
 		registerInterject := func(inject func(content string) error) {
-			s.SessionManager.SetInterjector(sessionID, inject)
+			interjectGen.Store(s.SessionManager.SetInterjector(sessionID, inject))
 		}
 
 		var agentResult agent.Result

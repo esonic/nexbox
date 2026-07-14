@@ -1175,19 +1175,10 @@ func (a *CodexAgent) SendMessage(
 					buildCodexTurnSteerParams(threadID, turnID, content),
 					&resp,
 				); err != nil {
-					// Only two failures guarantee the steer never reached the
-					// turn: the request was never written, or the app-server
-					// explicitly rejected it. Everything else (context
-					// expiry, connection lost or decode failure while waiting
-					// for the response) happens after the write, so the steer
-					// may already be folded into the turn — mark the outcome
-					// unknown so the caller doesn't re-send the same message
-					// through the ordinary queue path.
-					var rpcErr *codexRPCError
-					if errors.Is(err, errCodexRequestNotSent) || errors.As(err, &rpcErr) {
-						return fmt.Errorf("steer codex turn: %w", err)
+					if isSteerOutcomeUnknown(err) {
+						return fmt.Errorf("%w: steer codex turn: %v", ErrInterjectOutcomeUnknown, err)
 					}
-					return fmt.Errorf("%w: steer codex turn: %v", ErrInterjectOutcomeUnknown, err)
+					return fmt.Errorf("steer codex turn: %w", err)
 				}
 				return nil
 			})
@@ -1416,6 +1407,18 @@ func (a *CodexAgent) buildThreadForkParams(req Request) map[string]interface{} {
 	params["threadId"] = req.Fork.SessionID
 	params["lastTurnId"] = req.Fork.Checkpoint
 	return params
+}
+
+// isSteerOutcomeUnknown classifies a turn/steer failure. Only two failures
+// guarantee the steer never reached the running turn: the request was never
+// written to the app-server (errCodexRequestNotSent) or the app-server
+// explicitly rejected it (codexRPCError). Everything else — context expiry,
+// connection lost or response decode failure while waiting — happens after
+// the write, so the steer may already be folded into the turn and the caller
+// must not re-send the message through the ordinary queue path.
+func isSteerOutcomeUnknown(err error) bool {
+	var rpcErr *codexRPCError
+	return !errors.Is(err, errCodexRequestNotSent) && !errors.As(err, &rpcErr)
 }
 
 func buildCodexTurnSteerParams(threadID, turnID, content string) map[string]interface{} {

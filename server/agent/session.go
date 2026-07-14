@@ -13,8 +13,17 @@ type SessionManager struct {
 	// interjectMap holds, per active session, a function that injects an extra
 	// user message into the running agent turn (queue-jump / "interjection").
 	// Backends advertising the capability register their own opaque control
-	// closure. Others fall back to ordinary queueing.
-	interjectMap map[string]func(content string) error
+	// closure. Others fall back to ordinary queueing. Each registration is
+	// stamped with a generation so a finishing turn's cleanup can't remove an
+	// injector the NEXT turn already registered (the old turn's deferred
+	// removal runs after processNextQueued has started the successor).
+	interjectMap     map[string]interjectorEntry
+	interjectNextGen uint64
+}
+
+type interjectorEntry struct {
+	fn  func(content string) error
+	gen uint64
 }
 
 // SessionInfo stores metadata about an active session.
@@ -30,23 +39,32 @@ func NewSessionManager() *SessionManager {
 	return &SessionManager{
 		sessions:     make(map[string]*SessionInfo),
 		cancelMap:    make(map[string]context.CancelFunc),
-		interjectMap: make(map[string]func(content string) error),
+		interjectMap: make(map[string]interjectorEntry),
 	}
 }
 
-// SetInterjector registers the live message-injection function for a session.
-// Called by the agent backend once its active turn can accept more input.
-func (sm *SessionManager) SetInterjector(sessionID string, fn func(content string) error) {
+// SetInterjector registers the live message-injection function for a session
+// and returns its generation token. Called by the agent backend once its
+// active turn can accept more input. The caller passes the token back to
+// RemoveInterjector so it can only unregister its own registration.
+func (sm *SessionManager) SetInterjector(sessionID string, fn func(content string) error) uint64 {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	sm.interjectMap[sessionID] = fn
+	sm.interjectNextGen++
+	sm.interjectMap[sessionID] = interjectorEntry{fn: fn, gen: sm.interjectNextGen}
+	return sm.interjectNextGen
 }
 
-// RemoveInterjector clears a session's injection function (turn finished).
-func (sm *SessionManager) RemoveInterjector(sessionID string) {
+// RemoveInterjector clears a session's injection function (turn finished),
+// but only when it still belongs to the given generation — a successor turn
+// may already have registered its own injector. gen 0 (never registered)
+// never matches.
+func (sm *SessionManager) RemoveInterjector(sessionID string, gen uint64) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	delete(sm.interjectMap, sessionID)
+	if entry, ok := sm.interjectMap[sessionID]; ok && entry.gen == gen {
+		delete(sm.interjectMap, sessionID)
+	}
 }
 
 // Interject delivers content to a session's running turn. It returns
@@ -56,12 +74,12 @@ func (sm *SessionManager) RemoveInterjector(sessionID string) {
 // ended and the pipe closed) — the caller should likewise fall back.
 func (sm *SessionManager) Interject(sessionID, content string) (bool, error) {
 	sm.mu.RLock()
-	fn, ok := sm.interjectMap[sessionID]
+	entry, ok := sm.interjectMap[sessionID]
 	sm.mu.RUnlock()
 	if !ok {
 		return false, nil
 	}
-	return true, fn(content)
+	return true, entry.fn(content)
 }
 
 // SetCancel stores the cancel function for a session (used for stop).

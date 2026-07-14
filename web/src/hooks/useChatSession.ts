@@ -317,30 +317,39 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   }, [messages, isStreaming]);
 
   // Fetch server default agent and available agents. Fork/interject gating
-  // depends entirely on the capabilities map and this hook mounts once for
-  // the app's lifetime, so a swallowed failure here would silently disable
-  // those controls everywhere until a full reload — keep retrying with
-  // capped backoff until the request succeeds.
+  // depends entirely on the capabilities map (and, for legacy sessions with
+  // an empty agent column, on serverAgent), and this hook mounts once for
+  // the app's lifetime — a swallowed failure would silently disable those
+  // controls everywhere until a full reload. Retry each request
+  // independently with capped backoff until it succeeds.
   useEffect(() => {
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    serverApi.info().then((info) => {
-      if (!cancelled) setServerAgent(info.agent);
-    }).catch(() => {});
-    const load = (attempt: number) => {
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const retry = (attempt: number, fn: (attempt: number) => void) => {
+      if (cancelled) return;
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        fn(attempt);
+      }, Math.min(15000, 1000 * 2 ** Math.min(attempt, 4)));
+      timers.add(timer);
+    };
+    const loadInfo = (attempt: number) => {
+      serverApi.info().then((info) => {
+        if (!cancelled) setServerAgent(info.agent);
+      }).catch(() => retry(attempt + 1, loadInfo));
+    };
+    const loadAgents = (attempt: number) => {
       serverApi.availableAgents().then((data) => {
         if (cancelled) return;
         setAvailableAgents(data.agents || []);
         setAgentCapabilities(data.capabilities || {});
-      }).catch(() => {
-        if (cancelled) return;
-        timer = setTimeout(() => load(attempt + 1), Math.min(15000, 1000 * 2 ** Math.min(attempt, 4)));
-      });
+      }).catch(() => retry(attempt + 1, loadAgents));
     };
-    load(0);
+    loadInfo(0);
+    loadAgents(0);
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
+      timers.forEach(clearTimeout);
     };
   }, []);
 
