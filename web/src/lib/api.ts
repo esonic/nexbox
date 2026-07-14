@@ -1,7 +1,7 @@
 import type {
   Task, Project, Session, Asset, AssetVersion,
   ReviewComment, DiffResult, ChatMessage, MessagePart,
-  TaskLabel, TaskComment, ModelInfo, AgentCapabilities,
+  TaskLabel, ModelInfo, AgentCapabilities,
 } from "@/types";
 
 const API_BASE = "/api";
