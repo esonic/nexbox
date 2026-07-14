@@ -256,6 +256,57 @@ func TestQuery_ClearsWorkflowViaUserTaskNotification(t *testing.T) {
 	}
 }
 
+// TestQuery_TracksBackgroundTasksViaSnapshot covers CC 2.1.206+: completion is
+// signalled by a `background_tasks_changed` snapshot (tasks:[]) rather than a
+// per-task task_notification. The loop must treat the snapshot as authoritative
+// — swallow the interim result while the snapshot is non-empty, and end the turn
+// once it goes empty — else a churning task set desyncs and the turn ends early
+// (grace-killed) with the last subagent unfinished.
+func TestQuery_TracksBackgroundTasksViaSnapshot(t *testing.T) {
+	lines := []string{
+		`{"type":"system","subtype":"init","session_id":"S6","model":"claude-opus-4-8"}`,
+		`{"type":"assistant","session_id":"S6","uuid":"u1","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"LAUNCHING"}]}}`,
+		`{"type":"assistant","session_id":"S6","uuid":"u2","message":{"role":"assistant","id":"m1","content":[{"type":"tool_use","id":"toolu_ag","name":"Task","input":{}}]}}`,
+		// Snapshot says one background task is running (no task_started/task_type relied on).
+		`{"type":"system","subtype":"background_tasks_changed","session_id":"S6","tasks":[{"task_id":"bg1","task_type":"local_agent","description":"finder"}],"uuid":"u3"}`,
+		`{"type":"user","session_id":"S6","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_ag","content":"launched"}]}}`,
+		// Interim result — MUST be swallowed, snapshot still non-empty.
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.4,"session_id":"S6","duration_ms":100}`,
+		// Completion signalled ONLY by the snapshot going empty — no task_notification.
+		`{"type":"system","subtype":"background_tasks_changed","session_id":"S6","tasks":[],"uuid":"u4"}`,
+		`{"type":"assistant","session_id":"S6","uuid":"u5","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"SNAPSHOT_CONTINUATION"}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.7,"session_id":"S6","duration_ms":200}`,
+	}
+	client := &ClaudeClient{CLIPath: writeFakeCLI(t, lines)}
+
+	var gotText strings.Builder
+	var resultNumTurns []int
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := client.Query(ctx, "review", QueryOptions{}, func(msg StreamMessage, parsed *AssistantMessage) {
+		if msg.Type == "result" {
+			resultNumTurns = append(resultNumTurns, msg.NumTurns)
+		}
+		if parsed != nil {
+			for _, c := range parsed.Content {
+				if c.Type == "text" {
+					gotText.WriteString(c.Text)
+				}
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("Query returned error: %v", err)
+	}
+	if !strings.Contains(gotText.String(), "SNAPSHOT_CONTINUATION") {
+		t.Errorf("continuation dropped (background_tasks_changed snapshot not honored); got %q", gotText.String())
+	}
+	if len(resultNumTurns) != 1 || resultNumTurns[0] != 2 {
+		t.Errorf("results delivered to callback = %v, want exactly [2] (interim swallowed)", resultNumTurns)
+	}
+}
+
 // TestQuery_BreaksOnRealResult is the control case: a normal turn (no premature
 // result, no Workflow) ends at its result exactly once, confirming the guards
 // don't change ordinary behavior.

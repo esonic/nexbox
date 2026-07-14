@@ -191,6 +191,13 @@ type StreamMessage struct {
 	// patch, NOT at the top level.
 	Patch map[string]interface{} `json:"patch,omitempty"`
 
+	// For system.background_tasks_changed (CC 2.1.206+): the authoritative
+	// snapshot of currently-running detached background tasks (Workflows / Agent
+	// subagents). Emitted on every change; an empty slice means none are running.
+	// More reliable than incrementally tracking task_started/task_notification,
+	// which can desync on churning task sets.
+	BackgroundTasks []ClaudeBackgroundTask `json:"tasks,omitempty"`
+
 	// For stream_event messages (partial message streaming)
 	Event json.RawMessage `json:"event,omitempty"`
 
@@ -227,6 +234,15 @@ type ClaudeRateLimitInfo struct {
 	OverageStatus   string `json:"overageStatus,omitempty"`
 	OverageResetsAt int64  `json:"overageResetsAt,omitempty"`
 	IsUsingOverage  bool   `json:"isUsingOverage,omitempty"`
+}
+
+// ClaudeBackgroundTask is one entry in a `background_tasks_changed` snapshot
+// (CC 2.1.206+): a detached background task (Workflow / Agent subagent) that is
+// currently still running.
+type ClaudeBackgroundTask struct {
+	TaskID      string `json:"task_id"`
+	TaskType    string `json:"task_type"`
+	Description string `json:"description,omitempty"`
 }
 
 // AssistantContent represents content from an assistant message
@@ -567,9 +583,27 @@ func (c *ClaudeClient) Query(
 		// result, and its terminal notification only later, when it completes.
 		if msg.Type == "system" {
 			switch msg.Subtype {
+			case "background_tasks_changed":
+				// CC 2.1.206+ authoritative snapshot: replace the tracked set with
+				// exactly the tasks the CLI reports as still running. This is the
+				// source of truth (fires on every change, incl. completion → empty
+				// slice) and corrects any drift in the incremental tracking below,
+				// which desyncs on churning task sets (e.g. a review's finder→
+				// verifier pipeline) — the bug this handles. No task_type filter:
+				// the snapshot lists only background tasks, so every entry counts
+				// (also future-proof against new detached task_types).
+				next := make(map[string]bool, len(msg.BackgroundTasks))
+				for _, tk := range msg.BackgroundTasks {
+					if tk.TaskID != "" {
+						next[tk.TaskID] = true
+					}
+				}
+				runningBgTasks = next
 			case "task_started":
 				// "local_workflow" = dynamic Workflow tool; "local_agent" =
 				// background Agent subagent. Both outlive the foreground turn.
+				// (Incremental fallback for CLIs without background_tasks_changed,
+				// e.g. 2.1.199; when present, the snapshot above is authoritative.)
 				if msg.TaskID != "" && (msg.TaskType == "local_workflow" || msg.TaskType == "local_agent") {
 					runningBgTasks[msg.TaskID] = true
 				}
