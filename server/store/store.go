@@ -105,7 +105,9 @@ type SessionStore interface {
 	// ForkSession creates a fork of parentID at atMessageID, copying messages
 	// from the parent up to and including atMessageID into the new session.
 	// checkpoint is opaque to the store and interpreted only by the agent.
-	ForkSession(parentID, name, atMessageID, checkpoint string) (*Session, error)
+	// agent is the caller-resolved backend name stamped on the new row (the
+	// fork was capability-gated against it); empty inherits the parent's.
+	ForkSession(parentID, name, atMessageID, checkpoint, agent string) (*Session, error)
 	GetExpiredSessionWorktrees(olderThan time.Time) ([]string, error) // returns worktree_paths for soon-to-be-purged sessions
 	DeleteSession(id string) error   // soft delete (move to trash)
 	RestoreSession(id string) error  // restore from trash

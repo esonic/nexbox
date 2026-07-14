@@ -663,34 +663,49 @@ func (db *DB) migrate() error {
 		}
 	}
 
-	// Normalize legacy Claude message/session anchors into the backend-agnostic
-	// checkpoint field. These updates are idempotent and preserve the old keys
-	// so an older BeeHub binary can still read the database after a rollback.
+	// Normalize legacy Claude anchors into the backend-agnostic checkpoint
+	// field. The updates are idempotent and preserve the old keys so an older
+	// BeeHub binary can still read the database after a rollback.
+	//
+	// The sessions UPDATE is a scan of a small table — run it every boot so
+	// fork rows written by an older binary after a rollback are re-normalized
+	// on the next upgrade.
 	if _, err := db.Exec(`UPDATE sessions
 		SET forked_at_agent_checkpoint = forked_at_agent_msg_uuid
 		WHERE forked_at_agent_checkpoint = '' AND forked_at_agent_msg_uuid != ''`); err != nil {
 		return fmt.Errorf("fork checkpoint session backfill failed: %w", err)
 	}
-	// Some development databases may contain the short-lived Codex-specific
-	// column from builds predating the opaque checkpoint model.
-	var hasLegacyTurnColumn int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='forked_at_agent_turn_id'`).Scan(&hasLegacyTurnColumn); err != nil {
-		return fmt.Errorf("fork checkpoint legacy column check failed: %w", err)
+	// The chat_messages UPDATE is a full-table scan (json_extract per row),
+	// so it runs once, keyed by user_version. The version bump commits in the
+	// SAME transaction as the backfill: a crash mid-migration leaves the
+	// version unset and the backfill re-runs on the next boot. Known residual
+	// limitation: message rows written by a pre-checkpoint binary after a
+	// rollback→upgrade cycle are not re-migrated (the once-only gate is the
+	// price of not scanning all chat history on every startup).
+	const schemaVersionForkCheckpoint = 1
+	var schemaVersion int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&schemaVersion); err != nil {
+		return fmt.Errorf("read user_version failed: %w", err)
 	}
-	if hasLegacyTurnColumn > 0 {
-		if _, err := db.Exec(`UPDATE sessions
-			SET forked_at_agent_checkpoint = forked_at_agent_turn_id
-			WHERE forked_at_agent_checkpoint = '' AND forked_at_agent_turn_id != ''`); err != nil {
-			return fmt.Errorf("fork checkpoint legacy turn backfill failed: %w", err)
+	if schemaVersion < schemaVersionForkCheckpoint {
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin fork checkpoint migration: %w", err)
 		}
-	}
-	if _, err := db.Exec(`UPDATE chat_messages
-		SET metadata = json_set(metadata, '$.agentCheckpoint',
-			COALESCE(json_extract(metadata, '$.agentTurnId'), json_extract(metadata, '$.sdkMessageUuid')))
-		WHERE json_valid(metadata)
-		  AND COALESCE(json_extract(metadata, '$.agentCheckpoint'), '') = ''
-		  AND COALESCE(json_extract(metadata, '$.agentTurnId'), json_extract(metadata, '$.sdkMessageUuid'), '') != ''`); err != nil {
-		return fmt.Errorf("fork checkpoint message backfill failed: %w", err)
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.Exec(`UPDATE chat_messages
+			SET metadata = json_set(metadata, '$.agentCheckpoint', json_extract(metadata, '$.sdkMessageUuid'))
+			WHERE json_valid(metadata)
+			  AND COALESCE(json_extract(metadata, '$.agentCheckpoint'), '') = ''
+			  AND COALESCE(json_extract(metadata, '$.sdkMessageUuid'), '') != ''`); err != nil {
+			return fmt.Errorf("fork checkpoint message backfill failed: %w", err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersionForkCheckpoint)); err != nil {
+			return fmt.Errorf("set user_version failed: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit fork checkpoint migration: %w", err)
+		}
 	}
 
 	// At most one live scratch session per project. Partial unique index ensures

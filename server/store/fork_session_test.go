@@ -46,7 +46,7 @@ func TestForkSession_HappyPath(t *testing.T) {
 	}
 
 	// Fork at the FIRST assistant message — only u1 + a1 should be copied.
-	forked, err := s.ForkSession(parent.ID, "", mA1.ID, "checkpoint-a1")
+	forked, err := s.ForkSession(parent.ID, "", mA1.ID, "checkpoint-a1", "")
 	if err != nil {
 		t.Fatalf("ForkSession: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestForkSession_AtLastMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	forked, err := s.ForkSession(parent.ID, "named", a.ID, "checkpoint")
+	forked, err := s.ForkSession(parent.ID, "named", a.ID, "checkpoint", "")
 	if err != nil {
 		t.Fatalf("ForkSession: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestForkSession_PersistsOpaqueCheckpoint(t *testing.T) {
 		t.Fatalf("CreateMessage: %v", err)
 	}
 
-	forked, err := s.ForkSession(parent.ID, "", message.ID, "opaque-turn-2")
+	forked, err := s.ForkSession(parent.ID, "", message.ID, "opaque-turn-2", "codex")
 	if err != nil {
 		t.Fatalf("ForkSession: %v", err)
 	}
@@ -219,13 +219,45 @@ func TestForkSession_PersistsOpaqueCheckpoint(t *testing.T) {
 	}
 }
 
+// TestForkSession_StampsResolvedAgent guards the write-path fix: a fork of an
+// empty-agent parent (legacy scratch-session rows) must persist the agent the
+// fork was capability-gated against, so a later default-agent change can't
+// hand the parent's checkpoint to a different backend on the first turn.
+func TestForkSession_StampsResolvedAgent(t *testing.T) {
+	s := newTestDB(t)
+	parent, _ := s.CreateSession(CreateSessionRequest{Name: "p"}) // agent deliberately empty
+	message, err := s.CreateMessage(parent.ID, "assistant",
+		[]MessagePart{{Type: "text", Content: "done"}},
+		MessageMetadata{AgentCheckpoint: "cp"})
+	if err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	forked, err := s.ForkSession(parent.ID, "", message.ID, "cp", "codex")
+	if err != nil {
+		t.Fatalf("ForkSession: %v", err)
+	}
+	if forked.Agent != "codex" {
+		t.Fatalf("forked.Agent = %q, want codex", forked.Agent)
+	}
+	got, err := s.GetSession(forked.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.Agent != "codex" {
+		t.Fatalf("agent round-trip = %q, want codex", got.Agent)
+	}
+}
+
+// TestMigrate_LegacyClaudeForkCheckpoint simulates the upgrade boot: a
+// pre-checkpoint database (user_version reset to 0) with sdkMessageUuid-era
+// anchors. The message backfill is keyed on user_version, so it must run on
+// this migrate and normalize both the session column and message metadata.
 func TestMigrate_LegacyClaudeForkCheckpoint(t *testing.T) {
 	s := newTestDB(t)
 	parent, _ := s.CreateSession(CreateSessionRequest{Name: "legacy", Agent: "claude"})
 	message, _ := s.CreateMessage(parent.ID, "assistant",
 		[]MessagePart{{Type: "text", Content: "done"}}, MessageMetadata{})
-	turnMessage, _ := s.CreateMessage(parent.ID, "assistant",
-		[]MessagePart{{Type: "text", Content: "later"}}, MessageMetadata{})
 	if _, err := s.db.Exec(`UPDATE chat_messages SET metadata = ? WHERE id = ?`,
 		`{"sdkMessageUuid":"legacy-message"}`, message.ID); err != nil {
 		t.Fatal(err)
@@ -234,8 +266,9 @@ func TestMigrate_LegacyClaudeForkCheckpoint(t *testing.T) {
 		"legacy-session", parent.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`UPDATE chat_messages SET metadata = ? WHERE id = ?`,
-		`{"agentTurnId":"legacy-turn"}`, turnMessage.ID); err != nil {
+	// Recreate the pre-upgrade state; this also covers the crash-recovery
+	// path (a crash before the version bump leaves user_version at 0).
+	if _, err := s.db.Exec(`PRAGMA user_version = 0`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.db.migrate(); err != nil {
@@ -245,13 +278,40 @@ func TestMigrate_LegacyClaudeForkCheckpoint(t *testing.T) {
 	if gotMessage.Metadata.AgentCheckpoint != "legacy-message" {
 		t.Fatalf("message checkpoint = %q", gotMessage.Metadata.AgentCheckpoint)
 	}
-	gotTurnMessage, _ := s.GetMessage(turnMessage.ID)
-	if gotTurnMessage.Metadata.AgentCheckpoint != "legacy-turn" {
-		t.Fatalf("turn checkpoint = %q", gotTurnMessage.Metadata.AgentCheckpoint)
-	}
 	gotSession, _ := s.GetSession(parent.ID)
 	if gotSession.ForkedAtAgentCheckpoint != "legacy-session" {
 		t.Fatalf("session checkpoint = %q", gotSession.ForkedAtAgentCheckpoint)
+	}
+}
+
+// TestMigrate_MessageBackfillRunsOnce pins the startup-cost guarantee and the
+// rollback semantics: once user_version is set, re-running migrate must NOT
+// re-scan chat_messages (message rows written by an older binary after a
+// rollback are the accepted trade-off), while the cheap sessions backfill
+// still runs every boot and picks up legacy fork rows.
+func TestMigrate_MessageBackfillRunsOnce(t *testing.T) {
+	s := newTestDB(t)
+	parent, _ := s.CreateSession(CreateSessionRequest{Name: "p", Agent: "claude"})
+	message, _ := s.CreateMessage(parent.ID, "assistant",
+		[]MessagePart{{Type: "text", Content: "done"}}, MessageMetadata{})
+	if _, err := s.db.Exec(`UPDATE chat_messages SET metadata = ? WHERE id = ?`,
+		`{"sdkMessageUuid":"post-rollback"}`, message.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET forked_at_agent_msg_uuid = ? WHERE id = ?`,
+		"post-rollback-session", parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	gotMessage, _ := s.GetMessage(message.ID)
+	if gotMessage.Metadata.AgentCheckpoint != "" {
+		t.Fatalf("message backfill re-ran on a migrated database: checkpoint = %q", gotMessage.Metadata.AgentCheckpoint)
+	}
+	gotSession, _ := s.GetSession(parent.ID)
+	if gotSession.ForkedAtAgentCheckpoint != "post-rollback-session" {
+		t.Fatalf("session backfill should run every boot: checkpoint = %q", gotSession.ForkedAtAgentCheckpoint)
 	}
 }
 
@@ -277,7 +337,7 @@ func TestForkSession_RejectsBadInput(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := s.ForkSession(tc.parent, "", tc.atMsg, tc.checkpoint)
+			_, err := s.ForkSession(tc.parent, "", tc.atMsg, tc.checkpoint, "")
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tc.wantErrIn)
 			}

@@ -485,7 +485,7 @@ func (s *SQLiteStore) UpdateSession(id string, req UpdateSessionRequest) (*Sessi
 // UI renders the forked prefix immediately and the parent is left untouched.
 //
 // Returns the newly created Session.
-func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint string) (*Session, error) {
+func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint, agent string) (*Session, error) {
 	if parentID == "" || atMessageID == "" {
 		return nil, fmt.Errorf("ForkSession: parentID and atMessageID required")
 	}
@@ -529,13 +529,20 @@ func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint string
 		return nil, fmt.Errorf("fork-at message does not belong to parent session")
 	}
 
+	// Stamp the caller-resolved agent so the fork's first turn runs against
+	// the same backend the fork was gated on; fall back to the parent's
+	// column for callers that don't resolve one.
+	if agent == "" {
+		agent = parent.Agent
+	}
+
 	now := time.Now()
 	newSess := &Session{
 		ID:                      uuid.New().String(),
 		NamespaceID:             parent.NamespaceID,
 		Name:                    name,
 		ProjectID:               parent.ProjectID,
-		Agent:                   parent.Agent,
+		Agent:                   agent,
 		Model:                   parent.Model,
 		Effort:                  parent.Effort,
 		Features:                parent.Features, // inherit per-session UI features (e.g. chrome_devtools)

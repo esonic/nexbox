@@ -349,6 +349,15 @@ func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A named-but-unregistered agent must not silently fall through to the
+	// default backend (ResolveAgent's fallback): the parent's checkpoints
+	// belong to whatever produced them, not to today's default.
+	if parent.Agent != "" {
+		if _, registered := s.Agents[parent.Agent]; !registered {
+			writeError(w, http.StatusBadRequest, "unknown agent for parent session: "+parent.Agent)
+			return
+		}
+	}
 	backend, resolvedAgent := s.ResolveAgent(parent)
 	if backend == nil || !backend.Capabilities().Fork {
 		writeError(w, http.StatusBadRequest, "fork is not supported by this agent")
@@ -379,8 +388,11 @@ func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create new session row + copy messages.
-	newSess, err := s.Store.ForkSession(parentID, req.Name, atMsg.ID, atMsg.Metadata.AgentCheckpoint)
+	// Create new session row + copy messages. Stamp the *resolved* agent on
+	// the new row: the fork was capability-gated against that backend, and an
+	// empty inherited column would let a later default-agent change hand this
+	// checkpoint to a different backend on the first turn.
+	newSess, err := s.Store.ForkSession(parentID, req.Name, atMsg.ID, atMsg.Metadata.AgentCheckpoint, resolvedAgent)
 	if err != nil {
 		log.Printf("[sessions] Fork failed (parent=%s, atMsg=%s): %v", parentID, atMsg.ID, err)
 		writeError(w, http.StatusInternalServerError, "failed to fork session: "+err.Error())

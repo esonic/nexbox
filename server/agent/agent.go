@@ -9,6 +9,13 @@ import (
 // session. Callers should clear AgentSessionID and retry as a new session.
 var ErrSessionExpired = errors.New("agent session expired or not found")
 
+// ErrInterjectOutcomeUnknown is returned by an interject injector when the
+// message may have reached the running turn but delivery could not be
+// confirmed (e.g. a timeout after the request was already written). Callers
+// must NOT fall back to re-sending the message — that risks delivering it
+// twice.
+var ErrInterjectOutcomeUnknown = errors.New("interject outcome unknown")
+
 // Agent is the interface that all coding agent backends must implement.
 // Each backend (Claude Code, Codex CLI, etc.) provides its own implementation
 // that translates between this unified protocol and the backend-specific CLI/API.
@@ -26,6 +33,9 @@ type Agent interface {
 type Capabilities struct {
 	Fork      bool `json:"fork"`
 	Interject bool `json:"interject"`
+	// ChromeDevTools reports whether the backend can attach the per-session
+	// Chrome DevTools MCP server (the chrome_devtools E2E testing feature).
+	ChromeDevTools bool `json:"chrome_devtools"`
 }
 
 // ForkContext identifies a durable point in an existing agent session. The
@@ -183,10 +193,10 @@ type StreamEvent struct {
 	// calls made by the main agent.
 	ParentToolID string `json:"parent_tool_id,omitempty"`
 
-	// Session, checkpoint, and metadata (used by EventDone)
-	SessionID  string                 `json:"session_id,omitempty"`
-	Checkpoint string                 `json:"checkpoint,omitempty"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	// Session and metadata (used by EventDone). The turn's durable checkpoint
+	// travels only on Result.Checkpoint — one delivery channel, not two.
+	SessionID string                 `json:"session_id,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // EventCallback is called for each streaming event from the agent.

@@ -299,6 +299,9 @@ export interface MessageMetadata {
 export interface AgentCapabilities {
   fork: boolean;
   interject: boolean;
+  // Whether the backend supports the chrome_devtools E2E testing feature.
+  // Gated server-side; exposed for future UI gating.
+  chrome_devtools?: boolean;
 }
 
 export interface ChatMessage {

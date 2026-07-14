@@ -39,7 +39,7 @@ func NewClaudeAgent() *ClaudeAgent {
 var _ Agent = (*ClaudeAgent)(nil)
 
 func (a *ClaudeAgent) Capabilities() Capabilities {
-	return Capabilities{Fork: true, Interject: true}
+	return Capabilities{Fork: true, Interject: true, ChromeDevTools: true}
 }
 
 // HasMCP returns whether MCP is configured for this agent.
@@ -694,10 +694,9 @@ func (a *ClaudeAgent) SendMessage(
 			result.Metadata = metadata
 
 			cb(StreamEvent{
-				Type:       EventDone,
-				SessionID:  msg.SessionID,
-				Checkpoint: lastAssistantUUID,
-				Metadata:   metadata,
+				Type:      EventDone,
+				SessionID: msg.SessionID,
+				Metadata:  metadata,
 			})
 
 		case "stream_event":

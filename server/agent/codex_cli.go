@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,11 @@ import (
 	"syscall"
 	"time"
 )
+
+// errCodexRequestNotSent marks a Request failure that happened before the
+// request reached the app-server's stdin. Callers can use it to distinguish
+// "definitely not delivered" from "outcome unknown" (any post-write failure).
+var errCodexRequestNotSent = errors.New("codex request not sent")
 
 // codexRPCError is a JSON-RPC method failure from codex app-server.
 type codexRPCError struct {
@@ -234,7 +240,7 @@ func (c *CodexAppServerClient) Request(ctx context.Context, method string, param
 		c.pendingMu.Lock()
 		delete(c.pending, idKey)
 		c.pendingMu.Unlock()
-		return fmt.Errorf("write request %s: %w", method, err)
+		return fmt.Errorf("%w: write request %s: %v", errCodexRequestNotSent, method, err)
 	}
 
 	if c.Verbose {

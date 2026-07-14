@@ -168,6 +168,11 @@ interface UseChatSessionOptions {
   session: Session;
 }
 
+// Stable fallback while the capabilities map hasn't loaded (or the agent is
+// unknown) — a module-level constant keeps the object identity stable across
+// renders.
+const NO_CAPABILITIES: AgentCapabilities = { fork: false, interject: false };
+
 /**
  * useChatSession — Encapsulates all WebSocket, streaming, and message state
  * management for a chat session. Keeps the ChatPanel component focused on rendering.
@@ -190,7 +195,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
 
   const agentName = session.agent || serverAgent;
-  const capabilities = agentCapabilities[agentName] || { fork: false, interject: false };
+  const capabilities = agentCapabilities[agentName] || NO_CAPABILITIES;
   const modelName = session.model || (availableModels[0] || "");
   const sessionId = session.id;
   const sessionIdRef = useRef(sessionId);
@@ -311,13 +316,32 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     return { todos, isPending: true, title: activeTaskLabel(todos) };
   }, [messages, isStreaming]);
 
-  // Fetch server default agent and available agents
+  // Fetch server default agent and available agents. Fork/interject gating
+  // depends entirely on the capabilities map and this hook mounts once for
+  // the app's lifetime, so a swallowed failure here would silently disable
+  // those controls everywhere until a full reload — keep retrying with
+  // capped backoff until the request succeeds.
   useEffect(() => {
-    serverApi.info().then((info) => setServerAgent(info.agent)).catch(() => {});
-    serverApi.availableAgents().then((data) => {
-      setAvailableAgents(data.agents || []);
-      setAgentCapabilities(data.capabilities || {});
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    serverApi.info().then((info) => {
+      if (!cancelled) setServerAgent(info.agent);
     }).catch(() => {});
+    const load = (attempt: number) => {
+      serverApi.availableAgents().then((data) => {
+        if (cancelled) return;
+        setAvailableAgents(data.agents || []);
+        setAgentCapabilities(data.capabilities || {});
+      }).catch(() => {
+        if (cancelled) return;
+        timer = setTimeout(() => load(attempt + 1), Math.min(15000, 1000 * 2 ** Math.min(attempt, 4)));
+      });
+    };
+    load(0);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {

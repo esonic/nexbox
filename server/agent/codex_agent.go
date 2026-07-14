@@ -42,7 +42,7 @@ func NewCodexAgent() *CodexAgent {
 var _ Agent = (*CodexAgent)(nil)
 
 func (a *CodexAgent) Capabilities() Capabilities {
-	return Capabilities{Fork: true, Interject: true}
+	return Capabilities{Fork: true, Interject: true, ChromeDevTools: true}
 }
 
 // --- app-server payloads (subset) -------------------------------------------------------------
@@ -310,14 +310,11 @@ func (a *CodexAgent) SendMessage(
 		doneEmitted = true
 		usage := latestTokenUsage
 		sessionID := result.SessionID
-		activeTurnID := currentTurnID
-		stateMu.Unlock()
+		if turnID == "" {
+			turnID = currentTurnID
+		}
 
 		metadata := map[string]interface{}{}
-		if turnID == "" {
-			turnID = activeTurnID
-		}
-		result.Checkpoint = turnID
 		if usage != nil {
 			metadata["inputTokens"] = int(usage.TokenUsage.Last.InputTokens)
 			metadata["outputTokens"] = int(usage.TokenUsage.Last.OutputTokens)
@@ -332,7 +329,11 @@ func (a *CodexAgent) SendMessage(
 			metadata["reasoningOutputTokens"] = int(usage.TokenUsage.Last.ReasoningOutputTokens)
 			metadata["totalTokens"] = int(usage.TokenUsage.Last.TotalTokens)
 		}
+		// result is also read by the main goroutine's ctx.Done() return path;
+		// every write/read of it after the turn starts must hold stateMu.
+		result.Checkpoint = turnID
 		result.Metadata = metadata
+		stateMu.Unlock()
 
 		if turn != nil && turn.Status == "failed" && turn.Error != nil && turn.Error.Message != "" {
 			errMsg := turn.Error.Message
@@ -343,10 +344,9 @@ func (a *CodexAgent) SendMessage(
 		}
 
 		cb(StreamEvent{
-			Type:       EventDone,
-			SessionID:  sessionID,
-			Checkpoint: turnID,
-			Metadata:   metadata,
+			Type:      EventDone,
+			SessionID: sessionID,
+			Metadata:  metadata,
 		})
 
 		turnDoneOnce.Do(func() { turnDone <- struct{}{} })
@@ -1093,6 +1093,7 @@ func (a *CodexAgent) SendMessage(
 
 	// Start, resume, or fork a thread. A Codex fork must happen before the
 	// first turn so turn/start appends to the new thread rather than the parent.
+	var threadID string
 	if req.Fork != nil {
 		if req.Fork.SessionID == "" || req.Fork.Checkpoint == "" {
 			return Result{}, errors.New("codex fork requires session id and checkpoint")
@@ -1101,7 +1102,7 @@ func (a *CodexAgent) SendMessage(
 		if err := client.Request(ctx, "thread/fork", a.buildThreadForkParams(req), &resp); err != nil {
 			return Result{}, fmt.Errorf("fork codex thread: %w", err)
 		}
-		result.SessionID = resp.Thread.ID
+		threadID = resp.Thread.ID
 	} else if req.SessionID != "" {
 		var resp codexThreadResponse
 		err := client.Request(ctx, "thread/resume", a.buildThreadResumeParams(req), &resp)
@@ -1111,21 +1112,30 @@ func (a *CodexAgent) SendMessage(
 			}
 			return Result{}, err
 		}
-		result.SessionID = resp.Thread.ID
+		threadID = resp.Thread.ID
 	} else {
 		var resp codexThreadResponse
 		if err := client.Request(ctx, "thread/start", a.buildThreadStartParams(req), &resp); err != nil {
 			return Result{}, err
 		}
-		result.SessionID = resp.Thread.ID
+		threadID = resp.Thread.ID
 	}
-	if result.SessionID == "" {
+	// The thread/started notification handler writes result.SessionID on the
+	// reader goroutine under stateMu; this write must take the same lock.
+	stateMu.Lock()
+	if threadID != "" {
+		result.SessionID = threadID
+	} else {
+		threadID = result.SessionID
+	}
+	stateMu.Unlock()
+	if threadID == "" {
 		return Result{}, errors.New("codex app-server did not return thread id")
 	}
 
 	// Start the turn.
 	turnStartParams := map[string]interface{}{
-		"threadId": result.SessionID,
+		"threadId": threadID,
 		"input": []map[string]interface{}{
 			{
 				"type": "text",
@@ -1146,12 +1156,16 @@ func (a *CodexAgent) SendMessage(
 		currentTurnID = turnResp.Turn.ID
 		stateMu.Unlock()
 		if req.RegisterInterject != nil {
-			threadID := result.SessionID
-			turnID := turnResp.Turn.ID
 			req.RegisterInterject(func(content string) error {
 				if strings.TrimSpace(content) == "" {
 					return errors.New("codex steer input must not be empty")
 				}
+				// Read the turn id at call time so the closure and the
+				// notification handlers share one source of truth instead of
+				// a registration-time snapshot that could drift from it.
+				stateMu.Lock()
+				turnID := currentTurnID
+				stateMu.Unlock()
 				steerCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				defer cancel()
 				var resp codexTurnSteerResponse
@@ -1161,23 +1175,46 @@ func (a *CodexAgent) SendMessage(
 					buildCodexTurnSteerParams(threadID, turnID, content),
 					&resp,
 				); err != nil {
-					return fmt.Errorf("steer codex turn: %w", err)
-				}
-				if resp.TurnID != "" && resp.TurnID != turnID {
-					return fmt.Errorf("steer accepted by unexpected turn %s", resp.TurnID)
+					// Only two failures guarantee the steer never reached the
+					// turn: the request was never written, or the app-server
+					// explicitly rejected it. Everything else (context
+					// expiry, connection lost or decode failure while waiting
+					// for the response) happens after the write, so the steer
+					// may already be folded into the turn — mark the outcome
+					// unknown so the caller doesn't re-send the same message
+					// through the ordinary queue path.
+					var rpcErr *codexRPCError
+					if errors.Is(err, errCodexRequestNotSent) || errors.As(err, &rpcErr) {
+						return fmt.Errorf("steer codex turn: %w", err)
+					}
+					return fmt.Errorf("%w: steer codex turn: %v", ErrInterjectOutcomeUnknown, err)
 				}
 				return nil
 			})
 		}
 	}
 
+	// snapshotResult copies result under stateMu so the early-return paths
+	// below don't race with emitDone's writes on the reader goroutine.
+	// A stopped or crashed turn deliberately keeps Checkpoint empty: the
+	// in-flight turn never reaches a terminal state on the codex side (Stop
+	// cancels the context and the app-server is killed without a
+	// turn/interrupt), so its id is not a forkable anchor — the UI hides the
+	// fork button for that message instead of offering a fork that would
+	// fail at runtime.
+	snapshotResult := func() Result {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		return result
+	}
+
 	// Wait for completion or termination.
 	select {
 	case <-turnDone:
 	case <-ctx.Done():
-		return result, context.Canceled
+		return snapshotResult(), context.Canceled
 	case <-client.readDone:
-		return result, fmt.Errorf("codex app-server terminated before turn completion: %w; stderr: %s", client.readErr, client.Stderr())
+		return snapshotResult(), fmt.Errorf("codex app-server terminated before turn completion: %w; stderr: %s", client.readErr, client.Stderr())
 	}
 
 	// Defensive done emission when the server exits right after turn completion.

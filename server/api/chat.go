@@ -85,7 +85,18 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 				s.Hub.Emit(chatReq.SessionID, ChatEvent{Type: "error", Message: "empty message"})
 				continue
 			}
-			s.handleInterject(chatReq.SessionID, chatReq.Content, chatReq.Parts, chatReq.Images, chatReq.Features)
+			// Dispatch off the read loop: unlike Claude's near-instant stdin
+			// write, an interject can be a network round-trip to the backend
+			// (Codex turn/steer, up to 30s). Running it inline would stall
+			// every frame on this connection — including "stop". The
+			// per-session lock keeps rapid-fire interjects delivering and
+			// persisting in arrival order.
+			go func(req ChatRequest) {
+				mu := s.interjectLock(req.SessionID)
+				mu.Lock()
+				defer mu.Unlock()
+				s.handleInterject(req.SessionID, req.Content, req.Parts, req.Images, req.Features)
+			}(chatReq)
 
 		case "tool_response":
 			if chatReq.SessionID == "" || chatReq.ToolUseID == "" {
@@ -380,10 +391,10 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		var chromeMCPURL string
 		var chromeMCPToolNames []string
 		if containsFeature(activeFeatures, "chrome_devtools") {
-			if agentNameUsed != "claude" && agentNameUsed != "codex" {
+			if !sessionAgent.Capabilities().ChromeDevTools {
 				s.Hub.Emit(sessionID, ChatEvent{
 					Type:    "error",
-					Message: "E2E browser testing is currently only supported with the Claude and Codex agents. Please switch in Settings.",
+					Message: "E2E browser testing is not supported by the current agent. Please switch in Settings.",
 				})
 				return
 			}
@@ -699,7 +710,6 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			case agent.EventDone:
 				mu.Lock()
 				metadata.SessionID = event.SessionID
-				metadata.AgentCheckpoint = event.Checkpoint
 				if event.Metadata != nil {
 					if v, ok := event.Metadata["inputTokens"].(int); ok {
 						metadata.InputTokens = v
@@ -931,11 +941,9 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		mu.Lock()
 		metadata.DurationMs = durationMs
 		metadata.ToolCalls = toolCallCount
-		// Stopped/error turns may not emit EventDone, so preserve the typed
-		// checkpoint returned by the adapter as a fallback.
-		if metadata.AgentCheckpoint == "" {
-			metadata.AgentCheckpoint = agentResult.Checkpoint
-		}
+		// The checkpoint travels only on the adapter's Result — set on every
+		// path, including stopped/error turns that never emit EventDone.
+		metadata.AgentCheckpoint = agentResult.Checkpoint
 		finalParts := make([]MessagePart, len(msgParts))
 		copy(finalParts, msgParts)
 		finalMeta := metadata
@@ -1024,6 +1032,26 @@ func (s *Server) handleInterject(sessionID, message string, parts []MessagePart,
 	content := agent.BuildInterjectPrompt(message, imagePaths)
 
 	ok, err := s.SessionManager.Interject(sessionID, content)
+	if err != nil && errors.Is(err, agent.ErrInterjectOutcomeUnknown) {
+		// The message may already be folded into the live turn; re-sending it
+		// through the queue path would risk delivering it twice. Persist it
+		// (so the transcript has no gap if it did land) and surface the
+		// uncertainty, letting the user decide whether to resend.
+		log.Printf("[interject] delivery outcome unknown for %s, not re-sending: %v", sessionID, err)
+		persistParts := parts
+		if len(persistParts) == 0 {
+			persistParts = []MessagePart{{Type: "text", Content: message}}
+		}
+		if _, perr := s.Store.CreateMessage(sessionID, "user", persistParts, MessageMetadata{Interjected: true}); perr != nil {
+			log.Printf("[interject] Failed to persist unknown-outcome message: %v", perr)
+		}
+		s.Hub.Emit(sessionID, ChatEvent{Type: "user_message", Content: message})
+		s.Hub.Emit(sessionID, ChatEvent{
+			Type:    "error",
+			Message: "Interjection may not have reached the running turn. If the agent doesn't pick it up, send it again.",
+		})
+		return
+	}
 	if !ok || err != nil {
 		if err != nil {
 			log.Printf("[interject] live injection failed for %s, falling back to queue/send: %v", sessionID, err)
