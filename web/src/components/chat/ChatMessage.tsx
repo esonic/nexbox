@@ -618,7 +618,9 @@ export function ForkButton({ message, supported }: { message: ChatMessageType; s
     setBusy(true);
     try {
       if (!hasForkAnchor) return;
-      const newSess = await sessionsApi.fork(currentSession.id, message.id);
+      // serverId is the durable DB row id learned at turn end; fall back to id
+      // for messages loaded straight from the API (where id already is it).
+      const newSess = await sessionsApi.fork(currentSession.id, message.serverId ?? message.id);
       setSessions([newSess, ...sessions.filter((s) => s.id !== newSess.id)]);
       setActiveSessionId(newSess.id);
     } catch (err) {
@@ -629,7 +631,7 @@ export function ForkButton({ message, supported }: { message: ChatMessageType; s
     } finally {
       setBusy(false);
     }
-  }, [busy, currentSession, hasForkAnchor, message.id, sessions, setSessions, setActiveSessionId]);
+  }, [busy, currentSession, hasForkAnchor, message.serverId, message.id, sessions, setSessions, setActiveSessionId]);
 
   if (!canFork) return null;
 

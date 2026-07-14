@@ -49,6 +49,23 @@ func TestInterjectQueue_FIFOPerSession(t *testing.T) {
 	}
 }
 
+// TestInterjectQueue_PanicDoesNotWedgeSession: a panicking handler must not
+// kill the drainer permanently — the queue must recover and keep processing
+// later items for that session (and not crash the process).
+func TestInterjectQueue_PanicDoesNotWedgeSession(t *testing.T) {
+	var q interjectQueue
+	q.enqueue("s", func() { panic("boom") })
+
+	ran := make(chan struct{}, 1)
+	q.enqueue("s", func() { ran <- struct{}{} })
+
+	select {
+	case <-ran:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drainer wedged after a handler panic: later item never ran")
+	}
+}
+
 // TestInterjectQueue_CleansUpWhenDrained: an idle session must not keep an
 // entry in the queue map (the old per-session mutex map leaked one mutex per
 // session forever).

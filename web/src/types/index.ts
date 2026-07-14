@@ -313,4 +313,9 @@ export interface ChatMessage {
   created_at: string;
   // Local UI states (not persisted)
   isStreaming?: boolean;
+  // Durable server message id learned when a streaming turn finishes. `id`
+  // stays the optimistic client id so the React key is stable across the
+  // turn-end transition (rewriting it would remount the message subtree);
+  // fork uses serverId ?? id to reach the real DB row.
+  serverId?: string;
 }

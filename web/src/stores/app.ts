@@ -407,7 +407,9 @@ export const useAppStore = create<AppState>()(
           return p;
         });
         // Merge execution stats and the opaque fork checkpoint. The durable
-        // server message id replaces the optimistic streaming id.
+        // server message id is stored as serverId (not written over `id`) so
+        // the React key stays stable and the message subtree isn't remounted
+        // at turn end.
         const updatedMetadata = stats || agentCheckpoint
           ? {
               ...lastMsg.metadata,
@@ -430,7 +432,7 @@ export const useAppStore = create<AppState>()(
               ...msgs.slice(0, -1),
               {
                 ...lastMsg,
-                ...(messageId ? { id: messageId } : {}),
+                ...(messageId ? { serverId: messageId } : {}),
                 parts: finalParts,
                 isStreaming: false,
                 metadata: updatedMetadata,

@@ -1,6 +1,9 @@
 package api
 
-import "sync"
+import (
+	"log"
+	"sync"
+)
 
 // interjectQueue serializes work per session in strict arrival order.
 //
@@ -45,9 +48,27 @@ func (q *interjectQueue) enqueue(sessionID string, fn func()) {
 				return
 			}
 			next := items[0]
+			// Release the executed slot so its captured closure can be GC'd
+			// during a long burst instead of being pinned until the queue drains.
+			items[0] = nil
 			q.queues[sessionID] = items[1:]
 			q.mu.Unlock()
-			next()
+			runInterjectItem(next)
 		}
 	}()
+}
+
+// runInterjectItem runs one queued item with panic recovery. Unlike the
+// original inline dispatch (which ran inside net/http's per-connection handler
+// and was shielded by its recover), the drainer is a detached goroutine — an
+// unrecovered panic here would crash the whole server. Recovering keeps the
+// drainer alive so it still returns to the loop and drains/cleans up the rest
+// of the session's queue.
+func runInterjectItem(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[interject] handler panic recovered: %v", r)
+		}
+	}()
+	fn()
 }
