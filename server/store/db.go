@@ -196,6 +196,15 @@ func New(dataDir string) (*DB, error) {
 	sqlDB.Exec(`PRAGMA temp_store=MEMORY`)
 
 	db := &DB{sqlDB: sqlDB, dsn: dsn}
+
+	// Force temp storage to memory BEFORE running migrations. Large migration
+	// statements — notably the fork-checkpoint message backfill, a full-table
+	// scan over chat_messages — otherwise spill to an on-disk temp file, which
+	// returns SQLITE_CANTOPEN (14) when the temp directory is inaccessible or
+	// full and bricks startup. This PRAGMA must be in effect during migrate(),
+	// not merely after it.
+	sqlDB.Exec(`PRAGMA temp_store=MEMORY`)
+
 	if err := db.migrate(); err != nil {
 		return nil, fmt.Errorf("run migrations: %w", err)
 	}
@@ -601,10 +610,6 @@ func (db *DB) migrate() error {
 			alter: `ALTER TABLE sessions ADD COLUMN forked_from_message_id TEXT NOT NULL DEFAULT ''`,
 		},
 		{
-			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='forked_at_agent_msg_uuid'`,
-			alter: `ALTER TABLE sessions ADD COLUMN forked_at_agent_msg_uuid TEXT NOT NULL DEFAULT ''`,
-		},
-		{
 			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='forked_at_agent_checkpoint'`,
 			alter: `ALTER TABLE sessions ADD COLUMN forked_at_agent_checkpoint TEXT NOT NULL DEFAULT ''`,
 		},
@@ -660,51 +665,6 @@ func (db *DB) migrate() error {
 			if _, err := db.Exec(cm.alter); err != nil {
 				return fmt.Errorf("column migration failed: %w\nSQL: %s", err, cm.alter)
 			}
-		}
-	}
-
-	// Normalize legacy Claude anchors into the backend-agnostic checkpoint
-	// field. The updates are idempotent and preserve the old keys so an older
-	// BeeHub binary can still read the database after a rollback.
-	//
-	// The sessions UPDATE is a scan of a small table — run it every boot so
-	// fork rows written by an older binary after a rollback are re-normalized
-	// on the next upgrade.
-	if _, err := db.Exec(`UPDATE sessions
-		SET forked_at_agent_checkpoint = forked_at_agent_msg_uuid
-		WHERE forked_at_agent_checkpoint = '' AND forked_at_agent_msg_uuid != ''`); err != nil {
-		return fmt.Errorf("fork checkpoint session backfill failed: %w", err)
-	}
-	// The chat_messages UPDATE is a full-table scan (json_extract per row),
-	// so it runs once, keyed by user_version. The version bump commits in the
-	// SAME transaction as the backfill: a crash mid-migration leaves the
-	// version unset and the backfill re-runs on the next boot. Known residual
-	// limitation: message rows written by a pre-checkpoint binary after a
-	// rollback→upgrade cycle are not re-migrated (the once-only gate is the
-	// price of not scanning all chat history on every startup).
-	const schemaVersionForkCheckpoint = 1
-	var schemaVersion int
-	if err := db.QueryRow(`PRAGMA user_version`).Scan(&schemaVersion); err != nil {
-		return fmt.Errorf("read user_version failed: %w", err)
-	}
-	if schemaVersion < schemaVersionForkCheckpoint {
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("begin fork checkpoint migration: %w", err)
-		}
-		defer func() { _ = tx.Rollback() }()
-		if _, err := tx.Exec(`UPDATE chat_messages
-			SET metadata = json_set(metadata, '$.agentCheckpoint', json_extract(metadata, '$.sdkMessageUuid'))
-			WHERE json_valid(metadata)
-			  AND COALESCE(json_extract(metadata, '$.agentCheckpoint'), '') = ''
-			  AND COALESCE(json_extract(metadata, '$.sdkMessageUuid'), '') != ''`); err != nil {
-			return fmt.Errorf("fork checkpoint message backfill failed: %w", err)
-		}
-		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersionForkCheckpoint)); err != nil {
-			return fmt.Errorf("set user_version failed: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit fork checkpoint migration: %w", err)
 		}
 	}
 

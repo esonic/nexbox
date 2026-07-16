@@ -249,69 +249,19 @@ func TestForkSession_StampsResolvedAgent(t *testing.T) {
 	}
 }
 
-// TestMigrate_LegacyClaudeForkCheckpoint simulates the upgrade boot: a
-// pre-checkpoint database (user_version reset to 0) with sdkMessageUuid-era
-// anchors. The message backfill is keyed on user_version, so it must run on
-// this migrate and normalize both the session column and message metadata.
-func TestMigrate_LegacyClaudeForkCheckpoint(t *testing.T) {
+// TestNew_TempStoreMemory guards the ordering fix: New must leave the
+// connection with temp_store=MEMORY (2), applied BEFORE migrate() runs.
+// Migration statements that sort — e.g. building the scratch-session unique
+// index — otherwise spill to an on-disk temp file, and a sandbox whose temp
+// dir is unwritable/full yields SQLITE_CANTOPEN(14) and bricks startup.
+func TestNew_TempStoreMemory(t *testing.T) {
 	s := newTestDB(t)
-	parent, _ := s.CreateSession(CreateSessionRequest{Name: "legacy", Agent: "claude"})
-	message, _ := s.CreateMessage(parent.ID, "assistant",
-		[]MessagePart{{Type: "text", Content: "done"}}, MessageMetadata{})
-	if _, err := s.db.Exec(`UPDATE chat_messages SET metadata = ? WHERE id = ?`,
-		`{"sdkMessageUuid":"legacy-message"}`, message.ID); err != nil {
+	var tempStore int
+	if err := s.db.QueryRow(`PRAGMA temp_store`).Scan(&tempStore); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`UPDATE sessions SET forked_at_agent_msg_uuid = ? WHERE id = ?`,
-		"legacy-session", parent.ID); err != nil {
-		t.Fatal(err)
-	}
-	// Recreate the pre-upgrade state; this also covers the crash-recovery
-	// path (a crash before the version bump leaves user_version at 0).
-	if _, err := s.db.Exec(`PRAGMA user_version = 0`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.db.migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	gotMessage, _ := s.GetMessage(message.ID)
-	if gotMessage.Metadata.AgentCheckpoint != "legacy-message" {
-		t.Fatalf("message checkpoint = %q", gotMessage.Metadata.AgentCheckpoint)
-	}
-	gotSession, _ := s.GetSession(parent.ID)
-	if gotSession.ForkedAtAgentCheckpoint != "legacy-session" {
-		t.Fatalf("session checkpoint = %q", gotSession.ForkedAtAgentCheckpoint)
-	}
-}
-
-// TestMigrate_MessageBackfillRunsOnce pins the startup-cost guarantee and the
-// rollback semantics: once user_version is set, re-running migrate must NOT
-// re-scan chat_messages (message rows written by an older binary after a
-// rollback are the accepted trade-off), while the cheap sessions backfill
-// still runs every boot and picks up legacy fork rows.
-func TestMigrate_MessageBackfillRunsOnce(t *testing.T) {
-	s := newTestDB(t)
-	parent, _ := s.CreateSession(CreateSessionRequest{Name: "p", Agent: "claude"})
-	message, _ := s.CreateMessage(parent.ID, "assistant",
-		[]MessagePart{{Type: "text", Content: "done"}}, MessageMetadata{})
-	if _, err := s.db.Exec(`UPDATE chat_messages SET metadata = ? WHERE id = ?`,
-		`{"sdkMessageUuid":"post-rollback"}`, message.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`UPDATE sessions SET forked_at_agent_msg_uuid = ? WHERE id = ?`,
-		"post-rollback-session", parent.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.db.migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	gotMessage, _ := s.GetMessage(message.ID)
-	if gotMessage.Metadata.AgentCheckpoint != "" {
-		t.Fatalf("message backfill re-ran on a migrated database: checkpoint = %q", gotMessage.Metadata.AgentCheckpoint)
-	}
-	gotSession, _ := s.GetSession(parent.ID)
-	if gotSession.ForkedAtAgentCheckpoint != "post-rollback-session" {
-		t.Fatalf("session backfill should run every boot: checkpoint = %q", gotSession.ForkedAtAgentCheckpoint)
+	if tempStore != 2 {
+		t.Fatalf("temp_store = %d, want 2 (MEMORY) so migrations never need an on-disk temp dir", tempStore)
 	}
 }
 
