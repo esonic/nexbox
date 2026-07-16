@@ -15,6 +15,8 @@ import { toast } from "sonner";
 import { useAppStore } from "@/stores/app";
 import { usePreferences, CHAT_FONT_SIZE_PX } from "@/stores/preferences";
 import { useSmoothText } from "@/hooks/useSmoothText";
+import { useThemeMode } from "@/hooks/useThemeMode";
+import { BorderBeam } from "@/components/ui/border-beam";
 import { formatDuration } from "@/lib/format";
 import type { ChatMessage as ChatMessageType, MessagePart, Task, AssetType } from "@/types";
 
@@ -809,6 +811,7 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
   const loadingRef = useRef(false);
   const projectRoot = useAppStore((s) => s.currentProject?.git_repo_path);
   const chatFontSize = usePreferences((s) => s.chatFontSize);
+  const themeMode = useThemeMode();
 
   const effectiveParts = loadedParts || message.parts;
   const groups = useMemo(() => groupParts(effectiveParts), [effectiveParts]);
@@ -957,8 +960,16 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
           </div>
         ) : (
           <div>
-            <div className="rounded-2xl px-4 py-3 bg-muted/50 max-w-full">
-              {message.isStreaming ? (
+            {/* Bottom "working" beam — lit while the assistant streams, fades out when done. */}
+            <BorderBeam
+              size="line"
+              theme={themeMode}
+              active={message.isStreaming}
+              duration={6}
+              className="block max-w-full"
+            >
+              <div className="rounded-2xl px-4 py-3 bg-muted/50 max-w-full">
+                {message.isStreaming ? (
                 <>
                   {groups.length === 0 && <ThinkingIndicator />}
                   {groups.map((group, gi) => {
@@ -1040,7 +1051,8 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
                   )}
                 </>
               )}
-            </div>
+              </div>
+            </BorderBeam>
           </div>
         )}
       </div>

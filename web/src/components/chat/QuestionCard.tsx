@@ -1,8 +1,10 @@
 import { useState, useCallback } from "react";
 import { CircleHelp, ChevronUp, ChevronDown, Check } from "lucide-react";
+import { BorderBeam } from "@/components/ui/border-beam";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { useThemeMode } from "@/hooks/useThemeMode";
 
 // Types matching the MCP tool schema
 interface QuestionOption {
@@ -40,6 +42,7 @@ const OPTION_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 export const OTHER_OPTION_ID = "__other__";
 
 export function QuestionCard({ title, questions, onSubmit, onSkip, disabled }: QuestionCardProps) {
+  const themeMode = useThemeMode();
   const [currentIndex, setCurrentIndex] = useState(0);
   // selections: map of question_id -> set of selected option_ids
   const [selections, setSelections] = useState<Record<string, Set<string>>>(() => {
@@ -116,7 +119,8 @@ export function QuestionCard({ title, questions, onSubmit, onSkip, disabled }: Q
   if (!currentQuestion) return null;
 
   return (
-    <div className="border border-border rounded-lg overflow-hidden bg-background">
+    <BorderBeam size="pulse-outside" theme={themeMode} className="block">
+      <div className="border border-border rounded-lg overflow-hidden bg-background">
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-2 border-b bg-muted/30">
         <CircleHelp className="h-4 w-4 text-muted-foreground" />
@@ -258,7 +262,8 @@ export function QuestionCard({ title, questions, onSubmit, onSkip, disabled }: Q
           </Button>
         </div>
       </div>
-    </div>
+      </div>
+    </BorderBeam>
   );
 }
 

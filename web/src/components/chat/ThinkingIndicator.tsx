@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
-import { Spinner } from "@/components/ui/spinner";
 import { ScrambleText } from "@/components/ui/scramble-text";
 
 /**
@@ -115,9 +114,10 @@ const VERBS = [
  * whimsical verb that swaps every 5s. To avoid the clustering/repeats of pure
  * random choice, we pick a random starting offset and then walk the pool in
  * order — so all of the verbs cycle through before any repeats. The verb
- * "decodes" into place via ScrambleText, and its color drifts through the same
- * pastel hue cycle as the spinner (see `.mood-text` in index.css). font-mono
- * keeps the width stable while characters scramble.
+ * "decodes" into place via ScrambleText, and its color drifts through a pastel
+ * hue cycle (see `.mood-text` in index.css). font-mono keeps the width stable
+ * while characters scramble. The "working" motion now lives in the BorderBeam
+ * at the bottom of the streaming card, so this indicator carries no spinner.
  */
 export function ThinkingIndicator({ className }: { className?: string }) {
   const indexRef = useRef(Math.floor(Math.random() * VERBS.length));
@@ -132,8 +132,7 @@ export function ThinkingIndicator({ className }: { className?: string }) {
   }, []);
 
   return (
-    <div className={cn("flex items-center gap-2", className)}>
-      <Spinner className="size-4" />
+    <div className={cn("flex items-center", className)}>
       <span className="mood-text text-sm font-mono">
         <ScrambleText text={verb} />…
       </span>

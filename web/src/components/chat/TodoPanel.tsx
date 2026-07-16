@@ -1,5 +1,7 @@
 import { ListChecks, CheckCircle2, CircleDot, Circle, CircleDashed, Ban } from "lucide-react";
+import { BorderBeam } from "@/components/ui/border-beam";
 import { cn } from "@/lib/utils";
+import { useThemeMode } from "@/hooks/useThemeMode";
 
 interface TodoItem {
   id: string;
@@ -29,13 +31,15 @@ const isDone = (status: string) => status === "TODO_STATUS_COMPLETED" || status 
 const isActive = (status: string) => status === "TODO_STATUS_IN_PROGRESS" || status === "in_progress";
 
 export function TodoPanel({ todos, title }: TodoPanelProps) {
+  const themeMode = useThemeMode();
   if (todos.length === 0) return null;
 
   const completedCount = todos.filter((t) => isDone(t.status)).length;
   const totalCount = todos.length;
 
   return (
-    <div className="border border-border rounded-lg overflow-hidden bg-background mb-3">
+    <BorderBeam size="pulse-outside" theme={themeMode} className="block mb-3">
+      <div className="border border-border rounded-lg overflow-hidden bg-background">
       <div className="flex items-center gap-2 px-4 py-2 border-b bg-muted/30">
         <ListChecks className="h-4 w-4 text-muted-foreground shrink-0" />
         <span className="text-sm font-medium truncate">{title || "Tasks"}</span>
@@ -72,6 +76,7 @@ export function TodoPanel({ todos, title }: TodoPanelProps) {
           );
         })}
       </div>
-    </div>
+      </div>
+    </BorderBeam>
   );
 }
