@@ -960,15 +960,8 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
           </div>
         ) : (
           <div>
-            {/* Bottom "working" beam — lit while the assistant streams, fades out when done. */}
-            <BorderBeam
-              size="line"
-              theme={themeMode}
-              active={message.isStreaming}
-              duration={6}
-              className="block max-w-full"
-            >
-              <div className="rounded-2xl px-4 py-3 bg-muted/50 max-w-full">
+            <div className="relative isolate overflow-hidden rounded-2xl bg-muted/50 max-w-full">
+              <div className="relative z-0 px-4 py-3 max-w-full">
                 {message.isStreaming ? (
                 <>
                   {groups.length === 0 && <ThinkingIndicator />}
@@ -1052,7 +1045,28 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
                 </>
               )}
               </div>
-            </BorderBeam>
+              {/*
+                Keep the paint-heavy moving masks on a fixed-height overlay.
+                Wrapping the message itself makes the animated raster area grow
+                with every streamed paragraph/tool card and eventually starves
+                scrolling and input of frame time.
+
+                BorderBeam's generated CSS sets its root to position:relative,
+                so position:absolute must be inline to win the cascade.
+              */}
+              <BorderBeam
+                size="line"
+                theme={themeMode}
+                active={message.isStreaming}
+                duration={6}
+                borderRadius={16}
+                aria-hidden="true"
+                className="inset-x-0 bottom-0 z-10 h-[128px] w-full pointer-events-none"
+                style={{ position: "absolute" }}
+              >
+                <div className="h-full w-full" />
+              </BorderBeam>
+            </div>
           </div>
         )}
       </div>
