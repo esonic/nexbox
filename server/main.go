@@ -142,14 +142,21 @@ func main() {
 		}
 	}()
 
+	// Created before the Chrome manager so the reaper can consult it (below).
+	sessionManager := agent.NewSessionManager()
+
 	// Per-session Chrome DevTools MCP manager. Headless is read from config on
 	// each new-session creation, so toggling the setting affects newly spawned
 	// Chrome instances without a restart.
+	// After chromeIdleTimeout the reaper frees the idle Chrome process; a
+	// session with a running turn keeps its MCP endpoint (so the live CLI can
+	// reconnect and relaunch Chrome), while one with no running turn is torn
+	// down fully and re-created lazily on the next turn.
 	const chromeIdleTimeout = 10 * time.Minute
 	chromeBaseDir := filepath.Join(*dataDir, "chrome")
 	chromeManager := chromemcp.NewChromeManager(chromeBaseDir, *listen, func() bool {
 		return cfgMgr.Get().ChromeHeadless
-	}, chromeIdleTimeout)
+	}, sessionManager.IsActive, chromeIdleTimeout)
 
 	// Initialize all agent backends
 	allAgents := make(map[string]agent.Agent)
@@ -188,7 +195,6 @@ func main() {
 		defaultAgent = allAgents[defaultAgentName]
 	}
 	log.Printf("  Default agent: %s", defaultAgentName)
-	sessionManager := agent.NewSessionManager()
 
 	hub := api.NewChatHub()
 	// Resolve session → project → owner for the hub, so per-session events

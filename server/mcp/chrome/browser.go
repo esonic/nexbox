@@ -45,6 +45,7 @@ type BrowserManager struct {
 	currentPage int
 	nextPageID  int
 	launched    bool
+	generation  int             // bumped each Launch; ties an exit watcher to its instance
 	parentCtx   context.Context // long-lived parent for re-launch
 }
 
@@ -102,8 +103,9 @@ func (bm *BrowserManager) Launch(parentCtx context.Context) error {
 		}
 	}
 
-	bm.allocCtx, bm.allocCancel = chromedp.NewExecAllocator(parentCtx, chromeOpts...)
-	bm.browserCtx, _ = chromedp.NewContext(bm.allocCtx)
+	allocCtx, allocCancel := chromedp.NewExecAllocator(parentCtx, chromeOpts...)
+	bm.allocCtx, bm.allocCancel = allocCtx, allocCancel
+	bm.browserCtx, _ = chromedp.NewContext(allocCtx)
 
 	// Log the resolved exec path for diagnostics.
 	resolvedExec := execPath
@@ -175,22 +177,27 @@ func (bm *BrowserManager) Launch(parentCtx context.Context) error {
 
 	bm.parentCtx = parentCtx
 	bm.launched = true
+	bm.generation++
+	gen := bm.generation
 
 	// Log Chrome binary and version info.
 	bm.logBrowserInfo()
 
-	// Watch for unexpected Chrome exit (e.g. user closes the window).
+	// Watch for unexpected Chrome exit (e.g. user closes the window, or the idle
+	// reaper's Close). Bound to this launch's allocCtx and generation so that a
+	// Close immediately followed by a relaunch can't have the old watcher stomp
+	// the new instance's launched/pages state.
 	go func() {
-		<-bm.allocCtx.Done()
+		<-allocCtx.Done()
 		bm.mu.Lock()
-		wasLaunched := bm.launched
+		defer bm.mu.Unlock()
+		if bm.generation != gen || !bm.launched {
+			return // superseded by a newer launch, or already torn down
+		}
 		bm.launched = false
 		bm.pages = make(map[int]*pageState)
 		bm.currentPage = 0
-		bm.mu.Unlock()
-		if wasLaunched {
-			log.Printf("[chrome] Browser process exited unexpectedly")
-		}
+		log.Printf("[chrome] Browser process exited unexpectedly")
 	}()
 
 	return nil

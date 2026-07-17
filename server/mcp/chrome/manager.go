@@ -14,9 +14,10 @@ import (
 type ChromeManager struct {
 	mu          sync.Mutex
 	sessions    map[string]*Server
-	baseDir     string      // base directory for per-session data
-	listenHost  string      // host part for MCP servers (e.g. "127.0.0.1")
-	headlessFn  func() bool // resolved at session-create time so toggling the setting affects new sessions
+	baseDir     string                      // base directory for per-session data
+	listenHost  string                      // host part for MCP servers (e.g. "127.0.0.1")
+	headlessFn  func() bool                 // resolved at session-create time so toggling the setting affects new sessions
+	isActiveFn  func(sessionID string) bool // reports whether a session has a running turn (a live CLI holding the MCP URL)
 	idleTimeout time.Duration
 	reaperStop  chan struct{}
 	reaperDone  chan struct{}
@@ -25,18 +26,26 @@ type ChromeManager struct {
 // NewChromeManager creates a manager. baseDir is the root for per-session
 // Chrome profiles and screenshots (e.g. "data/chrome"). headlessFn is called
 // each time a new session's Chrome server is constructed; the value is captured
-// at that point and applied on Chrome's lazy first launch. If idleTimeout > 0,
-// a background reaper shuts down servers untouched for that long; sessions can
-// re-launch lazily on the next tool call.
-func NewChromeManager(baseDir, listenHost string, headlessFn func() bool, idleTimeout time.Duration) *ChromeManager {
+// at that point and applied on Chrome's lazy first launch. isActiveFn reports
+// whether a session currently has a running turn (a live CLI still connected to
+// its MCP URL); the reaper uses it to decide whether it may drop the endpoint.
+// If idleTimeout > 0, a background reaper frees idle Chrome processes: sessions
+// with a running turn keep their MCP server (and port) so the CLI can reconnect
+// and relaunch Chrome lazily, while idle sessions with no running turn are torn
+// down entirely and re-created lazily on the next turn.
+func NewChromeManager(baseDir, listenHost string, headlessFn func() bool, isActiveFn func(sessionID string) bool, idleTimeout time.Duration) *ChromeManager {
 	if headlessFn == nil {
 		headlessFn = func() bool { return false }
+	}
+	if isActiveFn == nil {
+		isActiveFn = func(string) bool { return false }
 	}
 	m := &ChromeManager{
 		sessions:    make(map[string]*Server),
 		baseDir:     baseDir,
 		listenHost:  listenHost,
 		headlessFn:  headlessFn,
+		isActiveFn:  isActiveFn,
 		idleTimeout: idleTimeout,
 	}
 	if idleTimeout > 0 {
@@ -134,8 +143,8 @@ func (m *ChromeManager) ActiveSessions() int {
 	return len(m.sessions)
 }
 
-// runReaper periodically removes Chrome instances that have been idle longer
-// than idleTimeout. Removed sessions re-launch on the next tool call.
+// runReaper periodically frees Chrome instances that have been idle longer
+// than idleTimeout. See reapIdle for the keep-alive-vs-teardown policy.
 func (m *ChromeManager) runReaper() {
 	defer close(m.reaperDone)
 	// Tick at min(timeout/4, 1min). With a 30m timeout this is ~7m30s; with a
@@ -160,20 +169,58 @@ func (m *ChromeManager) runReaper() {
 	}
 }
 
+// reapIdle frees Chrome instances idle longer than idleTimeout. The heavy
+// resource (the Chrome process) is always released to reclaim memory; whether
+// the lightweight MCP HTTP server is also torn down depends on liveness:
+//
+//   - Session has a running turn (isActiveFn true): its claude CLI is still
+//     connected to this MCP URL and can't be re-pointed, so the HTTP server (and
+//     its port) is kept alive and only Chrome is stopped. The next Chrome tool
+//     call relaunches Chrome via ensureBrowser and the CLI reconnects seamlessly.
+//   - No running turn: no CLI holds the URL, so the server is shut down fully and
+//     dropped from the map. A future turn lazily creates a fresh one.
 func (m *ChromeManager) reapIdle() {
 	cutoff := time.Now().Add(-m.idleTimeout)
 
 	m.mu.Lock()
-	var stale []string
+	var idle []string
 	for sid, srv := range m.sessions {
 		if srv.LastUsed().Before(cutoff) {
-			stale = append(stale, sid)
+			idle = append(idle, sid)
 		}
 	}
 	m.mu.Unlock()
 
-	for _, sid := range stale {
-		log.Printf("[chrome-manager] Reaping idle Chrome MCP for session %s (idle > %s)", sid, m.idleTimeout)
-		m.Remove(sid)
+	for _, sid := range idle {
+		if m.isActiveFn(sid) {
+			// Turn still running — free Chrome but keep the endpoint alive.
+			// ReleaseBrowser re-checks idle + in-flight under the server's own
+			// lock, so a call that started since our scan isn't cut off.
+			m.mu.Lock()
+			srv := m.sessions[sid]
+			m.mu.Unlock()
+			if srv != nil {
+				srv.ReleaseBrowser(cutoff)
+			}
+			continue
+		}
+
+		// No running turn — fully reclaim the server. Re-check idle under the
+		// lock so a turn that grabbed this server between the scan and now
+		// (GetOrCreate touches it) is not torn down out from under its
+		// freshly-spawned CLI.
+		m.mu.Lock()
+		srv, ok := m.sessions[sid]
+		if !ok || !srv.LastUsed().Before(cutoff) {
+			m.mu.Unlock()
+			continue
+		}
+		delete(m.sessions, sid)
+		m.mu.Unlock()
+
+		if err := srv.Shutdown(context.Background()); err != nil {
+			log.Printf("[chrome-manager] Error shutting down idle Chrome MCP for session %s: %v", sid, err)
+		}
+		log.Printf("[chrome-manager] Reaped idle Chrome MCP for session %s (idle > %s)", sid, m.idleTimeout)
 	}
 }

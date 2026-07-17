@@ -31,6 +31,10 @@ type Server struct {
 	toolNames     []string
 
 	lastUsedNano atomic.Int64
+	// inFlight counts tool handlers currently executing. The idle reaper checks
+	// it (under mu) so ReleaseBrowser never tears Chrome out from under a live
+	// call. Incremented/decremented by the registerTools wrapper.
+	inFlight atomic.Int32
 
 	mu        sync.Mutex
 	started   bool
@@ -136,7 +140,6 @@ func (s *Server) IsStarted() bool {
 	return s.started
 }
 
-
 // Shutdown stops the MCP server and closes Chrome.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
@@ -156,6 +159,38 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.started = false
 	log.Printf("[chrome-mcp] Shut down")
 	return nil
+}
+
+// ReleaseBrowser stops the Chrome browser process to free memory/CPU while
+// keeping the MCP HTTP server (and its port/URL) alive. A client that already
+// holds the URL keeps working: the next tool call relaunches Chrome lazily via
+// ensureBrowser. Returns true if a running browser was actually closed.
+//
+// Used by the idle reaper to reclaim the heavy resource (Chrome) without
+// invalidating the endpoint an in-flight turn's CLI is still connected to. The
+// whole check-and-close runs under mu, and skips if a tool call is in flight or
+// the server was touched since cutoff, so it never yanks Chrome out from under a
+// live call (a race the reaper's scan-then-act pass can't otherwise rule out).
+func (s *Server) ReleaseBrowser(cutoff time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.started || !s.browser.IsLaunched() {
+		return false
+	}
+	if s.inFlight.Load() > 0 {
+		return false // a tool call is running (or a >cutoff-long one); leave Chrome up
+	}
+	if !s.LastUsed().Before(cutoff) {
+		return false // touched since the reaper's scan; no longer idle
+	}
+	s.browser.Close()
+	// Drop stale accessibility UIDs: they'd resolve against a fresh Chrome after
+	// relaunch and could error or hit the wrong node. Safe to reassign here —
+	// inFlight==0 under mu means no handler is reading it (handlers touch the
+	// snapshot only after getPageCtx acquires mu, which serialises with this).
+	s.snapshot = NewSnapshotManager()
+	log.Printf("[chrome-mcp] Released idle Chrome browser (MCP server kept alive on %s)", s.actualAddr)
+	return true
 }
 
 // getPageCtx returns the current page's chromedp context.
@@ -210,6 +245,11 @@ func (s *Server) registerTools() {
 		name := tool.Name
 		wrapped := func(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 			s.Touch()
+			s.inFlight.Add(1)
+			defer func() {
+				s.inFlight.Add(-1)
+				s.Touch() // refresh on exit too, so a long call isn't "idle" the instant it returns
+			}()
 			log.Printf("[chrome-mcp] >> %s", name)
 			return handler(ctx, req)
 		}

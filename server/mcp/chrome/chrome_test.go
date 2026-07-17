@@ -343,6 +343,131 @@ func TestMCPServerLifecycle(t *testing.T) {
 	}
 }
 
+// TestReaperKeepsMCPForActiveSession verifies the idle reaper's two-tier policy:
+// a session with a running turn keeps its MCP endpoint (only Chrome would be
+// released) so the live CLI can reconnect, while an idle session with no running
+// turn is torn down entirely. Chrome is never launched here — EnsureStarted only
+// brings up the HTTP MCP server, which is all this branching depends on.
+func TestReaperKeepsMCPForActiveSession(t *testing.T) {
+	base := t.TempDir()
+	active := map[string]bool{"active": true, "gone": false}
+	// idleTimeout small enough to expire quickly; the background reaper's own
+	// tick floors at 10s, so it won't fire during the test — we call reapIdle
+	// directly instead.
+	m := NewChromeManager(base, "127.0.0.1", func() bool { return true },
+		func(sid string) bool { return active[sid] }, 50*time.Millisecond)
+	defer m.ShutdownAll()
+
+	ctx := context.Background()
+	srvActive := m.GetOrCreate("active")
+	if err := srvActive.EnsureStarted(ctx); err != nil {
+		t.Fatalf("EnsureStarted active: %v", err)
+	}
+	urlActive := srvActive.URL()
+
+	srvGone := m.GetOrCreate("gone")
+	if err := srvGone.EnsureStarted(ctx); err != nil {
+		t.Fatalf("EnsureStarted gone: %v", err)
+	}
+
+	// Let both age past the idle timeout, then reap.
+	time.Sleep(80 * time.Millisecond)
+	m.reapIdle()
+
+	// Active session: endpoint kept alive, same URL/port, still tracked and the
+	// same instance — so a CLI holding urlActive can keep using it.
+	if !srvActive.IsStarted() {
+		t.Errorf("active session's MCP server should stay started after reap")
+	}
+	if got := srvActive.URL(); got != urlActive {
+		t.Errorf("active session URL changed: was %q now %q", urlActive, got)
+	}
+	if m.GetOrCreate("active") != srvActive {
+		t.Errorf("active session should remain the same server instance in the map")
+	}
+
+	// Idle session with no running turn: fully shut down and dropped.
+	if srvGone.IsStarted() {
+		t.Errorf("idle non-active session's MCP server should be shut down after reap")
+	}
+	if n := m.ActiveSessions(); n != 1 {
+		t.Errorf("expected 1 tracked session after reap, got %d", n)
+	}
+}
+
+// TestReleaseBrowserThenRelaunch is the core behaviour behind the idle-reaper
+// change: releasing the Chrome process keeps the MCP server up, the next tool
+// call relaunches Chrome, and the released instance's exit watcher does not
+// corrupt the relaunched one (browser.go generation guard).
+func TestReleaseBrowserThenRelaunch(t *testing.T) {
+	tmpDir := t.TempDir()
+	srv := NewServer("127.0.0.1:0", tmpDir, BrowserOptions{Headless: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := srv.EnsureStarted(ctx); err != nil {
+		t.Fatalf("EnsureStarted: %v", err)
+	}
+	defer func() { _ = srv.Shutdown(ctx) }()
+
+	url := srv.URL()
+
+	// Launch Chrome via the normal lazy path.
+	if _, err := srv.getPageCtx(); err != nil {
+		t.Fatalf("initial getPageCtx: %v", err)
+	}
+	if !srv.browser.IsLaunched() {
+		t.Fatalf("browser should be launched after getPageCtx")
+	}
+
+	// In-flight guard: a running call must block release.
+	srv.inFlight.Add(1)
+	if srv.ReleaseBrowser(time.Now().Add(time.Hour)) {
+		t.Errorf("ReleaseBrowser must not close Chrome while a call is in flight")
+	}
+	if !srv.browser.IsLaunched() {
+		t.Errorf("browser should still be launched after a blocked release")
+	}
+	srv.inFlight.Add(-1)
+
+	// Idle release: closes Chrome but keeps the MCP server (and URL) alive.
+	if !srv.ReleaseBrowser(time.Now().Add(time.Hour)) {
+		t.Fatalf("ReleaseBrowser should have closed the idle browser")
+	}
+	if srv.browser.IsLaunched() {
+		t.Errorf("browser should be closed after release")
+	}
+	if !srv.IsStarted() || srv.URL() != url {
+		t.Errorf("MCP server/URL must survive release: started=%v url=%q want %q",
+			srv.IsStarted(), srv.URL(), url)
+	}
+
+	// Relaunch via the next tool call.
+	if _, err := srv.getPageCtx(); err != nil {
+		t.Fatalf("relaunch getPageCtx: %v", err)
+	}
+	if !srv.browser.IsLaunched() {
+		t.Fatalf("browser should be relaunched")
+	}
+
+	// Give the released instance's watcher time to fire; the generation guard
+	// must stop it from flipping the relaunched instance back to not-launched.
+	time.Sleep(300 * time.Millisecond)
+	if !srv.browser.IsLaunched() {
+		t.Errorf("stale exit watcher corrupted the relaunched browser (generation guard failed)")
+	}
+
+	// And it must still be functional.
+	ts := startTestHTTP()
+	defer ts.Close()
+	pageCtx, err := srv.getPageCtx()
+	if err != nil {
+		t.Fatalf("getPageCtx after relaunch: %v", err)
+	}
+	if err := chromedp.Run(pageCtx, chromedp.Navigate(ts.URL)); err != nil {
+		t.Errorf("navigate after relaunch failed: %v", err)
+	}
+}
+
 // findUID extracts a UID from a snapshot line matching the given role and name.
 func findUID(snap, role, name string) string {
 	for _, line := range strings.Split(snap, "\n") {
