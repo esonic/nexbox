@@ -277,7 +277,7 @@ export const BorderBeam = forwardRef<HTMLDivElement, BorderBeamProps>(
     }, [driverConfig, isActive, isFading, isVisible]);
 
     // The line preset also feeds animated custom properties into painted
-    // gradients/masks. Drive those properties in one 20 fps batch instead of
+    // gradients/masks. Drive those properties in one 24 fps batch instead of
     // letting five CSS animations repaint independently at 60-120 fps.
     useEffect(() => {
       if (size !== 'line') return;

@@ -3,10 +3,10 @@
  *
  * Animating registered custom properties with CSS makes Chromium sample and
  * repaint the gradient masks at the display refresh rate (60-120 Hz), even
- * though the glow moves slowly. Update all motion variables together at 20 fps
+ * though the glow moves slowly. Update all motion variables together at 24 fps
  * instead: this keeps the motion fluid while bounding paint work independently
- * of the display's refresh rate. 20 fps divides evenly into common 60/120 Hz
- * refresh rates, avoiding uneven frame cadence while the slow glow travels.
+ * of the display's refresh rate. 24 fps is a small step up from the original
+ * 20 fps cap, trading a little CPU headroom for visibly smoother travel.
  */
 
 interface LineInstance {
@@ -22,7 +22,7 @@ type ValueKeyframe = readonly [offset: number, value: number];
 const instances = new Set<LineInstance>();
 const elapsedByElement = new WeakMap<HTMLElement, number>();
 
-const TARGET_FPS = 20;
+const TARGET_FPS = 24;
 const FRAME_INTERVAL = 1000 / TARGET_FPS;
 
 const WIDTH_FRAMES: readonly ValueKeyframe[] = [
