@@ -14,6 +14,7 @@ import {
 import type { BorderBeamProps, BorderBeamTheme } from './types';
 import { sizePresets, sizeThemePresets, generateBeamCSS, getPulseDriverConfig } from './styles';
 import { registerPulseInstance } from './pulseDriver';
+import { registerLineInstance } from './lineDriver';
 
 function useSystemTheme(): 'dark' | 'light' {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
@@ -274,6 +275,26 @@ export const BorderBeam = forwardRef<HTMLDivElement, BorderBeamProps>(
 
       return registerPulseInstance(el, driverConfig);
     }, [driverConfig, isActive, isFading, isVisible]);
+
+    // The line preset also feeds animated custom properties into painted
+    // gradients/masks. Drive those properties in one 20 fps batch instead of
+    // letting five CSS animations repaint independently at 60-120 fps.
+    useEffect(() => {
+      if (size !== 'line') return;
+      if (!(isActive || isFading) || !isVisible) return;
+
+      const el = internalRef.current;
+      if (!el) return;
+
+      if (
+        typeof window !== 'undefined' &&
+        window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      ) {
+        return;
+      }
+
+      return registerLineInstance(el, id, finalDuration);
+    }, [size, id, finalDuration, isActive, isFading, isVisible]);
 
     const setRefs = useCallback(
       (node: HTMLDivElement | null) => {

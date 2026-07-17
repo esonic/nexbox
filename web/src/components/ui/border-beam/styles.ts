@@ -1879,7 +1879,6 @@ function generateLineVariantCSS(options: GenerateStylesOptions): string {
     id,
     borderRadius,
     borderWidth,
-    duration,
     strokeOpacity,
     innerOpacity,
     bloomOpacity,
@@ -1901,11 +1900,13 @@ function generateLineVariantCSS(options: GenerateStylesOptions): string {
   
   const hueShiftAnimation = staticColors 
     ? '' 
-    : `animation: beam-hue-shift-${id} 12s ease-in-out infinite;`;
+    // Four color updates/sec are ample for a subtle 12-second hue drift and
+    // avoid re-filtering the painted layer at the display refresh rate.
+    : `animation: beam-hue-shift-${id} 12s steps(48) infinite;`;
 
   const hueShiftBloomAnimation = staticColors
     ? ''
-    : `animation: beam-hue-shift-bloom-${id} 8s ease-in-out infinite;`;
+    : `animation: beam-hue-shift-bloom-${id} 8s steps(32) infinite;`;
   
   const hueShiftKeyframes = staticColors ? '' : `
 @keyframes beam-hue-shift-${id} {
@@ -1990,23 +1991,11 @@ function generateLineVariantCSS(options: GenerateStylesOptions): string {
 }
 
 [data-beam="${id}"][data-active] {
-  animation:
-    beam-travel-${id} ${duration}s linear infinite,
-    beam-edge-fade-${id} ${duration}s linear infinite,
-    beam-breathe-${id} ${(duration * 1.3).toFixed(1)}s ease-in-out infinite,
-    beam-spike-${id} ${(duration * 1.33).toFixed(1)}s ease-in-out infinite,
-    beam-spike2-${id} ${(duration * 1.7).toFixed(1)}s ease-in-out infinite,
-    beam-fade-in-${id} 0.6s ease forwards;
+  animation: beam-fade-in-${id} 0.6s ease forwards;
 }
 
 [data-beam="${id}"][data-fading] {
-  animation:
-    beam-travel-${id} ${duration}s linear infinite,
-    beam-edge-fade-${id} ${duration}s linear infinite,
-    beam-breathe-${id} ${(duration * 1.3).toFixed(1)}s ease-in-out infinite,
-    beam-spike-${id} ${(duration * 1.33).toFixed(1)}s ease-in-out infinite,
-    beam-spike2-${id} ${(duration * 1.7).toFixed(1)}s ease-in-out infinite,
-    beam-fade-out-${id} 0.5s ease forwards;
+  animation: beam-fade-out-${id} 0.5s ease forwards;
 }
 
 [data-beam="${id}"][data-active]::after,
@@ -2100,55 +2089,6 @@ function generateLineVariantCSS(options: GenerateStylesOptions): string {
   display: block;
   opacity: calc(var(--beam-opacity-${id}) * var(--beam-edge-${id}) * ${finalBloomOpacity.toFixed(2)} * var(--beam-bloom-opacity, 1) * var(--beam-strength, 1));
   ${hueShiftBloomAnimation}
-}
-
-/* LOCAL MODIFICATION (vendored): the upstream travel range was 0.06→0.94 and
-   the edge-fade only lit the middle third (32.5%–67.5%), so the glow never
-   reached the corners. Widened so the comet sweeps the full width, corner to
-   corner, and stays lit almost the whole sweep — fading only at the very ends
-   to hide the loop seam. */
-@keyframes beam-travel-${id} {
-  0%   { --beam-x-${id}: 0.0;   --beam-w-${id}: 0.6; }
-  10%  { --beam-x-${id}: 0.1;   --beam-w-${id}: 0.85; }
-  20%  { --beam-x-${id}: 0.2;   --beam-w-${id}: 1.1; }
-  30%  { --beam-x-${id}: 0.3;   --beam-w-${id}: 1.3; }
-  40%  { --beam-x-${id}: 0.4;   --beam-w-${id}: 1.45; }
-  50%  { --beam-x-${id}: 0.5;   --beam-w-${id}: 1.5; }
-  60%  { --beam-x-${id}: 0.6;   --beam-w-${id}: 1.45; }
-  70%  { --beam-x-${id}: 0.7;   --beam-w-${id}: 1.3; }
-  80%  { --beam-x-${id}: 0.8;   --beam-w-${id}: 1.1; }
-  90%  { --beam-x-${id}: 0.9;   --beam-w-${id}: 0.85; }
-  100% { --beam-x-${id}: 1.0;   --beam-w-${id}: 0.6; }
-}
-
-@keyframes beam-edge-fade-${id} {
-  0%    { --beam-edge-${id}: 0; }
-  6%    { --beam-edge-${id}: 1; }
-  94%   { --beam-edge-${id}: 1; }
-  100%  { --beam-edge-${id}: 0; }
-}
-
-@keyframes beam-breathe-${id} {
-  0%, 100% { --beam-h-${id}: 0.8; }
-  25%      { --beam-h-${id}: 1.25; }
-  55%      { --beam-h-${id}: 0.85; }
-  80%      { --beam-h-${id}: 1.3; }
-}
-
-@keyframes beam-spike-${id} {
-  0%   { --beam-spike-${id}: 0.8; }
-  25%  { --beam-spike-${id}: 1.3; }
-  50%  { --beam-spike-${id}: 0.9; }
-  75%  { --beam-spike-${id}: 1.4; }
-  100% { --beam-spike-${id}: 0.8; }
-}
-
-@keyframes beam-spike2-${id} {
-  0%   { --beam-spike2-${id}: 1.2; }
-  25%  { --beam-spike2-${id}: 0.7; }
-  50%  { --beam-spike2-${id}: 1.4; }
-  75%  { --beam-spike2-${id}: 0.8; }
-  100% { --beam-spike2-${id}: 1.2; }
 }
 
 @keyframes beam-fade-in-${id} {
