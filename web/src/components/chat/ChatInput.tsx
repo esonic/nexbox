@@ -346,7 +346,7 @@ function UserInputPanel({
   // Structured questions → use QuestionCard
   if (questionCardData) {
     return (
-      <div className="py-3 border-b">
+      <div className="pb-3 border-b">
         <QuestionCard
           title={questionCardData.title}
           questions={questionCardData.questions}
@@ -390,7 +390,7 @@ function UserInputPanel({
   };
 
   return (
-    <div className="py-3 border-b">
+    <div className="pb-3 border-b">
       <div className="flex items-start gap-2 px-1">
         <CircleHelp className="h-4 w-4 text-blue-400 mt-0.5 shrink-0" />
         <div className="flex-1 min-w-0 space-y-2">
@@ -900,7 +900,7 @@ export function ChatInput({
 
         {/* Question panel */}
         {pendingQuestion && (
-          <div className="py-3 border-b">
+          <div className="pb-3 border-b">
             <QuestionCard
               title={pendingQuestion.title}
               questions={pendingQuestion.questions}
