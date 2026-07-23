@@ -83,6 +83,14 @@ interface AppState {
   setStreamingSession: (sessionId: string, active: boolean) => void;
   initStreamingSessions: (activeIds: string[]) => void;
 
+  // Per-session unread state (client-only, persisted to localStorage). A
+  // session becomes unread when a round finishes while the user isn't viewing
+  // it (blue dot in the sidebar); it clears when the user opens it. Users can
+  // also force-mark a read session unread via the row's right-click menu.
+  unreadSessions: Record<string, boolean>;
+  markSessionUnread: (sessionId: string) => void;
+  markSessionRead: (sessionId: string) => void;
+
   // Pending interactive tool request per session (AskUserQuestion from Claude CLI).
   // Keyed by session ID so concurrent sessions don't clobber each other's popup,
   // and so switching away and back to a session re-shows its pending question.
@@ -453,12 +461,23 @@ export const useAppStore = create<AppState>()(
   streamingSessions: {},
   streamingStartedAt: {} as Record<string, number>,
   setStreamingSession: (sessionId, active) =>
-    set((state) => ({
-      streamingSessions: { ...state.streamingSessions, [sessionId]: active },
-      streamingStartedAt: active
-        ? { ...state.streamingStartedAt, [sessionId]: Date.now() }
-        : state.streamingStartedAt,
-    })),
+    set((state) => {
+      // A round just finished (true → false) for a session the user isn't
+      // currently viewing → flag it unread so the sidebar shows a blue dot.
+      const finishedInBackground =
+        state.streamingSessions[sessionId] === true &&
+        !active &&
+        sessionId !== state.activeSessionId;
+      return {
+        streamingSessions: { ...state.streamingSessions, [sessionId]: active },
+        streamingStartedAt: active
+          ? { ...state.streamingStartedAt, [sessionId]: Date.now() }
+          : state.streamingStartedAt,
+        unreadSessions: finishedInBackground
+          ? { ...state.unreadSessions, [sessionId]: true }
+          : state.unreadSessions,
+      };
+    }),
   initStreamingSessions: (activeIds) =>
     set((state) => {
       // Server is the source of truth for active sessions.
@@ -476,7 +495,29 @@ export const useAppStore = create<AppState>()(
           }
         }
       }
-      return { streamingSessions: map };
+      // Background sessions that were streaming and are now considered finished
+      // (dropped from the reseeded map) just completed a round out of view →
+      // mark them unread. The one being viewed is never flagged.
+      const unread = { ...state.unreadSessions };
+      for (const [id, active] of Object.entries(state.streamingSessions)) {
+        if (active && !map[id] && id !== state.activeSessionId) {
+          unread[id] = true;
+        }
+      }
+      return { streamingSessions: map, unreadSessions: unread };
+    }),
+
+  unreadSessions: {},
+  markSessionUnread: (sessionId) =>
+    set((state) => ({
+      unreadSessions: { ...state.unreadSessions, [sessionId]: true },
+    })),
+  markSessionRead: (sessionId) =>
+    set((state) => {
+      if (!state.unreadSessions[sessionId]) return state;
+      const next = { ...state.unreadSessions };
+      delete next[sessionId];
+      return { unreadSessions: next };
     }),
 
   pendingUserInputs: {},
@@ -657,9 +698,11 @@ export const useAppStore = create<AppState>()(
 }),
     {
       name: "nexbox-app",
-      // Persist activeSessionId to remember which session was last selected
+      // Persist activeSessionId to remember which session was last selected,
+      // and per-session unread flags (client-only) so blue dots survive reload.
       partialize: (state) => ({
         activeSessionId: state.activeSessionId,
+        unreadSessions: state.unreadSessions,
       }),
       onRehydrateStorage: () => (state) => {
         console.log('[Store] Rehydrated from localStorage:', state?.activeSessionId);

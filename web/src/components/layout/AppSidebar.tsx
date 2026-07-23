@@ -23,6 +23,7 @@ import {
   RotateCcw,
   Store,
   Trash2,
+  Circle,
 } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { toast } from "sonner";
@@ -43,8 +44,10 @@ import type { Project, Session } from "@/types";
 
 interface SessionRowProps {
   session: Session;
+  groupSessions: Session[];
   isActive: boolean;
   isStreaming: boolean;
+  isUnread: boolean;
   // Rename
   isRenaming: boolean;
   renameValue: string;
@@ -53,6 +56,14 @@ interface SessionRowProps {
   onRenameCommit: () => void;
   onRenameCancel: () => void;
   onRenameStart: (id: string, name: string) => void;
+  // Drag
+  isDragging: boolean;
+  isDropTarget: boolean;
+  dropPosition: "above" | "below" | null;
+  onDragStart: (e: React.DragEvent, id: string) => void;
+  onDragOver: (e: React.DragEvent, id: string) => void;
+  onDragEnd: () => void;
+  onDrop: (e: React.DragEvent, id: string, group: Session[]) => void;
   // Delete
   isConfirmingDelete: boolean;
   onConfirmDelete: (id: string) => void;
@@ -60,25 +71,80 @@ interface SessionRowProps {
   onDelete: (id: string) => void;
   // Selection
   onSelect: (id: string) => void;
+  // Mark unread (right-click menu)
+  onMarkUnread: (id: string) => void;
 }
 
 function SessionRow({
-  session: sess,
-  isActive, isStreaming,
+  session: sess, groupSessions,
+  isActive, isStreaming, isUnread,
   isRenaming, renameValue, renameRef,
   onRenameChange, onRenameCommit, onRenameCancel, onRenameStart,
+  isDragging, isDropTarget, dropPosition,
+  onDragStart, onDragOver, onDragEnd, onDrop,
   isConfirmingDelete, onConfirmDelete, onCancelDelete, onDelete,
-  onSelect,
+  onSelect, onMarkUnread,
 }: SessionRowProps) {
+  // Right-click context menu, positioned at the cursor. Kept local to the row
+  // so each session owns its own menu; closes on any outside interaction.
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!menuPos) return;
+    const close = () => setMenuPos(null);
+    window.addEventListener("mousedown", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", close);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", close);
+    };
+  }, [menuPos]);
+
   return (
     <div
+      draggable={!isRenaming}
+      onDragStart={(e) => onDragStart(e, sess.id)}
+      onDragOver={(e) => onDragOver(e, sess.id)}
+      onDragEnd={onDragEnd}
+      onDrop={(e) => onDrop(e, sess.id, groupSessions)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenuPos({ x: e.clientX, y: e.clientY });
+      }}
       className={cn(
         "group flex items-center rounded-lg transition-colors mb-px relative",
         isActive ? "bg-accent" : "hover:bg-accent/50",
+        isDragging && "opacity-40",
+        isDropTarget && dropPosition === "above" && "before:absolute before:left-2 before:right-2 before:top-0 before:h-0.5 before:bg-primary before:rounded-full",
+        isDropTarget && dropPosition === "below" && "after:absolute after:left-2 after:right-2 after:bottom-0 after:h-0.5 after:bg-primary after:rounded-full",
       )}
     >
-      {isStreaming && (
+      {isStreaming ? (
         <span className="absolute left-2.5 top-1/2 -translate-y-1/2 h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
+      ) : isUnread ? (
+        <span
+          className="absolute left-2.5 top-1/2 -translate-y-1/2 h-1.5 w-1.5 rounded-full bg-sky-400"
+          title="Unread"
+        />
+      ) : null}
+      {menuPos && (
+        <div
+          data-session-context-menu
+          style={{ position: "fixed", left: menuPos.x, top: menuPos.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+          className="z-[60] min-w-[9rem] bg-popover border rounded-md shadow-md p-1 text-popover-foreground"
+        >
+          <button
+            onClick={() => { onMarkUnread(sess.id); setMenuPos(null); }}
+            className="w-full flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent transition-colors"
+          >
+            <Circle className="h-3 w-3 fill-sky-400 text-sky-400" />
+            Mark as unread
+          </button>
+        </div>
       )}
       {isRenaming ? (
         <input
@@ -153,6 +219,7 @@ export function AppSidebar() {
   const {
     sessions, setSessions, activeSessionId, setActiveSessionId,
     streamingSessions, initStreamingSessions,
+    unreadSessions, markSessionRead, markSessionUnread,
     connectStatus, setConnectStatus,
     projects, setProjects,
     marketplaceUpdateCount, setMarketplaceUpdateCount,
@@ -294,6 +361,11 @@ export function AppSidebar() {
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [deleteTargetProject, setDeleteTargetProject] = useState<Project | null>(null);
   const [deletingProject, setDeletingProject] = useState(false);
+
+  // Drag-and-drop reorder (within a folder/project group)
+  const [dragSessionId, setDragSessionId] = useState<string | null>(null);
+  const [dragOverSessionId, setDragOverSessionId] = useState<string | null>(null);
+  const [dragOverPosition, setDragOverPosition] = useState<"above" | "below" | null>(null);
 
   // Project ... menu
   const [projectMenuId, setProjectMenuId] = useState<string | null>(null);
@@ -625,7 +697,84 @@ export function AppSidebar() {
 
   const handleSelectSession = (sessionId: string) => {
     setActiveSessionId(sessionId);
+    markSessionRead(sessionId);
     if (location.pathname !== "/") navigate("/");
+  };
+
+  // Opening a session on the chat page counts as reading it — clears its blue
+  // dot. Covers clicks, route changes back to "/", and the rehydrated active
+  // session on first load.
+  useEffect(() => {
+    if (activeSessionId && location.pathname === "/") markSessionRead(activeSessionId);
+  }, [activeSessionId, location.pathname, markSessionRead]);
+
+  // ── Drag-and-drop reorder ──
+
+  const handleDragStart = (e: React.DragEvent, sessionId: string) => {
+    setDragSessionId(sessionId);
+    e.dataTransfer.effectAllowed = "move";
+    // Make the drag ghost semi-transparent
+    if (e.currentTarget instanceof HTMLElement) {
+      e.dataTransfer.setDragImage(e.currentTarget, 0, 0);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent, sessionId: string) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (!dragSessionId || dragSessionId === sessionId) {
+      setDragOverSessionId(null);
+      setDragOverPosition(null);
+      return;
+    }
+    // Determine if cursor is in the top or bottom half of the target
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    setDragOverSessionId(sessionId);
+    setDragOverPosition(e.clientY < midY ? "above" : "below");
+  };
+
+  const handleDragEnd = () => {
+    setDragSessionId(null);
+    setDragOverSessionId(null);
+    setDragOverPosition(null);
+  };
+
+  const handleDrop = (e: React.DragEvent, targetSessionId: string, groupSessions: typeof sessions) => {
+    e.preventDefault();
+    if (!dragSessionId || dragSessionId === targetSessionId) {
+      handleDragEnd();
+      return;
+    }
+
+    // Build new order for this group only (drag is scoped within a folder)
+    const ids = groupSessions.map((s) => s.id);
+    const fromIdx = ids.indexOf(dragSessionId);
+    let toIdx = ids.indexOf(targetSessionId);
+    if (fromIdx === -1 || toIdx === -1) { handleDragEnd(); return; }
+
+    // Remove dragged item
+    ids.splice(fromIdx, 1);
+    // Re-find target index after removal
+    toIdx = ids.indexOf(targetSessionId);
+    // Insert at correct position
+    if (dragOverPosition === "below") toIdx += 1;
+    ids.splice(toIdx, 0, dragSessionId);
+
+    handleDragEnd();
+
+    // Optimistic update
+    const orderMap = new Map(ids.map((id, i) => [id, i + 1]));
+    const updated = sessions.map((s) =>
+      orderMap.has(s.id) ? { ...s, sort_order: orderMap.get(s.id)! } : s
+    );
+    setSessions(updated);
+
+    // Persist to server
+    sessionsApi.reorder(ids).catch((err) => {
+      console.error("Failed to reorder sessions:", err);
+      loadSessions();
+    });
   };
 
   const handleNewSession = async (projectId?: string) => {
@@ -1183,8 +1332,10 @@ export function AppSidebar() {
                   <SessionRow
                     key={s.id}
                     session={s}
+                    groupSessions={group.sessions}
                     isActive={activeSessionId === s.id && location.pathname === "/"}
                     isStreaming={!!streamingSessions[s.id]}
+                    isUnread={!!unreadSessions[s.id]}
                     isRenaming={renamingSessionId === s.id}
                     renameValue={renameValue}
                     renameRef={renameRef}
@@ -1192,11 +1343,19 @@ export function AppSidebar() {
                     onRenameCommit={handleCommitRename}
                     onRenameCancel={() => setRenamingSessionId(null)}
                     onRenameStart={handleStartRename}
+                    isDragging={dragSessionId === s.id}
+                    isDropTarget={dragOverSessionId === s.id}
+                    dropPosition={dragOverPosition}
+                    onDragStart={handleDragStart}
+                    onDragOver={handleDragOver}
+                    onDragEnd={handleDragEnd}
+                    onDrop={handleDrop}
                     isConfirmingDelete={confirmDeleteSessionId === s.id}
                     onConfirmDelete={setConfirmDeleteSessionId}
                     onCancelDelete={() => setConfirmDeleteSessionId(null)}
                     onDelete={handleDeleteSession}
                     onSelect={handleSelectSession}
+                    onMarkUnread={markSessionUnread}
                   />
                 ))}
               </div>
