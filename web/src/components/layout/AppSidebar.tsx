@@ -1,36 +1,9 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import {
-  PanelLeftClose,
-  PanelLeftOpen,
-  GripVertical,
-  X,
-  SquarePen,
-  ChevronRight,
-  ChevronDown,
-  Plus,
-  FolderOpen,
-  FolderPlus,
-  Pencil,
-  Settings,
-  Cloud,
-  CloudOff,
-  Menu,
-  MoreHorizontal,
-  LayoutGrid,
-  LogOut,
-  History,
-  RotateCcw,
-  Store,
-  Trash2,
-  Circle,
-} from "lucide-react";
-import { useIsMobile } from "@/hooks/useIsMobile";
+import { PanelLeftClose, GripVertical, X, FolderOpen, Plus } from "lucide-react";
 import { toast } from "sonner";
-import { sessionsApi, projectsApi, serverApi, marketplaceApi } from "@/lib/api";
-import type { CloudInfo } from "@/lib/api";
-import { globalWS } from "@/lib/ws";
-import { cn, formatRelativeDate } from "@/lib/utils";
+import { sessionsApi, projectsApi } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app";
 import { useLayoutStore } from "@/stores/layout";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
@@ -38,173 +11,17 @@ import { ProjectDialog } from "@/components/project/ProjectDialog";
 import { DeleteProjectDialog } from "@/components/project/DeleteProjectDialog";
 import { UNASSIGNED_PROJECT, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX } from "@/lib/constants";
 import { useSessionNotifications } from "@/hooks/useSessionNotifications";
-import type { Project, Session } from "@/types";
-
-// ── SessionRow ──────────────────────────────────────────────────────────
-
-interface SessionRowProps {
-  session: Session;
-  groupSessions: Session[];
-  isActive: boolean;
-  isStreaming: boolean;
-  isUnread: boolean;
-  // Rename
-  isRenaming: boolean;
-  renameValue: string;
-  renameRef: React.RefObject<HTMLInputElement | null>;
-  onRenameChange: (v: string) => void;
-  onRenameCommit: () => void;
-  onRenameCancel: () => void;
-  onRenameStart: (id: string, name: string) => void;
-  // Drag
-  isDragging: boolean;
-  isDropTarget: boolean;
-  dropPosition: "above" | "below" | null;
-  onDragStart: (e: React.DragEvent, id: string) => void;
-  onDragOver: (e: React.DragEvent, id: string) => void;
-  onDragEnd: () => void;
-  onDrop: (e: React.DragEvent, id: string, group: Session[]) => void;
-  // Delete
-  isConfirmingDelete: boolean;
-  onConfirmDelete: (id: string) => void;
-  onCancelDelete: () => void;
-  onDelete: (id: string) => void;
-  // Selection
-  onSelect: (id: string) => void;
-  // Mark unread (right-click menu)
-  onMarkUnread: (id: string) => void;
-}
-
-function SessionRow({
-  session: sess, groupSessions,
-  isActive, isStreaming, isUnread,
-  isRenaming, renameValue, renameRef,
-  onRenameChange, onRenameCommit, onRenameCancel, onRenameStart,
-  isDragging, isDropTarget, dropPosition,
-  onDragStart, onDragOver, onDragEnd, onDrop,
-  isConfirmingDelete, onConfirmDelete, onCancelDelete, onDelete,
-  onSelect, onMarkUnread,
-}: SessionRowProps) {
-  // Right-click context menu, positioned at the cursor. Kept local to the row
-  // so each session owns its own menu; closes on any outside interaction.
-  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
-  useEffect(() => {
-    if (!menuPos) return;
-    const close = () => setMenuPos(null);
-    window.addEventListener("mousedown", close);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
-    window.addEventListener("keydown", close);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", close);
-      window.removeEventListener("keydown", close);
-    };
-  }, [menuPos]);
-
-  return (
-    <div
-      draggable={!isRenaming}
-      onDragStart={(e) => onDragStart(e, sess.id)}
-      onDragOver={(e) => onDragOver(e, sess.id)}
-      onDragEnd={onDragEnd}
-      onDrop={(e) => onDrop(e, sess.id, groupSessions)}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        setMenuPos({ x: e.clientX, y: e.clientY });
-      }}
-      className={cn(
-        "group flex items-center rounded-lg transition-colors mb-px relative",
-        isActive ? "bg-accent" : "hover:bg-accent/50",
-        isDragging && "opacity-40",
-        isDropTarget && dropPosition === "above" && "before:absolute before:left-2 before:right-2 before:top-0 before:h-0.5 before:bg-primary before:rounded-full",
-        isDropTarget && dropPosition === "below" && "after:absolute after:left-2 after:right-2 after:bottom-0 after:h-0.5 after:bg-primary after:rounded-full",
-      )}
-    >
-      {isStreaming ? (
-        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
-      ) : isUnread ? (
-        <span
-          className="absolute left-2.5 top-1/2 -translate-y-1/2 h-1.5 w-1.5 rounded-full bg-sky-400"
-          title="Unread"
-        />
-      ) : null}
-      {menuPos && (
-        <div
-          data-session-context-menu
-          style={{ position: "fixed", left: menuPos.x, top: menuPos.y }}
-          onMouseDown={(e) => e.stopPropagation()}
-          className="z-[60] min-w-[9rem] bg-popover border rounded-md shadow-md p-1 text-popover-foreground"
-        >
-          <button
-            onClick={() => { onMarkUnread(sess.id); setMenuPos(null); }}
-            className="w-full flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent transition-colors"
-          >
-            <Circle className="h-3 w-3 fill-sky-400 text-sky-400" />
-            Mark as unread
-          </button>
-        </div>
-      )}
-      {isRenaming ? (
-        <input
-          ref={renameRef}
-          value={renameValue}
-          onChange={(e) => onRenameChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.nativeEvent.isComposing) onRenameCommit();
-            if (e.key === "Escape") onRenameCancel();
-          }}
-          onBlur={onRenameCommit}
-          className="flex-1 bg-transparent outline-none text-[13px] font-medium pl-7 pr-3 py-1.5 min-w-0"
-        />
-      ) : (
-        <button
-          onClick={() => onSelect(sess.id)}
-          onDoubleClick={() => onRenameStart(sess.id, sess.name || "")}
-          className={cn(
-            "flex-1 flex items-center gap-1.5 pl-7 pr-2 py-1.5 text-[13px] min-w-0 transition-colors",
-            isActive
-              ? "text-foreground font-bold"
-              : "text-muted-foreground hover:text-foreground"
-          )}
-        >
-          <span className="truncate">{sess.name || "New Session"}</span>
-        </button>
-      )}
-      <div className="relative shrink-0 w-5 h-5 mr-1.5 flex items-center justify-center">
-        <span className="text-[11px] text-muted-foreground/40 tabular-nums group-hover:opacity-0 transition-opacity">
-          {formatRelativeDate(sess.updated_at || sess.created_at)}
-        </span>
-        <button
-          onClick={(e) => { e.stopPropagation(); onConfirmDelete(sess.id); }}
-          className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-destructive transition-all"
-          title="Move to trash"
-        >
-          <X className="h-3 w-3" />
-        </button>
-        {isConfirmingDelete && (
-          <div data-delete-confirm className="absolute right-0 top-full mt-1 z-50 bg-popover border rounded-md shadow-md p-1.5 flex gap-1 whitespace-nowrap">
-            <button
-              onClick={(e) => { e.stopPropagation(); onDelete(sess.id); onCancelDelete(); }}
-              className="px-2 py-0.5 text-xs bg-destructive text-destructive-foreground rounded hover:bg-destructive/90"
-            >
-              Move to Trash
-            </button>
-            <button
-              onClick={(e) => { e.stopPropagation(); onCancelDelete(); }}
-              className="px-2 py-0.5 text-xs bg-muted text-muted-foreground rounded hover:bg-accent"
-            >
-              Cancel
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── AppSidebar ──────────────────────────────────────────────────────────
+import { useIsMobile } from "@/hooks/useIsMobile";
+import { useSidebarData } from "@/hooks/useSidebarData";
+import { useGroupedSessions } from "@/hooks/useGroupedSessions";
+import { useSessionReorder } from "@/hooks/useSessionReorder";
+import { useMobileDrawerSwipe } from "@/hooks/useMobileDrawerSwipe";
+import { SessionGroup } from "@/components/layout/sidebar/SessionGroup";
+import { NewSessionButton } from "@/components/layout/sidebar/NewSessionButton";
+import { SessionsHeader } from "@/components/layout/sidebar/SessionsHeader";
+import { SidebarFooterNav } from "@/components/layout/sidebar/SidebarFooterNav";
+import { MobileMenuButton, CollapsedSidebarRail } from "@/components/layout/sidebar/CollapsedSidebar";
+import type { Project } from "@/types";
 
 // Tracks whether the first auto-select pass has run in this JS runtime.
 // Module-level so it survives React strict-mode double-mounts but resets
@@ -218,11 +35,7 @@ export function AppSidebar() {
   const location = useLocation();
   const {
     sessions, setSessions, activeSessionId, setActiveSessionId,
-    streamingSessions, initStreamingSessions,
-    unreadSessions, markSessionRead, markSessionUnread,
-    connectStatus, setConnectStatus,
-    projects, setProjects,
-    marketplaceUpdateCount, setMarketplaceUpdateCount,
+    markSessionRead, projects, setProjects,
   } = useAppStore();
   const {
     sidebarCollapsed: collapsed, setSidebarCollapsed: setCollapsed,
@@ -245,74 +58,15 @@ export function AppSidebar() {
     if (isMobile) setMobileOpen(false);
   }, [location.pathname, isMobile]);
 
-  // ── Swipe-to-close (mobile drawer) ──
-  // The drawer hugs the left edge, so dragging it leftward dismisses it. We
-  // attach native touch listeners (React's onTouch* are passive and can't
-  // preventDefault) so an engaged horizontal drag won't also scroll the
-  // session list; vertical and rightward gestures are left untouched.
+  // ── Data + derived state (see hooks for the heavy lifting) ──
   const panelRef = useRef<HTMLDivElement>(null);
-  const [dragX, setDragX] = useState(0);        // live drag offset, ≤ 0
-  const [swiping, setSwiping] = useState(false); // finger down & dragging → no transition
-  const [panelW, setPanelW] = useState(0);
-
-  // Every close path (tap X, backdrop, route change, breakpoint, swipe) resets
-  // the offset so the next open starts flush against the edge.
-  useEffect(() => {
-    if (!mobileOpen) { setDragX(0); setSwiping(false); }
-  }, [mobileOpen]);
-
-  useEffect(() => {
-    const el = panelRef.current;
-    if (!isMobile || !mobileOpen || !el) return;
-    setPanelW(el.offsetWidth);
-
-    let startX = 0, startY = 0, startT = 0, dx = 0;
-    let mode: "pending" | "drag" | "ignore" = "pending";
-
-    const onStart = (e: TouchEvent) => {
-      const t = e.touches[0];
-      startX = t.clientX; startY = t.clientY; startT = performance.now();
-      dx = 0; mode = "pending";
-    };
-    const onMove = (e: TouchEvent) => {
-      const t = e.touches[0];
-      dx = t.clientX - startX;
-      const dy = t.clientY - startY;
-      if (mode === "pending") {
-        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return; // wait for clear intent
-        mode = Math.abs(dx) > Math.abs(dy) && dx < 0 ? "drag" : "ignore";
-        if (mode === "drag") setSwiping(true);
-      }
-      if (mode !== "drag") return;
-      e.preventDefault(); // hold the session list still mid-swipe
-      setDragX(Math.min(0, dx));
-    };
-    const onEnd = () => {
-      if (mode !== "drag") { mode = "pending"; return; }
-      setSwiping(false);
-      const width = el.offsetWidth || 1;
-      const velocity = dx / Math.max(1, performance.now() - startT); // px/ms, <0 = left
-      if (-dx > width / 3 || (velocity < -0.4 && -dx > 24)) {
-        setDragX(-width);                                   // finish sliding out…
-        window.setTimeout(() => setMobileOpen(false), 200); // …then unmount
-      } else {
-        setDragX(0);                                        // snap back
-      }
-      mode = "pending";
-    };
-
-    el.addEventListener("touchstart", onStart, { passive: true });
-    el.addEventListener("touchmove", onMove, { passive: false });
-    el.addEventListener("touchend", onEnd);
-    el.addEventListener("touchcancel", onEnd);
-    return () => {
-      el.removeEventListener("touchstart", onStart);
-      el.removeEventListener("touchmove", onMove);
-      el.removeEventListener("touchend", onEnd);
-      el.removeEventListener("touchcancel", onEnd);
-    };
-  }, [isMobile, mobileOpen]);
-
+  const { dragX, swiping, panelW } = useMobileDrawerSwipe(panelRef, isMobile, mobileOpen, setMobileOpen);
+  const { loadSessions, projectsLoaded } = useSidebarData();
+  const groupedSessions = useGroupedSessions(sessions, projects);
+  const {
+    dragSessionId, dragOverSessionId, dragOverPosition,
+    handleDragStart, handleDragOver, handleDragEnd, handleDrop,
+  } = useSessionReorder(loadSessions);
   useSessionNotifications();
 
   // Resize
@@ -326,185 +80,14 @@ export function AppSidebar() {
   // Collapsed project groups
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
 
-  // New session context menu
-  const [showNewSessionMenu, setShowNewSessionMenu] = useState(false);
-  const newSessionMenuRef = useRef<HTMLDivElement>(null);
-
   // Delete session confirmation
   const [confirmDeleteSessionId, setConfirmDeleteSessionId] = useState<string | null>(null);
 
-  // Trash
-  const [showTrash, setShowTrash] = useState(false);
-  const [trashedSessions, setTrashedSessions] = useState<Session[]>([]);
-  const trashRef = useRef<HTMLDivElement>(null);
-
-  // Cloud info
-  const [cloudInfo, setCloudInfo] = useState<CloudInfo | null>(null);
-
-  // Notification unread dot
-  const [notificationUnread, setNotificationUnread] = useState(
-    () => localStorage.getItem("notification_unread") === "1"
-  );
-  const cloudUserRef = useRef<string | null>(null);
-
-  const markNotificationUnread = () => {
-    localStorage.setItem("notification_unread", "1");
-    setNotificationUnread(true);
-  };
-  const clearNotificationUnread = () => {
-    localStorage.removeItem("notification_unread");
-    setNotificationUnread(false);
-  };
-
-  // Project dialog
+  // Project dialog + delete
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [deleteTargetProject, setDeleteTargetProject] = useState<Project | null>(null);
   const [deletingProject, setDeletingProject] = useState(false);
-
-  // Drag-and-drop reorder (within a folder/project group)
-  const [dragSessionId, setDragSessionId] = useState<string | null>(null);
-  const [dragOverSessionId, setDragOverSessionId] = useState<string | null>(null);
-  const [dragOverPosition, setDragOverPosition] = useState<"above" | "below" | null>(null);
-
-  // Project ... menu
-  const [projectMenuId, setProjectMenuId] = useState<string | null>(null);
-  const projectMenuRef = useRef<HTMLDivElement>(null);
-
-
-
-  // ── Data Loading ──
-
-  const loadSessions = useCallback(async () => {
-    try {
-      const data = await sessionsApi.list();
-      const list = data.sessions || [];
-      // The server filters hidden ("scratch") sessions out of the list, so
-      // refetching would otherwise wipe an active scratch session and
-      // orphan its activeSessionId. Preserve locally-known hidden sessions
-      // that the server didn't return; the server's copy wins for any
-      // session it does return (e.g. a just-promoted one).
-      const remoteIds = new Set(list.map((s) => s.id));
-      const prev = useAppStore.getState().sessions;
-      const preservedScratch = prev.filter((s) => s.is_hidden && !remoteIds.has(s.id));
-      setSessions([...list, ...preservedScratch]);
-      initStreamingSessions(data.active_session_ids || []);
-    } catch (e) {
-      console.error("Failed to load sessions:", e);
-    }
-  }, [setSessions, initStreamingSessions]);
-
-  // Tracks whether projectsApi.list has completed at least once. The auto-select
-  // effect waits on this so it doesn't fall through to "first visible session"
-  // before the Default-project check has had a chance to run.
-  const [projectsLoaded, setProjectsLoaded] = useState(false);
-
-  const loadProjects = useCallback(async () => {
-    try {
-      const data = await projectsApi.list();
-      setProjects(data || []);
-    } catch (e) {
-      console.error("Failed to load projects:", e);
-    } finally {
-      setProjectsLoaded(true);
-    }
-  }, []);
-
-  const checkMarketplaceUpdates = useCallback(async () => {
-    // No remote registry – update count is always 0
-    setMarketplaceUpdateCount(0);
-  }, [setMarketplaceUpdateCount]);
-
-  useEffect(() => {
-    loadSessions();
-    loadProjects();
-  }, [loadSessions, loadProjects]);
-
-  useEffect(() => {
-    const timer = setTimeout(checkMarketplaceUpdates, 60 * 1000);
-    const interval = setInterval(checkMarketplaceUpdates, 30 * 60 * 1000);
-    return () => { clearTimeout(timer); clearInterval(interval); };
-  }, [checkMarketplaceUpdates]);
-
-  useEffect(() => {
-    window.addEventListener("marketplace-package-updated", checkMarketplaceUpdates);
-    return () => window.removeEventListener("marketplace-package-updated", checkMarketplaceUpdates);
-  }, [checkMarketplaceUpdates]);
-
-  useEffect(() => {
-    const handler = () => { loadSessions(); loadProjects(); };
-    window.addEventListener("session-updated", handler);
-    return () => window.removeEventListener("session-updated", handler);
-  }, [loadSessions, loadProjects]);
-
-  useEffect(() => {
-    return globalWS.subscribeGlobal((event) => {
-      if (event.type === "change" && event.entity_type === "session") {
-        loadSessions();
-      }
-      if (event.type === "change" && event.entity_type === "notification") {
-        const me = cloudUserRef.current;
-        const recipient = event.recipient as string | undefined;
-        const notifId = event.id as number | undefined;
-        if (me && recipient && recipient.split(",").includes(me)) {
-          const lastReadId = parseInt(localStorage.getItem("notification_last_read_id") || "0");
-          const dismissedIds: number[] = JSON.parse(localStorage.getItem("notification_dismissed_ids") || "[]");
-          if (!notifId || (notifId > lastReadId && !dismissedIds.includes(notifId))) {
-            markNotificationUnread();
-          }
-        }
-      }
-      // OAuth authorization prompts from the MCP proxy.
-      if (event.type === "connector:needs_auth") {
-        const name = event.name as string;
-        const projectId = event.project_id as string | undefined;
-        toast.warning(`MCP "${name}" requires authorization`, {
-          id: `connector-needs-auth-${name}`, // dedup: only one toast per MCP
-          duration: Infinity,
-          closeButton: true,
-          description: "Authorize to enable this tool, then talk to AI again.",
-          action: {
-            label: "Authorize",
-            onClick: async () => {
-              try {
-                const { auth_url } = await marketplaceApi.oauthStart(name, projectId || undefined);
-                window.open(auth_url, "_blank", "noopener,noreferrer");
-              } catch (e: any) {
-                toast.error(`Cannot start OAuth for "${name}"`, { description: e.message });
-              }
-            },
-          },
-        });
-      }
-      if (event.type === "connector:connected") {
-        const name = event.name as string;
-        toast.dismiss(`connector-needs-auth-${name}`);
-        toast.success(`MCP "${name}" connected`);
-      }
-    });
-  }, [loadSessions]);
-
-  useEffect(() => {
-    const handler = () => clearNotificationUnread();
-    window.addEventListener("notification-read", handler);
-    return () => window.removeEventListener("notification-read", handler);
-  }, []);
-
-  // Clear notification dot when user visits the Cloud page
-  useEffect(() => {
-    if (location.pathname === "/connect") {
-      clearNotificationUnread();
-    }
-  }, [location.pathname]);
-
-  // Re-sync streaming state when WebSocket reconnects (done events may have been lost)
-  useEffect(() => {
-    return globalWS.onConnection((connected) => {
-      if (connected) {
-        loadSessions();
-      }
-    });
-  }, [loadSessions]);
 
   useEffect(() => {
     if (renamingSessionId && renameRef.current) {
@@ -512,18 +95,6 @@ export function AppSidebar() {
       renameRef.current.select();
     }
   }, [renamingSessionId]);
-
-  // Close new-session menu on outside click
-  useEffect(() => {
-    if (!showNewSessionMenu) return;
-    const handler = (e: MouseEvent) => {
-      if (newSessionMenuRef.current && !newSessionMenuRef.current.contains(e.target as Node)) {
-        setShowNewSessionMenu(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [showNewSessionMenu]);
 
   // Close delete confirmation on outside click
   useEffect(() => {
@@ -536,100 +107,6 @@ export function AppSidebar() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [confirmDeleteSessionId]);
-
-  // Close trash popover on outside click
-  useEffect(() => {
-    if (!showTrash) return;
-    const handler = (e: MouseEvent) => {
-      if (trashRef.current && !trashRef.current.contains(e.target as Node)) {
-        setShowTrash(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [showTrash]);
-
-  // Close project ... menu on outside click
-  useEffect(() => {
-    if (!projectMenuId) return;
-    const handler = (e: MouseEvent) => {
-      if (projectMenuRef.current && !projectMenuRef.current.contains(e.target as Node)) {
-        setProjectMenuId(null);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [projectMenuId]);
-
-  // ── Grouped sessions ──
-
-  const projectMap = useMemo(() => {
-    const map = new Map<string, Project>();
-    for (const p of projects) map.set(p.id, p);
-    return map;
-  }, [projects]);
-
-  const groupedSessions = useMemo(() => {
-    // Group sessions by project_id
-    const sessionsByProject = new Map<string, typeof sessions>();
-    const unbound: typeof sessions = [];
-
-    for (const sess of sessions) {
-      // Hidden ("scratch") sessions are per-project staging buffers — they
-      // live in the store so the chat panel can render them, but the
-      // sidebar list and project session count both ignore them until
-      // they're promoted on first user message.
-      if (sess.is_hidden) continue;
-      if (sess.project_id) {
-        const proj = projectMap.get(sess.project_id);
-        if (!proj) continue; // project unlinked locally — hide session
-        if (proj.name !== UNASSIGNED_PROJECT) {
-          const list = sessionsByProject.get(sess.project_id) || [];
-          list.push(sess);
-          sessionsByProject.set(sess.project_id, list);
-          continue;
-        }
-      }
-      unbound.push(sess);
-    }
-
-    const result: { projectId: string | null; project: Project | null; sessions: typeof sessions }[] = [];
-
-    const sortSessions = (list: typeof sessions) =>
-      [...list].sort((a, b) => {
-        // 1. 优先按 sort_order 排序（升序）
-        if (a.sort_order !== b.sort_order) {
-          return a.sort_order - b.sort_order;
-        }
-        // 2. sort_order 相同时，按 created_at 倒序（新创建的在前）
-        const ta = new Date(a.created_at).getTime();
-        const tb = new Date(b.created_at).getTime();
-        return tb - ta;
-      });
-
-    // Only show "Working Projects" (those with a local dir mapping) in the sidebar
-    for (const p of projects.filter((p) => p.name !== UNASSIGNED_PROJECT && p.git_repo_path)) {
-      result.push({
-        projectId: p.id,
-        project: p,
-        sessions: sortSessions(sessionsByProject.get(p.id) || []),
-      });
-    }
-
-    // Sort project groups by created_at (newest first)
-    result.sort((a, b) => {
-      const aTime = new Date(a.project?.created_at || 0).getTime();
-      const bTime = new Date(b.project?.created_at || 0).getTime();
-      return bTime - aTime;
-    });
-
-    // Add unbound sessions at the end (Unassigned group)
-    if (unbound.length > 0) {
-      result.push({ projectId: null, project: null, sessions: sortSessions(unbound) });
-    }
-
-    return result;
-  }, [sessions, projects, projectMap]);
 
   // Auto-select a session.
   //
@@ -708,75 +185,6 @@ export function AppSidebar() {
     if (activeSessionId && location.pathname === "/") markSessionRead(activeSessionId);
   }, [activeSessionId, location.pathname, markSessionRead]);
 
-  // ── Drag-and-drop reorder ──
-
-  const handleDragStart = (e: React.DragEvent, sessionId: string) => {
-    setDragSessionId(sessionId);
-    e.dataTransfer.effectAllowed = "move";
-    // Make the drag ghost semi-transparent
-    if (e.currentTarget instanceof HTMLElement) {
-      e.dataTransfer.setDragImage(e.currentTarget, 0, 0);
-    }
-  };
-
-  const handleDragOver = (e: React.DragEvent, sessionId: string) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    if (!dragSessionId || dragSessionId === sessionId) {
-      setDragOverSessionId(null);
-      setDragOverPosition(null);
-      return;
-    }
-    // Determine if cursor is in the top or bottom half of the target
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const midY = rect.top + rect.height / 2;
-    setDragOverSessionId(sessionId);
-    setDragOverPosition(e.clientY < midY ? "above" : "below");
-  };
-
-  const handleDragEnd = () => {
-    setDragSessionId(null);
-    setDragOverSessionId(null);
-    setDragOverPosition(null);
-  };
-
-  const handleDrop = (e: React.DragEvent, targetSessionId: string, groupSessions: typeof sessions) => {
-    e.preventDefault();
-    if (!dragSessionId || dragSessionId === targetSessionId) {
-      handleDragEnd();
-      return;
-    }
-
-    // Build new order for this group only (drag is scoped within a folder)
-    const ids = groupSessions.map((s) => s.id);
-    const fromIdx = ids.indexOf(dragSessionId);
-    let toIdx = ids.indexOf(targetSessionId);
-    if (fromIdx === -1 || toIdx === -1) { handleDragEnd(); return; }
-
-    // Remove dragged item
-    ids.splice(fromIdx, 1);
-    // Re-find target index after removal
-    toIdx = ids.indexOf(targetSessionId);
-    // Insert at correct position
-    if (dragOverPosition === "below") toIdx += 1;
-    ids.splice(toIdx, 0, dragSessionId);
-
-    handleDragEnd();
-
-    // Optimistic update
-    const orderMap = new Map(ids.map((id, i) => [id, i + 1]));
-    const updated = sessions.map((s) =>
-      orderMap.has(s.id) ? { ...s, sort_order: orderMap.get(s.id)! } : s
-    );
-    setSessions(updated);
-
-    // Persist to server
-    sessionsApi.reorder(ids).catch((err) => {
-      console.error("Failed to reorder sessions:", err);
-      loadSessions();
-    });
-  };
-
   const handleNewSession = async (projectId?: string) => {
     try {
       const sess = await sessionsApi.create({
@@ -842,41 +250,6 @@ export function AppSidebar() {
     }
   };
 
-  const handleOpenTrash = async () => {
-    try {
-      const data = await sessionsApi.listTrashed();
-      setTrashedSessions(data.sessions || []);
-      setShowTrash(true);
-    } catch (e) {
-      console.error("Failed to load trash:", e);
-      toast.error("Failed to load trash", { description: String(e) });
-    }
-  };
-
-  const handleRestoreSession = async (sessionId: string) => {
-    try {
-      const restored = await sessionsApi.restore(sessionId);
-      setTrashedSessions(trashedSessions.filter((s) => s.id !== sessionId));
-      setSessions([restored, ...sessions]);
-    } catch (e) {
-      console.error("Failed to restore session:", e);
-      toast.error("Failed to restore session", { description: String(e) });
-    }
-  };
-
-  const [confirmEmptyTrash, setConfirmEmptyTrash] = useState(false);
-  const handleEmptyTrash = async () => {
-    try {
-      setConfirmEmptyTrash(false);
-      await sessionsApi.emptyTrash();
-      setTrashedSessions([]);
-      toast.success("Trash emptied");
-    } catch (e) {
-      console.error("Failed to empty trash:", e);
-      toast.error("Failed to empty trash", { description: String(e) });
-    }
-  };
-
   const handleStartRename = (sessionId: string, currentName: string) => {
     setRenamingSessionId(sessionId);
     setRenameValue(currentName);
@@ -899,14 +272,20 @@ export function AppSidebar() {
   const toggleProjectCollapsed = (projectId: string) => {
     setCollapsedProjects((prev) => {
       const next = new Set(prev);
-      next.has(projectId) ? next.delete(projectId) : next.add(projectId);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
       return next;
     });
   };
 
-  // Project dialog handlers
+  // ── Project dialog handlers ──
   const handleOpenEditProject = (project: Project) => {
     setEditingProject(project);
+    setProjectDialogOpen(true);
+  };
+
+  const handleOpenNewProject = () => {
+    setEditingProject(null);
     setProjectDialogOpen(true);
   };
 
@@ -939,18 +318,6 @@ export function AppSidebar() {
     }
   };
 
-  // ── Server mode detection ──
-  useEffect(() => {
-    serverApi.info()
-      .then((info: any) => {
-        setCloudInfo(info as CloudInfo);
-        cloudUserRef.current = (info as CloudInfo).user_name ?? null;
-        setConnectStatus(info.mode === "cloud" ? "connected" : "idle");
-      })
-      .catch(() => setConnectStatus("idle"));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // ── Resize ──
 
   const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
@@ -967,70 +334,18 @@ export function AppSidebar() {
     };
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
-  }, []);
+  }, [setSidebarWidth]);
 
   // ── Collapsed state ──
   // Desktop: a 40px icon rail. Mobile: nothing inline; just a floating
   // hamburger pinned to the viewport so the drawer can slide in on demand.
 
   if (isMobile && !mobileOpen) {
-    return (
-      <button
-        onClick={() => setMobileOpen(true)}
-        className="fixed left-2 z-40 p-1.5 rounded-md bg-card/90 backdrop-blur border border-border/60 shadow-sm hover:bg-accent transition-colors"
-        style={{ top: "calc(env(safe-area-inset-top) + 0.25rem)" }}
-        title="Open menu"
-        aria-label="Open menu"
-      >
-        <Menu className="h-4 w-4" />
-      </button>
-    );
+    return <MobileMenuButton onOpen={() => setMobileOpen(true)} />;
   }
 
   if (!isMobile && collapsed) {
-    return (
-      <div className="w-10 border-r border-border/50 bg-card flex flex-col h-full items-center shrink-0">
-        <div className="py-3 w-full flex flex-col items-center gap-1">
-          <button
-            onClick={() => setCollapsed(false)}
-            className="p-1.5 rounded hover:bg-accent transition-colors"
-            title="Expand sidebar"
-          >
-            <PanelLeftOpen className="h-4 w-4" />
-          </button>
-          <ThemeToggle />
-        </div>
-        <div className="mt-auto pb-3 w-full flex flex-col items-center gap-1">
-          <button
-            onClick={() => navigate("/marketplace")}
-            className={cn(
-              "relative p-1.5 rounded transition-colors",
-              location.pathname.startsWith("/marketplace")
-                ? "bg-accent text-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-accent"
-            )}
-            title={marketplaceUpdateCount > 0 ? `Customize (${marketplaceUpdateCount} update${marketplaceUpdateCount > 1 ? "s" : ""} available)` : "Customize"}
-          >
-            <Store className="h-4 w-4" />
-            {marketplaceUpdateCount > 0 && (
-              <span className="absolute top-0 right-0 h-2 w-2 rounded-full bg-red-500" />
-            )}
-          </button>
-          <button
-            onClick={() => navigate("/settings")}
-            className={cn(
-              "p-1.5 rounded transition-colors",
-              location.pathname === "/settings"
-                ? "bg-accent text-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-accent"
-            )}
-            title="Settings"
-          >
-            <Settings className="h-4 w-4" />
-          </button>
-        </div>
-      </div>
-    );
+    return <CollapsedSidebarRail onExpand={() => setCollapsed(false)} />;
   }
 
   // ── Render ──
@@ -1098,269 +413,44 @@ export function AppSidebar() {
         </div>
 
         {/* ── Quick actions ── */}
-        <div className="px-2 pt-3 pb-2 relative" ref={newSessionMenuRef}>
-          <button
-            onClick={() => {
-              const realProjects = projects.filter((p) => p.name !== UNASSIGNED_PROJECT);
-              const localProjects = realProjects.filter((p) => p.git_repo_path);
-              if (realProjects.length === 0) {
-                toast.info("Create a project first");
-                return;
-              }
-              if (localProjects.length === 1) {
-                handleNewSession(localProjects[0].id);
-              } else {
-                setShowNewSessionMenu((v) => !v);
-              }
-            }}
-            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
-          >
-            <SquarePen className="h-4 w-4 shrink-0 text-muted-foreground" />
-            <span>New session</span>
-          </button>
-
-          {/* Project picker dropdown */}
-          {showNewSessionMenu && (
-            <div className="absolute left-2 right-2 top-full z-50 mt-0.5 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
-              <div className="px-3 py-2 text-xs font-medium text-muted-foreground border-b border-border bg-muted/30">
-                Select Project
-              </div>
-              {projects.filter((p) => p.name !== UNASSIGNED_PROJECT && p.git_repo_path).map((p) => (
-                <button
-                  key={p.id}
-                  onClick={() => { setShowNewSessionMenu(false); handleNewSession(p.id); }}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-accent transition-colors"
-                >
-                  <FolderOpen className="h-3.5 w-3.5 text-primary/60 shrink-0" />
-                  <span className="truncate">{p.name}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <NewSessionButton onNewSession={handleNewSession} />
 
         {/* ── Sessions section header ── */}
-        <div className="flex items-center justify-between pl-4 pr-3 pt-2 pb-1.5 relative" ref={trashRef}>
-          <span className="text-[13px] font-medium text-muted-foreground/60">Sessions</span>
-          <div className="flex items-center gap-0.5">
-            <button
-              onClick={() => { setEditingProject(null); setProjectDialogOpen(true); }}
-              className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-              title="New project"
-            >
-              <FolderPlus className="h-3.5 w-3.5" />
-            </button>
-            <button
-              onClick={handleOpenTrash}
-              className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-              title="Recently deleted"
-            >
-              <History className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          {/* Trash popover */}
-          {showTrash && (
-            <div className="absolute left-0 right-0 top-full z-50 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
-              <div className="px-3 py-2 border-b border-border bg-muted/30 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5">
-                  <History className="h-3.5 w-3.5 text-muted-foreground/60 shrink-0" />
-                  <span className="text-xs font-medium text-muted-foreground">Recently Deleted</span>
-                </div>
-                <div className="flex items-center gap-0.5 relative">
-                  {trashedSessions.length > 0 && (
-                    <button
-                      onClick={() => setConfirmEmptyTrash(true)}
-                      className="p-0.5 rounded hover:bg-destructive/20 text-muted-foreground/40 hover:text-destructive transition-colors"
-                      title="Empty trash"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </button>
-                  )}
-                  {confirmEmptyTrash && (
-                    <div className="absolute right-0 top-full mt-1 z-50 bg-popover border rounded-md shadow-md p-1.5 flex gap-1 whitespace-nowrap">
-                      <button
-                        onClick={handleEmptyTrash}
-                        className="px-2 py-0.5 text-xs bg-destructive text-destructive-foreground rounded hover:bg-destructive/90"
-                      >
-                        Empty Trash
-                      </button>
-                      <button
-                        onClick={() => setConfirmEmptyTrash(false)}
-                        className="px-2 py-0.5 text-xs bg-muted text-muted-foreground rounded hover:bg-accent"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  )}
-                  <button
-                    onClick={() => setShowTrash(false)}
-                    className="p-0.5 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </div>
-              </div>
-              <div className="px-3 py-1.5 border-b border-border/50">
-                <p className="text-[11px] text-muted-foreground/60">
-                  Sessions are permanently deleted after 7 days.
-                </p>
-              </div>
-              <div className="max-h-64 overflow-y-auto">
-                {trashedSessions.length === 0 ? (
-                  <div className="px-3 py-4 text-[12px] text-muted-foreground/40 text-center">
-                    No recently deleted sessions
-                  </div>
-                ) : (
-                  trashedSessions.map((s) => (
-                    <div
-                      key={s.id}
-                      className="flex items-center gap-2 px-3 py-1.5 hover:bg-accent/50 transition-colors"
-                    >
-                      <span className="shrink-0 text-[11px] text-muted-foreground/50 tabular-nums">
-                        {s.deleted_at ? formatRelativeDate(s.deleted_at) : ""}
-                      </span>
-                      <span className="flex-1 text-[12px] text-foreground truncate min-w-0">
-                        {s.name || "New Session"}
-                      </span>
-                      <button
-                        onClick={() => handleRestoreSession(s.id)}
-                        className="shrink-0 p-1 rounded hover:bg-accent text-muted-foreground/50 hover:text-foreground transition-colors"
-                        title="Restore session"
-                      >
-                        <RotateCcw className="h-3 w-3" />
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
-        </div>
+        <SessionsHeader onNewProject={handleOpenNewProject} />
 
         {/* ── Grouped session list ── */}
         <div className="flex-1 overflow-y-auto px-2 pb-2">
-          {groupedSessions.map((group) => {
-            const groupKey = group.projectId || "__unbound__";
-            const isCollapsed = collapsedProjects.has(groupKey);
-
-            return (
-              <div key={groupKey} className="mb-1">
-                {/* Project group header. The chevron and the rest of the row
-                    are separate click targets: chevron toggles expand/collapse,
-                    the row body opens the project's scratch session so the
-                    user can start a new chat (and use Files/Terminal/Workflow
-                    in the meantime) without committing to a real session
-                    until they send the first message. */}
-                <div className="group flex items-center rounded-lg hover:bg-accent/30 transition-colors">
-                  <button
-                    onClick={(e) => { e.stopPropagation(); toggleProjectCollapsed(groupKey); }}
-                    className="flex items-center justify-center pl-2 py-1.5 shrink-0"
-                    title={isCollapsed ? "Expand" : "Collapse"}
-                  >
-                    {isCollapsed
-                      ? <ChevronRight className="h-3 w-3 text-muted-foreground/50" />
-                      : <ChevronDown className="h-3 w-3 text-muted-foreground/50" />}
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (group.projectId) {
-                        handleSelectProject(group.projectId);
-                      } else {
-                        // Unassigned group: keep legacy expand/collapse behavior
-                        // since there's no project to anchor a scratch session.
-                        toggleProjectCollapsed(groupKey);
-                      }
-                    }}
-                    className="flex-1 flex items-center gap-1.5 pl-1 pr-2 py-1.5 min-w-0"
-                  >
-                    <FolderOpen className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
-                    <span className="text-[13px] text-muted-foreground truncate">
-                      {group.project?.name === UNASSIGNED_PROJECT ? "Unassigned" : (group.project?.name || "Unassigned")}
-                    </span>
-                    <span className="text-[11px] text-muted-foreground/30 tabular-nums ml-1.5 shrink-0">
-                      {group.sessions.length}
-                    </span>
-                  </button>
-                  {group.projectId && group.project ? (
-                    <div className="flex items-center shrink-0 relative">
-                      {/* ... menu button */}
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setProjectMenuId(projectMenuId === group.projectId ? null : group.projectId); }}
-                        className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-all opacity-0 group-hover:opacity-100"
-                        title="Project options"
-                      >
-                        <MoreHorizontal className="h-3 w-3" />
-                      </button>
-                      {/* New session button */}
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleNewSession(group.projectId!); }}
-                        className="p-1 mr-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-all"
-                        title="New session"
-                      >
-                        <Plus className="h-3 w-3" />
-                      </button>
-                      {/* Dropdown menu */}
-                      {projectMenuId === group.projectId && (
-                        <div
-                          ref={projectMenuRef}
-                          className="absolute right-0 top-full mt-0.5 z-50 w-44 bg-popover border rounded-lg shadow-lg overflow-hidden"
-                        >
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setProjectMenuId(null); handleOpenEditProject(group.project!); }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors"
-                          >
-                            <Pencil className="h-3 w-3 text-muted-foreground" />
-                            Edit
-                          </button>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setProjectMenuId(null); setDeleteTargetProject(group.project!); }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-destructive hover:bg-destructive/10 transition-colors"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                            Delete
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="w-5 mr-1.5 shrink-0" />
-                  )}
-                </div>
-
-                {/* Sessions in group */}
-                {!isCollapsed && group.sessions.map((s) => (
-                  <SessionRow
-                    key={s.id}
-                    session={s}
-                    groupSessions={group.sessions}
-                    isActive={activeSessionId === s.id && location.pathname === "/"}
-                    isStreaming={!!streamingSessions[s.id]}
-                    isUnread={!!unreadSessions[s.id]}
-                    isRenaming={renamingSessionId === s.id}
-                    renameValue={renameValue}
-                    renameRef={renameRef}
-                    onRenameChange={setRenameValue}
-                    onRenameCommit={handleCommitRename}
-                    onRenameCancel={() => setRenamingSessionId(null)}
-                    onRenameStart={handleStartRename}
-                    isDragging={dragSessionId === s.id}
-                    isDropTarget={dragOverSessionId === s.id}
-                    dropPosition={dragOverPosition}
-                    onDragStart={handleDragStart}
-                    onDragOver={handleDragOver}
-                    onDragEnd={handleDragEnd}
-                    onDrop={handleDrop}
-                    isConfirmingDelete={confirmDeleteSessionId === s.id}
-                    onConfirmDelete={setConfirmDeleteSessionId}
-                    onCancelDelete={() => setConfirmDeleteSessionId(null)}
-                    onDelete={handleDeleteSession}
-                    onSelect={handleSelectSession}
-                    onMarkUnread={markSessionUnread}
-                  />
-                ))}
-              </div>
-            );
-          })}
+          {groupedSessions.map((group) => (
+            <SessionGroup
+              key={group.projectId || "__unbound__"}
+              group={group}
+              isCollapsed={collapsedProjects.has(group.projectId || "__unbound__")}
+              onToggleCollapsed={toggleProjectCollapsed}
+              onSelectProject={handleSelectProject}
+              onNewSession={handleNewSession}
+              onEditProject={handleOpenEditProject}
+              onDeleteProject={setDeleteTargetProject}
+              renamingSessionId={renamingSessionId}
+              renameValue={renameValue}
+              renameRef={renameRef}
+              onRenameChange={setRenameValue}
+              onRenameCommit={handleCommitRename}
+              onRenameCancel={() => setRenamingSessionId(null)}
+              onRenameStart={handleStartRename}
+              dragSessionId={dragSessionId}
+              dragOverSessionId={dragOverSessionId}
+              dragOverPosition={dragOverPosition}
+              onDragStart={handleDragStart}
+              onDragOver={handleDragOver}
+              onDragEnd={handleDragEnd}
+              onDrop={handleDrop}
+              confirmDeleteSessionId={confirmDeleteSessionId}
+              onConfirmDelete={setConfirmDeleteSessionId}
+              onCancelDelete={() => setConfirmDeleteSessionId(null)}
+              onDelete={handleDeleteSession}
+              onSelectSession={handleSelectSession}
+            />
+          ))}
 
           {projects.filter((p) => p.name !== UNASSIGNED_PROJECT).length === 0 && (
             <div className="flex flex-col items-center text-center px-3 py-8 gap-2">
@@ -1369,7 +459,7 @@ export function AppSidebar() {
                 No projects yet. Create one to start chatting.
               </p>
               <button
-                onClick={() => { setEditingProject(null); setProjectDialogOpen(true); }}
+                onClick={handleOpenNewProject}
                 className="mt-1 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] font-medium text-primary-foreground bg-primary hover:bg-primary/90 transition-colors"
               >
                 <Plus className="h-3 w-3" />
@@ -1379,55 +469,8 @@ export function AppSidebar() {
           )}
         </div>
 
-        {/* ── Bottom nav ── */}
-        <div className="px-2 pb-3 pt-1 shrink-0 space-y-0.5 border-t border-border/40 mt-1">
-          <button
-            onClick={() => navigate("/projects")}
-            className={cn(
-              "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors mt-1",
-              location.pathname === "/projects"
-                ? "bg-accent text-foreground font-medium"
-                : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
-            )}
-          >
-            <LayoutGrid className="h-4 w-4 shrink-0" />
-            <span>Projects</span>
-          </button>
-          <button
-            onClick={() => navigate("/marketplace")}
-            className={cn(
-              "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors",
-              location.pathname.startsWith("/marketplace")
-                ? "bg-accent text-foreground font-medium"
-                : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
-            )}
-          >
-            <div className="relative shrink-0">
-              <Store className="h-4 w-4" />
-              {marketplaceUpdateCount > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-red-500" />
-              )}
-            </div>
-            <span>Customize</span>
-            {marketplaceUpdateCount > 0 && (
-              <span className="ml-auto text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-500/10 text-red-500">
-                {marketplaceUpdateCount}
-              </span>
-            )}
-          </button>
-          <button
-            onClick={() => navigate("/settings")}
-            className={cn(
-              "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors",
-              location.pathname === "/settings"
-                ? "bg-accent text-foreground font-medium"
-                : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
-            )}
-          >
-            <Settings className="h-4 w-4 shrink-0" />
-            <span>Settings</span>
-          </button>
-        </div>
+        {/* ── Footer: bottom nav ── */}
+        <SidebarFooterNav />
       </div>
 
       {/* Project Dialog (create + edit). Delete uses the dedicated typed-name
