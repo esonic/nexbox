@@ -137,6 +137,40 @@ const MonacoFileEditor = forwardRef<MonacoFileEditorHandle, MonacoFileEditorProp
       onSaveRef.current = onSave;
     }, [onSave]);
 
+    // ── IME-safe content sync ────────────────────────────────────────────────
+    // <Editor> is rendered UNCONTROLLED (defaultValue, not value). The controlled
+    // `value` prop makes @monaco-editor/react run a full-range executeEdits
+    // whenever `value !== editor.getValue()`. During an IME composition the React
+    // `value` lags the live model by a keystroke or two, so that compare trips
+    // mid-composition, replaces the whole document, and — via forceMoveMarkers —
+    // yanks the caret to EOF. That is the "typing Chinese suddenly scrolls to the
+    // bottom and the text lands at end-of-file" bug. We reproduce the sync here
+    // but skip it entirely while a composition is active (composingRef). Echoes
+    // of the user's own edits — including the characters just committed by the
+    // IME — are no-ops because by the time this runs the model already holds them
+    // (model.getValue() === value). Only genuinely external changes (file switch
+    // / reload), where value diverges from the model outside composition, apply.
+    const valueRef = useRef(value);
+    const composingRef = useRef(false);
+
+    const syncExternalValue = useCallback(() => {
+      const editor = editorRef.current;
+      const model = editor?.getModel();
+      if (!editor || !model) return;
+      if (composingRef.current) return; // never mutate the model mid-IME
+      const next = valueRef.current;
+      if (model.getValue() === next) return; // echo of the user's own edit / no-op
+      editor.executeEdits("external-value-sync", [
+        { range: model.getFullModelRange(), text: next, forceMoveMarkers: true },
+      ]);
+      editor.pushUndoStop();
+    }, []);
+
+    useEffect(() => {
+      valueRef.current = value;
+      syncExternalValue();
+    }, [value, syncExternalValue]);
+
     // Keep the latest search request in a ref so onMount (first load, fires
     // after the async Monaco chunk resolves) navigates using current values,
     // free of closure-timing concerns. Updated in the effect below.
@@ -294,6 +328,22 @@ const MonacoFileEditor = forwardRef<MonacoFileEditorHandle, MonacoFileEditorProp
     const handleMount: OnMount = (editor, monaco) => {
       editorRef.current = editor;
       monacoRef.current = monaco;
+      // Track IME composition so syncExternalValue never rewrites the model (and
+      // forces the caret to EOF) while the user is mid-composition.
+      //
+      // Do NOT sync synchronously on composition end: at that instant React has
+      // not yet committed the just-selected characters, so `valueRef` still holds
+      // the pre-commit *pinyin* text — syncing now would overwrite the freshly
+      // committed 汉字 with those letters and jump the caret to EOF. We only clear
+      // the flag; the model already contains the committed text, and the ensuing
+      // [value] effect (which runs after React commits, with composingRef=false
+      // and model.getValue() === value) no-ops, leaving the committed text intact.
+      editor.onDidCompositionStart(() => {
+        composingRef.current = true;
+      });
+      editor.onDidCompositionEnd(() => {
+        composingRef.current = false;
+      });
       // This is a standalone single-file editor: the built-in TS worker has no
       // tsconfig/node_modules/JSX context, so it false-flags nearly every
       // identifier ("Cannot find name ...") and all JSX. Disable diagnostics so
@@ -304,8 +354,11 @@ const MonacoFileEditor = forwardRef<MonacoFileEditorHandle, MonacoFileEditorProp
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
         onSaveRef.current?.();
       });
-      // First load: the effects below already ran (no editor yet); drive the
-      // initial reveal and dirty-diff render here now that the editor exists.
+      // First load: the effects below already ran (no editor yet); reconcile the
+      // model against the current value (a no-op when defaultValue already
+      // seeded it) and drive the initial reveal and dirty-diff render here now
+      // that the editor exists.
+      syncExternalValue();
       revealSearchTarget();
       applyDirtyDiff();
     };
@@ -321,7 +374,10 @@ const MonacoFileEditor = forwardRef<MonacoFileEditorHandle, MonacoFileEditorProp
       <Editor
         height="100%"
         language={langFromPath(filepath)}
-        value={value}
+        // Uncontrolled: defaultValue seeds the model at mount; external changes
+        // are applied imperatively by syncExternalValue (IME-safe). Binding the
+        // controlled `value` prop here reintroduces the compose-jumps-to-EOF bug.
+        defaultValue={value}
         onChange={(v) => onChange(v ?? "")}
         onMount={handleMount}
         theme={theme}
