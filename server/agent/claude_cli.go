@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -69,8 +70,16 @@ func NewClaudeClient() *ClaudeClient {
 	if dacs := os.Getenv("DACS"); dacs != "" {
 		c.Env["CLAUDE_CODE_TMPDIR"] = dacs + "/.claude-tmp"
 	}
+	// send_to_session can block for the duration of another agent turn. Match
+	// NexBox's per-turn ceiling unless the operator set an explicit timeout.
+	if os.Getenv("MCP_TOOL_TIMEOUT") == "" {
+		c.Env["MCP_TOOL_TIMEOUT"] = strconv.Itoa(int(mcpToolTimeout / time.Millisecond))
+	}
 	return c
 }
+
+// mcpToolTimeout matches the per-turn ceiling in api.dispatchUserMessage.
+const mcpToolTimeout = 5 * time.Hour
 
 // QueryOptions contains options for a Claude query
 type QueryOptions struct {

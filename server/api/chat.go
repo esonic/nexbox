@@ -14,9 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/esonic/nexbox/agent"
 	"github.com/esonic/nexbox/store"
+	"github.com/gorilla/websocket"
 )
 
 var upgrader = websocket.Upgrader{
@@ -130,8 +130,8 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 
 // persistSessionAgent writes the effective agent onto the session row when it
 // was never set, mutating session.Agent in place on success. Scratch sessions
-// are created with agent='' and (unless the user manually switches the agent
-// dropdown) promoted in place without ever writing the column — UnhideSession
+// are created with an empty agent and (unless the user manually switches it in
+// the dropdown) promoted in place without ever writing the column — UnhideSession
 // only flips is_hidden, and the turn still runs because ResolveAgent falls back
 // to the server default. Persisting the resolved name lets clients associate
 // the session with its advertised capabilities without a separate fallback.
@@ -151,12 +151,37 @@ func (s *Server) persistSessionAgent(session *Session) {
 	session.Agent = agentName
 }
 
+// dispatchOutcome reports what became of a message handed to dispatchUserMessage.
+type dispatchOutcome int
+
+const (
+	dispatchFailed dispatchOutcome = iota
+	dispatchStarted
+	dispatchBusy
+)
+
+// dispatchOpts tunes how a message is delivered to a session.
+type dispatchOpts struct {
+	// noQueue lets relay callers retry a busy target without accidentally
+	// enqueueing the same message more than once.
+	noQueue bool
+	// onTurnStart exposes the placeholder assistant message ID before any event
+	// is emitted, so a relay can match the corresponding done event.
+	onTurnStart func(assistantMsgID string)
+}
+
 // handleUserMessage resolves context and starts the agent goroutine for a session.
 func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePart, imageFilenames []string, features []string) {
+	_, _ = s.dispatchUserMessage(sessionID, message, parts, imageFilenames, features, dispatchOpts{})
+}
+
+// dispatchUserMessage is handleUserMessage with an explicit outcome for callers
+// that need to distinguish a started turn from a queued or rejected message.
+func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessagePart, imageFilenames []string, features []string, opts dispatchOpts) (dispatchOutcome, error) {
 	session, err := s.Store.GetSession(sessionID)
 	if err != nil || session == nil {
 		s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "session not found"})
-		return
+		return dispatchFailed, fmt.Errorf("session %s not found", sessionID)
 	}
 
 	// Resolve inline task/asset refs from this message's parts.
@@ -189,7 +214,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 		if err != nil {
 			log.Printf("[chat] Failed to get/create unassigned project: %v", err)
 			s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "failed to initialize project"})
-			return
+			return dispatchFailed, fmt.Errorf("initialize project for session %s: %w", sessionID, err)
 		}
 		pid := unassignedProject.ID
 		if _, err := s.Store.UpdateSession(sessionID, UpdateSessionRequest{ProjectID: &pid}); err != nil {
@@ -203,7 +228,7 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 	project, err := s.getProjectWithLocalPath(session.ProjectID)
 	if err != nil || project == nil {
 		s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: "project not found"})
-		return
+		return dispatchFailed, fmt.Errorf("project %s for session %s not found", session.ProjectID, sessionID)
 	}
 
 	projectWorkDir := project.GitRepoPath
@@ -247,12 +272,14 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 	log.Printf("[chat] Agent request for session %s (project: %s, new: %v, refs: %d tasks, %d assets)",
 		sessionID, project.Name, isNewSession, len(refTasks), len(refAssets))
 
-	if s.SessionManager.IsActive(sessionID) {
+	if !s.SessionManager.TrySetActive(sessionID) {
+		if opts.noQueue {
+			return dispatchBusy, nil
+		}
 		s.enqueueMessage(sessionID, message, imageFilenames)
-		return
+		return dispatchBusy, nil
 	}
 
-	s.SessionManager.SetActive(sessionID, true)
 	s.Hub.SetActive(sessionID)
 
 	// Persist user message
@@ -319,6 +346,9 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 			return
 		}
 		assistantMsgID := assistantMsg.ID
+		if opts.onTurnStart != nil {
+			opts.onTurnStart(assistantMsgID)
+		}
 
 		var mu sync.Mutex
 		var msgParts []MessagePart
@@ -1003,6 +1033,8 @@ func (s *Server) handleUserMessage(sessionID, message string, parts []MessagePar
 
 		s.processNextQueued(sessionID)
 	}()
+
+	return dispatchStarted, nil
 }
 
 // resolveImagePaths converts image filenames to absolute paths, filtering out any that don't exist.

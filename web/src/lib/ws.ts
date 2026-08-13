@@ -34,6 +34,7 @@ class GlobalWebSocket {
 
   private handlers = new Map<string, Set<EventHandler>>(); // sessionId -> handler set
   private globalHandlers = new Set<GlobalEventHandler>(); // non-session events (connect module)
+  private unroutedHandlers = new Set<(sessionId: string) => void>(); // session events nobody is subscribed to
 
   private connectionHandlers = new Set<ConnectionHandler>();
   private _connected = false;
@@ -134,6 +135,18 @@ class GlobalWebSocket {
     };
   }
 
+  /**
+   * Register a callback for session events that had no subscriber. A client
+   * only subscribes to the session it is viewing, so any turn running elsewhere
+   * lands here instead.
+   */
+  subscribeUnrouted(handler: (sessionId: string) => void): () => void {
+    this.unroutedHandlers.add(handler);
+    return () => {
+      this.unroutedHandlers.delete(handler);
+    };
+  }
+
   /** Send a user message for a session, optionally with structured parts, image filenames, and features. */
   send(sessionId: string, message: string, parts?: MessagePart[], images?: string[], features?: string[]): void {
     this.rawSend({
@@ -213,10 +226,17 @@ class GlobalWebSocket {
     }
 
     const set = this.handlers.get(sid);
-    if (set) {
+    if (set && set.size > 0) {
       for (const handler of set) {
         handler(tagged as ChatEvent);
       }
+      return;
+    }
+
+    // The server broadcasts live and never replays. Notify cache owners when a
+    // session moved on while nobody was listening to it.
+    for (const handler of this.unroutedHandlers) {
+      handler(sid);
     }
   }
 

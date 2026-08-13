@@ -440,7 +440,11 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     messagesApi.list(sessionId, 20).then(({ messages: persisted, active, has_more, pending_input }) => {
       if (cancelled) return;
       const liveMessages = useAppStore.getState().chatMessages[sessionId] || [];
-      if (liveMessages.length > 0) {
+      // A WS delta may create the assistant bubble before this initial history
+      // request resolves. In that one-bubble case, retain the live deltas and
+      // splice the persisted history in front instead of discarding the fetch.
+      const joinedRunningTurn = liveMessages.length === 1 && liveMessages[0].role === "assistant";
+      if (liveMessages.length > 0 && !joinedRunningTurn) {
         setHasMore(has_more || false);
         return;
       }
@@ -469,6 +473,25 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       }
       if (totalDuration > 0) {
         useAppStore.getState().setSessionDuration(sessionId, totalDuration);
+      }
+
+      if (joinedRunningTurn) {
+        // Exclude only the persisted assistant row for the active turn; the
+        // live bubble already contains the newest deltas for that response.
+        // The placeholder can still have zero parts and therefore be absent
+        // from `mapped`; removing mapped's last assistant by position would
+        // then incorrectly delete the previous completed reply.
+        const activeAssistantId = [...(persisted || [])]
+          .reverse()
+          .find((m) => m.role === "assistant")?.id;
+        const history = activeAssistantId
+          ? mapped.filter((m) => m.id !== activeAssistantId)
+          : mapped;
+        if (history.length > 0) {
+          setChatMessages(sessionId, [...history, liveMessages[0]]);
+        }
+        setHasMore(has_more || false);
+        return;
       }
 
       if (active) {

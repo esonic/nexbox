@@ -18,7 +18,7 @@ import { useSmoothText } from "@/hooks/useSmoothText";
 import { useThemeMode } from "@/hooks/useThemeMode";
 import { BorderBeam } from "@/components/ui/border-beam";
 import { formatDuration } from "@/lib/format";
-import type { ChatMessage as ChatMessageType, MessagePart, Task, AssetType } from "@/types";
+import type { ChatMessage as ChatMessageType, MessagePart, Task, AssetType, NestedTool, ToolUseState } from "@/types";
 
 const ASSET_TYPE_CONFIG: Record<string, { label: string; color: string; icon: typeof FileText }> = {
   requirement_doc: { label: "Requirement", color: "text-blue-400", icon: ScrollText },
@@ -724,12 +724,106 @@ function toRelativePath(absPath: string, projectRoot: string | undefined): strin
 // them (only once the closing tag is present, i.e. the reply is complete);
 // stripNextActions removes the block from the rendered text — including a
 // dangling, not-yet-closed block during streaming so the raw tag never flashes.
-const NEXT_ACTIONS_RE = /<next-actions>([\s\S]*?)<\/next-actions>/i;
+//
+// A tag inside markdown code — a fenced block or an inline span — is the model
+// QUOTING the tag (say, while explaining this very feature), not emitting a
+// block. Those must be skipped: a quoted opening tag otherwise pairs with the
+// real block's closing tag far below, and everything in between disappears from
+// the message while its dash-prefixed lines turn into bogus chips.
+
+const NEXT_ACTIONS_OPEN = "<next-actions>";
+
+interface NextActionsBlock {
+  start: number; // start of the removable range (leading blank lines included)
+  end: number;
+  innerStart: number; // start of the block's dash-prefixed content
+  innerEnd: number;
+  closed: boolean; // false for a block still being streamed
+}
+
+// Ranges of markdown code in `text`: fenced blocks first, then inline spans in
+// what's left. An unterminated inline span doesn't count — during streaming the
+// text routinely ends mid-span, and treating that as code would hide the real
+// block at the end of the reply.
+function codeRegions(text: string): Array<{ s: number; e: number }> {
+  const regions: Array<{ s: number; e: number }> = [];
+  const covered = (i: number) => regions.some((r) => i >= r.s && i < r.e);
+
+  // Fenced blocks: a ``` / ~~~ line opens, the next fence line using the same
+  // character (and at least as long) closes. An unclosed fence runs to the end.
+  const fenceLine = /^[ \t]{0,3}(`{3,}|~{3,})[^\n]*$/gm;
+  let open: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = fenceLine.exec(text)) !== null) {
+    if (!open) {
+      open = m;
+    } else if (m[1][0] === open[1][0] && m[1].length >= open[1].length) {
+      regions.push({ s: open.index, e: m.index + m[0].length });
+      open = null;
+    }
+  }
+  if (open) regions.push({ s: open.index, e: text.length });
+
+  // Inline spans outside those fences. The content may wrap lines but not span
+  // a blank line, so one stray backtick can't mask the rest of the message.
+  const inlineSpan = /(`+)(?:[^\n]|\n(?![ \t]*\n))*?\1/g;
+  while ((m = inlineSpan.exec(text)) !== null) {
+    if (covered(m.index)) continue;
+    regions.push({ s: m.index, e: m.index + m[0].length });
+  }
+  return regions;
+}
+
+// Locate the genuine <next-actions> blocks in `text`.
+function nextActionsBlocks(text: string): NextActionsBlock[] {
+  if (!/<next-actions>/i.test(text)) return [];
+
+  const code = codeRegions(text);
+  const inCode = (i: number) => code.some((r) => i >= r.s && i < r.e);
+
+  const blocks: NextActionsBlock[] = [];
+  const re = /(\n*)<next-actions>([\s\S]*?)(<\/next-actions>|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const tagAt = m.index + m[1].length;
+    if (inCode(tagAt)) {
+      // Quoted, not emitted. Resume scanning just past the tag so a real block
+      // further down the message is still found.
+      re.lastIndex = tagAt + NEXT_ACTIONS_OPEN.length;
+      continue;
+    }
+    const innerStart = tagAt + NEXT_ACTIONS_OPEN.length;
+    blocks.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      innerStart,
+      innerEnd: innerStart + m[2].length,
+      closed: m[3] !== "",
+    });
+    if (m.index === re.lastIndex) re.lastIndex++;
+  }
+  return blocks;
+}
+
+function cutBlocks(text: string, blocks: NextActionsBlock[]): string {
+  let out = "";
+  let at = 0;
+  for (const b of blocks) {
+    out += text.slice(at, b.start);
+    at = b.end;
+  }
+  return out + text.slice(at);
+}
 
 function parseNextActions(text: string): string[] {
-  const m = text.match(NEXT_ACTIONS_RE);
-  if (!m) return [];
-  return m[1]
+  // A kept-open turn (background Agent/Workflow) can fold multiple turns into one
+  // message, so an early "wrap-up" <next-actions> may precede the real final one.
+  // Take the LAST complete block — that's the answer's true suggestions.
+  const closed = nextActionsBlocks(text).filter((b) => b.closed);
+  if (closed.length === 0) return [];
+  const last = closed[closed.length - 1];
+  return text
+    .slice(last.innerStart, last.innerEnd)
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.startsWith("-"))
@@ -739,10 +833,125 @@ function parseNextActions(text: string): string[] {
 }
 
 function stripNextActions(text: string): string {
-  const stripped = text.replace(/\n*<next-actions>[\s\S]*?(?:<\/next-actions>|$)/i, "");
+  const blocks = nextActionsBlocks(text);
   // Only trim when we actually removed a block, so messages without one render
   // byte-for-byte as before.
-  return stripped === text ? text : stripped.trimEnd();
+  if (blocks.length === 0) return text;
+  return cutBlocks(text, blocks.slice(0, 1)).trimEnd();
+}
+
+// Strip EVERY <next-actions> block from a plain-text rendition of a message.
+// A single message can contain several: each time the model considers its reply
+// finished (a background-task pause, a context compaction) it emits one, and a
+// kept-open turn folds all of those into one message. They're surfaced as chips,
+// never as text — so copying a message must not paste them either.
+// eslint-disable-next-line react-refresh/only-export-components
+export function stripAllNextActions(text: string): string {
+  const blocks = nextActionsBlocks(text);
+  if (blocks.length === 0) return text;
+  return cutBlocks(text, blocks).trim();
+}
+
+// Strip <next-actions> blocks that may be SPLIT across several text parts. During
+// a kept-open turn (background Agent/Workflow), the model's wrap-up text — which
+// ends with a <next-actions> block — gets interleaved with tool calls, so the
+// block (even its opening tag, e.g. "…<next" | "-actions>…") lands in separate,
+// non-adjacent text parts. Per-part stripping can't see the whole tag, so the
+// raw fragments leak. This operates on the concatenation (where the tag is whole
+// again), finds every block, then maps the removed ranges back onto each text
+// part. Fully-emptied text parts are dropped so they don't render blank blocks.
+function stripNextActionsAcrossParts(parts: MessagePart[]): MessagePart[] {
+  const spanStart: number[] = new Array(parts.length);
+  let full = "";
+  parts.forEach((p, i) => {
+    if (p.type === "text") {
+      const c = (p as { content: string }).content || "";
+      spanStart[i] = full.length;
+      full += c;
+    }
+  });
+  const ranges = nextActionsBlocks(full).map((b) => ({ s: b.start, e: b.end }));
+  if (ranges.length === 0) return parts;
+  const inRange = (g: number) => ranges.some((r) => g >= r.s && g < r.e);
+  const out: MessagePart[] = [];
+  parts.forEach((p, i) => {
+    if (p.type !== "text") {
+      out.push(p);
+      return;
+    }
+    const c = (p as { content: string }).content || "";
+    const base = spanStart[i];
+    let kept = "";
+    for (let k = 0; k < c.length; k++) {
+      if (!inRange(base + k)) kept += c[k];
+    }
+    kept = kept.trimEnd();
+    if (kept !== "") out.push({ ...p, content: kept } as MessagePart);
+  });
+  return out;
+}
+
+// Re-nest a sub-agent's tool calls under their parent Agent tool_use card. The
+// live store nests them (via WS parent_tool_id); persisted/reloaded parts store
+// them FLAT (with parentToolCallId), interleaved with the main agent's streaming
+// text. Rendered flat, they fragment the main text — and split a <next-actions>
+// block — into many top-level parts. Nesting removes them from the linear flow so
+// the main text stays coherent (matching the live view). Idempotent on already-
+// nested (live) parts, which carry no top-level parentToolCallId tool.
+function nestSubagentTools(parts: MessagePart[]): MessagePart[] {
+  const result: MessagePart[] = [];
+  const topIdx = new Map<string, number>(); // top-level tool_use toolCallId → index in result
+  const nestedParent = new Map<string, number>(); // nested toolCallId → parent index in result
+  for (const part of parts) {
+    if (part.type === "tool_use" && part.parentToolCallId && topIdx.has(part.parentToolCallId)) {
+      const pIdx = topIdx.get(part.parentToolCallId)!;
+      const parent = result[pIdx];
+      if (parent.type === "tool_use") {
+        const nt: NestedTool = { toolCallId: part.toolCallId, toolName: part.toolName, input: part.input, state: part.state };
+        result[pIdx] = { ...parent, nestedTools: [...(parent.nestedTools || []), nt] };
+        nestedParent.set(part.toolCallId, pIdx);
+        continue;
+      }
+    }
+    if (part.type === "tool_result" && nestedParent.has(part.toolCallId)) {
+      const pIdx = nestedParent.get(part.toolCallId)!;
+      const parent = result[pIdx];
+      if (parent.type === "tool_use" && parent.nestedTools) {
+        const ni = parent.nestedTools.findIndex((n) => n.toolCallId === part.toolCallId);
+        if (ni >= 0) {
+          const updated = parent.nestedTools.slice();
+          updated[ni] = {
+            ...updated[ni],
+            state: (part.isError ? "error" : "complete") as ToolUseState,
+            result: { output: part.output, isError: part.isError },
+          };
+          result[pIdx] = { ...parent, nestedTools: updated };
+        }
+      }
+      continue;
+    }
+    if (part.type === "tool_use") topIdx.set(part.toolCallId, result.length);
+    result.push(part);
+  }
+  return result;
+}
+
+// Merge consecutive text parts into one. After nestSubagentTools() removes the
+// interleaved sub-agent tools, the main agent's text runs (previously split by
+// them) become adjacent — merging reunites them so prose and a <next-actions>
+// block render as one coherent block. Text separated by the MAIN agent's own
+// tool calls stays split (correct).
+function mergeAdjacentText(parts: MessagePart[]): MessagePart[] {
+  const out: MessagePart[] = [];
+  for (const p of parts) {
+    const last = out[out.length - 1];
+    if (p.type === "text" && last && last.type === "text") {
+      out[out.length - 1] = { type: "text", content: last.content + p.content };
+    } else {
+      out.push(p);
+    }
+  }
+  return out;
 }
 
 function NextActions({ actions, sessionId }: { actions: string[]; sessionId: string }) {
@@ -814,7 +1023,16 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
   const themeMode = useThemeMode();
 
   const effectiveParts = loadedParts || message.parts;
-  const groups = useMemo(() => groupParts(effectiveParts), [effectiveParts]);
+  // Prepare parts for rendering: (1) re-nest sub-agent tool calls under their
+  // Agent card so they don't fragment the main text, (2) merge the now-adjacent
+  // main-agent text runs, (3) strip <next-actions>. Chips are still parsed from
+  // the original text below (plainText). This mirrors the live-stream view for
+  // persisted/reloaded flat parts.
+  const displayParts = useMemo(
+    () => stripNextActionsAcrossParts(mergeAdjacentText(nestSubagentTools(effectiveParts))),
+    [effectiveParts],
+  );
+  const groups = useMemo(() => groupParts(displayParts), [displayParts]);
   // For a completed turn, keep the original per-batch "X tool calls" collapse,
   // then fold everything before the final answer into the outer "Worked for Xs"
   // block. Streaming turns stay fully expanded (raw groups, no collapse).

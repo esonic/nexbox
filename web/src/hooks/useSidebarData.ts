@@ -99,6 +99,18 @@ export function useSidebarData() {
     return () => window.removeEventListener("session-updated", handler);
   }, [loadSessions, loadProjects]);
 
+  // Session event streams are only observed for the currently open session.
+  // If another session advances, invalidate its cached transcript so the next
+  // visit reloads the messages that this client did not observe.
+  useEffect(() => {
+    return globalWS.subscribeUnrouted((sessionId) => {
+      const store = useAppStore.getState();
+      if (store.chatMessages[sessionId]?.length) {
+        store.setChatMessages(sessionId, []);
+      }
+    });
+  }, []);
+
   useEffect(() => {
     return globalWS.subscribeGlobal((event) => {
       if (event.type === "change" && event.entity_type === "session") {

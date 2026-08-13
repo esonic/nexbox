@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	gomcp "github.com/mark3labs/mcp-go/mcp"
@@ -42,6 +43,8 @@ type SessionOrchestrator interface {
 	OrchestrateSendMessage(sessionID, message string) error
 	OrchestrateQueueMessage(sessionID, message string) error
 	OrchestrateWaitDone(ctx context.Context, sessionID string) (output string, err error)
+	OrchestrateResolveSession(fromSessionID, ref string) (id, name string, err error)
+	OrchestrateSendAndWait(ctx context.Context, fromSessionID, targetSessionID, message string) (string, error)
 }
 
 // ChromeEnabler allows the MCP server to enable per-session browser control.
@@ -58,19 +61,19 @@ type nexboxSessionKey struct{}
 
 // Server wraps the mcp-go MCP server with NexBox-specific tools
 type Server struct {
-	mcpServer        *server.MCPServer
-	httpServer       *server.StreamableHTTPServer
-	store            store.Store
-	addr             string
-	actualAddr       string
-	listener         net.Listener
-	httpSrv          *http.Server
-	toolNames        []string
-	terminalMgr      TerminalWriter
-	configGetter     ConfigGetter
-	changeNotifier   ChangeNotifier
-	orchestrator     SessionOrchestrator
-	chromeEnabler    ChromeEnabler
+	mcpServer      *server.MCPServer
+	httpServer     *server.StreamableHTTPServer
+	store          store.Store
+	addr           string
+	actualAddr     string
+	listener       net.Listener
+	httpSrv        *http.Server
+	toolNames      []string
+	terminalMgr    TerminalWriter
+	configGetter   ConfigGetter
+	changeNotifier ChangeNotifier
+	orchestrator   SessionOrchestrator
+	chromeEnabler  ChromeEnabler
 }
 
 // NewServer creates a new MCP server with asset management tools
@@ -430,6 +433,26 @@ func (s *Server) registerTools() {
 				"After calling this tool, the Chrome DevTools MCP tools will be available in the next message."),
 	)
 
+	// --- Cross-session messaging ---
+
+	sendToSessionTool := gomcp.NewTool("send_to_session",
+		gomcp.WithDescription(
+			"Send a message to the AI in ANOTHER NexBox session and wait for its answer.\n"+
+				"The message appears in that session exactly as if its user had typed it. This tool "+
+				"blocks until that session's AI finishes replying and returns its final visible answer. "+
+				"Use the short NexBox ID badge beside the session title or the full session UUID; "+
+				"do not guess an ID — ask the user for it. If the target is busy, the message waits "+
+				"until its current turn finishes."),
+		gomcp.WithString("session_id",
+			gomcp.Required(),
+			gomcp.Description("Target session's full UUID or short NexBox ID badge."),
+		),
+		gomcp.WithString("message",
+			gomcp.Required(),
+			gomcp.Description("Self-contained message delivered verbatim to the other session."),
+		),
+	)
+
 	// --- Visualize tools ---
 
 	visualizeReadMeTool := gomcp.NewTool("visualize_read_me",
@@ -481,6 +504,7 @@ func (s *Server) registerTools() {
 	addTool(updateTaskTool, s.handleUpdateTask)
 	// addTool(runInTerminalTool, s.handleRunInTerminal) // disabled
 	addTool(enableBrowserControlTool, s.handleEnableBrowserControl)
+	addTool(sendToSessionTool, s.handleSendToSession)
 	addTool(visualizeReadMeTool, s.handleVisualizeReadMe)
 	addTool(visualizeShowWidgetTool, s.handleVisualizeShowWidget)
 }
@@ -1057,6 +1081,99 @@ func (s *Server) handleEnableBrowserControl(ctx context.Context, request gomcp.C
 			"The Chrome DevTools MCP tools will be available starting from the next message.\n\n" +
 			"Please inform the user and ask them to send a new message to start the browser testing task.",
 	), nil
+}
+
+// mcpKeepAliveInterval keeps long blocking streamable-HTTP calls below client
+// header and idle timeouts.
+const mcpKeepAliveInterval = 20 * time.Second
+
+// keepCallAlive upgrades a blocking MCP response to an SSE stream and sends
+// periodic progress notifications until the handler returns.
+func keepCallAlive(ctx context.Context, request gomcp.CallToolRequest, label string) (stop func()) {
+	srv := server.ServerFromContext(ctx)
+	if srv == nil {
+		return func() {}
+	}
+	var token gomcp.ProgressToken
+	if request.Params.Meta != nil {
+		token = request.Params.Meta.ProgressToken
+	}
+
+	done := make(chan struct{})
+	go func() {
+		started := time.Now()
+		ticker := time.NewTicker(mcpKeepAliveInterval)
+		defer ticker.Stop()
+
+		for progress := 0; ; progress++ {
+			params := map[string]any{
+				"progress": progress,
+				"message":  fmt.Sprintf("%s (%s)", label, time.Since(started).Round(time.Second)),
+			}
+			if token != nil {
+				params["progressToken"] = token
+			}
+			if err := srv.SendNotificationToClient(ctx, "notifications/progress", params); err != nil {
+				log.Printf("[mcp] keep-alive notification failed: %v", err)
+				return
+			}
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
+}
+
+// handleSendToSession delivers a normal turn into another session and blocks
+// until that session's agent has produced its final visible answer.
+func (s *Server) handleSendToSession(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	if s.orchestrator == nil {
+		return errorResult("cross-session messaging is not available on this server"), nil
+	}
+
+	args := request.GetArguments()
+	ref, _ := args["session_id"].(string)
+	message, _ := args["message"].(string)
+	if strings.TrimSpace(ref) == "" {
+		return errorResult("session_id is required — ask the user for the target session's ID badge"), nil
+	}
+	if strings.TrimSpace(message) == "" {
+		return errorResult("message is required"), nil
+	}
+
+	fromSessionID, _ := ctx.Value(nexboxSessionKey{}).(string)
+	if fromSessionID == "" {
+		return errorResult("calling session ID is missing from the MCP request"), nil
+	}
+	targetID, targetName, err := s.orchestrator.OrchestrateResolveSession(fromSessionID, ref)
+	if err != nil {
+		return errorResult(err.Error()), nil
+	}
+	if targetName == "" {
+		targetName = "Untitled"
+	}
+
+	log.Printf("[mcp] send_to_session: %s → %s (%s), %d bytes", fromSessionID, targetID, targetName, len(message))
+	stopKeepAlive := keepCallAlive(ctx, request, fmt.Sprintf("waiting for session %q to reply", targetName))
+	defer stopKeepAlive()
+
+	reply, err := s.orchestrator.OrchestrateSendAndWait(ctx, fromSessionID, targetID, message)
+	if err != nil {
+		log.Printf("[mcp] send_to_session: %s → %s failed: %v", fromSessionID, targetID, err)
+		return errorResult(fmt.Sprintf("relay to session %q (%s) failed: %v", targetName, targetID, err)), nil
+	}
+	log.Printf("[mcp] send_to_session: %s → %s answered (%d bytes)", fromSessionID, targetID, len(reply))
+	if reply == "" {
+		return textResult(fmt.Sprintf("Session %q (%s) finished the turn but produced no text reply.", targetName, targetID)), nil
+	}
+	return textResult(fmt.Sprintf("Reply from session %q (%s):\n\n%s", targetName, targetID, reply)), nil
 }
 
 // Helper to create a text result

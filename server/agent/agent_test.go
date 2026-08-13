@@ -79,6 +79,38 @@ func TestSessionManager_SetActive_Nonexistent(t *testing.T) {
 	}
 }
 
+func TestSessionManager_TrySetActive(t *testing.T) {
+	sm := NewSessionManager()
+	if !sm.TrySetActive("session-1") {
+		t.Fatal("first claim should succeed")
+	}
+	if sm.TrySetActive("session-1") {
+		t.Fatal("second claim should fail while the session is active")
+	}
+	sm.SetActive("session-1", false)
+	if !sm.TrySetActive("session-1") {
+		t.Fatal("claim should succeed after the prior turn releases the session")
+	}
+}
+
+func TestSessionManager_TrySetActiveConcurrent(t *testing.T) {
+	sm := NewSessionManager()
+	const contenders = 32
+	results := make(chan bool, contenders)
+	for i := 0; i < contenders; i++ {
+		go func() { results <- sm.TrySetActive("session-1") }()
+	}
+	winners := 0
+	for i := 0; i < contenders; i++ {
+		if <-results {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("atomic claim winners = %d, want exactly 1", winners)
+	}
+}
+
 func TestSessionManager_IsActive_Default(t *testing.T) {
 	sm := NewSessionManager()
 	if sm.IsActive("nonexistent") {

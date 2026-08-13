@@ -149,6 +149,27 @@ func (sm *SessionManager) SetActive(sessionID string, active bool) {
 	}
 }
 
+// TrySetActive atomically claims an idle session for a new turn. It returns
+// false when another turn already owns the session. Callers that decide
+// whether to start or queue work must use this instead of a separate
+// IsActive/SetActive pair, which races under concurrent dispatches.
+func (sm *SessionManager) TrySetActive(sessionID string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if info, ok := sm.sessions[sessionID]; ok {
+		if info.IsActive {
+			return false
+		}
+		info.IsActive = true
+		return true
+	}
+	sm.sessions[sessionID] = &SessionInfo{
+		SessionID: sessionID,
+		IsActive:  true,
+	}
+	return true
+}
+
 // IsActive checks if a session is currently active.
 func (sm *SessionManager) IsActive(sessionID string) bool {
 	sm.mu.RLock()

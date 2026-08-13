@@ -20,6 +20,7 @@ import {
   Pencil,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { AgentIcon } from "@/components/ui/AgentIcon";
 import { sessionsApi, projectsApi, diffApi, type DiffResponse } from "@/lib/api";
 import { TaskPlugin } from "@/plugins/task/TaskPlugin";
 import { AssetPanel } from "@/plugins/asset/AssetPanel";
@@ -42,6 +43,50 @@ import {
   TERMINAL_HEIGHT_MIN, TERMINAL_HEIGHT_MAX,
 } from "@/lib/constants";
 import { toast } from "sonner";
+
+// ── SessionIdBadge ──────────────────────────────────────────────────────
+
+// Both badges display a compact prefix and copy the complete session ID.
+// The first is NexBox's ID; the optional second is the backing agent's ID.
+function SessionIdBadge({ sessionId, agent }: { sessionId: string; agent?: string }) {
+  const [copied, setCopied] = useState(false);
+  const short = sessionId.replace(/-/g, "").slice(0, 6).toUpperCase();
+  const isAgentSession = agent !== undefined;
+  const source = agent === "claude"
+    ? "Claude"
+    : agent === "codex"
+      ? "Codex"
+      : agent === "cursor"
+        ? "Cursor"
+        : isAgentSession
+          ? "Agent"
+          : "NexBox";
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(sessionId).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+        toast.success(`${source} session ID copied`, { duration: 1500 });
+      },
+      () => toast.error(`Could not copy ${source} session ID`),
+    );
+  }, [sessionId, source]);
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      title={`${source} session ID ${sessionId} — click to copy`}
+      aria-label={`Copy ${source} session ID`}
+      className="shrink-0 inline-flex items-center gap-1 rounded border border-border/60 px-1.5 py-0.5 font-mono text-[10px] leading-none tabular-nums text-muted-foreground/80 hover:text-foreground hover:bg-muted/60 transition-colors cursor-copy"
+    >
+      {copied ? <Check className="h-2.5 w-2.5" /> : null}
+      {!copied && agent ? <AgentIcon agent={agent} className="h-2.5 w-2.5" /> : null}
+      {short}
+    </button>
+  );
+}
 
 // ── ProjectSelector ─────────────────────────────────────────────────────
 
@@ -415,11 +460,20 @@ export function SessionWorkspace() {
         className="fixed top-0 left-0 right-0 z-30 bg-card border-b sm:static sm:bg-muted/20 flex items-center gap-0.5 sm:gap-1.5 pl-12 sm:pl-3 pr-2 sm:pr-3 py-1.5 text-sm shrink-0 min-h-[36px]"
         style={{ top: "env(safe-area-inset-top)" }}
       >
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 flex items-center gap-2">
           {activeSession && (
-            <span className="text-sm font-medium text-foreground/80 truncate block max-w-[40%] sm:max-w-[50%]">
-              {activeSession.name || "New Session"}
-            </span>
+            <>
+              <span className="text-sm font-medium text-foreground/80 truncate max-w-[40%] sm:max-w-[50%]">
+                {activeSession.name || "New Session"}
+              </span>
+              <SessionIdBadge sessionId={activeSession.id} />
+              {activeSession.agent_session_id && (
+                <SessionIdBadge
+                  sessionId={activeSession.agent_session_id}
+                  agent={activeSession.agent}
+                />
+              )}
+            </>
           )}
         </div>
 
@@ -800,4 +854,3 @@ export function SessionWorkspace() {
     </div>
   );
 }
-

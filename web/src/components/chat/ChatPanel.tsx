@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, useCallback, memo, useMemo } from "react";
 import { Circle, Clock, Wrench, MessageSquare, Loader2, ArrowDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ChatMessage, CopyButton, ForkButton, extractPlainText } from "@/components/chat/ChatMessage";
+import { ChatMessage, CopyButton, ForkButton, extractPlainText, stripAllNextActions } from "@/components/chat/ChatMessage";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ChatInput } from "@/components/chat/ChatInput";
 import type { WorktreeSelectorProps } from "@/components/chat/WorktreeSelector";
@@ -14,7 +14,8 @@ import { cn } from "@/lib/utils";
 import type { Session, Project, ChatMessage as ChatMessageType } from "@/types";
 
 const MessageFooter = memo(function MessageFooter({ message, canFork }: { message: ChatMessageType; canFork: boolean }) {
-  const plainText = useMemo(() => extractPlainText(message.parts), [message.parts]);
+  // Suggestions are rendered as chips and should not be included when copying.
+  const plainText = useMemo(() => stripAllNextActions(extractPlainText(message.parts)), [message.parts]);
 
   if (message.isStreaming || message.role === "system") return null;
 

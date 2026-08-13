@@ -1555,7 +1555,10 @@ func (a *CodexAgent) appendNexboxMCPConfig(cfg []string, conversationID string) 
 	if conversationID != "" {
 		url += "?session=" + conversationID
 	}
-	return append(cfg, fmt.Sprintf("mcp_servers.nexbox.url=%q", url))
+	cfg = append(cfg, fmt.Sprintf("mcp_servers.nexbox.url=%q", url))
+	// send_to_session can block for the duration of another agent turn.
+	cfg = append(cfg, fmt.Sprintf("mcp_servers.nexbox.tool_timeout_sec=%d", int(mcpToolTimeout/time.Second)))
+	return cfg
 }
 
 func (a *CodexAgent) appendChromeMCPConfig(cfg []string, req Request) []string {

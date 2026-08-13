@@ -234,16 +234,56 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n])
 }
 
-// generateAutoTitle calls Claude CLI (Haiku) one-shot to produce a short
-// title from the user's first message. Pins the agent to "claude" regardless
-// of the session's selected agent so the feature works uniformly across all
-// sessions (Codex, Cursor, etc.).
-func (s *Server) generateAutoTitle(parentCtx context.Context, workDir, firstMessage string) (string, error) {
-	a, ok := s.Agents["claude"]
+// autoTitleModelCatalog is implemented by backends that expose their live
+// model picker. CodexAgent serves this from its startup-warmed in-memory cache;
+// when warmup failed, ListSupportedModels performs the existing on-demand
+// retry.
+type autoTitleModelCatalog interface {
+	ListSupportedModels(context.Context) ([]agent.ModelInfo, string)
+}
+
+// resolveAutoTitleBackend selects the lightweight model used for auto-title
+// generation from the configured default agent. Claude keeps its stable Haiku
+// alias. Codex's live picker is ordered strongest-to-weakest, so the last model
+// and its first (lowest) advertised effort are used.
+func (s *Server) resolveAutoTitleBackend(ctx context.Context) (agent.Agent, string, string, string, error) {
+	agentName := s.getDefaultAgent()
+	a, ok := s.Agents[agentName]
 	if !ok || a == nil {
-		return "", fmt.Errorf("claude agent not available")
+		return nil, agentName, "", "", fmt.Errorf("default agent %q not available", agentName)
 	}
 
+	switch agentName {
+	case "claude":
+		return a, agentName, "haiku", "", nil
+	case "codex":
+		catalog, ok := a.(autoTitleModelCatalog)
+		if !ok {
+			return nil, agentName, "", "", fmt.Errorf("codex agent does not expose a model catalog")
+		}
+		models, _ := catalog.ListSupportedModels(ctx)
+		if len(models) == 0 {
+			return nil, agentName, "", "", fmt.Errorf("codex model catalog is empty")
+		}
+		selected := models[len(models)-1]
+		if strings.TrimSpace(selected.ID) == "" {
+			return nil, agentName, "", "", fmt.Errorf("codex weakest model has an empty id")
+		}
+		effort := ""
+		if len(selected.SupportedEfforts) > 0 {
+			effort = selected.SupportedEfforts[0]
+		}
+		return a, agentName, selected.ID, effort, nil
+	default:
+		return nil, agentName, "", "", fmt.Errorf("auto-title is not supported by default agent %q", agentName)
+	}
+}
+
+// generateAutoTitle performs a one-shot request using the configured default
+// agent. Claude uses Haiku; Codex uses the weakest cached picker model at its
+// lowest advertised effort. The HTTP handler retains the existing heuristic
+// fallback for catalog, agent, or response failures.
+func (s *Server) generateAutoTitle(parentCtx context.Context, workDir, firstMessage string) (string, error) {
 	if workDir == "" {
 		workDir, _ = os.UserHomeDir()
 	}
@@ -261,11 +301,18 @@ func (s *Server) generateAutoTitle(parentCtx context.Context, workDir, firstMess
 	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer cancel()
 
+	a, agentName, model, effort, err := s.resolveAutoTitleBackend(ctx)
+	if err != nil {
+		return "", err
+	}
+	log.Printf("[auto-title] agent=%s model=%s effort=%s", agentName, model, effort)
+
 	var textBuf strings.Builder
-	_, err := a.SendMessage(ctx, agent.Request{
+	_, err = a.SendMessage(ctx, agent.Request{
 		ConversationID: fmt.Sprintf("auto-title-%d", time.Now().UnixNano()),
 		WorkDir:        workDir,
-		Model:          "haiku",
+		Model:          model,
+		Effort:         effort,
 		Message:        prompt,
 	}, func(event agent.StreamEvent) {
 		if event.Type == agent.EventTextDelta {
