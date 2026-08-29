@@ -36,6 +36,7 @@ const DRAFT_KEY_PREFIX = "nexbox-draft:";
 const AGENT_LABELS: Record<string, string> = {
   claude: "Claude Code",
   codex: "Codex",
+  zeroclaw: "ZeroClaw",
 };
 
 export const SLASH_COMMANDS = [

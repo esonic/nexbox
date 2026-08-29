@@ -60,11 +60,13 @@ func (s *Server) ListAvailableAgents(w http.ResponseWriter, r *http.Request) {
 //   "source":      "dynamic|none"
 // }
 //
-// Both agents expose this information directly via their CLIs:
+// Backends with a model catalog expose it directly via their CLIs:
 //   - Claude: `initialize` control_response → `models[]` with `supportsEffort`
 //             and `supportedEffortLevels`.
 //   - Codex: `model/list` RPC → `Model[]` with `supportedReasoningEfforts`
 //            and `defaultReasoningEffort`.
+//   - ZeroClaw: provider/model selection belongs to its own configuration, so
+//     this endpoint intentionally returns an empty catalog.
 // There is no curated catalog on our side.
 func (s *Server) ListAvailableModels(w http.ResponseWriter, r *http.Request) {
 	agentName := strings.TrimSpace(r.URL.Query().Get("agent"))

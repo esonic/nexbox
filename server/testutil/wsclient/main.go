@@ -1,11 +1,11 @@
 // wsclient is a standalone WebSocket client for e2e chat testing.
 // It connects to a NexBox server's global WebSocket, subscribes to a
-// conversation, sends a message, collects all streaming events, and
+// session, sends a message, collects all streaming events, and
 // outputs a JSON summary to stdout.
 //
 // Usage:
 //
-//	wsclient -url ws://127.0.0.1:PORT/ws -conversation CONVERSATION_ID -message "hello"
+//	NEXBOX_AUTH_TOKEN=... wsclient -url ws://127.0.0.1:PORT/ws -session SESSION_ID -message "hello"
 //
 // Output (JSON):
 //
@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -36,30 +37,37 @@ type Result struct {
 
 func main() {
 	wsURL := flag.String("url", "", "WebSocket URL (ws://host:port/ws)")
-	conversationID := flag.String("conversation", "", "Conversation ID to subscribe and send to")
+	sessionID := flag.String("session", "", "Session ID to subscribe and send to")
 	message := flag.String("message", "Hello", "Message to send")
 	timeoutSec := flag.Int("timeout", 180, "Read timeout in seconds")
 	flag.Parse()
 
-	if *wsURL == "" || *conversationID == "" {
-		fmt.Fprintln(os.Stderr, "usage: wsclient -url ws://host:port/ws -conversation CONVERSATION_ID -message ...")
+	if *wsURL == "" || *sessionID == "" {
+		fmt.Fprintln(os.Stderr, "usage: NEXBOX_AUTH_TOKEN=... wsclient -url ws://host:port/ws -session SESSION_ID -message ...")
+		os.Exit(1)
+	}
+	authToken := strings.TrimSpace(os.Getenv("NEXBOX_AUTH_TOKEN"))
+	if authToken == "" {
+		fmt.Fprintln(os.Stderr, "NEXBOX_AUTH_TOKEN is required")
 		os.Exit(1)
 	}
 
 	log.SetOutput(os.Stderr) // keep stdout clean for JSON result
 
 	log.Printf("Connecting to %s", *wsURL)
-	conn, _, err := websocket.DefaultDialer.Dial(*wsURL, nil)
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+authToken)
+	conn, _, err := websocket.DefaultDialer.Dial(*wsURL, headers)
 	if err != nil {
 		log.Fatalf("WebSocket connect failed: %v", err)
 	}
 	defer conn.Close()
 	log.Println("Connected!")
 
-	// Subscribe to the conversation first
+	// Subscribe to the session first
 	sub, _ := json.Marshal(map[string]interface{}{
-		"type":            "subscribe",
-		"conversation_id": *conversationID,
+		"type":       "subscribe",
+		"session_id": *sessionID,
 	})
 	if err := conn.WriteMessage(websocket.TextMessage, sub); err != nil {
 		log.Fatalf("Subscribe failed: %v", err)
@@ -67,9 +75,9 @@ func main() {
 
 	// Send user message
 	msg, _ := json.Marshal(map[string]string{
-		"type":            "user_message",
-		"conversation_id": *conversationID,
-		"content":         *message,
+		"type":       "user_message",
+		"session_id": *sessionID,
+		"content":    *message,
 	})
 	if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 		log.Fatalf("Send failed: %v", err)
@@ -101,9 +109,9 @@ func main() {
 			continue
 		}
 
-		// Filter events for our conversation (global WS broadcasts all)
-		evtConvID, _ := event["conversation_id"].(string)
-		if evtConvID != *conversationID {
+		// Filter events for our session (global WS broadcasts all)
+		evtSessionID, _ := event["session_id"].(string)
+		if evtSessionID != *sessionID {
 			continue
 		}
 

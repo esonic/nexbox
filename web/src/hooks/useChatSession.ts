@@ -366,8 +366,9 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     setAvailableModelInfos([]);
     setModelsAgent("");
     let cancelled = false;
-    // Both Claude and Codex emit label/description + supported_efforts directly.
-    // No client-side massaging — if the list is empty (CLI not reachable), show empty.
+    // Catalog-capable backends emit label/description + supported_efforts directly.
+    // No client-side massaging — an empty list also covers backends such as
+    // ZeroClaw whose model is configured outside Nexbox.
     serverApi.availableModels(agentName).then((data) => {
       if (cancelled) return;
       setAvailableModels(data.models || []);

@@ -185,6 +185,11 @@ func main() {
 	}()
 	allAgents["codex"] = cx
 
+	// ZeroClaw owns its provider/model configuration (including OpenRouter).
+	// Nexbox connects only to its ACP v1 stdio surface and inherits the server
+	// process environment, so no provider credentials are stored here.
+	allAgents["zeroclaw"] = agent.NewZeroClawAgent()
+
 	defaultAgentName := cfgMgr.Get().DefaultAgent
 	if defaultAgentName == "" {
 		defaultAgentName = "claude"

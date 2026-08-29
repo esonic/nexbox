@@ -56,11 +56,13 @@ function SessionIdBadge({ sessionId, agent }: { sessionId: string; agent?: strin
     ? "Claude"
     : agent === "codex"
       ? "Codex"
-      : agent === "cursor"
-        ? "Cursor"
-        : isAgentSession
-          ? "Agent"
-          : "NexBox";
+      : agent === "zeroclaw"
+        ? "ZeroClaw"
+        : agent === "cursor"
+          ? "Cursor"
+          : isAgentSession
+            ? "Agent"
+            : "NexBox";
 
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(sessionId).then(

@@ -7,6 +7,7 @@ import { usePreferences, CHAT_FONT_SIZE_LABELS, type ChatFontSize } from "@/stor
 const AGENT_LABELS: Record<string, string> = {
   codex: "Codex",
   claude: "Claude Code",
+  zeroclaw: "ZeroClaw",
 };
 
 export function GeneralSettings() {

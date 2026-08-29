@@ -1,17 +1,20 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+
+ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+OUTPUT_PATH=${NEXBOX_OUTPUT:-$ROOT_DIR/dist/nexbox}
 
 # Build frontend
-cd web
+cd "$ROOT_DIR/web"
 npm run build
-cd ..
 
 # Copy web dist into server for Go embed
-rm -rf server/webdist
-cp -r web/dist server/webdist
+rm -rf "$ROOT_DIR/server/webdist"
+cp -r "$ROOT_DIR/web/dist" "$ROOT_DIR/server/webdist"
 
 # Build Go server with embedded frontend
-cd server
+mkdir -p "$(dirname -- "$OUTPUT_PATH")"
+cd "$ROOT_DIR/server"
 VERSION=$(date +%Y%m%d%H%M)
-go build -o /home/ubuntu/nex/nexbox -ldflags "-s -w -X main.Version=${VERSION}"
-echo "Built nexbox version ${VERSION}"
+go build -o "$OUTPUT_PATH" -ldflags "-s -w -X main.Version=${VERSION}"
+echo "Built nexbox version ${VERSION}: $OUTPUT_PATH"
