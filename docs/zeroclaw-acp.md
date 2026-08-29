@@ -40,21 +40,37 @@ zeroclaw --version
 
 ### 3. 配置 OpenRouter
 
-确认环境变量 `OPEN_ROUTER_KEY` 已存在，然后执行：
+创建 `~/.zeroclaw/config.toml`，内容如下：
 
-```bash
-zeroclaw quickstart \
-  --model-provider openrouter \
-  --model minimax/minimax-m3:free \
-  --api-key "$OPEN_ROUTER_KEY"
+```toml
+schema_version = 3
+
+[providers.models.openrouter.default]
+model = "minimax/minimax-m3:free"
+
+[agents.main]
+model_provider = "openrouter.default"
+risk_profile = "balanced"
+runtime_profile = "standard"
+
+[risk_profiles.balanced]
+
+[runtime_profiles.standard]
 ```
 
-Quickstart 会创建一个默认 Agent，并保存 OpenRouter 配置。Agent 的名字不重要；只有一个 Agent 时，Nexbox 会自动使用它。
+然后把已有的环境变量写入 ZeroClaw secrets：
+
+```bash
+zeroclaw config set --no-interactive \
+  providers.models.openrouter.default.api_key "$OPEN_ROUTER_KEY"
+```
+
+这套配置不需要运行 `quickstart`。`main` 只是唯一 Agent 的名字，Nexbox 会自动使用它。
 
 验证 OpenRouter：
 
 ```bash
-zeroclaw agent -m "Reply with exactly: OK"
+zeroclaw agent -a main -m "Reply with exactly: OK"
 ```
 
 ### 4. 启动 Nexbox
@@ -109,7 +125,7 @@ ZeroClaw 会提示输入新 Key，并进行隐藏输入。不要把 Key 写进 N
 
 ```bash
 zeroclaw doctor
-zeroclaw agent -m "Reply with exactly: OK"
+zeroclaw agent -a main -m "Reply with exactly: OK"
 ```
 
 如果 Nexbox 找不到 ZeroClaw，检查：
