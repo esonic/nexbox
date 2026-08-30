@@ -18,17 +18,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
-// CrushModel is a Nexbox-configured model that Crush can select through its
-// native HTTP API. Provider is Crush's provider id (for example openrouter).
-type CrushModel struct {
+// crushModel is a model reported by Crush's own native catalog. Provider and
+// ID are split only at the adapter boundary before sending its HTTP request.
+type crushModel struct {
 	ID       string
 	Provider string
-	Label    string
 }
 
 // CrushAgent implements the native Crush server protocol: HTTP requests for
@@ -38,7 +38,6 @@ type CrushAgent struct {
 	CLIPath string
 	DataDir string
 	Verbose bool
-	Models  []CrushModel
 
 	serverMu      sync.Mutex
 	serverURL     string
@@ -90,11 +89,10 @@ type crushMessageState struct {
 	toolDone  map[string]bool
 }
 
-func NewCrushAgent(models []CrushModel) *CrushAgent {
+func NewCrushAgent() *CrushAgent {
 	return &CrushAgent{
 		CLIPath:    defaultCrushCLIPath(),
 		Verbose:    true,
-		Models:     append([]CrushModel(nil), models...),
 		workspaces: make(map[string]*crushWorkspace),
 	}
 }
@@ -153,20 +151,53 @@ func (a *CrushAgent) Capabilities() Capabilities {
 	return Capabilities{ModelSwitchMode: ModelSwitchCurrentSession}
 }
 
-func (a *CrushAgent) ListSupportedModels(context.Context) ([]ModelInfo, string) {
-	models := make([]ModelInfo, 0, len(a.Models))
-	for _, configured := range a.Models {
-		id := strings.TrimSpace(configured.ID)
-		if id == "" {
-			continue
+// ListSupportedModels reads the native server's workspace configuration. Unlike
+// `crush models`, this intentionally excludes Catwalk's unconfigured catalog,
+// so Nexbox only shows models the user explicitly configured in Crush.
+func (a *CrushAgent) ListSupportedModels(ctx context.Context) ([]ModelInfo, string) {
+	a.beginTurn()
+	defer a.finishTurn()
+	if err := a.ensureServer(ctx); err != nil {
+		if a.Verbose {
+			log.Printf("[crush-agent] start model catalog server: %v", err)
 		}
-		label := strings.TrimSpace(configured.Label)
-		if label == "" {
-			label = id
-		}
-		models = append(models, ModelInfo{ID: id, Label: label})
+		return nil, "none"
 	}
-	return models, "config"
+	catalogDir, err := os.MkdirTemp("", "nexbox-crush-catalog-")
+	if err != nil {
+		return nil, "none"
+	}
+	defer os.RemoveAll(catalogDir)
+	clientID, err := newCrushID()
+	if err != nil {
+		return nil, "none"
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := a.postJSON(ctx, "/v1/workspaces", nil, map[string]interface{}{
+		"path": catalogDir, "data_dir": filepath.Join(catalogDir, "state"), "client_id": clientID,
+	}, http.StatusOK, &created); err != nil {
+		if a.Verbose {
+			log.Printf("[crush-agent] create model catalog workspace: %v", err)
+		}
+		return nil, "none"
+	}
+	if strings.TrimSpace(created.ID) == "" {
+		if a.Verbose {
+			log.Printf("[crush-agent] model catalog workspace did not return an ID")
+		}
+		return nil, "none"
+	}
+	defer a.deleteWorkspace(created.ID)
+	var config crushNativeConfig
+	if err := a.getJSON(ctx, "/v1/workspaces/"+url.PathEscape(created.ID)+"/config", &config); err != nil {
+		if a.Verbose {
+			log.Printf("[crush-agent] get configured models: %v", err)
+		}
+		return nil, "none"
+	}
+	return configuredCrushModels(config.Providers), "dynamic"
 }
 
 func (a *CrushAgent) SendMessage(ctx context.Context, req Request, cb EventCallback) (Result, error) {
@@ -262,20 +293,80 @@ func (a *CrushAgent) SendMessage(ctx context.Context, req Request, cb EventCallb
 	}
 }
 
-func (a *CrushAgent) selectedModel(requested string) (CrushModel, error) {
-	requested = strings.TrimSpace(requested)
-	for _, model := range a.Models {
-		if requested == "" || model.ID == requested {
-			if strings.TrimSpace(model.ID) == "" || strings.TrimSpace(model.Provider) == "" {
-				return CrushModel{}, fmt.Errorf("invalid crush model configuration")
+func (a *CrushAgent) selectedModel(requested string) (crushModel, error) {
+	model, err := parseCrushModel(requested)
+	if err != nil {
+		return crushModel{}, err
+	}
+	return model, nil
+}
+
+type crushConfiguredProvider struct {
+	ID      string             `json:"id"`
+	Disable bool               `json:"disable"`
+	Models  []crushModelConfig `json:"models"`
+}
+
+// crushNativeConfig is intentionally limited to the model catalog fields.
+// Crush's complete config also contains credentials, which Nexbox neither
+// needs nor stores.
+type crushNativeConfig struct {
+	Providers map[string]crushConfiguredProvider `json:"providers"`
+}
+
+type crushModelConfig struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	ContextWindow int64  `json:"context_window"`
+}
+
+func configuredCrushModels(providers map[string]crushConfiguredProvider) []ModelInfo {
+	models := make([]ModelInfo, 0)
+	seen := make(map[string]bool)
+	providerKeys := make([]string, 0, len(providers))
+	for key := range providers {
+		providerKeys = append(providerKeys, key)
+	}
+	sort.Strings(providerKeys)
+	for _, key := range providerKeys {
+		provider := providers[key]
+		if provider.Disable {
+			continue
+		}
+		providerID := strings.TrimSpace(provider.ID)
+		if providerID == "" {
+			providerID = strings.TrimSpace(key)
+		}
+		for _, configured := range provider.Models {
+			modelID := strings.TrimSpace(configured.ID)
+			if providerID == "" || modelID == "" {
+				continue
 			}
-			return model, nil
+			id := providerID + "/" + modelID
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			label := strings.TrimSpace(configured.Name)
+			if label == "" {
+				label = modelID
+			}
+			models = append(models, ModelInfo{ID: id, Label: label, ContextWindow: int(configured.ContextWindow)})
 		}
 	}
-	if requested == "" {
-		return CrushModel{}, fmt.Errorf("no crush models are configured")
+	return models
+}
+
+func parseCrushModel(identifier string) (crushModel, error) {
+	identifier = strings.TrimSpace(identifier)
+	provider, modelID, ok := strings.Cut(identifier, "/")
+	if !ok || strings.TrimSpace(provider) == "" || strings.TrimSpace(modelID) == "" {
+		if identifier == "" {
+			return crushModel{}, fmt.Errorf("select a Crush model before sending a message")
+		}
+		return crushModel{}, fmt.Errorf("invalid Crush model %q", identifier)
 	}
-	return CrushModel{}, fmt.Errorf("crush model %q is not configured in Nexbox", requested)
+	return crushModel{Provider: provider, ID: modelID}, nil
 }
 
 func buildCrushPrompt(req Request, isNewSession bool) string {
@@ -355,13 +446,7 @@ func (a *CrushAgent) ensureServer(ctx context.Context) error {
 }
 
 func crushProcessEnv() []string {
-	env := append([]string(nil), os.Environ()...)
-	if os.Getenv("OPENROUTER_API_KEY") == "" {
-		if key := os.Getenv("OPEN_ROUTER_KEY"); key != "" {
-			env = append(env, "OPENROUTER_API_KEY="+key)
-		}
-	}
-	return env
+	return append([]string(nil), os.Environ()...)
 }
 
 func (a *CrushAgent) beginTurn() {
@@ -437,6 +522,41 @@ func (a *CrushAgent) health(ctx context.Context) error {
 		return fmt.Errorf("unexpected health status %s", response.Status)
 	}
 	return nil
+}
+
+func (a *CrushAgent) getJSON(ctx context.Context, path string, target interface{}) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, a.serverURL+path, nil)
+	if err != nil {
+		return err
+	}
+	response, err := a.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: unexpected status %s", path, response.Status)
+	}
+	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+		return fmt.Errorf("decode GET %s: %w", path, err)
+	}
+	return nil
+}
+
+func (a *CrushAgent) deleteWorkspace(workspaceID string) {
+	if strings.TrimSpace(workspaceID) == "" || a.httpClient == nil || a.serverURL == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, a.serverURL+"/v1/workspaces/"+url.PathEscape(workspaceID), nil)
+	if err != nil {
+		return
+	}
+	response, err := a.httpClient.Do(request)
+	if err == nil && response != nil {
+		response.Body.Close()
+	}
 }
 
 func (a *CrushAgent) ensureWorkspace(ctx context.Context, workDir string) (*crushWorkspace, error) {
@@ -526,7 +646,7 @@ func (w *crushWorkspace) releaseTurn() {
 	w.turnSlot <- struct{}{}
 }
 
-func (a *CrushAgent) selectModel(ctx context.Context, workspaceID string, model CrushModel) error {
+func (a *CrushAgent) selectModel(ctx context.Context, workspaceID string, model crushModel) error {
 	body := map[string]interface{}{
 		"scope":      1, // Crush workspace scope; avoids mutating global user config.
 		"model_type": "large",

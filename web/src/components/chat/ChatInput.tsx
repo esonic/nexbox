@@ -879,7 +879,7 @@ export function ChatInput({
     onChangeEffort(lvl);
   };
 
-  const selectedModel = modelName || availableModels[0] || "";
+  const selectedModel = modelName;
   const currentModelInfo = availableModelInfos.find((m) => m.id === selectedModel);
   const displayModelLabel = (info?: ModelInfo, fallback?: string) => {
     const raw = info?.label || fallback || "";
@@ -889,7 +889,7 @@ export function ChatInput({
     if (hay.includes("sonnet")) return "Sonnet";
     return raw || "Model";
   };
-  const currentModelLabel = displayModelLabel(currentModelInfo, selectedModel);
+  const currentModelLabel = selectedModel ? displayModelLabel(currentModelInfo, selectedModel) : "Select model";
   const visibleModels = availableModels.filter((m) => m.toLowerCase() !== "default");
   const supportedEfforts = currentModelInfo?.supported_efforts || [];
   const currentEffort = effort || currentModelInfo?.default_effort || "";
@@ -1243,12 +1243,12 @@ export function ChatInput({
                     <button
                       onClick={() => canChangeModel && setShowModelMenu((v) => !v)}
                       className={cn(
-                        "text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 whitespace-nowrap transition-colors bg-violet-500/15 text-violet-400",
+                        "max-w-[180px] text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 transition-colors bg-violet-500/15 text-violet-400",
                         canChangeModel ? "hover:bg-violet-500/25 cursor-pointer" : "opacity-60 cursor-not-allowed"
                       )}
                       title={canChangeModel ? "Click to change model" : "This agent only allows choosing a model before the conversation starts"}
                     >
-                      <span>{currentModelLabel}</span>
+                      <span className="min-w-0 truncate">{currentModelLabel}</span>
                       {effortLabel && (
                         <span className="text-violet-400/60 font-normal">· {effortLabel}</span>
                       )}
@@ -1256,10 +1256,11 @@ export function ChatInput({
                     </button>
 
                     {showModelMenu && canChangeModel && (
-                      <div className="absolute left-0 bottom-full z-50 mb-1 w-52 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
+                      <div className="absolute left-0 bottom-full z-50 mb-1 w-64 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
                         <div className="px-3 pt-1.5 pb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground/60">
                           Models
                         </div>
+                        <div className="max-h-64 overflow-y-auto">
                         {visibleModels.map((model) => {
                           const info = availableModelInfos.find((m) => m.id === model);
                           return (
@@ -1270,7 +1271,7 @@ export function ChatInput({
                                 "w-full flex flex-col items-start gap-0 px-3 py-1.5 text-xs hover:bg-accent transition-colors",
                                 selectedModel === model && "bg-accent/50 font-medium"
                               )}
-                              title={info?.description || undefined}
+                              title={info?.description || model}
                             >
                               <div className="w-full flex items-center justify-between">
                                 <span className="truncate">{displayModelLabel(info, model)}</span>
@@ -1279,6 +1280,7 @@ export function ChatInput({
                             </button>
                           );
                         })}
+                        </div>
                         {supportedEfforts.length > 0 && (
                           <>
                             <div className="border-t border-border my-1" />

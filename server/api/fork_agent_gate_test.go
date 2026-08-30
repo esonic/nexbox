@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"path/filepath"
@@ -10,6 +11,16 @@ import (
 	"github.com/esonic/nexbox/config"
 	"github.com/esonic/nexbox/store"
 )
+
+type modelCatalogTestAgent struct{}
+
+func (modelCatalogTestAgent) Capabilities() agent.Capabilities { return agent.Capabilities{} }
+func (modelCatalogTestAgent) SendMessage(context.Context, agent.Request, agent.EventCallback) (agent.Result, error) {
+	return agent.Result{}, nil
+}
+func (modelCatalogTestAgent) ListSupportedModels(context.Context) ([]agent.ModelInfo, string) {
+	return []agent.ModelInfo{{ID: "openrouter/minimax/minimax-m3:free", Label: "MiniMax M3 Free"}}, "dynamic"
+}
 
 // newAgentGateServer builds a Server whose ResolveAgent falls back to "claude",
 // mirroring a stock local install. A real config.Manager is wired in because
@@ -152,9 +163,7 @@ func TestListAvailableAgents_IncludesCapabilities(t *testing.T) {
 
 func TestListAvailableModels_UsesAgentCatalog(t *testing.T) {
 	s := newAgentGateServer(t)
-	s.Agents["crush"] = agent.NewCrushAgent([]agent.CrushModel{{
-		ID: "minimax/minimax-m3:free", Provider: "openrouter", Label: "MiniMax M3",
-	}})
+	s.Agents["crush"] = modelCatalogTestAgent{}
 
 	rr := doRequest(t, s, http.MethodGet, "/api/available-models?agent=crush", nil)
 	if rr.Code != http.StatusOK {
@@ -169,10 +178,10 @@ func TestListAvailableModels_UsesAgentCatalog(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body.Agent != "crush" || body.Source != "config" || len(body.Models) != 1 || body.Models[0] != "minimax/minimax-m3:free" {
+	if body.Agent != "crush" || body.Source != "dynamic" || len(body.Models) != 1 || body.Models[0] != "openrouter/minimax/minimax-m3:free" {
 		t.Fatalf("unexpected models response: %#v", body)
 	}
-	if len(body.Info) != 1 || body.Info[0].Label != "MiniMax M3" {
+	if len(body.Info) != 1 || body.Info[0].Label != "MiniMax M3 Free" {
 		t.Fatalf("unexpected model info: %#v", body.Info)
 	}
 }

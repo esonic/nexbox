@@ -358,7 +358,6 @@ func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-
 	if req.DefaultAgent != nil {
 		if a, ok := s.Agents[*req.DefaultAgent]; ok {
 			s.Agent = a
@@ -387,6 +386,5 @@ func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to persist settings")
 		return
 	}
-
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -196,7 +196,10 @@ export function useChatSession({ session }: UseChatSessionOptions) {
 
   const agentName = session.agent || serverAgent;
   const capabilities = agentCapabilities[agentName] || NO_CAPABILITIES;
-  const modelName = session.model || (availableModels[0] || "");
+  // Crush's native configuration owns its catalog and has no Nexbox default.
+  // Require an explicit user choice instead of silently picking the first
+  // configured native model.
+  const modelName = session.model || (agentName === "crush" ? "" : (availableModels[0] || ""));
   const sessionId = session.id;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
@@ -388,7 +391,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   // default into a freshly switched session.
   useEffect(() => {
     if (!agentName || modelsAgent !== agentName) return;
-    if (availableModels.length === 0 || session.model) return;
+    if (agentName === "crush" || availableModels.length === 0 || session.model) return;
     let defaultModel = availableModels[0];
     try {
       const stored = localStorage.getItem(LAST_MODEL_KEY_PREFIX + agentName);
