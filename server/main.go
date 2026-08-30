@@ -190,6 +190,19 @@ func main() {
 	// process environment, so no provider credentials are stored here.
 	allAgents["zeroclaw"] = agent.NewZeroClawAgent()
 
+	// Crush is connected through its native HTTP/SSE server. Its model picker
+	// is deliberately owned by Nexbox config, while the OpenRouter credential
+	// is inherited from OPEN_ROUTER_KEY at process launch.
+	configuredCrushModels := cfgMgr.Get().CrushModels
+	crushModels := make([]agent.CrushModel, 0, len(configuredCrushModels))
+	for _, model := range configuredCrushModels {
+		crushModels = append(crushModels, agent.CrushModel{ID: model.ID, Provider: model.Provider, Label: model.Label})
+	}
+	crushAgent := agent.NewCrushAgent(crushModels)
+	crushAgent.DataDir = filepath.Join(*dataDir, "crush")
+	defer crushAgent.Close()
+	allAgents["crush"] = crushAgent
+
 	defaultAgentName := cfgMgr.Get().DefaultAgent
 	if defaultAgentName == "" {
 		defaultAgentName = "claude"

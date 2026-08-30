@@ -36,6 +36,30 @@ type Capabilities struct {
 	// ChromeDevTools reports whether the backend can attach the per-session
 	// Chrome DevTools MCP server (the chrome_devtools E2E testing feature).
 	ChromeDevTools bool `json:"chrome_devtools"`
+	// ModelSwitchMode defines when a selected model can be changed. Empty is
+	// kept equivalent to current_session for older third-party adapters.
+	ModelSwitchMode ModelSwitchMode `json:"model_switch_mode,omitempty"`
+}
+
+// ModelSwitchMode describes the lifecycle at which a backend accepts a model
+// change. It is deliberately backend-neutral: native and ACP adapters expose
+// the same UI contract without the frontend knowing their transport.
+type ModelSwitchMode string
+
+const (
+	// ModelSwitchCurrentSession means the backend accepts a different model on
+	// an existing conversation.
+	ModelSwitchCurrentSession ModelSwitchMode = "current_session"
+	// ModelSwitchNewSessionOnly means the model is fixed once the first
+	// message creates the backend session.
+	ModelSwitchNewSessionOnly ModelSwitchMode = "new_session_only"
+)
+
+// ModelCatalog is implemented by backends that can expose a model picker.
+// The source string identifies where the catalog came from (for example a
+// live CLI query or Nexbox configuration).
+type ModelCatalog interface {
+	ListSupportedModels(context.Context) ([]ModelInfo, string)
 }
 
 // ForkContext identifies a durable point in an existing agent session. The
@@ -48,15 +72,15 @@ type ForkContext struct {
 // MCPServerEntry describes an extra MCP server to inject into the agent runtime.
 // These come from locally installed MCP packages (stored in SQLite installed_mcps).
 type MCPServerEntry struct {
-	Key       string            `json:"key"`                  // server name in mcpServers config (e.g. "github")
-	Type      string            `json:"type"`                 // "http" or "stdio"
-	URL       string            `json:"url,omitempty"`        // for http transport
-	Headers   map[string]string `json:"headers,omitempty"`    // HTTP headers for http transport; user-provided values stored with "header:" prefix in env_values
-	Cmd       string            `json:"cmd,omitempty"`        // for stdio transport
-	Args      []string          `json:"args,omitempty"`       // for stdio transport
-	Env       map[string]string `json:"env,omitempty"`        // env vars for stdio transport
-	ToolNames        []string          `json:"tool_names,omitempty"`          // allowed tool names (mcp__key__name)
-	AppendSessionURL bool              `json:"append_session_url,omitempty"`  // if true, append ?session=<conversationID> to URL at runtime
+	Key              string            `json:"key"`                          // server name in mcpServers config (e.g. "github")
+	Type             string            `json:"type"`                         // "http" or "stdio"
+	URL              string            `json:"url,omitempty"`                // for http transport
+	Headers          map[string]string `json:"headers,omitempty"`            // HTTP headers for http transport; user-provided values stored with "header:" prefix in env_values
+	Cmd              string            `json:"cmd,omitempty"`                // for stdio transport
+	Args             []string          `json:"args,omitempty"`               // for stdio transport
+	Env              map[string]string `json:"env,omitempty"`                // env vars for stdio transport
+	ToolNames        []string          `json:"tool_names,omitempty"`         // allowed tool names (mcp__key__name)
+	AppendSessionURL bool              `json:"append_session_url,omitempty"` // if true, append ?session=<conversationID> to URL at runtime
 }
 
 // UserInputHandler is called when an agent needs interactive user input
@@ -67,10 +91,10 @@ type UserInputHandler func(requestID, toolName, input string) (string, error)
 
 // Request contains all parameters needed to send a message to an agent.
 type Request struct {
-	ConversationID     string           // Unique conversation identifier
-	SessionID          string           // Session ID for resuming previous sessions (empty for new)
-	WorkDir            string           // Working directory (typically the git repo root)
-	Model              string           // Model to use (agent-specific; e.g. "gpt-5.3-codex", "haiku")
+	ConversationID string // Unique conversation identifier
+	SessionID      string // Session ID for resuming previous sessions (empty for new)
+	WorkDir        string // Working directory (typically the git repo root)
+	Model          string // Model to use (agent-specific; e.g. "gpt-5.3-codex", "haiku")
 	// Effort is the reasoning effort for the current turn. Valid values come
 	// from the live per-model catalog — see ModelInfo.SupportedEfforts. Known
 	// vocabularies per backend: Claude accepts {low, medium, high, xhigh, max};

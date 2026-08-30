@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/esonic/nexbox/agent"
+	"github.com/go-chi/chi/v5"
 )
 
 // wfPrefixRegex matches the WF[xxxxx] prefix that orchestrator.go writes onto
@@ -108,6 +108,29 @@ func (s *Server) UpdateSession(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
+	}
+	if req.Model != nil {
+		existing, err := s.Store.GetSession(id)
+		if writeStoreError(w, err, "GetSession", "failed to load session") {
+			return
+		}
+		if existing == nil {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if *req.Model != existing.Model {
+			backend, _ := s.ResolveAgent(existing)
+			if backend != nil && backend.Capabilities().ModelSwitchMode == agent.ModelSwitchNewSessionOnly {
+				messages, err := s.Store.ListMessages(id)
+				if writeStoreError(w, err, "ListMessages", "failed to check session messages") {
+					return
+				}
+				if existing.AgentSessionID != "" || len(messages) > 0 {
+					writeError(w, http.StatusBadRequest, "this agent only allows choosing a model before the conversation starts")
+					return
+				}
+			}
+		}
 	}
 	sess, err := s.Store.UpdateSession(id, req)
 	if writeStoreError(w, err, "UpdateSession", "failed to update session") {

@@ -37,6 +37,7 @@ const AGENT_LABELS: Record<string, string> = {
   claude: "Claude Code",
   codex: "Codex",
   zeroclaw: "ZeroClaw",
+  crush: "Crush",
 };
 
 export const SLASH_COMMANDS = [
@@ -442,6 +443,7 @@ interface ChatInputProps {
   availableModels: string[];
   availableModelInfos: ModelInfo[];
   sessionHasMessages: boolean;
+  canChangeModel: boolean;
   worktree?: WorktreeSelectorProps;
   pickedTasks: Task[];
   pickedAssets: PickedAsset[];
@@ -484,6 +486,7 @@ export function ChatInput({
   availableModels,
   availableModelInfos,
   sessionHasMessages,
+  canChangeModel,
   worktree,
   pickedTasks,
   pickedAssets,
@@ -1238,9 +1241,12 @@ export function ChatInput({
                   <span className="text-muted-foreground/40 text-xs hidden sm:inline">·</span>
                   <div className="relative shrink-0" ref={modelMenuRef}>
                     <button
-                      onClick={() => setShowModelMenu((v) => !v)}
-                      className="text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 whitespace-nowrap transition-colors bg-violet-500/15 text-violet-400 hover:bg-violet-500/25 cursor-pointer"
-                      title="Click to change model"
+                      onClick={() => canChangeModel && setShowModelMenu((v) => !v)}
+                      className={cn(
+                        "text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 whitespace-nowrap transition-colors bg-violet-500/15 text-violet-400",
+                        canChangeModel ? "hover:bg-violet-500/25 cursor-pointer" : "opacity-60 cursor-not-allowed"
+                      )}
+                      title={canChangeModel ? "Click to change model" : "This agent only allows choosing a model before the conversation starts"}
                     >
                       <span>{currentModelLabel}</span>
                       {effortLabel && (
@@ -1249,7 +1255,7 @@ export function ChatInput({
                       <ChevronDown className="h-2.5 w-2.5" />
                     </button>
 
-                    {showModelMenu && (
+                    {showModelMenu && canChangeModel && (
                       <div className="absolute left-0 bottom-full z-50 mb-1 w-52 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
                         <div className="px-3 pt-1.5 pb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground/60">
                           Models

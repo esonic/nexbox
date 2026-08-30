@@ -171,7 +171,7 @@ interface UseChatSessionOptions {
 // Stable fallback while the capabilities map hasn't loaded (or the agent is
 // unknown) — a module-level constant keeps the object identity stable across
 // renders.
-const NO_CAPABILITIES: AgentCapabilities = { fork: false, interject: false };
+const NO_CAPABILITIES: AgentCapabilities = { fork: false, interject: false, model_switch_mode: "current_session" };
 
 /**
  * useChatSession — Encapsulates all WebSocket, streaming, and message state
@@ -994,6 +994,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   }, [session.id, sessionHasMessages]);
 
   const handleChangeModel = useCallback(async (newModel: string) => {
+    if (sessionHasMessages && capabilities.model_switch_mode === "new_session_only") return;
     try {
       // When switching models, re-align effort with what the new model accepts.
       const info = availableModelInfos.find((m) => m.id === newModel);
@@ -1016,7 +1017,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       console.error("Failed to update session model:", e);
       toast.error("Failed to change model", { description: String(e) });
     }
-  }, [session.id, session.effort, agentName, availableModelInfos]);
+  }, [session.id, session.effort, agentName, availableModelInfos, sessionHasMessages, capabilities.model_switch_mode]);
 
   const handleChangeEffort = useCallback(async (newEffort: string) => {
     try {

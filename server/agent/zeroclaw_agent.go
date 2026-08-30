@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -47,7 +48,32 @@ var _ Agent = (*ZeroClawAgent)(nil)
 // Sub-agents are intentionally represented as ordinary delegate/spawn tool
 // calls, not as Nexbox structured sub-task events.
 func (a *ZeroClawAgent) Capabilities() Capabilities {
-	return Capabilities{}
+	return Capabilities{ModelSwitchMode: ModelSwitchNewSessionOnly}
+}
+
+// ListSupportedModels exposes configured ZeroClaw agent aliases as Nexbox
+// models. The alias is intentionally returned unchanged: ZeroClaw owns all
+// meaning behind it (provider, actual model, tools, risk profile, etc.).
+func (a *ZeroClawAgent) ListSupportedModels(ctx context.Context) ([]ModelInfo, string) {
+	cmd := exec.CommandContext(ctx, a.CLIPath, "agents", "list")
+	output, err := cmd.Output()
+	if err != nil {
+		if a.Verbose {
+			log.Printf("[zeroclaw-agent] list aliases: %v", err)
+		}
+		return nil, "none"
+	}
+
+	lines := strings.Split(string(output), "\n")
+	models := make([]ModelInfo, 0, len(lines))
+	for _, line := range lines {
+		alias := strings.TrimSpace(line)
+		if alias == "" {
+			continue
+		}
+		models = append(models, ModelInfo{ID: alias, Label: alias})
+	}
+	return models, "dynamic"
 }
 
 type zeroClawInitializeResult struct {
@@ -157,8 +183,12 @@ func (a *ZeroClawAgent) SendMessage(ctx context.Context, req Request, cb EventCa
 		if req.WorkDir != "" {
 			params["cwd"] = req.WorkDir
 		}
-		if a.AgentAlias != "" {
-			params["agentAlias"] = a.AgentAlias
+		agentAlias := strings.TrimSpace(req.Model)
+		if agentAlias == "" {
+			agentAlias = a.AgentAlias
+		}
+		if agentAlias != "" {
+			params["agentAlias"] = agentAlias
 		}
 		var created zeroClawSessionNewResult
 		if err := client.request(ctx, "session/new", params, &created); err != nil {

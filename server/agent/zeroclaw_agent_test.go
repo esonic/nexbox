@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +18,41 @@ func TestZeroClawAgentCapabilities(t *testing.T) {
 	capabilities := NewZeroClawAgent().Capabilities()
 	if capabilities.Fork || capabilities.Interject || capabilities.ChromeDevTools {
 		t.Fatalf("unexpected ZeroClaw capabilities: %+v", capabilities)
+	}
+	if capabilities.ModelSwitchMode != ModelSwitchNewSessionOnly {
+		t.Fatalf("model switch mode = %q, want %q", capabilities.ModelSwitchMode, ModelSwitchNewSessionOnly)
+	}
+}
+
+func TestZeroClawAgentListsConfiguredAliases(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake CLI shell script is POSIX-only")
+	}
+	path := filepath.Join(t.TempDir(), "zeroclaw")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf 'fast\\ncareful\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	models, source := (&ZeroClawAgent{CLIPath: path}).ListSupportedModels(context.Background())
+	if source != "dynamic" {
+		t.Fatalf("source = %q, want dynamic", source)
+	}
+	if len(models) != 2 || models[0].ID != "fast" || models[1].ID != "careful" {
+		t.Fatalf("models = %#v", models)
+	}
+}
+
+func TestZeroClawAgentPassesSelectedAliasToNewSession(t *testing.T) {
+	t.Setenv("NEXBOX_ZEROCLAW_TEST_SCENARIO", "alias")
+	agent := newZeroClawHelperAgent(t)
+
+	_, err := agent.SendMessage(context.Background(), Request{
+		WorkDir: t.TempDir(),
+		Model:   "careful",
+		Message: "use the selected alias",
+	}, func(StreamEvent) {})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
 	}
 }
 
@@ -239,6 +276,14 @@ func runZeroClawACPHelper(scenario string) int {
 		case "session/new":
 			if scenario == "resume" || scenario == "expired" {
 				return fail("unexpected session/new in %s scenario", scenario)
+			}
+			if scenario == "alias" {
+				var params struct {
+					AgentAlias string `json:"agentAlias"`
+				}
+				if json.Unmarshal(message.Params, &params) != nil || params.AgentAlias != "careful" {
+					return fail("unexpected session/new params: %s", message.Params)
+				}
 			}
 			if !respond(message.ID, map[string]interface{}{"sessionId": "s-test", "workspaceDir": "/tmp"}) {
 				return 2

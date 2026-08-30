@@ -58,6 +58,8 @@ function SessionIdBadge({ sessionId, agent }: { sessionId: string; agent?: strin
       ? "Codex"
       : agent === "zeroclaw"
         ? "ZeroClaw"
+        : agent === "crush"
+          ? "Crush"
         : agent === "cursor"
           ? "Cursor"
           : isAgentSession

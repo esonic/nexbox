@@ -334,6 +334,7 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
         availableModels={availableModels}
         availableModelInfos={availableModelInfos}
         sessionHasMessages={sessionHasMessages}
+        canChangeModel={!sessionHasMessages || capabilities.model_switch_mode !== "new_session_only"}
         worktree={worktree}
         pickedTasks={pickedTasks}
         pickedAssets={pickedAssets}

@@ -42,7 +42,7 @@ func NewCodexAgent() *CodexAgent {
 var _ Agent = (*CodexAgent)(nil)
 
 func (a *CodexAgent) Capabilities() Capabilities {
-	return Capabilities{Fork: true, Interject: true, ChromeDevTools: true}
+	return Capabilities{Fork: true, Interject: true, ChromeDevTools: true, ModelSwitchMode: ModelSwitchCurrentSession}
 }
 
 // --- app-server payloads (subset) -------------------------------------------------------------
@@ -184,18 +184,18 @@ type codexThreadItem struct {
 	// Action is the webSearch action descriptor introduced in codex-cli 0.124.0.
 	// Shape varies by `action.type`: "search" (queries[], query), "openPage" (url),
 	// "findInPage" (pattern, url), "other".
-	Action           json.RawMessage   `json:"action,omitempty"`
-	Content          []string          `json:"content,omitempty"`
-	Summary          []string          `json:"summary,omitempty"`
-	ContentItems     json.RawMessage   `json:"contentItems,omitempty"` // dynamicToolCall result content
-	Success          *bool             `json:"success,omitempty"`      // dynamicToolCall
-	Prompt           string            `json:"prompt,omitempty"`       // collabAgentToolCall
-	AgentsStates     json.RawMessage   `json:"agentsStates,omitempty"` // collabAgentToolCall
+	Action       json.RawMessage `json:"action,omitempty"`
+	Content      []string        `json:"content,omitempty"`
+	Summary      []string        `json:"summary,omitempty"`
+	ContentItems json.RawMessage `json:"contentItems,omitempty"` // dynamicToolCall result content
+	Success      *bool           `json:"success,omitempty"`      // dynamicToolCall
+	Prompt       string          `json:"prompt,omitempty"`       // collabAgentToolCall
+	AgentsStates json.RawMessage `json:"agentsStates,omitempty"` // collabAgentToolCall
 }
 
 type codexFileChange struct {
-	Path    string              `json:"path"`
-	KindRaw json.RawMessage     `json:"kind"`
+	Path    string          `json:"path"`
+	KindRaw json.RawMessage `json:"kind"`
 }
 
 // Kind returns the normalized kind string ("add", "update", "delete").
@@ -294,9 +294,9 @@ func (a *CodexAgent) SendMessage(
 		// (codex-cli >= 0.124.0 only fills `query` and `action` at item/completed). For these, we
 		// suppress tool_start at started and emit it on completion alongside tool_result.
 		webSearchDeferStart = make(map[string]bool)
-		streamedAgentText  = make(map[string]bool)
-		streamedReasoning  = make(map[string]bool)
-		latestTokenUsage   *codexThreadTokenUsageUpdatedNotification
+		streamedAgentText   = make(map[string]bool)
+		streamedReasoning   = make(map[string]bool)
+		latestTokenUsage    *codexThreadTokenUsageUpdatedNotification
 	)
 	turnDone := make(chan struct{}, 1)
 	var turnDoneOnce sync.Once
@@ -1274,13 +1274,13 @@ func (a *CodexAgent) detectSupportedModels(ctx context.Context) ([]ModelInfo, st
 // keys in sync with the wire format so the decoder is tolerant to unknown
 // additions.
 type codexRPCModel struct {
-	ID                    string `json:"id"`
-	Model                 string `json:"model"`
-	DisplayName           string `json:"displayName"`
-	Description           string `json:"description"`
-	Hidden                bool   `json:"hidden"`
-	IsDefault             bool   `json:"isDefault"`
-	DefaultReasoningEffort string `json:"defaultReasoningEffort"`
+	ID                        string `json:"id"`
+	Model                     string `json:"model"`
+	DisplayName               string `json:"displayName"`
+	Description               string `json:"description"`
+	Hidden                    bool   `json:"hidden"`
+	IsDefault                 bool   `json:"isDefault"`
+	DefaultReasoningEffort    string `json:"defaultReasoningEffort"`
 	SupportedReasoningEfforts []struct {
 		ReasoningEffort string `json:"reasoningEffort"`
 		Description     string `json:"description,omitempty"`

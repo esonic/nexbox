@@ -8,6 +8,7 @@ const AGENT_LABELS: Record<string, string> = {
   codex: "Codex",
   claude: "Claude Code",
   zeroclaw: "ZeroClaw",
+  crush: "Crush",
 };
 
 export function GeneralSettings() {

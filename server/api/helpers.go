@@ -53,21 +53,16 @@ func (s *Server) ListAvailableAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListAvailableModels returns the available model catalog for an agent.
-// GET /api/available-models?agent=codex → {
-//   "agent":       "codex",
-//   "models":      ["gpt-5.4", ...],                           // legacy string list
-//   "models_info": [{id, label, description, supported_efforts, default_effort, is_default, ...}, ...],
-//   "source":      "dynamic|none"
-// }
 //
-// Backends with a model catalog expose it directly via their CLIs:
-//   - Claude: `initialize` control_response → `models[]` with `supportsEffort`
-//             and `supportedEffortLevels`.
-//   - Codex: `model/list` RPC → `Model[]` with `supportedReasoningEfforts`
-//            and `defaultReasoningEffort`.
-//   - ZeroClaw: provider/model selection belongs to its own configuration, so
-//     this endpoint intentionally returns an empty catalog.
-// There is no curated catalog on our side.
+//	GET /api/available-models?agent=codex → {
+//	  "agent":       "codex",
+//	  "models":      ["gpt-5.4", ...],                           // legacy string list
+//	  "models_info": [{id, label, description, supported_efforts, default_effort, is_default, ...}, ...],
+//	  "source":      "dynamic|none"
+//	}
+//
+// Backends optionally implement agent.ModelCatalog. The catalog can come from
+// a native protocol, a CLI query, or Nexbox's own configured model list.
 func (s *Server) ListAvailableModels(w http.ResponseWriter, r *http.Request) {
 	agentName := strings.TrimSpace(r.URL.Query().Get("agent"))
 	if agentName == "" {
@@ -87,11 +82,8 @@ func (s *Server) ListAvailableModels(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	switch a := backend.(type) {
-	case *agent.CodexAgent:
-		info, source = a.ListSupportedModels(ctx)
-	case *agent.ClaudeAgent:
-		info, source = a.ListSupportedModels(ctx)
+	if catalog, ok := backend.(agent.ModelCatalog); ok {
+		info, source = catalog.ListSupportedModels(ctx)
 	}
 
 	ids := make([]string, 0, len(info))
@@ -357,10 +349,10 @@ func (s *Server) nextActionsEnabled() bool {
 // PUT /api/settings
 func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DefaultAgent   *string `json:"default_agent,omitempty"`
-		ChromeHeadless     *bool `json:"chrome_headless,omitempty"`
-		EnableFileEdit     *bool `json:"enable_file_edit,omitempty"`
-		SuggestNextActions *bool `json:"suggest_next_actions,omitempty"`
+		DefaultAgent       *string `json:"default_agent,omitempty"`
+		ChromeHeadless     *bool   `json:"chrome_headless,omitempty"`
+		EnableFileEdit     *bool   `json:"enable_file_edit,omitempty"`
+		SuggestNextActions *bool   `json:"suggest_next_actions,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")

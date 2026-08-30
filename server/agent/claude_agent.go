@@ -22,9 +22,9 @@ type ClaudeAgent struct {
 
 	// Cached init_response data. Populated by the first ProbeInitialize() call
 	// or opportunistically whenever a real SendMessage receives its init_response.
-	modelsMu      sync.Mutex
-	cachedModels  []ModelInfo
-	cachedProbed  bool
+	modelsMu     sync.Mutex
+	cachedModels []ModelInfo
+	cachedProbed bool
 }
 
 // NewClaudeAgent creates a new Claude Code agent with default settings.
@@ -39,7 +39,7 @@ func NewClaudeAgent() *ClaudeAgent {
 var _ Agent = (*ClaudeAgent)(nil)
 
 func (a *ClaudeAgent) Capabilities() Capabilities {
-	return Capabilities{Fork: true, Interject: true, ChromeDevTools: true}
+	return Capabilities{Fork: true, Interject: true, ChromeDevTools: true, ModelSwitchMode: ModelSwitchCurrentSession}
 }
 
 // HasMCP returns whether MCP is configured for this agent.

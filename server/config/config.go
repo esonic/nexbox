@@ -18,6 +18,24 @@ type Config struct {
 	// (rendered as quick-reply buttons). Pointer so "absent" defaults to ON —
 	// nil means enabled; only an explicit false disables it.
 	SuggestNextActions *bool `json:"suggest_next_actions,omitempty"`
+	// CrushModels is the Nexbox-owned picker for the Crush native adapter.
+	// Provider and ID are passed to Crush as its selected model; no provider
+	// secret is stored here.
+	CrushModels []CrushModel `json:"crush_models,omitempty"`
+}
+
+type CrushModel struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	Label    string `json:"label,omitempty"`
+}
+
+func defaultCrushModels() []CrushModel {
+	return []CrushModel{{
+		ID:       "minimax/minimax-m3:free",
+		Provider: "openrouter",
+		Label:    "minimax/minimax-m3:free",
+	}}
 }
 
 // Manager provides thread-safe load/save operations for Config.
@@ -39,7 +57,7 @@ func NewManager(path string) (*Manager, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			m.cfg = Config{DefaultAgent: "claude", ChromeHeadless: true}
+			m.cfg = Config{DefaultAgent: "claude", ChromeHeadless: true, CrushModels: defaultCrushModels()}
 			return m, m.save()
 		}
 		return nil, fmt.Errorf("read config: %w", err)
@@ -47,6 +65,14 @@ func NewManager(path string) (*Manager, error) {
 
 	if err := json.Unmarshal(data, &m.cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	// Backfill installations created before Crush support. A non-nil empty
+	// list remains an explicit admin choice to expose no Crush models.
+	if m.cfg.CrushModels == nil {
+		m.cfg.CrushModels = defaultCrushModels()
+		if err := m.save(); err != nil {
+			return nil, err
+		}
 	}
 	return m, nil
 }

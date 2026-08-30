@@ -150,6 +150,69 @@ func TestListAvailableAgents_IncludesCapabilities(t *testing.T) {
 	}
 }
 
+func TestListAvailableModels_UsesAgentCatalog(t *testing.T) {
+	s := newAgentGateServer(t)
+	s.Agents["crush"] = agent.NewCrushAgent([]agent.CrushModel{{
+		ID: "minimax/minimax-m3:free", Provider: "openrouter", Label: "MiniMax M3",
+	}})
+
+	rr := doRequest(t, s, http.MethodGet, "/api/available-models?agent=crush", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Agent  string            `json:"agent"`
+		Models []string          `json:"models"`
+		Info   []agent.ModelInfo `json:"models_info"`
+		Source string            `json:"source"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Agent != "crush" || body.Source != "config" || len(body.Models) != 1 || body.Models[0] != "minimax/minimax-m3:free" {
+		t.Fatalf("unexpected models response: %#v", body)
+	}
+	if len(body.Info) != 1 || body.Info[0].Label != "MiniMax M3" {
+		t.Fatalf("unexpected model info: %#v", body.Info)
+	}
+}
+
+func TestUpdateSessionRejectsModelChangeForStartedNewSessionOnlyAgent(t *testing.T) {
+	s := newAgentGateServer(t)
+	s.Agents["zeroclaw"] = agent.NewZeroClawAgent()
+	model := "coder"
+	sess, err := s.Store.CreateSession(store.CreateSessionRequest{Name: "zero", Agent: "zeroclaw", Model: model})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.Store.CreateMessage(sess.ID, "user", []store.MessagePart{{Type: "text", Content: "hello"}}, store.MessageMetadata{}); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	rr := doRequest(t, s, http.MethodPut, "/api/sessions/"+sess.ID, map[string]string{"model": "other"})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	stored, err := s.Store.GetSession(sess.ID)
+	if err != nil || stored.Model != model {
+		t.Fatalf("stored model = %q, err=%v", stored.Model, err)
+	}
+}
+
+func TestUpdateSessionAllowsModelChangeForFreshNewSessionOnlyAgent(t *testing.T) {
+	s := newAgentGateServer(t)
+	s.Agents["zeroclaw"] = agent.NewZeroClawAgent()
+	sess, err := s.Store.CreateSession(store.CreateSessionRequest{Name: "zero", Agent: "zeroclaw", Model: "coder"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	rr := doRequest(t, s, http.MethodPut, "/api/sessions/"+sess.ID, map[string]string{"model": "other"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 // TestPersistSessionAgent_StampsEmptyAgent guards the whole-session fork-button
 // regression: a session created without an agent (as scratch sessions are) must
 // get the resolved agent written to its row the first time it is used, so the

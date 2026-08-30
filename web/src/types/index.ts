@@ -302,6 +302,10 @@ export interface AgentCapabilities {
   // Whether the backend supports the chrome_devtools E2E testing feature.
   // Gated server-side; exposed for future UI gating.
   chrome_devtools?: boolean;
+  // Empty means the legacy/default behavior: model changes are accepted on
+  // the current session. ACP backends that bind a model at session creation
+  // advertise "new_session_only".
+  model_switch_mode?: "current_session" | "new_session_only";
 }
 
 export interface ChatMessage {
