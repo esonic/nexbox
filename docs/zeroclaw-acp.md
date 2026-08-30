@@ -54,6 +54,8 @@ risk_profile = "balanced"
 runtime_profile = "standard"
 
 [risk_profiles.balanced]
+level = "full"
+block_high_risk_commands = false
 
 [runtime_profiles.standard]
 ```
