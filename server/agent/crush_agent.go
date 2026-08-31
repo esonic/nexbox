@@ -745,7 +745,11 @@ type crushWireMessage struct {
 }
 
 type crushWirePart struct {
-	Type       string `json:"type"`
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
+}
+
+type crushWirePartData struct {
 	Text       string `json:"text"`
 	Thinking   string `json:"thinking"`
 	ID         string `json:"id"`
@@ -799,8 +803,8 @@ func (a *CrushAgent) handleWorkspaceEvent(workspace *crushWorkspace, raw []byte)
 	}
 }
 
-// RunID is included only by Crush's run_complete event. Keeping it separate
-// from the wire message makes the event's correlation requirement explicit.
+// Wire messages do not carry RunID; the terminal run_complete event does.
+// Keeping it separate makes terminal correlation explicit.
 func (c *crushRunComplete) UnmarshalJSON(data []byte) error {
 	type wire struct {
 		SessionID string `json:"session_id"`
@@ -818,7 +822,7 @@ func (c *crushRunComplete) UnmarshalJSON(data []byte) error {
 }
 
 func (a *CrushAgent) handleCrushMessage(workspace *crushWorkspace, message crushWireMessage) {
-	if message.Role != "assistant" || message.SessionID == "" {
+	if message.SessionID == "" || (message.Role != "assistant" && message.Role != "tool") {
 		return
 	}
 	workspace.mu.Lock()
@@ -843,33 +847,43 @@ func (a *CrushAgent) handleCrushMessage(workspace *crushWorkspace, message crush
 	var text, thinking string
 	for _, rawPart := range message.Parts {
 		var part crushWirePart
-		if json.Unmarshal(rawPart, &part) != nil {
+		if json.Unmarshal(rawPart, &part) != nil || len(part.Data) == 0 {
+			continue
+		}
+		var data crushWirePartData
+		if json.Unmarshal(part.Data, &data) != nil {
 			continue
 		}
 		switch part.Type {
 		case "text":
-			text += part.Text
+			if message.Role == "assistant" {
+				text += data.Text
+			}
 		case "reasoning":
-			thinking += part.Thinking
+			if message.Role == "assistant" {
+				thinking += data.Thinking
+			}
 		case "tool_call":
-			if part.ID != "" && !state.toolCalls[part.ID] {
-				state.toolCalls[part.ID] = true
-				callback(StreamEvent{Type: EventToolStart, ToolID: part.ID, ToolName: part.Name, Input: part.Input})
+			if data.ID != "" && data.Finished && !state.toolCalls[data.ID] {
+				state.toolCalls[data.ID] = true
+				callback(StreamEvent{Type: EventToolStart, ToolID: data.ID, ToolName: data.Name, Input: data.Input})
 			}
 		case "tool_result":
-			if part.ToolCallID != "" && !state.toolDone[part.ToolCallID] {
-				state.toolDone[part.ToolCallID] = true
-				callback(StreamEvent{Type: EventToolResult, ToolID: part.ToolCallID, ToolName: part.Name, Output: part.Content, IsError: part.IsError})
+			if data.ToolCallID != "" && !state.toolDone[data.ToolCallID] {
+				state.toolDone[data.ToolCallID] = true
+				callback(StreamEvent{Type: EventToolResult, ToolID: data.ToolCallID, ToolName: data.Name, Output: data.Content, IsError: data.IsError})
 			}
 		}
 	}
-	if delta := strings.TrimPrefix(text, state.text); delta != "" {
-		callback(StreamEvent{Type: EventTextDelta, Content: delta})
+	if message.Role == "assistant" {
+		if delta := strings.TrimPrefix(text, state.text); delta != "" {
+			callback(StreamEvent{Type: EventTextDelta, Content: delta})
+		}
+		if delta := strings.TrimPrefix(thinking, state.thinking); delta != "" {
+			callback(StreamEvent{Type: EventThinking, Content: delta})
+		}
+		state.text, state.thinking = text, thinking
 	}
-	if delta := strings.TrimPrefix(thinking, state.thinking); delta != "" {
-		callback(StreamEvent{Type: EventThinking, Content: delta})
-	}
-	state.text, state.thinking = text, thinking
 	workspace.mu.Lock()
 	workspace.messageState[message.SessionID] = state
 	workspace.mu.Unlock()

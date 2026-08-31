@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,7 +36,7 @@ func TestCrushAgentIntegration(t *testing.T) {
 	t.Setenv("CRUSH_GLOBAL_DATA", t.TempDir())
 	defer a.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	models, source := a.ListSupportedModels(ctx)
 	if source != "dynamic" || len(models) != 1 || models[0].ID != "openrouter/minimax/minimax-m3:free" || models[0].Label != "MiniMax M3 Free" {
@@ -77,6 +79,147 @@ func TestCrushAgentIntegration(t *testing.T) {
 	if a.serverStarted || a.serverCmd != nil {
 		t.Fatal("Crush server must stop after the resumed turn")
 	}
+	probeID, err := newCrushID()
+	if err != nil {
+		t.Fatalf("create tool probe id: %v", err)
+	}
+	probeName := "nexbox-crush-tool-probe-" + probeID + ".txt"
+	if err := os.WriteFile(filepath.Join(workDir, probeName), []byte("private tool probe\n"), 0600); err != nil {
+		t.Fatalf("write tool probe: %v", err)
+	}
+	var toolCallID string
+	var toolResult StreamEvent
+	third, err := a.SendMessage(ctx, Request{
+		SessionID: second.SessionID,
+		WorkDir:   workDir,
+		Model:     "openrouter/minimax/minimax-m3:free",
+		Message:   "Call the ls tool to inspect the current working directory, then briefly describe what it contains. Do not answer from memory or assumptions.",
+	}, func(event StreamEvent) {
+		switch event.Type {
+		case EventToolStart:
+			if strings.EqualFold(event.ToolName, "ls") {
+				toolCallID = event.ToolID
+			}
+		case EventToolResult:
+			if event.ToolID == toolCallID {
+				toolResult = event
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("tool SendMessage: %v", err)
+	}
+	if third.SessionID != second.SessionID {
+		t.Fatalf("tool resumed session ID = %q, want %q", third.SessionID, second.SessionID)
+	}
+	if toolCallID == "" {
+		t.Fatal("real Crush call did not emit an ls tool start")
+	}
+	if toolResult.Type != EventToolResult || !strings.Contains(toolResult.Output, probeName) {
+		t.Fatalf("real Crush tool result = %#v, expected hidden filename %q", toolResult, probeName)
+	}
+	if a.serverStarted || a.serverCmd != nil {
+		t.Fatal("Crush server must stop after the tool turn")
+	}
+	questionSeen := make(chan string, 1)
+	var questionText strings.Builder
+	fourth, err := a.SendMessage(ctx, Request{
+		SessionID: third.SessionID,
+		WorkDir:   workDir,
+		Model:     "openrouter/minimax/minimax-m3:free",
+		Message:   "Call the question tool now. Ask exactly one single_choice question: Choose a deployment color. Offer Blue and Green. After the user answers, report the selected color.",
+		UserInputHandler: func(_ string, toolName, input string) (string, error) {
+			if toolName != "CrushQuestion" {
+				t.Errorf("interactive tool = %q, want CrushQuestion", toolName)
+			}
+			var form struct {
+				Questions []struct {
+					Question string `json:"question"`
+					Header   string `json:"header"`
+				} `json:"questions"`
+			}
+			if err := json.Unmarshal([]byte(input), &form); err != nil {
+				return "", fmt.Errorf("decode Crush question form: %w", err)
+			}
+			if len(form.Questions) != 1 {
+				return "", fmt.Errorf("Crush question count = %d, want 1", len(form.Questions))
+			}
+			select {
+			case questionSeen <- form.Questions[0].Header:
+			default:
+			}
+			answer, _ := json.Marshal(map[string]interface{}{"answers": map[string]string{form.Questions[0].Question: "Green"}})
+			return string(answer), nil
+		},
+	}, func(event StreamEvent) {
+		if event.Type == EventTextDelta {
+			questionText.WriteString(event.Content)
+		}
+	})
+	if err != nil {
+		t.Fatalf("question SendMessage: %v", err)
+	}
+	if fourth.SessionID != third.SessionID {
+		t.Fatalf("question resumed session ID = %q, want %q", fourth.SessionID, third.SessionID)
+	}
+	select {
+	case header := <-questionSeen:
+		if !strings.Contains(header, "Choose a deployment color") {
+			t.Fatalf("question header = %q", header)
+		}
+	default:
+		t.Fatal("real Crush call did not request structured user input")
+	}
+	if !strings.Contains(strings.ToLower(questionText.String()), "green") {
+		t.Fatalf("question response = %q", questionText.String())
+	}
+	if a.serverStarted || a.serverCmd != nil {
+		t.Fatal("Crush server must stop after the question turn")
+	}
+	cancelCtx, cancelTurn := context.WithCancel(ctx)
+	questionStarted := make(chan struct{}, 1)
+	cancelled := make(chan error, 1)
+	go func() {
+		_, sendErr := a.SendMessage(cancelCtx, Request{
+			SessionID: fourth.SessionID,
+			WorkDir:   workDir,
+			Model:     "openrouter/minimax/minimax-m3:free",
+			Message:   "Call the question tool now. Ask exactly one yes_no question: Should this operation continue? Wait for the user's answer before doing anything else.",
+			UserInputHandler: func(_ string, toolName, _ string) (string, error) {
+				if toolName != "CrushQuestion" {
+					return "", fmt.Errorf("interactive tool = %q, want CrushQuestion", toolName)
+				}
+				select {
+				case questionStarted <- struct{}{}:
+				default:
+				}
+				<-cancelCtx.Done()
+				return "", cancelCtx.Err()
+			},
+		}, func(StreamEvent) {})
+		cancelled <- sendErr
+	}()
+	select {
+	case <-questionStarted:
+		cancelTurn()
+	case sendErr := <-cancelled:
+		cancelTurn()
+		t.Fatalf("cancellable Crush turn ended before requesting input: %v", sendErr)
+	case <-time.After(60 * time.Second):
+		cancelTurn()
+		t.Fatal("real Crush call did not reach a cancellable question")
+	}
+	select {
+	case sendErr := <-cancelled:
+		if !errors.Is(sendErr, context.Canceled) {
+			t.Fatalf("cancelled Crush turn error = %v, want context.Canceled", sendErr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled Crush turn did not return")
+	}
+	if a.serverStarted || a.serverCmd != nil {
+		t.Fatal("Crush server must stop after the cancelled turn")
+	}
 	a.beginTurn()
 	defer a.finishTurn()
 	if err := a.ensureServer(ctx); err != nil {
@@ -97,6 +240,48 @@ func TestCrushAgentIntegration(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workDir, ".crush")); !os.IsNotExist(err) {
 		t.Fatalf("Crush must not create project-local state: stat .crush: %v", err)
+	}
+}
+
+// TestCrushAgentProviderErrorIntegration proves that an error produced by a
+// real OpenRouter request terminates the matching Nexbox turn instead of
+// hanging while it waits for a successful run_complete event.
+func TestCrushAgentProviderErrorIntegration(t *testing.T) {
+	if os.Getenv("CRUSH_INTEGRATION") != "1" {
+		t.Skip("set CRUSH_INTEGRATION=1 to run against an installed Crush and OpenRouter")
+	}
+	a := NewCrushAgent()
+	if cliPath := os.Getenv("CRUSH_CLI"); cliPath != "" {
+		a.CLIPath = cliPath
+	}
+	a.DataDir = t.TempDir()
+	configDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configDir, "crushrc"), []byte("option default-providers false\nprovider add openrouter --type openai-compat --base-url \"https://openrouter.ai/api/v1\" --api-key \"$OPENROUTER_API_KEY\"\nmodel add openrouter/minimax/minimax-m3:free --name \"MiniMax M3 Free\"\n"), 0600); err != nil {
+		t.Fatalf("write Crush config: %v", err)
+	}
+	t.Setenv("CRUSH_GLOBAL_CONFIG", configDir)
+	t.Setenv("CRUSH_GLOBAL_DATA", t.TempDir())
+	t.Setenv("OPENROUTER_API_KEY", "invalid-nexbox-integration-key")
+	defer a.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	result, err := a.SendMessage(ctx, Request{
+		WorkDir: t.TempDir(),
+		Model:   "openrouter/minimax/minimax-m3:free",
+		Message: "Reply with OK.",
+	}, func(StreamEvent) {})
+	if err == nil {
+		t.Fatal("real OpenRouter authentication failure unexpectedly succeeded")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Crush provider error was not correlated to its run: %v", err)
+	}
+	if result.SessionID == "" {
+		t.Fatal("provider failure should preserve the created Crush session ID")
+	}
+	if a.serverStarted || a.serverCmd != nil {
+		t.Fatal("Crush server must stop after the failed turn")
 	}
 }
 
@@ -282,28 +467,30 @@ func TestCrushAgentEventFailsItsRun(t *testing.T) {
 	}
 }
 
-func TestCrushToolPartsMapToUnifiedEvents(t *testing.T) {
+func TestCrushNativeMessageEnvelopeMapsToUnifiedEvents(t *testing.T) {
 	var events []StreamEvent
 	workspace := &crushWorkspace{
 		runs:         map[string]*crushRun{"run-1": {sessionID: "session-1", callback: func(event StreamEvent) { events = append(events, event) }}},
 		messageState: make(map[string]crushMessageState),
 	}
-	NewCrushAgent().handleCrushMessage(workspace, crushWireMessage{
-		SessionID: "session-1",
-		Role:      "assistant",
-		Parts: []json.RawMessage{
-			json.RawMessage(`{"type":"tool_call","id":"call-1","name":"view","input":"{\"path\":\"README.md\"}"}`),
-			json.RawMessage(`{"type":"tool_result","tool_call_id":"call-1","name":"view","content":"file content"}`),
-		},
-	})
-	if len(events) != 2 {
+	a := NewCrushAgent()
+	a.handleWorkspaceEvent(workspace, []byte(`{"type":"message","payload":{"type":"updated","payload":{"session_id":"session-1","role":"assistant","parts":[{"type":"tool_call","data":{"id":"call-1","name":"view","input":"{","finished":false}}]}}}`))
+	a.handleWorkspaceEvent(workspace, []byte(`{"type":"message","payload":{"type":"created","payload":{"session_id":"session-1","role":"assistant","parts":[{"type":"text","data":{"text":"Checking"}},{"type":"reasoning","data":{"thinking":"Need the file"}},{"type":"tool_call","data":{"id":"call-1","name":"view","input":"{\"path\":\"README.md\"}","finished":true}}]}}}`))
+	a.handleWorkspaceEvent(workspace, []byte(`{"type":"message","payload":{"type":"created","payload":{"session_id":"session-1","role":"tool","parts":[{"type":"tool_result","data":{"tool_call_id":"call-1","name":"view","content":"file content","is_error":false}}]}}}`))
+	if len(events) != 4 {
 		t.Fatalf("events = %#v", events)
 	}
-	if events[0].Type != EventToolStart || events[0].ToolID != "call-1" || events[0].ToolName != "view" {
+	if events[0].Type != EventToolStart || events[0].ToolID != "call-1" || events[0].ToolName != "view" || !strings.Contains(events[0].Input, "README.md") {
 		t.Fatalf("tool start = %#v", events[0])
 	}
-	if events[1].Type != EventToolResult || events[1].ToolID != "call-1" || events[1].Output != "file content" {
-		t.Fatalf("tool result = %#v", events[1])
+	if events[1].Type != EventTextDelta || events[1].Content != "Checking" {
+		t.Fatalf("text = %#v", events[1])
+	}
+	if events[2].Type != EventThinking || events[2].Content != "Need the file" {
+		t.Fatalf("thinking = %#v", events[2])
+	}
+	if events[3].Type != EventToolResult || events[3].ToolID != "call-1" || events[3].Output != "file content" {
+		t.Fatalf("tool result = %#v", events[3])
 	}
 }
 
