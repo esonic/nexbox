@@ -433,6 +433,36 @@ func TestCrushQuestionPostsNativeAnswers(t *testing.T) {
 	}
 }
 
+func TestCrushQuestionAfterCloseDoesNotUseReleasedHTTPClient(t *testing.T) {
+	called := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called <- struct{}{}
+	}))
+	defer server.Close()
+
+	a := NewCrushAgent()
+	a.serverURL = server.URL
+	a.httpClient = server.Client()
+	a.Close()
+	workspace := &crushWorkspace{
+		id: "workspace-1",
+		runs: map[string]*crushRun{
+			"run-1": {
+				sessionID: "session-1",
+				input: func(string, string, string) (string, error) {
+					return "", context.Canceled
+				},
+			},
+		},
+	}
+	a.handleCrushQuestion(workspace, json.RawMessage(`{"id":"batch-1","session_id":"session-1","questions":[{"id":"choice","type":"single_choice","question":"Pick one"}]}`))
+	select {
+	case <-called:
+		t.Fatal("question cancellation used an HTTP client after Crush was closed")
+	default:
+	}
+}
+
 func TestBuildCrushPromptIncludesImages(t *testing.T) {
 	prompt := buildCrushPrompt(Request{
 		StaticContext:  "project context",

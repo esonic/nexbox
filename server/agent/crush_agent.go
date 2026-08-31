@@ -401,13 +401,15 @@ func (a *CrushAgent) ensureServer(ctx context.Context) error {
 		return fmt.Errorf("start crush server: %w", err)
 	}
 
-	a.serverURL = "http://" + address
-	a.httpClient = &http.Client{}
+	serverURL := "http://" + address
+	httpClient := &http.Client{}
+	a.serverURL = serverURL
+	a.httpClient = httpClient
 	a.serverCmd = cmd
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
-		err := a.health(probeCtx)
+		err := crushHealth(probeCtx, serverURL, httpClient)
 		cancel()
 		if err == nil {
 			a.serverStarted = true
@@ -485,12 +487,12 @@ func (a *CrushAgent) closeResources() {
 	}
 }
 
-func (a *CrushAgent) health(ctx context.Context) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, a.serverURL+"/v1/health", nil)
+func crushHealth(ctx context.Context, serverURL string, httpClient *http.Client) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, serverURL+"/v1/health", nil)
 	if err != nil {
 		return err
 	}
-	response, err := a.httpClient.Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
 		return err
 	}
@@ -501,12 +503,29 @@ func (a *CrushAgent) health(ctx context.Context) error {
 	return nil
 }
 
+// serverConnection returns a stable connection for one request. Callers may
+// outlive a turn (for example after an interactive question is cancelled), so
+// they must not read serverURL or httpClient directly while Close can release
+// them.
+func (a *CrushAgent) serverConnection() (string, *http.Client, error) {
+	a.serverMu.Lock()
+	defer a.serverMu.Unlock()
+	if a.serverURL == "" || a.httpClient == nil {
+		return "", nil, errors.New("Crush server is not running")
+	}
+	return a.serverURL, a.httpClient, nil
+}
+
 func (a *CrushAgent) getJSON(ctx context.Context, path string, target interface{}) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, a.serverURL+path, nil)
+	serverURL, httpClient, err := a.serverConnection()
 	if err != nil {
 		return err
 	}
-	response, err := a.httpClient.Do(request)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, serverURL+path, nil)
+	if err != nil {
+		return err
+	}
+	response, err := httpClient.Do(request)
 	if err != nil {
 		return err
 	}
@@ -521,16 +540,20 @@ func (a *CrushAgent) getJSON(ctx context.Context, path string, target interface{
 }
 
 func (a *CrushAgent) deleteWorkspace(workspaceID string) {
-	if strings.TrimSpace(workspaceID) == "" || a.httpClient == nil || a.serverURL == "" {
+	if strings.TrimSpace(workspaceID) == "" {
+		return
+	}
+	serverURL, httpClient, err := a.serverConnection()
+	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, a.serverURL+"/v1/workspaces/"+url.PathEscape(workspaceID), nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, serverURL+"/v1/workspaces/"+url.PathEscape(workspaceID), nil)
 	if err != nil {
 		return
 	}
-	response, err := a.httpClient.Do(request)
+	response, err := httpClient.Do(request)
 	if err == nil && response != nil {
 		response.Body.Close()
 	}
@@ -696,13 +719,17 @@ func (a *CrushAgent) streamWorkspaceEvents(workspace *crushWorkspace) {
 
 func (a *CrushAgent) consumeWorkspaceEvents(workspace *crushWorkspace, connected func()) error {
 	query := url.Values{"client_id": []string{workspace.clientID}}
-	endpoint := a.serverURL + "/v1/workspaces/" + url.PathEscape(workspace.id) + "/events?" + query.Encode()
+	serverURL, httpClient, err := a.serverConnection()
+	if err != nil {
+		return err
+	}
+	endpoint := serverURL + "/v1/workspaces/" + url.PathEscape(workspace.id) + "/events?" + query.Encode()
 	request, err := http.NewRequestWithContext(workspace.ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
 	}
 	request.Header.Set("Accept", "text/event-stream")
-	response, err := a.httpClient.Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
 		return err
 	}
@@ -1163,7 +1190,11 @@ func (a *CrushAgent) postJSON(ctx context.Context, path string, query url.Values
 		}
 		body = bytes.NewReader(encoded)
 	}
-	endpoint := a.serverURL + path
+	serverURL, httpClient, err := a.serverConnection()
+	if err != nil {
+		return err
+	}
+	endpoint := serverURL + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
@@ -1174,7 +1205,7 @@ func (a *CrushAgent) postJSON(ctx context.Context, path string, query url.Values
 	if payload != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	response, err := a.httpClient.Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
 		return err
 	}

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -139,9 +140,17 @@ func (a *ZeroClawAgent) SendMessage(ctx context.Context, req Request, cb EventCa
 
 	client := newACPStdioClient(a.CLIPath, a.CLIArgs)
 	client.verbose = a.Verbose
+	var streamedText struct {
+		sync.Mutex
+		received bool
+	}
 	client.setNotificationHandler(func(method string, params json.RawMessage) {
 		if method == "session/update" {
-			a.handleSessionUpdate(params, cb)
+			if a.handleSessionUpdate(params, cb) {
+				streamedText.Lock()
+				streamedText.received = true
+				streamedText.Unlock()
+			}
 		}
 	})
 	client.setServerRequestHandler(func(method string, params json.RawMessage) (interface{}, *acpWireError) {
@@ -251,6 +260,12 @@ func (a *ZeroClawAgent) SendMessage(ctx context.Context, req Request, cb EventCa
 		sessionID = outcome.result.SessionID
 	}
 	metadata := map[string]interface{}{"stopReason": outcome.result.StopReason}
+	streamedText.Lock()
+	receivedText := streamedText.received
+	streamedText.Unlock()
+	if !receivedText && outcome.result.Content != "" {
+		cb(StreamEvent{Type: EventTextDelta, Content: outcome.result.Content})
+	}
 	cb(StreamEvent{Type: EventDone, SessionID: sessionID, Metadata: metadata})
 	return Result{SessionID: sessionID, Metadata: metadata}, nil
 }
@@ -305,19 +320,20 @@ func buildZeroClawPrompt(req Request, isNewSession bool) (interface{}, error) {
 	return parts, nil
 }
 
-func (a *ZeroClawAgent) handleSessionUpdate(params json.RawMessage, cb EventCallback) {
+func (a *ZeroClawAgent) handleSessionUpdate(params json.RawMessage, cb EventCallback) bool {
 	var update zeroClawSessionUpdateParams
 	if err := json.Unmarshal(params, &update); err != nil {
 		if a.Verbose {
 			log.Printf("[zeroclaw-agent] invalid session/update: %v", err)
 		}
-		return
+		return false
 	}
 
 	switch update.Update.SessionUpdate {
 	case "agent_message_chunk":
 		if text := acpContentText(update.Update.Content); text != "" {
 			cb(StreamEvent{Type: EventTextDelta, Content: text})
+			return true
 		}
 	case "agent_thought_chunk":
 		if text := acpContentText(update.Update.Content); text != "" {
@@ -340,6 +356,7 @@ func (a *ZeroClawAgent) handleSessionUpdate(params json.RawMessage, cb EventCall
 			IsError:  status == "failed" || status == "error" || status == "rejected" || status == "cancelled",
 		})
 	}
+	return false
 }
 
 func (a *ZeroClawAgent) handlePermissionRequest(

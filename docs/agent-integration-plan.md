@@ -21,7 +21,7 @@ Nexbox 现已注册四个 agent：Codex、Claude Code、ZeroClaw、Crush。
 - 使用 Crush 原生 HTTP/SSE 服务，不使用 ACP，也不解析 TUI 或 `crush run` 输出。
 - Nexbox 按工作目录创建并复用 Crush workspace，保存 Crush session ID 以支持续聊。
 - Crush 的配置、鉴权和模型目录由 Crush 自己管理；Nexbox 不保存这些状态，也不会在用户项目中创建或修改 `.crush`。
-- 通过 SSE 映射文本、思考、工具调用、工具结果、权限请求、完成和取消事件。
+- 通过 SSE 映射文本、思考、工具调用、工具结果、用户提问、完成和取消事件。Crush workspace 以 YOLO 模式创建，所有工具权限请求均由 Crush 自动跳过，不在 Nexbox 中逐项确认。
 - 每轮 Crush 对话开始时，Nexbox 自动执行 `crush server` 并在本机随机端口监听；该轮完成、失败或取消后立即关闭 workspace/SSE 与子进程。多个并发回合共用同一子进程，直到最后一个回合结束。
 - Nexbox 不转写或保存 OpenRouter 密钥。部署 Nexbox 的进程直接提供 Crush 所需的 `OPENROUTER_API_KEY` 即可；子进程原样继承该环境变量。
 - Crush 支持在已有会话中改模型；Nexbox 将它声明为 `current_session`，模型下拉在会话中仍可选择。
@@ -37,7 +37,7 @@ provider add openrouter --type openai-compat --base-url "https://openrouter.ai/a
 model add openrouter/minimax/minimax-m3:free --name "MiniMax M3 Free"
 ```
 
-其中每个 `model add` 就是 Nexbox 下拉中的一项。`OPENROUTER_API_KEY` 始终只保留在部署进程环境中；Nexbox 不转写或保存它。Crush 模型必须由用户显式选择，Nexbox 不自动补默认模型。
+其中每个 `model add` 就是 Nexbox 下拉中的一项。`OPENROUTER_API_KEY` 始终只保留在部署进程环境中；Nexbox 不转写或保存它。对尚未选择模型的 Crush 会话，Nexbox 首次使用时自动选择当前配置列表的最后一项，之后优先复用该 agent 最近选择的模型。
 
 ## 安装与验证记录
 

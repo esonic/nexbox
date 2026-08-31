@@ -116,6 +116,28 @@ func TestZeroClawAgentStreamsACPEvents(t *testing.T) {
 	}
 }
 
+func TestZeroClawAgentEmitsPromptResultContentWithoutChunks(t *testing.T) {
+	t.Setenv("NEXBOX_ZEROCLAW_TEST_SCENARIO", "result")
+	agent := newZeroClawHelperAgent(t)
+
+	var events []StreamEvent
+	_, err := agent.SendMessage(context.Background(), Request{
+		WorkDir: t.TempDir(),
+		Message: "return a result without streaming",
+	}, func(event StreamEvent) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if len(events) != 3 || events[0].Type != EventSessionInfo || events[1].Type != EventTextDelta || events[2].Type != EventDone {
+		t.Fatalf("events = %#v, want session info, text delta, done", events)
+	}
+	if events[1].Content != "done" {
+		t.Fatalf("result text = %q, want done", events[1].Content)
+	}
+}
+
 func TestZeroClawAgentResumesPersistedSession(t *testing.T) {
 	t.Setenv("NEXBOX_ZEROCLAW_TEST_SCENARIO", "resume")
 	agent := newZeroClawHelperAgent(t)
