@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,6 +77,24 @@ func TestCrushAgentIntegration(t *testing.T) {
 	if a.serverStarted || a.serverCmd != nil {
 		t.Fatal("Crush server must stop after the resumed turn")
 	}
+	a.beginTurn()
+	defer a.finishTurn()
+	if err := a.ensureServer(ctx); err != nil {
+		t.Fatalf("restart Crush for YOLO check: %v", err)
+	}
+	workspace, err := a.ensureWorkspace(ctx, workDir)
+	if err != nil {
+		t.Fatalf("create YOLO workspace: %v", err)
+	}
+	var permissions struct {
+		Skip bool `json:"skip"`
+	}
+	if err := a.getJSON(ctx, "/v1/workspaces/"+workspace.id+"/permissions/skip", &permissions); err != nil {
+		t.Fatalf("read YOLO permissions: %v", err)
+	}
+	if !permissions.Skip {
+		t.Fatal("Nexbox Crush workspace must skip all permission requests")
+	}
 	if _, err := os.Stat(filepath.Join(workDir, ".crush")); !os.IsNotExist(err) {
 		t.Fatalf("Crush must not create project-local state: stat .crush: %v", err)
 	}
@@ -121,6 +142,168 @@ func TestCrushSelectedModelUsesNativeProviderPrefix(t *testing.T) {
 	}
 	if _, err := a.selectedModel(""); err == nil || !strings.Contains(err.Error(), "select a Crush model") {
 		t.Fatalf("selectedModel empty error = %v", err)
+	}
+}
+
+func TestCrushPermissionUsesStructuredChoices(t *testing.T) {
+	title, input := crushPermissionInput(crushPermissionRequest{
+		Action:      "view",
+		ToolName:    "View",
+		Description: "Read the requested source file",
+		Path:        "/workspace/main.go",
+	})
+	if title != "Allow view?" {
+		t.Fatalf("permission title = %q", title)
+	}
+	for _, want := range []string{"questions", "Allow once", "Allow for this turn", "Deny", "/workspace/main.go"} {
+		if !strings.Contains(input, want) {
+			t.Fatalf("permission input missing %q: %s", want, input)
+		}
+	}
+	if got := crushPermissionAction(`{"answers":{"Allow view?":"Allow once"}}`, title); got != "allow" {
+		t.Fatalf("allow-once action = %q", got)
+	}
+	if got := crushPermissionAction(`{"answers":{"Allow view?":"Allow for this turn"}}`, title); got != "allow_session" {
+		t.Fatalf("allow-session action = %q", got)
+	}
+	if got := crushPermissionAction(`{"answers":{"Allow view?":"Deny"}}`, title); got != "deny" {
+		t.Fatalf("deny action = %q", got)
+	}
+}
+
+func TestCrushQuestionUsesStructuredChoices(t *testing.T) {
+	request := crushQuestionRequest{
+		ID:           "batch-1",
+		ConfirmTitle: "Choose an approach",
+		Questions: []crushQuestionItem{
+			{ID: "style", Type: "multi_choice", Question: "What should we optimize?", Description: "Choose all that apply", Choices: []crushQuestionChoice{{ID: "speed", Label: "Speed"}, {ID: "safety", Label: "Safety"}}},
+			{ID: "confirm", Type: "yes_no", Question: "Proceed?"},
+			{ID: "notes", Type: "free_text", Question: "Anything else?"},
+		},
+	}
+	title, input := crushQuestionInput(request)
+	if title != "Choose an approach" {
+		t.Fatalf("question title = %q", title)
+	}
+	for _, want := range []string{"questions", "What should we optimize?", "Speed", "Safety", "Yes", "No"} {
+		if !strings.Contains(input, want) {
+			t.Fatalf("question input missing %q: %s", want, input)
+		}
+	}
+
+	answers := crushQuestionAnswers(`{"answers":{"style":"Speed, Safety","confirm":"Yes","notes":"Keep the API stable"}}`, request)
+	if len(answers) != 3 {
+		t.Fatalf("answers = %#v", answers)
+	}
+	if got := answers[0].SelectedIDs; len(got) != 2 || got[0] != "speed" || got[1] != "safety" {
+		t.Fatalf("choice answers = %#v", got)
+	}
+	if answers[1].Yes == nil || !*answers[1].Yes {
+		t.Fatalf("yes/no answer = %#v", answers[1])
+	}
+	if answers[2].FillInText != "Keep the API stable" {
+		t.Fatalf("free-text answer = %#v", answers[2])
+	}
+}
+
+func TestCrushQuestionPostsNativeAnswers(t *testing.T) {
+	var received struct {
+		BatchRequestID string                `json:"batch_request_id"`
+		Responses      []crushQuestionAnswer `json:"responses"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/v1/workspaces/workspace-1/questions/answer" {
+			t.Errorf("unexpected question request: %s %s", request.Method, request.URL.Path)
+		}
+		if err := json.NewDecoder(request.Body).Decode(&received); err != nil {
+			t.Errorf("decode question answer: %v", err)
+		}
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	a := NewCrushAgent()
+	a.serverURL = server.URL
+	a.httpClient = server.Client()
+	workspace := &crushWorkspace{
+		id: "workspace-1",
+		runs: map[string]*crushRun{
+			"run-1": {
+				sessionID: "session-1",
+				input: func(_ string, toolName, input string) (string, error) {
+					if toolName != "CrushQuestion" || !strings.Contains(input, "Pick one") {
+						t.Errorf("unexpected question input: tool=%q input=%s", toolName, input)
+					}
+					return `{"answers":{"choice":"Green"}}`, nil
+				},
+			},
+		},
+	}
+	a.handleCrushQuestion(workspace, json.RawMessage(`{"id":"batch-1","session_id":"session-1","questions":[{"id":"choice","type":"single_choice","question":"Pick one","description":"Choose a color","choices":[{"id":"green","label":"Green"},{"id":"blue","label":"Blue"}]}]}`))
+	if received.BatchRequestID != "batch-1" || len(received.Responses) != 1 {
+		t.Fatalf("question answer = %#v", received)
+	}
+	if got := received.Responses[0].SelectedIDs; len(got) != 1 || got[0] != "green" {
+		t.Fatalf("selected ids = %#v", got)
+	}
+}
+
+func TestBuildCrushPromptIncludesImages(t *testing.T) {
+	prompt := buildCrushPrompt(Request{
+		StaticContext:  "project context",
+		DynamicContext: "dynamic context",
+		Message:        "inspect this",
+		Images:         []string{"/tmp/screenshot.png"},
+	}, true)
+	for _, want := range []string{"project context", "dynamic context", "[Attached Images]", "/tmp/screenshot.png", "[User Message]", "inspect this"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q: %s", want, prompt)
+		}
+	}
+}
+
+func TestCrushAgentEventFailsItsRun(t *testing.T) {
+	run := &crushRun{
+		sessionID: "session-1",
+		callback:  func(StreamEvent) {},
+		done:      make(chan crushRunComplete, 1),
+	}
+	workspace := &crushWorkspace{runs: map[string]*crushRun{"run-1": run}}
+	NewCrushAgent().handleCrushAgentEvent(workspace, crushAgentEvent{
+		Type: "error", SessionID: "session-1", RunID: "run-1", Error: "provider unavailable",
+	})
+	select {
+	case complete := <-run.done:
+		if complete.err != "provider unavailable" {
+			t.Fatalf("completion = %#v", complete)
+		}
+	default:
+		t.Fatal("agent error did not finish its run")
+	}
+}
+
+func TestCrushToolPartsMapToUnifiedEvents(t *testing.T) {
+	var events []StreamEvent
+	workspace := &crushWorkspace{
+		runs:         map[string]*crushRun{"run-1": {sessionID: "session-1", callback: func(event StreamEvent) { events = append(events, event) }}},
+		messageState: make(map[string]crushMessageState),
+	}
+	NewCrushAgent().handleCrushMessage(workspace, crushWireMessage{
+		SessionID: "session-1",
+		Role:      "assistant",
+		Parts: []json.RawMessage{
+			json.RawMessage(`{"type":"tool_call","id":"call-1","name":"view","input":"{\"path\":\"README.md\"}"}`),
+			json.RawMessage(`{"type":"tool_result","tool_call_id":"call-1","name":"view","content":"file content"}`),
+		},
+	})
+	if len(events) != 2 {
+		t.Fatalf("events = %#v", events)
+	}
+	if events[0].Type != EventToolStart || events[0].ToolID != "call-1" || events[0].ToolName != "view" {
+		t.Fatalf("tool start = %#v", events[0])
+	}
+	if events[1].Type != EventToolResult || events[1].ToolID != "call-1" || events[1].Output != "file content" {
+		t.Fatalf("tool result = %#v", events[1])
 	}
 }
 

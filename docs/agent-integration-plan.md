@@ -22,7 +22,7 @@ Nexbox 现已注册四个 agent：Codex、Claude Code、ZeroClaw、Crush。
 - Nexbox 按工作目录创建并复用 Crush workspace，保存 Crush session ID 以支持续聊。
 - Crush 的配置、鉴权和模型目录由 Crush 自己管理；Nexbox 不保存这些状态，也不会在用户项目中创建或修改 `.crush`。
 - 通过 SSE 映射文本、思考、工具调用、工具结果、权限请求、完成和取消事件。
-- 每轮 Crush 对话开始时，Nexbox 自动执行 `crush server` 并在本机随机端口监听；该轮完成、失败或取消后立即关闭 workspace/SSE 与子进程。多个并发回合共用同一子进程，直到最后一个回合结束。也可用 `NEXBOX_CRUSH_URL` 指向已运行的 Crush 服务；此时 Nexbox 只断开连接，不会停止外部服务。
+- 每轮 Crush 对话开始时，Nexbox 自动执行 `crush server` 并在本机随机端口监听；该轮完成、失败或取消后立即关闭 workspace/SSE 与子进程。多个并发回合共用同一子进程，直到最后一个回合结束。
 - Nexbox 不转写或保存 OpenRouter 密钥。部署 Nexbox 的进程直接提供 Crush 所需的 `OPENROUTER_API_KEY` 即可；子进程原样继承该环境变量。
 - Crush 支持在已有会话中改模型；Nexbox 将它声明为 `current_session`，模型下拉在会话中仍可选择。
 - 当前原生接口未实现 Nexbox 语义的 fork 或 active-turn interject，因此两项均禁用。

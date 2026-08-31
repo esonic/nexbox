@@ -370,35 +370,13 @@ func parseCrushModel(identifier string) (crushModel, error) {
 }
 
 func buildCrushPrompt(req Request, isNewSession bool) string {
-	parts := make([]string, 0, 3)
-	if isNewSession && strings.TrimSpace(req.StaticContext) != "" {
-		parts = append(parts, req.StaticContext)
-	}
-	if strings.TrimSpace(req.DynamicContext) != "" {
-		parts = append(parts, req.DynamicContext)
-	}
-	parts = append(parts, req.Message)
-	return strings.Join(parts, "\n\n")
+	return BuildPrompt(req.StaticContext, req.DynamicContext, req.Message, isNewSession, req.Images)
 }
 
 func (a *CrushAgent) ensureServer(ctx context.Context) error {
 	a.serverMu.Lock()
 	defer a.serverMu.Unlock()
 	if a.serverStarted {
-		return nil
-	}
-
-	if configuredURL := strings.TrimRight(strings.TrimSpace(os.Getenv("NEXBOX_CRUSH_URL")), "/"); configuredURL != "" {
-		parsed, err := url.Parse(configuredURL)
-		if err != nil || parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "" {
-			return fmt.Errorf("invalid NEXBOX_CRUSH_URL")
-		}
-		a.serverURL = configuredURL
-		a.httpClient = &http.Client{}
-		if err := a.health(ctx); err != nil {
-			return fmt.Errorf("connect to configured crush server: %w", err)
-		}
-		a.serverStarted = true
 		return nil
 	}
 
@@ -467,8 +445,7 @@ func (a *CrushAgent) finishTurn() {
 	}
 }
 
-// Close releases local Crush state. It only disconnects from a server
-// supplied through NEXBOX_CRUSH_URL; that external process is never stopped.
+// Close releases local Crush state.
 func (a *CrushAgent) Close() {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
@@ -580,7 +557,7 @@ func (a *CrushAgent) ensureWorkspace(ctx context.Context, workDir string) (*crus
 		ID string `json:"id"`
 	}
 	if err := a.postJSON(ctx, "/v1/workspaces", nil, map[string]interface{}{
-		"path": clean, "data_dir": dataDir, "client_id": clientID,
+		"path": clean, "data_dir": dataDir, "client_id": clientID, "yolo": true,
 	}, http.StatusOK, &created); err != nil {
 		return nil, fmt.Errorf("create crush workspace: %w", err)
 	}
@@ -807,7 +784,17 @@ func (a *CrushAgent) handleWorkspaceEvent(workspace *crushWorkspace, raw []byte)
 	case "permission_request":
 		var event crushEvent[json.RawMessage]
 		if json.Unmarshal(envelope.Payload, &event) == nil {
-			a.handleCrushPermission(workspace, event.Payload)
+			go a.handleCrushPermission(workspace, event.Payload)
+		}
+	case "question_batch_request":
+		var event crushEvent[json.RawMessage]
+		if json.Unmarshal(envelope.Payload, &event) == nil {
+			go a.handleCrushQuestion(workspace, event.Payload)
+		}
+	case "agent_event":
+		var event crushEvent[crushAgentEvent]
+		if json.Unmarshal(envelope.Payload, &event) == nil {
+			a.handleCrushAgentEvent(workspace, event.Payload)
 		}
 	}
 }
@@ -889,40 +876,268 @@ func (a *CrushAgent) handleCrushMessage(workspace *crushWorkspace, message crush
 }
 
 func (a *CrushAgent) handleCrushPermission(workspace *crushWorkspace, raw json.RawMessage) {
-	var request struct {
-		ID          string `json:"id"`
-		SessionID   string `json:"session_id"`
-		ToolCallID  string `json:"tool_call_id"`
-		ToolName    string `json:"tool_name"`
-		Description string `json:"description"`
-	}
+	var request crushPermissionRequest
 	if json.Unmarshal(raw, &request) != nil || request.ID == "" {
 		return
 	}
-	workspace.mu.Lock()
-	var handler UserInputHandler
-	for _, run := range workspace.runs {
-		if run.sessionID == request.SessionID {
-			handler = run.input
-			break
-		}
-	}
-	workspace.mu.Unlock()
+	run := workspace.runForSession(request.SessionID)
 	action := "deny"
-	if handler != nil {
-		input, _ := json.Marshal(request)
-		if answer, err := handler(request.ID, "CrushPermission", string(input)); err == nil {
-			switch strings.ToLower(strings.TrimSpace(answer)) {
-			case "allow", "approve", "yes":
-				action = "allow"
-			case "always", "allow_session":
-				action = "allow_session"
-			}
+	if run != nil && run.input != nil {
+		title, input := crushPermissionInput(request)
+		if answer, err := run.input(request.ID, "CrushPermission", input); err == nil {
+			action = crushPermissionAction(answer, title)
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_ = a.postJSON(ctx, "/v1/workspaces/"+url.PathEscape(workspace.id)+"/permissions/grant", nil, map[string]interface{}{"permission": json.RawMessage(raw), "action": action}, http.StatusOK, nil)
+}
+
+type crushPermissionRequest struct {
+	ID          string `json:"id"`
+	SessionID   string `json:"session_id"`
+	ToolCallID  string `json:"tool_call_id"`
+	ToolName    string `json:"tool_name"`
+	Description string `json:"description"`
+	Action      string `json:"action"`
+	Path        string `json:"path"`
+}
+
+// crushPermissionInput adapts Crush's three-valued permission protocol to the
+// same structured choice card used by ZeroClaw. It must not expose the raw
+// protocol envelope as an arbitrary user question.
+func crushPermissionInput(request crushPermissionRequest) (string, string) {
+	action := strings.TrimSpace(request.Action)
+	if action == "" {
+		action = "tool action"
+	}
+	title := "Allow " + action + "?"
+	description := strings.TrimSpace(request.Description)
+	if description == "" {
+		description = "Crush requests permission to use " + firstNonEmpty(request.ToolName, "a tool") + "."
+	}
+	if path := strings.TrimSpace(request.Path); path != "" && !strings.Contains(description, path) {
+		description += "\n" + path
+	}
+	input := map[string]interface{}{
+		"question": title,
+		"questions": []map[string]interface{}{
+			{
+				"question":    title,
+				"header":      description,
+				"multiSelect": false,
+				"options": []map[string]string{
+					{"label": "Allow once", "description": "Allow only this operation"},
+					{"label": "Allow for this turn", "description": "Allow matching requests during this response"},
+					{"label": "Deny", "description": "Do not perform this operation"},
+				},
+			},
+		},
+	}
+	encoded, _ := json.Marshal(input)
+	return title, string(encoded)
+}
+
+func crushPermissionAction(response, title string) string {
+	answer := strings.TrimSpace(response)
+	var structured struct {
+		Answers map[string]string `json:"answers"`
+	}
+	if json.Unmarshal([]byte(response), &structured) == nil {
+		answer = strings.TrimSpace(structured.Answers[title])
+	}
+	switch strings.ToLower(answer) {
+	case "allow", "allow once", "approve", "yes":
+		return "allow"
+	case "always", "allow_session", "allow for this turn", "allow for this session":
+		return "allow_session"
+	default:
+		return "deny"
+	}
+}
+
+func (w *crushWorkspace) runForSession(sessionID string) *crushRun {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, run := range w.runs {
+		if run.sessionID == sessionID {
+			return run
+		}
+	}
+	return nil
+}
+
+type crushQuestionRequest struct {
+	ID                 string              `json:"id"`
+	SessionID          string              `json:"session_id"`
+	ToolCallID         string              `json:"tool_call_id"`
+	Questions          []crushQuestionItem `json:"questions"`
+	ConfirmTitle       string              `json:"confirm_title"`
+	ConfirmDescription string              `json:"confirm_description"`
+}
+
+type crushQuestionItem struct {
+	ID          string                `json:"id"`
+	Type        string                `json:"type"`
+	Label       string                `json:"label"`
+	Question    string                `json:"question"`
+	Description string                `json:"description"`
+	Choices     []crushQuestionChoice `json:"choices"`
+}
+
+type crushQuestionChoice struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+type crushQuestionAnswer struct {
+	QuestionID  string   `json:"request_id"`
+	SelectedIDs []string `json:"selected_ids,omitempty"`
+	FillInText  string   `json:"fill_in_text,omitempty"`
+	Yes         *bool    `json:"yes,omitempty"`
+}
+
+func (a *CrushAgent) handleCrushQuestion(workspace *crushWorkspace, raw json.RawMessage) {
+	var request crushQuestionRequest
+	if json.Unmarshal(raw, &request) != nil || request.ID == "" || request.SessionID == "" || len(request.Questions) == 0 {
+		return
+	}
+	run := workspace.runForSession(request.SessionID)
+	if run == nil || run.input == nil {
+		a.cancelCrushQuestion(workspace.id)
+		return
+	}
+	_, input := crushQuestionInput(request)
+	response, err := run.input(request.ID, "CrushQuestion", input)
+	if err != nil {
+		a.cancelCrushQuestion(workspace.id)
+		return
+	}
+	answers := crushQuestionAnswers(response, request)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = a.postJSON(ctx, "/v1/workspaces/"+url.PathEscape(workspace.id)+"/questions/answer", nil, map[string]interface{}{
+		"batch_request_id": request.ID,
+		"responses":        answers,
+	}, http.StatusOK, nil)
+}
+
+func (a *CrushAgent) cancelCrushQuestion(workspaceID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = a.postJSON(ctx, "/v1/workspaces/"+url.PathEscape(workspaceID)+"/questions/cancel", nil, nil, http.StatusOK, nil)
+}
+
+func crushQuestionInput(request crushQuestionRequest) (string, string) {
+	title := firstNonEmpty(strings.TrimSpace(request.ConfirmTitle), "Crush needs your input")
+	questions := make([]map[string]interface{}, 0, len(request.Questions))
+	for _, question := range request.Questions {
+		header := strings.TrimSpace(question.Question)
+		if description := strings.TrimSpace(question.Description); description != "" {
+			header += "\n" + description
+		}
+		options := make([]map[string]string, 0, len(question.Choices))
+		for _, choice := range question.Choices {
+			options = append(options, map[string]string{"label": choice.Label, "description": choice.Description})
+		}
+		if question.Type == "yes_no" {
+			options = []map[string]string{{"label": "Yes"}, {"label": "No"}}
+		}
+		questions = append(questions, map[string]interface{}{
+			"question":    question.ID,
+			"header":      header,
+			"multiSelect": question.Type == "multi_choice",
+			"options":     options,
+		})
+	}
+	input, _ := json.Marshal(map[string]interface{}{"question": title, "questions": questions})
+	return title, string(input)
+}
+
+func crushQuestionAnswers(response string, request crushQuestionRequest) []crushQuestionAnswer {
+	var structured struct {
+		Answers map[string]string `json:"answers"`
+	}
+	_ = json.Unmarshal([]byte(response), &structured)
+	if structured.Answers == nil && len(request.Questions) == 1 {
+		structured.Answers = map[string]string{request.Questions[0].ID: strings.TrimSpace(response)}
+	}
+	answers := make([]crushQuestionAnswer, 0, len(request.Questions))
+	for _, question := range request.Questions {
+		answer := strings.TrimSpace(structured.Answers[question.ID])
+		resolved := crushQuestionAnswer{QuestionID: question.ID}
+		switch question.Type {
+		case "yes_no":
+			if strings.EqualFold(answer, "yes") {
+				yes := true
+				resolved.Yes = &yes
+			} else if strings.EqualFold(answer, "no") {
+				yes := false
+				resolved.Yes = &yes
+			} else {
+				resolved.FillInText = answer
+			}
+		case "free_text":
+			resolved.FillInText = answer
+		default:
+			unmatched := make([]string, 0)
+			for _, selection := range strings.Split(answer, ", ") {
+				selection = strings.TrimSpace(selection)
+				if selection == "" {
+					continue
+				}
+				matched := false
+				for _, choice := range question.Choices {
+					if selection == choice.Label {
+						resolved.SelectedIDs = append(resolved.SelectedIDs, choice.ID)
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					unmatched = append(unmatched, selection)
+				}
+			}
+			resolved.FillInText = strings.Join(unmatched, ", ")
+		}
+		answers = append(answers, resolved)
+	}
+	return answers
+}
+
+type crushAgentEvent struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	RunID     string `json:"run_id"`
+	Error     string `json:"error"`
+}
+
+func (a *CrushAgent) handleCrushAgentEvent(workspace *crushWorkspace, event crushAgentEvent) {
+	if event.Type != "error" || strings.TrimSpace(event.Error) == "" {
+		return
+	}
+	var run *crushRun
+	workspace.mu.Lock()
+	if event.RunID != "" {
+		run = workspace.runs[event.RunID]
+	}
+	if run == nil {
+		for _, candidate := range workspace.runs {
+			if candidate.sessionID == event.SessionID {
+				run = candidate
+				break
+			}
+		}
+	}
+	workspace.mu.Unlock()
+	if run == nil {
+		return
+	}
+	select {
+	case run.done <- crushRunComplete{sessionID: event.SessionID, runID: event.RunID, err: event.Error}:
+	default:
+	}
 }
 
 func (a *CrushAgent) postJSON(ctx context.Context, path string, query url.Values, payload interface{}, expectedStatus int, destination interface{}) error {
