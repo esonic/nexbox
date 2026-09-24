@@ -3,9 +3,11 @@ package agent
 import (
 	"bufio"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,13 +20,23 @@ import (
 	"time"
 )
 
+//go:embed pi_nexbox_extension.ts
+var piNexboxExtension []byte
+
 // PiAgent adapts the Pi coding-agent CLI's RPC mode. A fresh pi process is
 // started for each Nexbox turn; Pi owns its session files and resumes them by
 // the opaque session ID returned from get_state.
 type PiAgent struct {
-	CLIPath  string
-	AgentDir string // Empty means Pi's normal user-level agent directory.
-	Verbose  bool
+	CLIPath      string
+	AgentDir     string // Empty means Pi's normal user-level agent directory.
+	MCPServerURL string
+	Verbose      bool
+}
+
+type piMCPServerSpec struct {
+	Key     string            `json:"key"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 func NewPiAgent() *PiAgent {
@@ -220,7 +232,33 @@ func piBareModelID(id string) string {
 }
 
 func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback) (Result, error) {
-	args := []string{"--mode", "rpc"}
+	// Explicitly load only Nexbox-managed project skills. --no-approve keeps
+	// Pi from trusting arbitrary project .pi resources or extensions.
+	args := []string{"--mode", "rpc", "--no-approve"}
+	if skillDir := filepath.Join(req.WorkDir, ".agents", "skills"); isDir(skillDir) {
+		args = append(args, "--skill", skillDir)
+	}
+	servers := a.mcpServers(req)
+	var extensionPath string
+	if len(servers) > 0 {
+		extensionDir := filepath.Join(req.WorkDir, ".nexbox", "pi-extensions")
+		if err := os.MkdirAll(extensionDir, 0700); err != nil {
+			return Result{}, fmt.Errorf("create Pi extension directory: %w", err)
+		}
+		file, err := os.CreateTemp(extensionDir, "nexbox-mcp-*.ts")
+		if err != nil {
+			return Result{}, fmt.Errorf("create Pi Nexbox extension: %w", err)
+		}
+		extensionPath = file.Name()
+		if _, err := file.Write(piNexboxExtension); err != nil {
+			file.Close()
+			os.Remove(extensionPath)
+			return Result{}, fmt.Errorf("write Pi Nexbox extension: %w", err)
+		}
+		file.Close()
+		defer os.Remove(extensionPath)
+		args = append(args, "--extension", extensionPath)
+	}
 	// Fork starts by opening the parent session. The RPC fork command then
 	// switches Pi to the child session before we send the first child prompt.
 	sessionID := req.SessionID
@@ -242,6 +280,33 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 	}
 
 	client := newPiRPCClient(a.CLIPath, args, a.Verbose)
+	if extensionPath != "" {
+		encoded, err := json.Marshal(servers)
+		if err != nil {
+			return Result{}, fmt.Errorf("encode Pi MCP configuration: %w", err)
+		}
+		configFile, err := os.CreateTemp(filepath.Dir(extensionPath), "nexbox-mcp-config-*.json")
+		if err != nil {
+			return Result{}, fmt.Errorf("create Pi MCP configuration: %w", err)
+		}
+		configPath := configFile.Name()
+		if err := configFile.Chmod(0600); err != nil {
+			configFile.Close()
+			os.Remove(configPath)
+			return Result{}, fmt.Errorf("protect Pi MCP configuration: %w", err)
+		}
+		if _, err := configFile.Write(encoded); err != nil {
+			configFile.Close()
+			os.Remove(configPath)
+			return Result{}, fmt.Errorf("write Pi MCP configuration: %w", err)
+		}
+		if err := configFile.Close(); err != nil {
+			os.Remove(configPath)
+			return Result{}, fmt.Errorf("close Pi MCP configuration: %w", err)
+		}
+		defer os.Remove(configPath)
+		client.env = append(os.Environ(), "NEXBOX_PI_MCP_CONFIG="+configPath)
+	}
 	if err := client.start(req.WorkDir); err != nil {
 		return Result{}, err
 	}
@@ -324,6 +389,40 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 	resultMu.Unlock()
 	cb(StreamEvent{Type: EventDone, SessionID: final.SessionID, Metadata: final.Metadata})
 	return final, nil
+}
+
+func (a *PiAgent) mcpServers(req Request) []piMCPServerSpec {
+	servers := make([]piMCPServerSpec, 0, 1+len(req.ExtraMCPServers))
+	if a.MCPServerURL != "" {
+		servers = append(servers, piMCPServerSpec{Key: "nexbox", URL: withPiMCPSession(a.MCPServerURL, req.ConversationID)})
+	}
+	for _, mcp := range req.ExtraMCPServers {
+		if mcp.Type != "http" || mcp.URL == "" {
+			continue
+		}
+		serverURL := mcp.URL
+		if mcp.AppendSessionURL {
+			serverURL = withPiMCPSession(serverURL, req.ConversationID)
+		}
+		servers = append(servers, piMCPServerSpec{Key: mcp.Key, URL: serverURL, Headers: mcp.Headers})
+	}
+	return servers
+}
+
+func isDir(path string) bool { info, err := os.Stat(path); return err == nil && info.IsDir() }
+
+func withPiMCPSession(raw, session string) string {
+	if session == "" {
+		return raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	query := parsed.Query()
+	query.Set("session", session)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 type piState struct {
@@ -469,6 +568,7 @@ type piRPCClient struct {
 	args      []string
 	verbose   bool
 	cmd       *exec.Cmd
+	env       []string
 	stdin     io.WriteCloser
 	writeMu   sync.Mutex
 	nextID    int64
@@ -489,7 +589,10 @@ func newPiRPCClient(command string, args []string, verbose bool) *piRPCClient {
 func (c *piRPCClient) start(workDir string) error {
 	cmd := exec.Command(c.cmdPath, c.args...)
 	cmd.Dir = workDir
-	cmd.Env = os.Environ()
+	cmd.Env = c.env
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
