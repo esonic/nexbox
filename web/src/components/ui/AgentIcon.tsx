@@ -55,6 +55,7 @@ export function AgentIcon({ agent, className, streaming }: AgentIconProps) {
 
     case "zeroclaw":
     case "crush":
+    case "pi":
       return <Bot className={size} style={streaming ? breatheStyle : undefined} />;
 
     default:

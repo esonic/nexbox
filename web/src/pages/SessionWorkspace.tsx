@@ -43,6 +43,7 @@ import {
   TERMINAL_HEIGHT_MIN, TERMINAL_HEIGHT_MAX,
 } from "@/lib/constants";
 import { toast } from "sonner";
+import { agentLabel } from "@/lib/agents";
 
 // ── SessionIdBadge ──────────────────────────────────────────────────────
 
@@ -52,19 +53,7 @@ function SessionIdBadge({ sessionId, agent }: { sessionId: string; agent?: strin
   const [copied, setCopied] = useState(false);
   const short = sessionId.replace(/-/g, "").slice(0, 6).toUpperCase();
   const isAgentSession = agent !== undefined;
-  const source = agent === "claude"
-    ? "Claude"
-    : agent === "codex"
-      ? "Codex"
-      : agent === "zeroclaw"
-        ? "ZeroClaw"
-        : agent === "crush"
-          ? "Crush"
-        : agent === "cursor"
-          ? "Cursor"
-          : isAgentSession
-            ? "Agent"
-            : "NexBox";
+  const source = isAgentSession ? agentLabel(agent || "Agent") : "NexBox";
 
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(sessionId).then(

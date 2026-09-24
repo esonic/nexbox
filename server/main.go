@@ -185,6 +185,10 @@ func main() {
 	}()
 	allAgents["codex"] = cx
 
+	// Pi owns provider configuration and session persistence itself. Nexbox
+	// starts one RPC process per turn and resumes the opaque Pi session ID.
+	allAgents["pi"] = agent.NewPiAgent()
+
 	// ZeroClaw owns its provider/model configuration (including OpenRouter).
 	// Nexbox connects only to its ACP v1 stdio surface and inherits the server
 	// process environment, so no provider credentials are stored here.

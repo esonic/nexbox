@@ -3,13 +3,7 @@ import { toast } from "sonner";
 import { serverApi, authApi } from "@/lib/api";
 import { ChevronDown, LogOut, Loader2, User as UserIcon } from "lucide-react";
 import { usePreferences, CHAT_FONT_SIZE_LABELS, type ChatFontSize } from "@/stores/preferences";
-
-const AGENT_LABELS: Record<string, string> = {
-  codex: "Codex",
-  claude: "Claude Code",
-  zeroclaw: "ZeroClaw",
-  crush: "Crush",
-};
+import { agentLabel } from "@/lib/agents";
 
 export function GeneralSettings() {
   const [agents, setAgents] = useState<string[]>([]);
@@ -139,7 +133,7 @@ export function GeneralSettings() {
             >
               {agents.map((id) => (
                 <option key={id} value={id}>
-                  {AGENT_LABELS[id] || id}
+                  {agentLabel(id)}
                 </option>
               ))}
             </select>

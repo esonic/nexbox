@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react
 import { toast } from "sonner";
 import { Send, StopCircle, Command, FileText, ChevronDown, Check, X, GitBranch, ImagePlus, Play, Pencil, Workflow, MessageSquare, CircleHelp } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { agentLabel } from "@/lib/agents";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -32,13 +33,6 @@ export interface AttachedImage {
 }
 
 const DRAFT_KEY_PREFIX = "nexbox-draft:";
-
-const AGENT_LABELS: Record<string, string> = {
-  claude: "Claude Code",
-  codex: "Codex",
-  zeroclaw: "ZeroClaw",
-  crush: "Crush",
-};
 
 export const SLASH_COMMANDS = [
   {
@@ -1210,7 +1204,7 @@ export function ChatInput({
                       )}
                       title={sessionHasMessages ? "Agent locked after first message" : "Click to change agent"}
                     >
-                      {AGENT_LABELS[agentName] || agentName}
+                      {agentLabel(agentName)}
                       {!sessionHasMessages && availableAgents.length > 1 && (
                         <ChevronDown className="h-2.5 w-2.5" />
                       )}
@@ -1227,7 +1221,7 @@ export function ChatInput({
                               agentName === ag && "bg-accent/50 font-medium"
                             )}
                           >
-                            <span>{AGENT_LABELS[ag] || ag}</span>
+                            <span>{agentLabel(ag)}</span>
                             {agentName === ag && <Check className="h-3 w-3 text-primary" />}
                           </button>
                         ))}
