@@ -58,6 +58,11 @@ type SessionOrchestrator interface {
 	OrchestrateWaitDone(ctx context.Context, sessionID string) (output string, err error)
 	OrchestrateResolveSession(fromSessionID, ref string) (id, name string, err error)
 	OrchestrateSendAndWait(ctx context.Context, fromSessionID, targetSessionID, message string) (string, error)
+	// OrchestrateCreateSiblingSession creates a new session in the calling
+	// session's project. With empty agentName and model it uses the caller's
+	// agent, model and effort; otherwise the given agent/model are used. An
+	// empty name is derived from firstMessage.
+	OrchestrateCreateSiblingSession(fromSessionID, name, firstMessage, agentName, model string) (id, sessionName string, err error)
 }
 
 // ChromeEnabler allows the MCP server to enable per-session browser control.
@@ -488,11 +493,25 @@ func (s *Server) registerTools() {
 				"The message appears in that session exactly as if its user had typed it. This tool "+
 				"blocks until that session's AI finishes replying and returns its final visible answer. "+
 				"Use the short NexBox ID badge beside the session title or the full session UUID; "+
-				"do not guess an ID — ask the user for it. If the target is busy, the message waits "+
+				"do not guess an ID. If session_id is omitted, a NEW session is created in the current "+
+				"project (same agent and model as this session unless overridden) and the message is sent there; "+
+				"use this to delegate a self-contained sub-task to a fresh agent. The new session's ID is included "+
+				"in the result so you can follow up with it as session_id. If the target is busy, the message waits "+
 				"until its current turn finishes."),
 		gomcp.WithString("session_id",
-			gomcp.Required(),
-			gomcp.Description("Target session's full UUID or short NexBox ID badge."),
+			gomcp.Description("Optional. Target session's full UUID or short NexBox ID badge. Omit to create a new session in the current project and send the message there."),
+		),
+		gomcp.WithString("new_session_title",
+			gomcp.Description("Optional. Title for the new session created when session_id is omitted. Ignored when session_id is set; defaults to a title derived from the message."),
+		),
+		gomcp.WithString("agent",
+			gomcp.Description("Optional. Agent (backend) for the new session created when session_id is omitted, e.g. claude, codex. "+
+				"Omit to use this session's agent. Ignored when session_id is set. An unknown name returns an error listing the available agents."),
+		),
+		gomcp.WithString("model",
+			gomcp.Description("Optional. Model for the new session created when session_id is omitted. "+
+				"Omit to use this session's model (or the chosen agent's default model if agent is set to a different agent). "+
+				"Ignored when session_id is set. An unavailable model returns an error listing the available models."),
 		),
 		gomcp.WithString("message",
 			gomcp.Required(),
@@ -1211,9 +1230,9 @@ func (s *Server) handleSendToSession(ctx context.Context, request gomcp.CallTool
 	args := request.GetArguments()
 	ref, _ := args["session_id"].(string)
 	message, _ := args["message"].(string)
-	if strings.TrimSpace(ref) == "" {
-		return errorResult("session_id is required — ask the user for the target session's ID badge"), nil
-	}
+	newTitle, _ := args["new_session_title"].(string)
+	agentName, _ := args["agent"].(string)
+	model, _ := args["model"].(string)
 	if strings.TrimSpace(message) == "" {
 		return errorResult("message is required"), nil
 	}
@@ -1222,9 +1241,23 @@ func (s *Server) handleSendToSession(ctx context.Context, request gomcp.CallTool
 	if fromSessionID == "" {
 		return errorResult("calling session ID is missing from the MCP request"), nil
 	}
-	targetID, targetName, err := s.orchestrator.OrchestrateResolveSession(fromSessionID, ref)
-	if err != nil {
-		return errorResult(err.Error()), nil
+	var (
+		targetID, targetName string
+		created              bool
+		err                  error
+	)
+	if strings.TrimSpace(ref) == "" {
+		targetID, targetName, err = s.orchestrator.OrchestrateCreateSiblingSession(fromSessionID, newTitle, message, agentName, model)
+		if err != nil {
+			return errorResult(fmt.Sprintf("failed to create a new session: %v", err)), nil
+		}
+		created = true
+		log.Printf("[mcp] send_to_session: %s created new session %s (%s)", fromSessionID, targetID, targetName)
+	} else {
+		targetID, targetName, err = s.orchestrator.OrchestrateResolveSession(fromSessionID, ref)
+		if err != nil {
+			return errorResult(err.Error()), nil
+		}
 	}
 	if targetName == "" {
 		targetName = "Untitled"
@@ -1237,13 +1270,23 @@ func (s *Server) handleSendToSession(ctx context.Context, request gomcp.CallTool
 	reply, err := s.orchestrator.OrchestrateSendAndWait(ctx, fromSessionID, targetID, message)
 	if err != nil {
 		log.Printf("[mcp] send_to_session: %s → %s failed: %v", fromSessionID, targetID, err)
-		return errorResult(fmt.Sprintf("relay to session %q (%s) failed: %v", targetName, targetID, err)), nil
+		return errorResult(fmt.Sprintf("%srelay to session %q (%s) failed: %v", createdNote(created, targetName, targetID), targetName, targetID, err)), nil
 	}
 	log.Printf("[mcp] send_to_session: %s → %s answered (%d bytes)", fromSessionID, targetID, len(reply))
+	note := createdNote(created, targetName, targetID)
 	if reply == "" {
-		return textResult(fmt.Sprintf("Session %q (%s) finished the turn but produced no text reply.", targetName, targetID)), nil
+		return textResult(fmt.Sprintf("%sSession %q (%s) finished the turn but produced no text reply.", note, targetName, targetID)), nil
 	}
-	return textResult(fmt.Sprintf("Reply from session %q (%s):\n\n%s", targetName, targetID, reply)), nil
+	return textResult(fmt.Sprintf("%sReply from session %q (%s):\n\n%s", note, targetName, targetID, reply)), nil
+}
+
+// createdNote prefixes send_to_session results with the ID of a session the
+// tool just created, so the caller can follow up in it via session_id.
+func createdNote(created bool, name, id string) string {
+	if !created {
+		return ""
+	}
+	return fmt.Sprintf("Created new session %q (%s); pass session_id=%q to continue in it.\n\n", name, id, id)
 }
 
 // Helper to create a text result

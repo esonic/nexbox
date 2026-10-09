@@ -15,6 +15,14 @@ import (
 // back a canned reply.
 type fakeOrchestrator struct {
 	resolveErr error
+	createErr  error
+
+	createCalls     int
+	gotCreateFrom   string
+	gotCreateName   string
+	gotCreateFirstM string
+	gotCreateAgent  string
+	gotCreateModel  string
 
 	gotFrom        string
 	gotResolveFrom string
@@ -45,6 +53,16 @@ func (f *fakeOrchestrator) OrchestrateResolveSession(fromSessionID, ref string) 
 		return "", "", f.resolveErr
 	}
 	return "target-session-id", "Target Session", nil
+}
+
+func (f *fakeOrchestrator) OrchestrateCreateSiblingSession(fromSessionID, name, firstMessage, agentName, model string) (string, string, error) {
+	f.createCalls++
+	f.gotCreateFrom, f.gotCreateName, f.gotCreateFirstM = fromSessionID, name, firstMessage
+	f.gotCreateAgent, f.gotCreateModel = agentName, model
+	if f.createErr != nil {
+		return "", "", f.createErr
+	}
+	return "new-session-id", "New Session", nil
 }
 
 func (f *fakeOrchestrator) OrchestrateSendAndWait(ctx context.Context, fromSessionID, targetSessionID, message string) (string, error) {
@@ -119,7 +137,7 @@ func resultText(res *gomcp.CallToolResult) string {
 	return sb.String()
 }
 
-// The tool must be advertised with both of its required parameters.
+// The tool must be advertised with only message required.
 func TestSendToSession_IsAdvertised(t *testing.T) {
 	c := newTestMCPClient(t, &fakeOrchestrator{}, "caller-session")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -144,9 +162,15 @@ func TestSendToSession_IsAdvertised(t *testing.T) {
 	for _, r := range found.InputSchema.Required {
 		required[r] = true
 	}
-	for _, want := range []string{"session_id", "message"} {
-		if !required[want] {
-			t.Errorf("%q should be a required parameter, required=%v", want, found.InputSchema.Required)
+	if !required["message"] {
+		t.Errorf("message should be required, required=%v", found.InputSchema.Required)
+	}
+	if required["session_id"] {
+		t.Errorf("session_id must be optional so a new session can be created, required=%v", found.InputSchema.Required)
+	}
+	for _, want := range []string{"session_id", "new_session_title", "agent", "model"} {
+		if _, ok := found.InputSchema.Properties[want]; !ok {
+			t.Errorf("parameter %q is not advertised", want)
 		}
 	}
 
@@ -333,6 +357,82 @@ func TestSendToSession_ReportsFailures(t *testing.T) {
 		}
 		if orch.gotResolveFrom != "" || orch.gotTarget != "" {
 			t.Fatal("a missing calling session must be rejected before target resolution")
+		}
+	})
+}
+
+// Omitting session_id creates a sibling session and relays the message there.
+func TestSendToSession_CreatesSessionWhenIDOmitted(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	t.Run("creates and relays", func(t *testing.T) {
+		orch := &fakeOrchestrator{reply: "done"}
+		c := newTestMCPClient(t, orch, "caller-session")
+		res := callSendToSession(t, c, ctx, map[string]any{"message": "do the thing", "new_session_title": "Helper"})
+		if res.IsError {
+			t.Fatalf("unexpected error result: %s", resultText(res))
+		}
+		if orch.createCalls != 1 || orch.gotCreateFrom != "caller-session" || orch.gotCreateName != "Helper" || orch.gotCreateFirstM != "do the thing" {
+			t.Errorf("create calls=%d from=%q name=%q msg=%q", orch.createCalls, orch.gotCreateFrom, orch.gotCreateName, orch.gotCreateFirstM)
+		}
+		if orch.gotResolveFrom != "" {
+			t.Error("resolve must not be called when creating a session")
+		}
+		if orch.gotTarget != "new-session-id" || orch.gotMessage != "do the thing" {
+			t.Errorf("relayed to %q with %q", orch.gotTarget, orch.gotMessage)
+		}
+		text := resultText(res)
+		if !strings.Contains(text, "Created new session") || !strings.Contains(text, "new-session-id") || !strings.Contains(text, "done") {
+			t.Errorf("result = %q, want creation note, ID and reply", text)
+		}
+	})
+
+	t.Run("agent and model are forwarded", func(t *testing.T) {
+		orch := &fakeOrchestrator{reply: "ok"}
+		c := newTestMCPClient(t, orch, "caller-session")
+		res := callSendToSession(t, c, ctx, map[string]any{"message": "hi", "agent": "codex", "model": "gpt-5"})
+		if res.IsError {
+			t.Fatalf("unexpected error result: %s", resultText(res))
+		}
+		if orch.gotCreateAgent != "codex" || orch.gotCreateModel != "gpt-5" {
+			t.Errorf("create agent=%q model=%q", orch.gotCreateAgent, orch.gotCreateModel)
+		}
+	})
+
+	t.Run("explicit id does not create", func(t *testing.T) {
+		orch := &fakeOrchestrator{reply: "ok"}
+		c := newTestMCPClient(t, orch, "caller-session")
+		res := callSendToSession(t, c, ctx, map[string]any{"session_id": "ABC123", "message": "hi", "new_session_title": "x", "agent": "codex", "model": "m"})
+		if res.IsError {
+			t.Fatalf("unexpected error result: %s", resultText(res))
+		}
+		if orch.createCalls != 0 {
+			t.Error("an explicit session_id must not create a session")
+		}
+		if strings.Contains(resultText(res), "Created new session") {
+			t.Error("result must not claim a session was created")
+		}
+	})
+
+	t.Run("create failure", func(t *testing.T) {
+		orch := &fakeOrchestrator{createErr: errors.New("calling session has no project")}
+		c := newTestMCPClient(t, orch, "caller-session")
+		res := callSendToSession(t, c, ctx, map[string]any{"message": "hi"})
+		if !res.IsError || !strings.Contains(resultText(res), "no project") {
+			t.Fatalf("want error carrying the reason, got %q", resultText(res))
+		}
+		if orch.gotTarget != "" {
+			t.Error("nothing may be relayed when creation fails")
+		}
+	})
+
+	t.Run("unknown caller", func(t *testing.T) {
+		orch := &fakeOrchestrator{}
+		c := newTestMCPClient(t, orch, "")
+		res := callSendToSession(t, c, ctx, map[string]any{"message": "hi"})
+		if !res.IsError || orch.createCalls != 0 {
+			t.Fatal("creation without a calling session must be rejected")
 		}
 	})
 }

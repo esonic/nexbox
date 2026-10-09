@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/esonic/nexbox/agent"
 )
 
 // Session relay — deliver a message from one session's agent into another
@@ -799,4 +802,135 @@ func (s *Server) OrchestrateResolveSession(fromSessionID, ref string) (id, name 
 
 func (s *Server) OrchestrateSendAndWait(ctx context.Context, fromSessionID, targetSessionID, message string) (string, error) {
 	return s.SendToSessionAndWait(ctx, fromSessionID, targetSessionID, message)
+}
+
+func (s *Server) OrchestrateCreateSiblingSession(fromSessionID, name, firstMessage, agentName, model string) (id, sessionName string, err error) {
+	return s.CreateSiblingSession(fromSessionID, name, firstMessage, agentName, model)
+}
+
+// CreateSiblingSession creates a fresh, visible session in the same project as
+// fromSessionID. It backs send_to_session when the caller does not name a
+// target session. When name is empty the session is titled from firstMessage.
+//
+// With no agentName/model it uses exactly the caller's agent, model and effort.
+// An explicit agentName and/or model overrides that: model and effort are only
+// inherited from the caller while they still make sense for the chosen agent
+// (same agent, same model); otherwise the backend default is used.
+//
+// The caller's project must be user-owned (the same boundary the relay
+// enforces for existing targets), so the new session inherits that owner.
+func (s *Server) CreateSiblingSession(fromSessionID, name, firstMessage, agentName, model string) (id, sessionName string, err error) {
+	if fromSessionID == "" {
+		return "", "", fmt.Errorf("calling session is unknown, so a new session cannot be created in its project")
+	}
+	from, err := s.Store.GetSession(fromSessionID)
+	if err != nil {
+		return "", "", fmt.Errorf("load calling session %s: %w", fromSessionID, err)
+	}
+	if from == nil {
+		return "", "", fmt.Errorf("calling session %s not found", fromSessionID)
+	}
+	if from.ProjectID == "" {
+		return "", "", fmt.Errorf("calling session %s has no project", fromSessionID)
+	}
+	if _, err := s.relaySessionOwnerID(fromSessionID); err != nil {
+		return "", "", fmt.Errorf("calling %w", err)
+	}
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = heuristicTitle(firstMessage)
+	}
+
+	// Agent is copied verbatim (even when empty): an empty agent resolves to
+	// the same runtime default for both sessions.
+	newAgent, newModel, newEffort := from.Agent, from.Model, from.Effort
+	agentName, model = strings.TrimSpace(agentName), strings.TrimSpace(model)
+	if agentName != "" || model != "" {
+		_, fromResolved := s.ResolveAgent(from)
+		effectiveAgent := fromResolved
+		if agentName != "" {
+			if _, ok := s.Agents[agentName]; !ok {
+				return "", "", fmt.Errorf("unknown agent %q; available agents: %s", agentName, strings.Join(s.agentNames(), ", "))
+			}
+			effectiveAgent = agentName
+			newAgent = agentName
+		}
+		sameAgent := effectiveAgent == fromResolved
+		switch {
+		case model != "":
+			if err := s.validateModel(effectiveAgent, model); err != nil {
+				return "", "", err
+			}
+			if !sameAgent || model != from.Model {
+				newEffort = ""
+			}
+			newModel = model
+		case !sameAgent:
+			newModel, newEffort = "", ""
+		}
+	}
+
+	sess, err := s.Store.CreateSession(CreateSessionRequest{
+		Name:      name,
+		ProjectID: from.ProjectID,
+		Agent:     newAgent,
+		Model:     newModel,
+		Effort:    newEffort,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("create session: %w", err)
+	}
+	if s.MarketplaceStats != nil {
+		s.MarketplaceStats.RecordSession()
+	}
+	s.Hub.NotifyChange("session", sess.ID, "created")
+	log.Printf("[relay] created session %s (%s) for %s: project=%s agent=%q model=%q effort=%q",
+		sess.ID, sess.Name, fromSessionID, sess.ProjectID, sess.Agent, sess.Model, sess.Effort)
+	return sess.ID, sess.Name, nil
+}
+
+// agentNames lists registered agent names in stable order.
+func (s *Server) agentNames() []string {
+	names := make([]string, 0, len(s.Agents))
+	for name := range s.Agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// validateModel rejects a model the agent's catalog definitively does not
+// offer. When the catalog is unavailable or empty the model is accepted and any
+// problem surfaces on the session's first turn.
+func (s *Server) validateModel(agentName, model string) error {
+	backend, ok := s.Agents[agentName]
+	if !ok {
+		// The default agent may not be registered in Agents.
+		if agentName == s.AgentName && s.Agent != nil {
+			backend = s.Agent
+		} else {
+			return fmt.Errorf("unknown agent %q", agentName)
+		}
+	}
+	catalog, ok := backend.(agent.ModelCatalog)
+	if !ok {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	info, _ := catalog.ListSupportedModels(ctx)
+	if len(info) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(info))
+	for _, m := range info {
+		if m.ID == model {
+			return nil
+		}
+		if !m.Hidden {
+			ids = append(ids, m.ID)
+		}
+	}
+	return fmt.Errorf("model %q is not available for agent %q; available models: %s", model, agentName, strings.Join(ids, ", "))
 }

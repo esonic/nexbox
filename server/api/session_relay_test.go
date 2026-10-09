@@ -618,3 +618,143 @@ func TestMatchSessionByPrefix_Ambiguous(t *testing.T) {
 		t.Fatalf("got (%q, %q, %v), want the unique match", id, name, err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Sibling session creation (send_to_session without a session_id)
+// ---------------------------------------------------------------------------
+
+func createRelayOwnedProject(t *testing.T, s *Server, ownerID int64, name string) *store.Project {
+	t.Helper()
+	project, err := s.Store.CreateProject(store.CreateProjectRequest{
+		OwnerUserID: ownerID,
+		Name:        name,
+		GitRepoPath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	return project
+}
+
+func TestCreateSiblingSession_InheritsAgentAndModel(t *testing.T) {
+	s := newRelayServer(t)
+	project := createRelayOwnedProject(t, s, 101, "proj")
+	from, err := s.Store.CreateSession(store.CreateSessionRequest{
+		Name: "caller", ProjectID: project.ID, Agent: "codex", Model: "gpt-5", Effort: "high",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	id, name, err := s.CreateSiblingSession(from.ID, "", "Investigate the flaky test. Then report back.", "", "")
+	if err != nil {
+		t.Fatalf("CreateSiblingSession: %v", err)
+	}
+	if id == "" || id == from.ID {
+		t.Fatalf("id = %q, want a fresh session", id)
+	}
+	if name != "Investigate the flaky test" {
+		t.Errorf("name = %q, want a title derived from the message", name)
+	}
+	got, err := s.Store.GetSession(id)
+	if err != nil || got == nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.ProjectID != project.ID || got.Agent != "codex" || got.Model != "gpt-5" || got.Effort != "high" {
+		t.Errorf("new session = project %q agent %q model %q effort %q, want it to match the caller",
+			got.ProjectID, got.Agent, got.Model, got.Effort)
+	}
+	// The new session must be reachable from the caller under the owner boundary.
+	if rid, _, err := s.ResolveSessionRefFrom(from.ID, id); err != nil || rid != id {
+		t.Errorf("caller cannot resolve its sibling: %q %v", rid, err)
+	}
+
+	if _, name, err := s.CreateSiblingSession(from.ID, "  Custom  ", "ignored", "", ""); err != nil || name != "Custom" {
+		t.Errorf("explicit title: name=%q err=%v", name, err)
+	}
+}
+
+func TestCreateSiblingSession_Rejects(t *testing.T) {
+	s := newRelayServer(t)
+	if _, _, err := s.CreateSiblingSession("", "", "hi", "", ""); err == nil {
+		t.Error("an unknown caller must be rejected")
+	}
+	if _, _, err := s.CreateSiblingSession("does-not-exist", "", "hi", "", ""); err == nil {
+		t.Error("a missing caller session must be rejected")
+	}
+	noProj, err := s.Store.CreateSession(store.CreateSessionRequest{Name: "orphan"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, _, err := s.CreateSiblingSession(noProj.ID, "", "hi", "", ""); err == nil {
+		t.Error("a caller without a project must be rejected")
+	}
+	unowned := createRelayOwnedProject(t, s, 0, "unowned")
+	sess, err := s.Store.CreateSession(store.CreateSessionRequest{Name: "u", ProjectID: unowned.ID})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, _, err := s.CreateSiblingSession(sess.ID, "", "hi", "", ""); err == nil {
+		t.Error("a caller in a project without an owner must be rejected")
+	}
+}
+
+func TestCreateSiblingSession_AgentAndModelOverrides(t *testing.T) {
+	s := newAgentGateServer(t)
+	s.Agents["alpha"] = modelCatalogTestAgent{}
+	s.Agents["beta"] = modelCatalogTestAgent{}
+	project := createRelayOwnedProject(t, s, 101, "proj")
+	from, err := s.Store.CreateSession(store.CreateSessionRequest{
+		Name: "caller", ProjectID: project.ID, Agent: "alpha", Model: "openrouter/minimax/minimax-m3:free", Effort: "high",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	create := func(agentName, model string) (*store.Session, error) {
+		id, _, err := s.CreateSiblingSession(from.ID, "t", "hi", agentName, model)
+		if err != nil {
+			return nil, err
+		}
+		return s.Store.GetSession(id)
+	}
+
+	t.Run("different agent drops model and effort", func(t *testing.T) {
+		got, err := create("beta", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Agent != "beta" || got.Model != "" || got.Effort != "" {
+			t.Errorf("got agent=%q model=%q effort=%q", got.Agent, got.Model, got.Effort)
+		}
+	})
+	t.Run("same agent keeps model and effort", func(t *testing.T) {
+		got, err := create("alpha", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Agent != "alpha" || got.Model != from.Model || got.Effort != "high" {
+			t.Errorf("got agent=%q model=%q effort=%q", got.Agent, got.Model, got.Effort)
+		}
+	})
+	t.Run("agent and model", func(t *testing.T) {
+		got, err := create("beta", "openrouter/minimax/minimax-m3:free")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Agent != "beta" || got.Model != "openrouter/minimax/minimax-m3:free" || got.Effort != "" {
+			t.Errorf("got agent=%q model=%q effort=%q", got.Agent, got.Model, got.Effort)
+		}
+	})
+	t.Run("unknown agent", func(t *testing.T) {
+		_, err := create("nope", "")
+		if err == nil || !strings.Contains(err.Error(), "alpha") {
+			t.Errorf("want an error listing available agents, got %v", err)
+		}
+	})
+	t.Run("unavailable model", func(t *testing.T) {
+		_, err := create("", "no-such-model")
+		if err == nil || !strings.Contains(err.Error(), "minimax-m3") {
+			t.Errorf("want an error listing available models, got %v", err)
+		}
+	})
+}
