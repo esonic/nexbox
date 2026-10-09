@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,10 +46,37 @@ func (s *Server) ListAvailableAgents(w http.ResponseWriter, r *http.Request) {
 		names = append(names, name)
 		capabilities[name] = backend.Capabilities()
 	}
+	sortAgentNames(names)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"agents":       names,
 		"default":      s.getDefaultAgent(),
 		"capabilities": capabilities,
+	})
+}
+
+// agentDisplayOrder gives known agents a stable position in the dropdown.
+// Unknown agents sort after these, alphabetically. Without this the map-backed
+// listing reordered on every request (Go map iteration is randomized).
+var agentDisplayOrder = map[string]int{
+	"claude":   0,
+	"codex":    1,
+	"cursor":   2,
+	"pi":       3,
+	"crush":    4,
+	"zeroclaw": 5,
+}
+
+func sortAgentNames(names []string) {
+	sort.Slice(names, func(i, j int) bool {
+		oi, iok := agentDisplayOrder[names[i]]
+		oj, jok := agentDisplayOrder[names[j]]
+		if iok && jok {
+			return oi < oj
+		}
+		if iok != jok {
+			return iok // known agents sort before unknown ones
+		}
+		return names[i] < names[j]
 	})
 }
 

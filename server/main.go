@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -27,6 +28,23 @@ import (
 // Version is injected at build time via -ldflags "-X main.Version=<timestamp>".
 // Stays "dev" for local development builds.
 var Version = "dev"
+
+// agentCLIAvailable reports whether an agent's CLI resolves to an executable
+// on this system. Bare command names are looked up on PATH; explicit paths are
+// stat'd directly. Used at startup to skip registering optional agents (Crush,
+// ZeroClaw) whose CLI isn't installed, so they never appear in the picker.
+func agentCLIAvailable(cliPath string) bool {
+	cliPath = strings.TrimSpace(cliPath)
+	if cliPath == "" {
+		return false
+	}
+	if strings.ContainsRune(cliPath, os.PathSeparator) {
+		info, err := os.Stat(cliPath)
+		return err == nil && !info.IsDir()
+	}
+	_, err := exec.LookPath(cliPath)
+	return err == nil
+}
 
 // chromeEnablerImpl adapts ChromeManager + store to the mcp.ChromeEnabler interface.
 type chromeEnablerImpl struct {
@@ -193,16 +211,28 @@ func main() {
 
 	// ZeroClaw owns its provider/model configuration (including OpenRouter).
 	// Nexbox connects only to its ACP v1 stdio surface and inherits the server
-	// process environment, so no provider credentials are stored here.
-	allAgents["zeroclaw"] = agent.NewZeroClawAgent()
+	// process environment, so no provider credentials are stored here. Only
+	// register it when its CLI is actually installed (checked once at startup),
+	// so the agent picker doesn't list a backend that can never run here.
+	zeroClawAgent := agent.NewZeroClawAgent()
+	if agentCLIAvailable(zeroClawAgent.CLIPath) {
+		allAgents["zeroclaw"] = zeroClawAgent
+	} else {
+		log.Printf("  ZeroClaw CLI %q not found; skipping agent", zeroClawAgent.CLIPath)
+	}
 
 	// Crush owns its own models, provider configuration, and credentials.
 	// Nexbox reads the native server's configured catalog and starts it only
-	// while reading that catalog or running a conversation.
+	// while reading that catalog or running a conversation. As with ZeroClaw,
+	// only register it when its CLI is installed.
 	crushAgent := agent.NewCrushAgent()
 	crushAgent.DataDir = filepath.Join(*dataDir, "crush")
-	defer crushAgent.Close()
-	allAgents["crush"] = crushAgent
+	if agentCLIAvailable(crushAgent.CLIPath) {
+		defer crushAgent.Close()
+		allAgents["crush"] = crushAgent
+	} else {
+		log.Printf("  Crush CLI %q not found; skipping agent", crushAgent.CLIPath)
+	}
 
 	defaultAgentName := cfgMgr.Get().DefaultAgent
 	if defaultAgentName == "" {
