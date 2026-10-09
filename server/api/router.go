@@ -16,23 +16,24 @@ import (
 
 // Server holds all API dependencies
 type Server struct {
-	Store            *store.SQLiteStore     // unified data access (always sqlite in local-only mode)
-	Config           *config.Manager        // local config
-	Auth             *Authenticator         // JWT signer + token parser
-	Agent            agent.Agent            // Default agent (from config)
-	AgentName        string                 // Default agent name
-	Agents           map[string]agent.Agent // All available agents by name
-	SessionManager   *agent.SessionManager
-	MCPServerURL     string
-	Hub              *ChatHub                 // Hub for session chat messages
-	TerminalMgr      *TerminalManager         // tracks active PTY for run_in_terminal tool
-	DetailCache      *store.DetailCache       // local cache for full message part details
-	DataDir          string                   // data directory for file storage (images, etc.)
-	Version          string                   // build-time version string
-	ChromeManager    *chromemcp.ChromeManager // Per-session Chrome DevTools MCP manager for E2E testing
-	ListenPort       int                      // actual TCP port the HTTP server is listening on
-	MarketplaceStats *MarketplaceStatsBuffer  // In-memory stats accumulator
-	WeChat           *WeChatJSSDK             // optional WeChat JS-SDK share signer (nil when unconfigured)
+	Store             *store.SQLiteStore     // unified data access (always sqlite in local-only mode)
+	Config            *config.Manager        // local config
+	Auth              *Authenticator         // JWT signer + token parser
+	Agent             agent.Agent            // Default agent (from config)
+	AgentName         string                 // Default agent name
+	Agents            map[string]agent.Agent // All available agents by name
+	SessionManager    *agent.SessionManager
+	MCPServerURL      string
+	Hub               *ChatHub                 // Hub for session chat messages
+	TerminalMgr       *TerminalManager         // tracks active PTY for run_in_terminal tool
+	DetailCache       *store.DetailCache       // local cache for full message part details
+	DataDir           string                   // data directory for file storage (images, etc.)
+	Version           string                   // build-time version string
+	ChromeManager     *chromemcp.ChromeManager // Per-session Chrome DevTools MCP manager for E2E testing
+	ListenPort        int                      // actual TCP port the HTTP server is listening on
+	MarketplaceStats  *MarketplaceStatsBuffer  // In-memory stats accumulator
+	OnMCPToolsChanged func()                   // called after MCP tool category settings change
+	WeChat            *WeChatJSSDK             // optional WeChat JS-SDK share signer (nil when unconfigured)
 
 	// humanGates: executionID+":"+nodeID → channel carrying user input for human node continuation
 	humanGatesMu sync.Mutex

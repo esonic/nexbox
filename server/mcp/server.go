@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/esonic/nexbox/store"
 	gomcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/esonic/nexbox/store"
 )
 
 // TerminalWriter abstracts writing commands to a session's terminal.
@@ -31,6 +31,19 @@ type ConfigGetter interface {
 	// Returns empty string if not found.
 	GitRepoPath(projectID string) string
 }
+
+// MCP tool categories that can be toggled in Settings. Categories are opt-in.
+const MCPToolCategoryTaskManagement = "task_management"
+
+var mcpToolCategories = map[string]string{
+	"create_task": MCPToolCategoryTaskManagement,
+	"get_task":    MCPToolCategoryTaskManagement,
+	"list_tasks":  MCPToolCategoryTaskManagement,
+	"update_task": MCPToolCategoryTaskManagement,
+}
+
+// CategoryChecker reports whether a configurable tool category is enabled.
+type CategoryChecker func(category string) bool
 
 // ChangeNotifier is called when MCP tools modify data (assets, tasks, etc.)
 // so the main server can broadcast updates to connected browsers.
@@ -61,19 +74,20 @@ type nexboxSessionKey struct{}
 
 // Server wraps the mcp-go MCP server with NexBox-specific tools
 type Server struct {
-	mcpServer      *server.MCPServer
-	httpServer     *server.StreamableHTTPServer
-	store          store.Store
-	addr           string
-	actualAddr     string
-	listener       net.Listener
-	httpSrv        *http.Server
-	toolNames      []string
-	terminalMgr    TerminalWriter
-	configGetter   ConfigGetter
-	changeNotifier ChangeNotifier
-	orchestrator   SessionOrchestrator
-	chromeEnabler  ChromeEnabler
+	mcpServer       *server.MCPServer
+	httpServer      *server.StreamableHTTPServer
+	store           store.Store
+	addr            string
+	actualAddr      string
+	listener        net.Listener
+	httpSrv         *http.Server
+	toolNames       []string
+	terminalMgr     TerminalWriter
+	configGetter    ConfigGetter
+	categoryEnabled CategoryChecker
+	changeNotifier  ChangeNotifier
+	orchestrator    SessionOrchestrator
+	chromeEnabler   ChromeEnabler
 }
 
 // NewServer creates a new MCP server with asset management tools
@@ -88,6 +102,7 @@ func NewServer(s store.Store, addr string) *Server {
 		"Nexbox Asset Manager",
 		"1.0.0",
 		server.WithToolCapabilities(true),
+		server.WithToolFilter(srv.filterTools),
 		server.WithRecovery(),
 	)
 
@@ -156,6 +171,36 @@ func (s *Server) SetTerminalManager(tm TerminalWriter) {
 // SetConfigGetter sets the config getter for reading local settings (e.g. GitLab token).
 func (s *Server) SetConfigGetter(cg ConfigGetter) {
 	s.configGetter = cg
+}
+
+// SetCategoryChecker installs the callback that decides whether a configurable
+// tool category is exposed. With no checker, configurable tools are hidden.
+func (s *Server) SetCategoryChecker(fn CategoryChecker) {
+	s.categoryEnabled = fn
+}
+
+// NotifyToolListChanged tells connected MCP clients to refresh their tool list
+// after a category setting changes.
+func (s *Server) NotifyToolListChanged() {
+	s.mcpServer.SendNotificationToAllClients(gomcp.MethodNotificationToolsListChanged, nil)
+}
+
+func (s *Server) toolEnabled(name string) bool {
+	category, configurable := mcpToolCategories[name]
+	if !configurable {
+		return true
+	}
+	return s.categoryEnabled != nil && s.categoryEnabled(category)
+}
+
+func (s *Server) filterTools(_ context.Context, tools []gomcp.Tool) []gomcp.Tool {
+	filtered := make([]gomcp.Tool, 0, len(tools))
+	for _, tool := range tools {
+		if s.toolEnabled(tool.Name) {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
 }
 
 // SetChangeNotifier sets the callback for broadcasting data changes to browsers.
@@ -401,6 +446,9 @@ func (s *Server) registerTools() {
 	addTool := func(tool gomcp.Tool, handler server.ToolHandlerFunc) {
 		name := tool.Name
 		wrapped := func(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+			if !s.toolEnabled(name) {
+				return errorResult(fmt.Sprintf("%s MCP tools are disabled in Settings", mcpToolCategories[name])), nil
+			}
 			args := req.GetArguments()
 			if len(args) > 0 {
 				sanitized := make(map[string]interface{}, len(args))

@@ -8,11 +8,23 @@ import (
 	"sync"
 )
 
+// MCPToolsConfig controls which groups of built-in MCP tools are exposed to
+// AI agents. Every category is opt-in: a missing value means disabled.
+type MCPToolsConfig struct {
+	TaskManagement *bool `json:"task_management,omitempty"`
+}
+
+// TaskManagementEnabled reports whether the task tools are exposed.
+func (c MCPToolsConfig) TaskManagementEnabled() bool {
+	return c.TaskManagement != nil && *c.TaskManagement
+}
+
 // Config holds all configuration persisted to <data-dir>/config.json.
 type Config struct {
 	DefaultAgent   string `json:"default_agent"`
 	ChromeHeadless bool   `json:"chrome_headless"`
-	EnableFileEdit bool   `json:"enable_file_edit"`
+	// MCPTools toggles groups of built-in MCP tools. All are opt-in.
+	MCPTools MCPToolsConfig `json:"mcp_tools"`
 	// SuggestNextActions controls whether new sessions get a system-prompt
 	// instruction asking the model to end each reply with a <next-actions> block
 	// (rendered as quick-reply buttons). Pointer so "absent" defaults to ON —

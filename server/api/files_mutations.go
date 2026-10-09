@@ -265,15 +265,9 @@ func (s *Server) DeleteProjectFile(w http.ResponseWriter, r *http.Request) {
 }
 
 // SaveProjectFile writes text content to a file.
-// Gated by the global enable_file_edit config flag.
 // PUT /api/projects/{projectId}/file-content?path=relative/path&session_id=...
 // Body: { "content": "<utf-8 string>" }
 func (s *Server) SaveProjectFile(w http.ResponseWriter, r *http.Request) {
-	if !s.Config.Get().EnableFileEdit {
-		writeError(w, http.StatusForbidden, "file editing is disabled (set enable_file_edit=true in config.json)")
-		return
-	}
-
 	projectID := chi.URLParam(r, "projectId")
 	root, err := s.resolveFilesRoot(r, projectID)
 	if err != nil {

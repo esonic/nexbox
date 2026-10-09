@@ -683,7 +683,8 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const [markdownMode, setMarkdownMode] = useState<"source" | "rendered">("source");
 
   // Edit/save state (only meaningful when enableFileEdit is true)
-  const [editEnabled, setEditEnabled] = useState(false);
+  // File editing is always available (the old enable_file_edit gate was removed).
+  const editEnabled = true;
   const [editorValue, setEditorValue] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -745,15 +746,6 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   useEffect(() => {
     setHighlightedPath(null);
   }, [projectId]);
-
-  // Fetch the global enable_file_edit flag once on mount. The Monaco editor
-  // (and any code paths importing it) are kept behind this flag so disabling
-  // file editing also avoids any Monaco CDN download.
-  useEffect(() => {
-    serverApi.getSettings()
-      .then((data) => setEditEnabled(!!data.enable_file_edit))
-      .catch(() => { /* leave edit disabled on failure */ });
-  }, []);
 
   // Search state
   const [showSearch, setShowSearch] = useState(false);

@@ -236,27 +236,35 @@ func main() {
 	mcpServer.SetTerminalManager(termMgr)
 
 	mcpServer.SetChangeNotifier(hub.NotifyChange)
+	mcpServer.SetCategoryChecker(func(category string) bool {
+		switch category {
+		case nexmcp.MCPToolCategoryTaskManagement:
+			return cfgMgr.Get().MCPTools.TaskManagementEnabled()
+		}
+		return false
+	})
 
 	startupLog.Printf("  Version: %s", Version)
 
 	srv := &api.Server{
-		Store:            dataStore,
-		Config:           cfgMgr,
-		Auth:             api.NewAuthenticator(),
-		Agent:            defaultAgent,
-		AgentName:        defaultAgentName,
-		Agents:           allAgents,
-		SessionManager:   sessionManager,
-		MCPServerURL:     mcpServer.URL(),
-		Hub:              hub,
-		TerminalMgr:      termMgr,
-		DetailCache:      detailCache,
-		DataDir:          *dataDir,
-		Version:          Version,
-		ChromeManager:    chromeManager,
-		ListenPort:       *port,
-		MarketplaceStats: api.NewMarketplaceStatsBuffer(),
-		WeChat:           api.NewWeChatJSSDK(os.Getenv("WECHAT_APPID"), os.Getenv("WECHAT_APPSECRET")),
+		Store:             dataStore,
+		Config:            cfgMgr,
+		Auth:              api.NewAuthenticator(),
+		Agent:             defaultAgent,
+		AgentName:         defaultAgentName,
+		Agents:            allAgents,
+		SessionManager:    sessionManager,
+		MCPServerURL:      mcpServer.URL(),
+		Hub:               hub,
+		TerminalMgr:       termMgr,
+		DetailCache:       detailCache,
+		DataDir:           *dataDir,
+		Version:           Version,
+		ChromeManager:     chromeManager,
+		ListenPort:        *port,
+		MarketplaceStats:  api.NewMarketplaceStatsBuffer(),
+		OnMCPToolsChanged: mcpServer.NotifyToolListChanged,
+		WeChat:            api.NewWeChatJSSDK(os.Getenv("WECHAT_APPID"), os.Getenv("WECHAT_APPSECRET")),
 	}
 	if srv.WeChat != nil {
 		log.Printf("  WeChat JS-SDK share: enabled (appID from env)")

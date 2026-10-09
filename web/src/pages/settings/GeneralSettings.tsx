@@ -14,8 +14,8 @@ export function GeneralSettings() {
   const setChatFontSize = usePreferences((s) => s.setChatFontSize);
 
   const [chromeHeadless, setChromeHeadless] = useState(true);
-  const [enableFileEdit, setEnableFileEdit] = useState(false);
   const [suggestNextActions, setSuggestNextActions] = useState(true);
+  const [taskTools, setTaskTools] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [currentUser, setCurrentUser] = useState<string>("");
 
@@ -30,8 +30,8 @@ export function GeneralSettings() {
     serverApi.getSettings()
       .then((data) => {
         setChromeHeadless(!!data.chrome_headless);
-        setEnableFileEdit(!!data.enable_file_edit);
         setSuggestNextActions(data.suggest_next_actions !== false);
+        setTaskTools(!!data.mcp_tools?.task_management);
       })
       .catch((e) => console.error("Failed to load settings:", e));
 
@@ -56,16 +56,16 @@ export function GeneralSettings() {
     }
   };
 
-  const handleFileEditChange = async (next: boolean) => {
-    if (next === enableFileEdit || saving) return;
-    const prev = enableFileEdit;
-    setEnableFileEdit(next);
+  const handleTaskToolsChange = async (next: boolean) => {
+    if (next === taskTools || saving) return;
+    const prev = taskTools;
+    setTaskTools(next);
     setSaving(true);
     try {
-      await serverApi.updateSettings({ enable_file_edit: next });
+      await serverApi.updateSettings({ mcp_tools: { task_management: next } });
     } catch (e) {
-      setEnableFileEdit(prev);
-      console.error("Failed to update file edit:", e);
+      setTaskTools(prev);
+      console.error("Failed to update MCP tools:", e);
       toast.error("Failed to update setting", { description: String(e) });
     } finally {
       setSaving(false);
@@ -191,25 +191,25 @@ export function GeneralSettings() {
         </div>
       </div>
 
-      {/* Enable file editing from the Files panel */}
+      {/* Built-in MCP tool categories (opt-in) */}
       <div className="rounded-lg border bg-card">
         <div className="flex items-center justify-between px-4 py-3">
           <div>
-            <div className="text-sm font-medium">Enable File Editing</div>
+            <div className="text-sm font-medium">Task Management Tools</div>
             <div className="text-xs text-muted-foreground mt-0.5">
-              Allow editing, uploading and deleting files from the Files panel.
+              Expose the create_task, get_task, list_tasks and update_task MCP tools to AI agents.
             </div>
           </div>
           <button
             type="button"
             role="switch"
-            aria-checked={enableFileEdit}
+            aria-checked={taskTools}
             disabled={saving}
-            onClick={() => handleFileEditChange(!enableFileEdit)}
-            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${enableFileEdit ? "bg-primary" : "bg-input"}`}
+            onClick={() => handleTaskToolsChange(!taskTools)}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${taskTools ? "bg-primary" : "bg-input"}`}
           >
             <span
-              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-background shadow ring-0 transition-transform ${enableFileEdit ? "translate-x-5" : "translate-x-0"}`}
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-background shadow ring-0 transition-transform ${taskTools ? "translate-x-5" : "translate-x-0"}`}
             />
           </button>
         </div>

@@ -331,9 +331,11 @@ func (s *Server) ListChanges(w http.ResponseWriter, r *http.Request) {
 func (s *Server) GetSettings(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Config.Get()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"default_agent":        s.getDefaultAgent(),
-		"chrome_headless":      cfg.ChromeHeadless,
-		"enable_file_edit":     cfg.EnableFileEdit,
+		"default_agent":   s.getDefaultAgent(),
+		"chrome_headless": cfg.ChromeHeadless,
+		"mcp_tools": map[string]bool{
+			"task_management": cfg.MCPTools.TaskManagementEnabled(),
+		},
 		"suggest_next_actions": s.nextActionsEnabled(),
 	})
 }
@@ -349,10 +351,12 @@ func (s *Server) nextActionsEnabled() bool {
 // PUT /api/settings
 func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DefaultAgent       *string `json:"default_agent,omitempty"`
-		ChromeHeadless     *bool   `json:"chrome_headless,omitempty"`
-		EnableFileEdit     *bool   `json:"enable_file_edit,omitempty"`
-		SuggestNextActions *bool   `json:"suggest_next_actions,omitempty"`
+		DefaultAgent   *string `json:"default_agent,omitempty"`
+		ChromeHeadless *bool   `json:"chrome_headless,omitempty"`
+		MCPTools       *struct {
+			TaskManagement *bool `json:"task_management,omitempty"`
+		} `json:"mcp_tools,omitempty"`
+		SuggestNextActions *bool `json:"suggest_next_actions,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -368,6 +372,7 @@ func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	mcpToolsChanged := false
 	if err := s.Config.Update(func(cfg *config.Config) {
 		if req.DefaultAgent != nil {
 			cfg.DefaultAgent = *req.DefaultAgent
@@ -375,8 +380,9 @@ func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		if req.ChromeHeadless != nil {
 			cfg.ChromeHeadless = *req.ChromeHeadless
 		}
-		if req.EnableFileEdit != nil {
-			cfg.EnableFileEdit = *req.EnableFileEdit
+		if req.MCPTools != nil && req.MCPTools.TaskManagement != nil {
+			mcpToolsChanged = mcpToolsChanged || cfg.MCPTools.TaskManagementEnabled() != *req.MCPTools.TaskManagement
+			cfg.MCPTools.TaskManagement = req.MCPTools.TaskManagement
 		}
 		if req.SuggestNextActions != nil {
 			cfg.SuggestNextActions = req.SuggestNextActions
@@ -385,6 +391,9 @@ func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[api] UpdateSettings persist error: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to persist settings")
 		return
+	}
+	if mcpToolsChanged && s.OnMCPToolsChanged != nil {
+		s.OnMCPToolsChanged()
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

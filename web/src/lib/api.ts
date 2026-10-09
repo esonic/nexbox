@@ -578,8 +578,8 @@ export const serverApi = {
       body: JSON.stringify({ agent }),
     }),
   getSettings: () =>
-    request<{ default_agent: string; chrome_headless: boolean; enable_file_edit: boolean; suggest_next_actions: boolean }>("/settings"),
-  updateSettings: (data: { default_agent?: string; chrome_headless?: boolean; enable_file_edit?: boolean; suggest_next_actions?: boolean }) =>
+    request<{ default_agent: string; chrome_headless: boolean; suggest_next_actions: boolean; mcp_tools?: { task_management?: boolean } }>("/settings"),
+  updateSettings: (data: { default_agent?: string; chrome_headless?: boolean; suggest_next_actions?: boolean; mcp_tools?: { task_management?: boolean } }) =>
     request<void>("/settings", {
       method: "PUT",
       body: JSON.stringify(data),
