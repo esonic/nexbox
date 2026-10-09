@@ -96,6 +96,67 @@ func TestClaudeAgentRoutesSubAgentResultToCard(t *testing.T) {
 	}
 }
 
+func TestClaudeAgentCompletesSubAgentFromBackgroundTaskSnapshot(t *testing.T) {
+	lines := []string{
+		`{"type":"system","subtype":"init","session_id":"S-snapshot","model":"claude-sonnet-4-6"}`,
+		`{"type":"assistant","session_id":"S-snapshot","uuid":"u1","message":{"role":"assistant","id":"m1","content":[{"type":"tool_use","id":"toolu_snapshot","name":"Task","input":{"description":"snapshot agent","prompt":"inspect the snapshot protocol"}}]}}`,
+		// CC 2.1.206+ can omit task_started and expose only this authoritative set.
+		`{"type":"system","subtype":"background_tasks_changed","session_id":"S-snapshot","tasks":[{"task_id":"snapshot-1","task_type":"local_agent","description":"snapshot agent"}],"uuid":"u2"}`,
+		`{"type":"user","session_id":"S-snapshot","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_snapshot","content":"agent launched"}]}}`,
+		`{"type":"assistant","session_id":"S-snapshot","uuid":"u3","parent_tool_use_id":"toolu_snapshot","message":{"role":"assistant","id":"child-1","content":[{"type":"text","text":"SNAPSHOT_CHILD_ONLY"}]}}`,
+		// This foreground result is interim while the snapshot remains non-empty.
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"S-snapshot","duration_ms":100}`,
+		// No task_updated or task_notification: removal from the snapshot is the
+		// only terminal signal for the child.
+		`{"type":"system","subtype":"background_tasks_changed","session_id":"S-snapshot","tasks":[],"uuid":"u4"}`,
+		`{"type":"assistant","session_id":"S-snapshot","uuid":"u5","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"SNAPSHOT_PARENT_ONLY"}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":2,"session_id":"S-snapshot","duration_ms":200}`,
+	}
+
+	a := NewClaudeAgent()
+	a.CLIPath = writeFakeCLI(t, lines)
+	a.DataDir = t.TempDir()
+	a.Verbose = false
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var events []StreamEvent
+	_, err := a.SendMessage(ctx, Request{
+		ConversationID: "claude-snapshot-subagent",
+		WorkDir:        t.TempDir(),
+		Message:        "run the snapshot fixture",
+	}, func(event StreamEvent) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	var rootText strings.Builder
+	doneCount := 0
+	for _, event := range events {
+		switch event.Type {
+		case EventTextDelta:
+			rootText.WriteString(event.Content)
+		case EventSubTaskDone:
+			doneCount++
+			if event.Content != "SNAPSHOT_CHILD_ONLY" || event.IsError {
+				t.Fatalf("snapshot completion = %+v", event)
+			}
+			if event.Metadata["task_id"] != "snapshot-1" || event.Metadata["tool_use_id"] != "toolu_snapshot" {
+				t.Fatalf("snapshot completion lost task/tool association: %+v", event)
+			}
+		}
+	}
+	if doneCount != 1 {
+		t.Fatalf("snapshot subtask_done events = %d, want 1; events=%+v", doneCount, events)
+	}
+	if got := rootText.String(); got != "SNAPSHOT_PARENT_ONLY" {
+		t.Fatalf("root text = %q, want SNAPSHOT_PARENT_ONLY", got)
+	}
+}
+
 // TestClaudeIntegrationSubAgentRouting exercises the contract against the
 // installed Claude CLI. It is opt-in because it requires authentication and
 // makes a real model request.

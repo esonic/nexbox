@@ -398,16 +398,22 @@ func (a *ClaudeAgent) SendMessage(
 	var lastAssistantUUID string
 
 	// Maps a sub-agent's task_id → the Agent tool_use_id that launched it. Built
-	// from task_started (which carries both ids). A background sub-agent signals
-	// completion with a `task_updated` message that carries ONLY task_id (no
-	// tool_use_id), so we need this map to translate it back to the tool_use_id
-	// the UI's Agent card is keyed on. Verified against the real CLI in
-	// claude_subagent_stream_test.go: sync tools finish via task_notification
-	// (with tool_use_id), but async sub-agents finish via task_updated. Accessed
-	// only from the single stream-reading goroutine, so no lock needed.
+	// primarily from task_started (which carries both ids). Claude Code 2.1.206+
+	// can instead report the lifecycle only through background_tasks_changed,
+	// whose entries have no tool_use_id, so top-level Agent/Task launches are also
+	// retained below as an ordered fallback. Accessed only from the single
+	// stream-reading goroutine, so no lock is needed.
 	subAgentTaskTool := map[string]string{}
 	subAgentTaskType := map[string]string{}
 	subAgentResults := map[string]string{} // Agent tool_use_id -> latest child assistant text
+	type subAgentLaunch struct {
+		toolUseID   string
+		description string
+	}
+	var subAgentLaunches []subAgentLaunch
+	subAgentLaunchSeen := map[string]bool{}
+	subAgentLaunchClaimed := map[string]bool{}
+	backgroundTaskSnapshot := map[string]ClaudeBackgroundTask{}
 	type subTaskDoneState struct {
 		status  string
 		summary string
@@ -454,6 +460,73 @@ func (a *ClaudeAgent) SendMessage(
 				"workflow_progress": msg.WorkflowProgress,
 			},
 		})
+	}
+
+	launchDescription := func(input interface{}) string {
+		fields, ok := input.(map[string]interface{})
+		if !ok {
+			return ""
+		}
+		for _, key := range []string{"description", "prompt"} {
+			if value, ok := fields[key].(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+		return ""
+	}
+	rememberSubAgentLaunches := func(content []AssistantContent) {
+		for _, block := range content {
+			if block.Type != "tool_use" || block.ID == "" ||
+				(!strings.EqualFold(block.Name, "Agent") && !strings.EqualFold(block.Name, "Task")) {
+				continue
+			}
+			if subAgentLaunchSeen[block.ID] {
+				continue
+			}
+			subAgentLaunchSeen[block.ID] = true
+			subAgentLaunches = append(subAgentLaunches, subAgentLaunch{
+				toolUseID:   block.ID,
+				description: launchDescription(block.Input),
+			})
+		}
+	}
+	claimSubAgentLaunch := func(toolUseID string) {
+		if toolUseID != "" {
+			subAgentLaunchClaimed[toolUseID] = true
+		}
+	}
+	matchSubAgentLaunch := func(task ClaudeBackgroundTask) string {
+		if toolUseID := subAgentTaskTool[task.TaskID]; toolUseID != "" {
+			return toolUseID
+		}
+		if task.TaskType != "" && task.TaskType != "local_agent" {
+			return ""
+		}
+
+		description := strings.TrimSpace(task.Description)
+		matched := ""
+		if description != "" {
+			for _, launch := range subAgentLaunches {
+				if !subAgentLaunchClaimed[launch.toolUseID] &&
+					strings.EqualFold(launch.description, description) {
+					matched = launch.toolUseID
+					break
+				}
+			}
+		}
+		if matched == "" {
+			for _, launch := range subAgentLaunches {
+				if !subAgentLaunchClaimed[launch.toolUseID] {
+					matched = launch.toolUseID
+					break
+				}
+			}
+		}
+		if matched != "" {
+			subAgentTaskTool[task.TaskID] = matched
+			subAgentLaunchClaimed[matched] = true
+		}
+		return matched
 	}
 
 	resultSessionID, err := client.Query(ctx, combinedPrompt, opts, func(msg StreamMessage, parsed *AssistantMessage) {
@@ -506,9 +579,64 @@ func (a *ClaudeAgent) SendMessage(
 			case "init_response":
 				log.Printf("[claude-agent] Initialize response: %d models", len(msg.InitModels))
 				a.updateModelCacheFromInit(msg.InitModels)
+			case "background_tasks_changed":
+				next := make(map[string]ClaudeBackgroundTask, len(msg.BackgroundTasks))
+				for _, task := range msg.BackgroundTasks {
+					if task.TaskID == "" {
+						continue
+					}
+					next[task.TaskID] = task
+					if task.TaskType != "" {
+						subAgentTaskType[task.TaskID] = task.TaskType
+					}
+					matchSubAgentLaunch(task)
+				}
+				for taskID, previousTask := range backgroundTaskSnapshot {
+					if _, stillRunning := next[taskID]; stillRunning {
+						continue
+					}
+					taskType := previousTask.TaskType
+					if taskType == "" {
+						taskType = subAgentTaskType[taskID]
+					}
+					if taskType != "" && taskType != "local_agent" && taskType != "local_workflow" {
+						continue
+					}
+					toolUseID := matchSubAgentLaunch(previousTask)
+					if toolUseID == "" {
+						continue
+					}
+					status := "completed"
+					if previous, seen := subAgentDone[toolUseID]; seen && previous.status != "" {
+						// Preserve an explicit failure/interruption received before the
+						// task disappeared from the status-only snapshot.
+						status = previous.status
+					}
+					emitSubAgentDone(StreamMessage{
+						TaskID:   taskID,
+						TaskType: taskType,
+					}, toolUseID, status, "")
+				}
+				backgroundTaskSnapshot = next
 			case "task_started":
-				if msg.TaskID != "" && msg.ToolUseID != "" {
-					subAgentTaskTool[msg.TaskID] = msg.ToolUseID
+				toolUseID := msg.ToolUseID
+				if toolUseID != "" {
+					if previous := subAgentTaskTool[msg.TaskID]; previous != "" && previous != toolUseID {
+						// An earlier snapshot-only fallback was provisional. Prefer the
+						// protocol's explicit association and release the old candidate.
+						delete(subAgentLaunchClaimed, previous)
+					}
+				}
+				if toolUseID == "" {
+					toolUseID = matchSubAgentLaunch(ClaudeBackgroundTask{
+						TaskID:      msg.TaskID,
+						TaskType:    msg.TaskType,
+						Description: msg.Description,
+					})
+				}
+				if msg.TaskID != "" && toolUseID != "" {
+					subAgentTaskTool[msg.TaskID] = toolUseID
+					claimSubAgentLaunch(toolUseID)
 				}
 				if msg.TaskID != "" && msg.TaskType != "" {
 					subAgentTaskType[msg.TaskID] = msg.TaskType
@@ -518,7 +646,7 @@ func (a *ClaudeAgent) SendMessage(
 					Content: msg.Description,
 					Metadata: map[string]interface{}{
 						"task_id":       msg.TaskID,
-						"tool_use_id":   msg.ToolUseID,
+						"tool_use_id":   toolUseID,
 						"task_type":     msg.TaskType,
 						"workflow_name": msg.WorkflowName,
 					},
@@ -581,6 +709,9 @@ func (a *ClaudeAgent) SendMessage(
 				lastAssistantUUID = msg.UUID
 			}
 			if parsed != nil {
+				if msg.ParentToolUseID == "" {
+					rememberSubAgentLaunches(parsed.Content)
+				}
 				if msg.ParentToolUseID != "" {
 					if text := strings.TrimSpace(assistantText(parsed.Content)); text != "" {
 						subAgentResults[msg.ParentToolUseID] = text
