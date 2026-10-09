@@ -32,17 +32,11 @@ func emitCodexItemStarted(item codexThreadItem, cb EventCallback) {
 			Input:    string(item.Arguments),
 		})
 
-	case "collabAgentToolCall":
-		inputJSON, _ := json.Marshal(map[string]interface{}{
-			"tool":   item.Tool,
-			"prompt": item.Prompt,
-		})
-		cb(StreamEvent{
-			Type:     EventToolStart,
-			ToolID:   item.ID,
-			ToolName: "collab/" + item.Tool,
-			Input:    string(inputJSON),
-		})
+	case "collabAgentToolCall", "collabToolCall", "subAgentActivity":
+		// Collaboration bookkeeping is handled by the thread router in
+		// CodexAgent.SendMessage. Rendering these protocol items directly creates
+		// empty subAgentActivity cards and noisy collab/wait rows.
+		return
 
 	case "webSearch":
 		toolName, inputJSON := codexWebSearchToolStart(item)
@@ -109,15 +103,11 @@ func emitCodexItemCompleted(item codexThreadItem, agentStreamed, reasoningStream
 			IsError: isError,
 		})
 
-	case "collabAgentToolCall":
-		isError := item.Status == "failed"
-		output := string(item.AgentsStates)
-		cb(StreamEvent{
-			Type:    EventToolResult,
-			ToolID:  item.ID,
-			Output:  output,
-			IsError: isError,
-		})
+	case "collabAgentToolCall", "collabToolCall", "subAgentActivity":
+		// See the matching item-start case above. A subAgentActivity item
+		// completes immediately after announcing the child; the child turn's own
+		// turn/completed event is the authoritative completion signal.
+		return
 
 	case "webSearch":
 		cb(StreamEvent{
@@ -329,11 +319,63 @@ func codexDynamicToolOutputText(raw json.RawMessage) string {
 
 func codexIsNonToolItem(itemType string) bool {
 	switch itemType {
-	case "", "agentMessage", "reasoning", "plan", "contextCompaction":
+	case "", "userMessage", "agentMessage", "reasoning", "plan", "contextCompaction",
+		"collabAgentToolCall", "collabToolCall", "subAgentActivity":
 		return true
 	default:
 		return false
 	}
+}
+
+func codexParentedCallback(parentToolID string, cb EventCallback) EventCallback {
+	if parentToolID == "" {
+		return cb
+	}
+	return func(event StreamEvent) {
+		if event.Type == EventToolStart || event.Type == EventToolResult || event.Type == EventToolInputReplace {
+			event.ParentToolID = parentToolID
+		}
+		cb(event)
+	}
+}
+
+func codexCollabReceiverThreadIDs(item codexThreadItem) []string {
+	ids := make([]string, 0, len(item.ReceiverThreadIDs)+2)
+	seen := make(map[string]struct{}, len(item.ReceiverThreadIDs)+2)
+	for _, id := range append(append([]string(nil), item.ReceiverThreadIDs...), item.ReceiverThreadID, item.NewThreadID) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func codexIsSpawnAgentTool(tool string) bool {
+	normalized := strings.NewReplacer("_", "", "-", "", "/", "").Replace(strings.ToLower(strings.TrimSpace(tool)))
+	return normalized == "spawnagent"
+}
+
+func codexSubAgentDescription(item codexThreadItem) string {
+	if prompt := strings.TrimSpace(item.Prompt); prompt != "" {
+		if line, _, ok := strings.Cut(prompt, "\n"); ok {
+			prompt = line
+		}
+		return prompt
+	}
+	agentPath := strings.Trim(strings.TrimSpace(item.AgentPath), "/")
+	if agentPath == "" {
+		return "Sub-agent"
+	}
+	if idx := strings.LastIndex(agentPath, "/"); idx >= 0 && idx+1 < len(agentPath) {
+		return agentPath[idx+1:]
+	}
+	return agentPath
 }
 
 func codexIsIgnorableNotification(method string) bool {

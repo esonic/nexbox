@@ -65,7 +65,8 @@ type codexTurnSteerResponse struct {
 
 type codexThreadStartedNotification struct {
 	Thread struct {
-		ID string `json:"id"`
+		ID             string `json:"id"`
+		ParentThreadID string `json:"parentThreadId,omitempty"`
 	} `json:"thread"`
 }
 
@@ -184,13 +185,32 @@ type codexThreadItem struct {
 	// Action is the webSearch action descriptor introduced in codex-cli 0.124.0.
 	// Shape varies by `action.type`: "search" (queries[], query), "openPage" (url),
 	// "findInPage" (pattern, url), "other".
-	Action       json.RawMessage `json:"action,omitempty"`
-	Content      []string        `json:"content,omitempty"`
-	Summary      []string        `json:"summary,omitempty"`
-	ContentItems json.RawMessage `json:"contentItems,omitempty"` // dynamicToolCall result content
-	Success      *bool           `json:"success,omitempty"`      // dynamicToolCall
-	Prompt       string          `json:"prompt,omitempty"`       // collabAgentToolCall
-	AgentsStates json.RawMessage `json:"agentsStates,omitempty"` // collabAgentToolCall
+	Action            json.RawMessage `json:"action,omitempty"`
+	Content           []string        `json:"content,omitempty"`
+	Summary           []string        `json:"summary,omitempty"`
+	ContentItems      json.RawMessage `json:"contentItems,omitempty"` // dynamicToolCall result content
+	Success           *bool           `json:"success,omitempty"`      // dynamicToolCall
+	Prompt            string          `json:"prompt,omitempty"`       // collabAgentToolCall
+	AgentsStates      json.RawMessage `json:"agentsStates,omitempty"` // collabAgentToolCall
+	SenderThreadID    string          `json:"senderThreadId,omitempty"`
+	ReceiverThreadIDs []string        `json:"receiverThreadIds,omitempty"`
+	// ReceiverThreadID/NewThreadID are used by newer collabToolCall schemas.
+	// Keep the plural field above for codex-cli versions that still expose
+	// collabAgentToolCall.
+	ReceiverThreadID string `json:"receiverThreadId,omitempty"`
+	NewThreadID      string `json:"newThreadId,omitempty"`
+	AgentThreadID    string `json:"agentThreadId,omitempty"` // subAgentActivity
+	AgentPath        string `json:"agentPath,omitempty"`     // subAgentActivity
+	Kind             string `json:"kind,omitempty"`          // subAgentActivity
+}
+
+type codexSubAgentRun struct {
+	ToolID          string
+	ParentToolID    string
+	ContainerToolID string
+	AgentPath       string
+	Summary         string
+	Completed       bool
 }
 
 type codexFileChange struct {
@@ -276,6 +296,7 @@ func (a *CodexAgent) SendMessage(
 	var (
 		result             Result
 		stateMu            sync.Mutex
+		mainThreadID       string
 		currentTurnID      string
 		doneEmitted        bool
 		planToolStarted    bool
@@ -302,9 +323,171 @@ func (a *CodexAgent) SendMessage(
 		streamedAgentText   = make(map[string]bool)
 		streamedReasoning   = make(map[string]bool)
 		latestTokenUsage    *codexThreadTokenUsageUpdatedNotification
+		subAgentRuns        = make(map[string]*codexSubAgentRun) // child thread id -> active/latest run
+		subAgentSourceSeen  = make(map[string]struct{})          // protocol item id + child thread id
 	)
 	turnDone := make(chan struct{}, 1)
 	var turnDoneOnce sync.Once
+	isMainThread := func(threadID string) bool {
+		stateMu.Lock()
+		root := mainThreadID
+		stateMu.Unlock()
+		return threadID == "" || (root != "" && threadID == root)
+	}
+
+	parentToolForThread := func(threadID string) string {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		if run := subAgentRuns[threadID]; run != nil {
+			return run.ContainerToolID
+		}
+		return ""
+	}
+
+	registerSubAgent := func(ownerThreadID string, item codexThreadItem) {
+		receiverThreadIDs := codexCollabReceiverThreadIDs(item)
+		childThreadIDs := make([]string, 0, len(receiverThreadIDs)+1)
+		seenChildThreads := make(map[string]struct{}, len(receiverThreadIDs)+1)
+		for _, childThreadID := range append([]string{item.AgentThreadID}, receiverThreadIDs...) {
+			childThreadID = strings.TrimSpace(childThreadID)
+			if childThreadID == "" {
+				continue
+			}
+			if _, seen := seenChildThreads[childThreadID]; seen {
+				continue
+			}
+			seenChildThreads[childThreadID] = struct{}{}
+			childThreadIDs = append(childThreadIDs, childThreadID)
+		}
+		if len(childThreadIDs) == 0 {
+			return
+		}
+
+		for childIndex, childThreadID := range childThreadIDs {
+			childThreadID = strings.TrimSpace(childThreadID)
+			if childThreadID == "" {
+				continue
+			}
+			description := codexSubAgentDescription(item)
+
+			stateMu.Lock()
+			parentToolID := ""
+			if ownerThreadID != "" && mainThreadID != "" && ownerThreadID != mainThreadID {
+				ownerRun := subAgentRuns[ownerThreadID]
+				if ownerRun == nil {
+					stateMu.Unlock()
+					continue
+				}
+				parentToolID = ownerRun.ContainerToolID
+			}
+
+			sourceKey := item.ID + "\x00" + childThreadID
+			if item.ID == "" {
+				sourceKey = item.Type + "\x00" + item.Kind + "\x00" + childThreadID
+			}
+			if _, seen := subAgentSourceSeen[sourceKey]; seen {
+				stateMu.Unlock()
+				continue
+			}
+			subAgentSourceSeen[sourceKey] = struct{}{}
+
+			if existing := subAgentRuns[childThreadID]; existing != nil && !existing.Completed {
+				if existing.AgentPath == "" {
+					existing.AgentPath = item.AgentPath
+				}
+				stateMu.Unlock()
+				continue
+			}
+
+			toolID := item.ID
+			if toolID == "" {
+				toolID = "subagent:" + childThreadID
+			} else if len(childThreadIDs) > 1 {
+				toolID = fmt.Sprintf("%s:%d", toolID, childIndex)
+			}
+			containerToolID := toolID
+			if parentToolID != "" {
+				// The current UI supports one nested level. Keep deeper descendants
+				// inside the nearest top-level Agent card instead of leaking them.
+				containerToolID = parentToolID
+			}
+			subAgentRuns[childThreadID] = &codexSubAgentRun{
+				ToolID:          toolID,
+				ParentToolID:    parentToolID,
+				ContainerToolID: containerToolID,
+				AgentPath:       item.AgentPath,
+			}
+			stateMu.Unlock()
+
+			input := map[string]string{
+				"description": description,
+				"thread_id":   childThreadID,
+			}
+			if item.AgentPath != "" {
+				input["agent_path"] = item.AgentPath
+			}
+			inputJSON, _ := json.Marshal(input)
+			cb(StreamEvent{
+				Type:         EventToolStart,
+				ToolID:       toolID,
+				ToolName:     "Agent",
+				Input:        string(inputJSON),
+				ParentToolID: parentToolID,
+			})
+			if parentToolID == "" {
+				cb(StreamEvent{
+					Type:    EventSubTaskStart,
+					Content: description,
+					Metadata: map[string]interface{}{
+						"task_id":     toolID,
+						"tool_use_id": toolID,
+					},
+				})
+			}
+		}
+	}
+
+	finishSubAgent := func(threadID, status string) {
+		stateMu.Lock()
+		run := subAgentRuns[threadID]
+		if run == nil || run.Completed {
+			stateMu.Unlock()
+			return
+		}
+		run.Completed = true
+		toolID := run.ToolID
+		parentToolID := run.ParentToolID
+		summary := run.Summary
+		stateMu.Unlock()
+
+		isError := status != "" && status != "completed"
+		if parentToolID != "" {
+			cb(StreamEvent{
+				Type:         EventToolResult,
+				ToolID:       toolID,
+				Output:       summary,
+				IsError:      isError,
+				ParentToolID: parentToolID,
+			})
+			return
+		}
+		if isError {
+			if summary == "" {
+				summary = "Sub-agent " + status
+			}
+			cb(StreamEvent{Type: EventToolResult, ToolID: toolID, Output: summary, IsError: true})
+			return
+		}
+		cb(StreamEvent{
+			Type:    EventSubTaskDone,
+			Content: summary,
+			Metadata: map[string]interface{}{
+				"task_id":     toolID,
+				"tool_use_id": toolID,
+				"status":      status,
+			},
+		})
+	}
 
 	emitDone := func(turnID string, turn *codexTurn) {
 		stateMu.Lock()
@@ -502,12 +685,17 @@ func (a *CodexAgent) SendMessage(
 			if strings.TrimSpace(toolInput) == "" || toolInput == "null" {
 				toolInput = "{}"
 			}
-			cb(StreamEvent{
-				Type:     EventToolStart,
-				ToolID:   toolID,
-				ToolName: call.ToolName,
-				Input:    toolInput,
-			})
+			parentToolID := parentToolForThread(call.ThreadID)
+			emitToolEvent := isMainThread(call.ThreadID) || parentToolID != ""
+			if emitToolEvent {
+				cb(StreamEvent{
+					Type:         EventToolStart,
+					ToolID:       toolID,
+					ToolName:     call.ToolName,
+					Input:        toolInput,
+					ParentToolID: parentToolID,
+				})
+			}
 
 			toolCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
@@ -518,12 +706,15 @@ func (a *CodexAgent) SendMessage(
 				if strings.TrimSpace(output) != "" {
 					msg += "\n" + output
 				}
-				cb(StreamEvent{
-					Type:    EventToolResult,
-					ToolID:  toolID,
-					Output:  msg,
-					IsError: true,
-				})
+				if emitToolEvent {
+					cb(StreamEvent{
+						Type:         EventToolResult,
+						ToolID:       toolID,
+						Output:       msg,
+						IsError:      true,
+						ParentToolID: parentToolID,
+					})
+				}
 				if call.ItemID != "" {
 					stateMu.Lock()
 					requestToolEmitted[call.ItemID] = struct{}{}
@@ -534,11 +725,14 @@ func (a *CodexAgent) SendMessage(
 				}
 				return buildCodexDynamicToolResponse(false, msg), nil
 			}
-			cb(StreamEvent{
-				Type:   EventToolResult,
-				ToolID: toolID,
-				Output: output,
-			})
+			if emitToolEvent {
+				cb(StreamEvent{
+					Type:         EventToolResult,
+					ToolID:       toolID,
+					Output:       output,
+					ParentToolID: parentToolID,
+				})
+			}
 			if call.ItemID != "" {
 				stateMu.Lock()
 				requestToolEmitted[call.ItemID] = struct{}{}
@@ -566,8 +760,11 @@ func (a *CodexAgent) SendMessage(
 		switch method {
 		case "thread/started":
 			var n codexThreadStartedNotification
-			if json.Unmarshal(params, &n) == nil && n.Thread.ID != "" {
+			if json.Unmarshal(params, &n) == nil && n.Thread.ID != "" && n.Thread.ParentThreadID == "" {
 				stateMu.Lock()
+				if mainThreadID == "" {
+					mainThreadID = n.Thread.ID
+				}
 				if result.SessionID == "" {
 					result.SessionID = n.Thread.ID
 				}
@@ -576,7 +773,7 @@ func (a *CodexAgent) SendMessage(
 
 		case "turn/started":
 			var n codexTurnStartedNotification
-			if json.Unmarshal(params, &n) == nil && n.Turn.ID != "" {
+			if json.Unmarshal(params, &n) == nil && n.Turn.ID != "" && isMainThread(n.ThreadID) {
 				stateMu.Lock()
 				currentTurnID = n.Turn.ID
 				stateMu.Unlock()
@@ -584,7 +781,7 @@ func (a *CodexAgent) SendMessage(
 
 		case "item/agentMessage/delta":
 			var n codexAgentMessageDeltaNotification
-			if err := json.Unmarshal(params, &n); err == nil && n.Delta != "" {
+			if err := json.Unmarshal(params, &n); err == nil && n.Delta != "" && isMainThread(n.ThreadID) {
 				stateMu.Lock()
 				streamedAgentText[n.ItemID] = true
 				stateMu.Unlock()
@@ -593,7 +790,7 @@ func (a *CodexAgent) SendMessage(
 
 		case "item/reasoning/textDelta":
 			var n codexReasoningTextDeltaNotification
-			if err := json.Unmarshal(params, &n); err == nil && n.Delta != "" {
+			if err := json.Unmarshal(params, &n); err == nil && n.Delta != "" && isMainThread(n.ThreadID) {
 				stateMu.Lock()
 				streamedReasoning[n.ItemID] = true
 				stateMu.Unlock()
@@ -602,7 +799,7 @@ func (a *CodexAgent) SendMessage(
 
 		case "item/reasoning/summaryTextDelta":
 			var n codexReasoningSummaryTextDeltaNotification
-			if err := json.Unmarshal(params, &n); err == nil && n.Delta != "" {
+			if err := json.Unmarshal(params, &n); err == nil && n.Delta != "" && isMainThread(n.ThreadID) {
 				stateMu.Lock()
 				streamedReasoning[n.ItemID] = true
 				stateMu.Unlock()
@@ -962,6 +1159,28 @@ func (a *CodexAgent) SendMessage(
 		case "item/started":
 			var n codexItemNotification
 			if err := json.Unmarshal(params, &n); err == nil {
+				switch n.Item.Type {
+				case "subAgentActivity":
+					if strings.EqualFold(n.Item.Kind, "interrupted") {
+						finishSubAgent(n.Item.AgentThreadID, "interrupted")
+					} else {
+						registerSubAgent(n.ThreadID, n.Item)
+					}
+					return
+				case "collabAgentToolCall", "collabToolCall":
+					if codexIsSpawnAgentTool(n.Item.Tool) {
+						registerSubAgent(n.ThreadID, n.Item)
+					}
+					return
+				}
+
+				parentToolID := ""
+				if !isMainThread(n.ThreadID) {
+					parentToolID = parentToolForThread(n.ThreadID)
+					if parentToolID == "" {
+						return
+					}
+				}
 				if n.Item.Type == "commandExecution" && n.Item.ID != "" {
 					stateMu.Lock()
 					if _, ok := compatExecSkip[n.Item.ID]; ok {
@@ -1018,12 +1237,46 @@ func (a *CodexAgent) SendMessage(
 				if skip || deferStart {
 					return
 				}
-				emitCodexItemStarted(n.Item, cb)
+				emitCodexItemStarted(n.Item, codexParentedCallback(parentToolID, cb))
 			}
 
 		case "item/completed":
 			var n codexItemNotification
 			if err := json.Unmarshal(params, &n); err == nil {
+				switch n.Item.Type {
+				case "subAgentActivity":
+					if strings.EqualFold(n.Item.Kind, "interrupted") {
+						finishSubAgent(n.Item.AgentThreadID, "interrupted")
+					} else {
+						// item/completed is also accepted as a fallback in case a
+						// client opted out of item/started. Registration is deduped.
+						registerSubAgent(n.ThreadID, n.Item)
+					}
+					return
+				case "collabAgentToolCall", "collabToolCall":
+					if codexIsSpawnAgentTool(n.Item.Tool) {
+						registerSubAgent(n.ThreadID, n.Item)
+					}
+					return
+				}
+
+				parentToolID := ""
+				if !isMainThread(n.ThreadID) {
+					stateMu.Lock()
+					run := subAgentRuns[n.ThreadID]
+					if run != nil && n.Item.Type == "agentMessage" && strings.TrimSpace(n.Item.Text) != "" &&
+						(n.Item.Phase == "" || strings.EqualFold(n.Item.Phase, "final_answer")) {
+						run.Summary = n.Item.Text
+					}
+					if run != nil {
+						parentToolID = run.ContainerToolID
+					}
+					stateMu.Unlock()
+					if codexIsNonToolItem(n.Item.Type) || parentToolID == "" {
+						return
+					}
+				}
+
 				stateMu.Lock()
 				_, skip := requestToolEmitted[n.Item.ID]
 				if skip {
@@ -1038,24 +1291,26 @@ func (a *CodexAgent) SendMessage(
 					return
 				}
 				if deferStart {
-					emitCodexItemStarted(n.Item, cb)
+					emitCodexItemStarted(n.Item, codexParentedCallback(parentToolID, cb))
 				}
 				stateMu.Lock()
 				agentStreamed := streamedAgentText[n.Item.ID]
 				reasoningStreamed := streamedReasoning[n.Item.ID]
+				delete(streamedAgentText, n.Item.ID)
+				delete(streamedReasoning, n.Item.ID)
 				stateMu.Unlock()
-				emitCodexItemCompleted(n.Item, agentStreamed, reasoningStreamed, cb)
+				emitCodexItemCompleted(n.Item, agentStreamed, reasoningStreamed, codexParentedCallback(parentToolID, cb))
 			}
 
 		case "item/mcpToolCall/progress":
 			var n codexMcpToolCallProgressNotification
-			if err := json.Unmarshal(params, &n); err == nil && n.Message != "" {
+			if err := json.Unmarshal(params, &n); err == nil && n.Message != "" && isMainThread(n.ThreadID) {
 				cb(StreamEvent{Type: EventSystem, Content: n.Message})
 			}
 
 		case "turn/plan/updated":
 			var n codexTurnPlanUpdatedNotification
-			if err := json.Unmarshal(params, &n); err == nil {
+			if err := json.Unmarshal(params, &n); err == nil && isMainThread(n.ThreadID) {
 				planJSON, _ := json.Marshal(n)
 				if !planToolStarted {
 					planToolStarted = true
@@ -1075,7 +1330,7 @@ func (a *CodexAgent) SendMessage(
 
 		case "thread/tokenUsage/updated":
 			var n codexThreadTokenUsageUpdatedNotification
-			if err := json.Unmarshal(params, &n); err == nil {
+			if err := json.Unmarshal(params, &n); err == nil && isMainThread(n.ThreadID) {
 				stateMu.Lock()
 				latestTokenUsage = &n
 				stateMu.Unlock()
@@ -1106,7 +1361,7 @@ func (a *CodexAgent) SendMessage(
 
 		case "error":
 			var n codexErrorNotification
-			if err := json.Unmarshal(params, &n); err == nil {
+			if err := json.Unmarshal(params, &n); err == nil && isMainThread(n.ThreadID) {
 				if n.WillRetry {
 					cb(StreamEvent{Type: EventSystem, Content: n.Error.Message})
 				} else {
@@ -1117,6 +1372,10 @@ func (a *CodexAgent) SendMessage(
 		case "turn/completed":
 			var n codexTurnCompletedNotification
 			if err := json.Unmarshal(params, &n); err == nil {
+				if !isMainThread(n.ThreadID) {
+					finishSubAgent(n.ThreadID, n.Turn.Status)
+					return
+				}
 				stateMu.Lock()
 				matchTurn := currentTurnID == "" || n.Turn.ID == "" || n.Turn.ID == currentTurnID
 				stateMu.Unlock()
@@ -1169,9 +1428,11 @@ func (a *CodexAgent) SendMessage(
 	// reader goroutine under stateMu; this write must take the same lock.
 	stateMu.Lock()
 	if threadID != "" {
+		mainThreadID = threadID
 		result.SessionID = threadID
 	} else {
 		threadID = result.SessionID
+		mainThreadID = threadID
 	}
 	stateMu.Unlock()
 	if threadID == "" {

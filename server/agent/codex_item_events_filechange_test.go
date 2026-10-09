@@ -93,3 +93,27 @@ func TestCodexFileChangeCompletionSkipsReplaceWhenStillEmpty(t *testing.T) {
 		}
 	}
 }
+// TestCodexParentedCallbackTagsToolInputReplace verifies the connective
+// tissue between emitCodexItemCompleted's re-emit and sub-agent routing:
+// codexParentedCallback must stamp ParentToolID on EventToolInputReplace
+// (not just EventToolStart/EventToolResult), otherwise a sub-agent's
+// FileChange diff update loses its parent association server-side, before
+// it even reaches the frontend's nestedToolIdsRef routing.
+func TestCodexParentedCallbackTagsToolInputReplace(t *testing.T) {
+	var captured StreamEvent
+	cb := codexParentedCallback("parent-task-1", func(e StreamEvent) { captured = e })
+
+	cb(StreamEvent{Type: EventToolInputReplace, ToolID: "child-1", Input: "{}"})
+	if captured.ParentToolID != "parent-task-1" {
+		t.Fatalf("expected ParentToolID set on tool_input_replace, got %+v", captured)
+	}
+
+	// With no parent (main-thread call), codexParentedCallback must be a
+	// pure passthrough — confirms the "no parent" half of this codepath too.
+	var passthrough StreamEvent
+	cbNoParent := codexParentedCallback("", func(e StreamEvent) { passthrough = e })
+	cbNoParent(StreamEvent{Type: EventToolInputReplace, ToolID: "child-2", Input: "{}"})
+	if passthrough.ParentToolID != "" {
+		t.Fatalf("expected no ParentToolID without a parent, got %+v", passthrough)
+	}
+}

@@ -17,6 +17,8 @@ import (
 
 type codexDynamicToolCall struct {
 	ItemID    string
+	ThreadID  string
+	TurnID    string
 	ToolName  string
 	Arguments json.RawMessage
 }
@@ -29,6 +31,8 @@ func parseCodexDynamicToolCall(params json.RawMessage) (codexDynamicToolCall, er
 
 	call := codexDynamicToolCall{
 		ItemID:   firstJSONString(raw, "itemId", "item_id", "id", "toolCallId", "tool_call_id"),
+		ThreadID: firstJSONString(raw, "threadId", "thread_id"),
+		TurnID:   firstJSONString(raw, "turnId", "turn_id"),
 		ToolName: firstJSONString(raw, "toolName", "tool_name", "tool", "name"),
 	}
 
@@ -38,7 +42,7 @@ func parseCodexDynamicToolCall(params json.RawMessage) (codexDynamicToolCall, er
 		inline := map[string]interface{}{}
 		for k, v := range raw {
 			switch k {
-			case "itemId", "item_id", "id", "toolCallId", "tool_call_id", "toolName", "tool_name", "tool", "name", "arguments", "args", "input":
+			case "itemId", "item_id", "id", "toolCallId", "tool_call_id", "threadId", "thread_id", "turnId", "turn_id", "toolName", "tool_name", "tool", "name", "arguments", "args", "input":
 				continue
 			default:
 				var any interface{}

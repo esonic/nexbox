@@ -12,6 +12,8 @@ import (
 func TestParseCodexDynamicToolCall(t *testing.T) {
 	raw := json.RawMessage(`{
 		"itemId":"itm_1",
+		"threadId":"child-thread",
+		"turnId":"child-turn",
 		"toolName":"Read",
 		"arguments":{"path":"a.txt","start_line":1}
 	}`)
@@ -21,6 +23,9 @@ func TestParseCodexDynamicToolCall(t *testing.T) {
 	}
 	if call.ItemID != "itm_1" {
 		t.Fatalf("unexpected item id: %s", call.ItemID)
+	}
+	if call.ThreadID != "child-thread" || call.TurnID != "child-turn" {
+		t.Fatalf("unexpected thread/turn ids: %s/%s", call.ThreadID, call.TurnID)
 	}
 	if call.ToolName != "Read" {
 		t.Fatalf("unexpected tool name: %s", call.ToolName)
