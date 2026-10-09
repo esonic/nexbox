@@ -97,9 +97,47 @@ func (s *Server) ListProjectFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entries)
 }
 
-// listDirLevel returns the immediate children of currentPath (no recursion).
-// Symlinks pointing to directories are followed for IsDir detection and recursable expansion.
+// maxCompactDepth caps how many single-child links compactSingleChildDirs will
+// follow, so a symlink cycle or a pathological tree can't spin forever.
+const maxCompactDepth = 32
+
+// listDirLevel returns the immediate children of currentPath, with chains of
+// single-child directories compacted into one entry (see compactSingleChildDirs).
 func listDirLevel(basePath, currentPath string) ([]FileEntry, error) {
+	entries, err := readDirLevel(basePath, currentPath)
+	if err != nil {
+		return nil, err
+	}
+	compactSingleChildDirs(basePath, entries)
+	return entries, nil
+}
+
+// compactSingleChildDirs merges a directory whose only visible child is itself a
+// directory into that child (VSCode "compact folders"). The merged entry keeps
+// the joined name ("com/example/app") and the deepest path, so expanding or
+// dropping onto the row acts on the innermost folder. The chain is followed
+// server-side because the client loads one level at a time.
+func compactSingleChildDirs(basePath string, entries []FileEntry) {
+	for i := range entries {
+		if !entries[i].IsDir || entries[i].IsSymlink {
+			continue
+		}
+		name, path := entries[i].Name, entries[i].Path
+		for depth := 0; depth < maxCompactDepth; depth++ {
+			children, err := readDirLevel(basePath, filepath.Join(basePath, path))
+			if err != nil || len(children) != 1 || !children[0].IsDir || children[0].IsSymlink {
+				break
+			}
+			name += "/" + children[0].Name
+			path = children[0].Path
+		}
+		entries[i].Name, entries[i].Path = name, path
+	}
+}
+
+// readDirLevel returns the immediate children of currentPath (no recursion).
+// Symlinks pointing to directories are followed for IsDir detection and recursable expansion.
+func readDirLevel(basePath, currentPath string) ([]FileEntry, error) {
 	dirents, err := os.ReadDir(currentPath)
 	if err != nil {
 		return nil, err
@@ -169,6 +207,8 @@ func (s *Server) ListProjectFilesFlat(w http.ResponseWriter, r *http.Request) {
 	const maxResults = 20000
 	results := make([]FileEntry, 0, 256)
 	visited := make(map[string]bool)
+	// Honour .gitignore so build output doesn't crowd out source files in quick open.
+	ignore := ignoreFilterForRoot(root)
 
 	var walk func(dirPath string)
 	walk = func(dirPath string) {
@@ -222,7 +262,7 @@ func (s *Server) ListProjectFilesFlat(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			if isDir && skipDir(name) {
+			if excludedFromSearch(ignore, root, full, isDir) {
 				continue
 			}
 
@@ -358,11 +398,19 @@ func (s *Server) SearchProjectFiles(w http.ResponseWriter, r *http.Request) {
 	if searchType == "" {
 		searchType = "name"
 	}
-	queryLower := strings.ToLower(query)
+	// case=1 keeps the search case-sensitive; otherwise both the query and the
+	// scanned text are folded to lower case (the historical default).
+	caseSensitive := r.URL.Query().Get("case") == "1" || r.URL.Query().Get("case") == "true"
+	needle := query
+	if !caseSensitive {
+		needle = strings.ToLower(query)
+	}
 	const maxResults = 50
 
+	ignore := ignoreFilterForRoot(root)
+
 	if searchType == "content" {
-		results := searchFileContents(root, root, queryLower, maxResults)
+		results := searchFileContents(root, ignore, needle, caseSensitive, maxResults)
 		writeJSON(w, http.StatusOK, results)
 		return
 	}
@@ -380,13 +428,20 @@ func (s *Server) SearchProjectFiles(w http.ResponseWriter, r *http.Request) {
 			}
 			return nil
 		}
-		if d.IsDir() && skipDir(name) {
-			return filepath.SkipDir
+		if excludedFromSearch(ignore, root, path, d.IsDir()) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if d.IsDir() {
 			return nil
 		}
-		if strings.Contains(strings.ToLower(name), queryLower) {
+		hay := name
+		if !caseSensitive {
+			hay = strings.ToLower(name)
+		}
+		if strings.Contains(hay, needle) {
 			rel, _ := filepath.Rel(root, path)
 			results = append(results, map[string]interface{}{
 				"path": rel,
@@ -407,7 +462,10 @@ type contentMatch struct {
 	Content string `json:"content"`
 }
 
-func searchFileContents(root, current, query string, maxResults int) []contentMatch {
+// searchFileContents scans files under root for lines containing needle. The
+// caller passes needle already lower-cased when caseSensitive is false, and the
+// ignore filter for root (nil outside a git repository).
+func searchFileContents(root string, ignore *gitIgnoreFilter, needle string, caseSensitive bool, maxResults int) []contentMatch {
 	var results []contentMatch
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || len(results) >= maxResults {
@@ -420,8 +478,11 @@ func searchFileContents(root, current, query string, maxResults int) []contentMa
 			}
 			return nil
 		}
-		if d.IsDir() && skipDir(name) {
-			return filepath.SkipDir
+		if excludedFromSearch(ignore, root, path, d.IsDir()) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if d.IsDir() {
 			return nil
@@ -443,7 +504,11 @@ func searchFileContents(root, current, query string, maxResults int) []contentMa
 		for scanner.Scan() {
 			lineNum++
 			line := scanner.Text()
-			if strings.Contains(strings.ToLower(line), query) {
+			hay := line
+			if !caseSensitive {
+				hay = strings.ToLower(line)
+			}
+			if strings.Contains(hay, needle) {
 				rel, _ := filepath.Rel(root, path)
 				preview := line
 				if len(preview) > 200 {
