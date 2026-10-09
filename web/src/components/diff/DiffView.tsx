@@ -13,15 +13,17 @@ import {
   FileCode2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { splitUnifiedDiffByFile, type ParsedDiffFile } from "@/lib/diff-parser";
+import { getFilePath, splitUnifiedDiffByFile, type ParsedDiffFile } from "@/lib/diff-parser";
 import {
   gitApi,
   type GitStatusResponse,
   type DiffFileInfo,
+  type GitScope,
+  type GitRepository,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { DiffFileCard, getFilePath } from "./DiffFileCard";
+import { DiffFileCard } from "./DiffFileCard";
 import { DiffMinimap } from "./DiffMinimap";
 import { HistoryTab } from "./HistoryTab";
 import { BranchToolbar } from "./BranchToolbar";
@@ -32,6 +34,8 @@ interface DiffViewProps {
   fileStats?: DiffFileInfo[];
   projectId?: string;
   sessionId?: string;
+  repository?: GitRepository;
+  isDefaultRepository?: boolean;
   onCommitted?: () => void;
 }
 
@@ -41,23 +45,30 @@ const CATEGORY_ORDER: FileCategory[] = ["staged", "unstaged", "untracked"];
 const LEFT_WIDTH_MIN = 200;
 const LEFT_WIDTH_MAX = 600;
 
-export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitted }: DiffViewProps) {
+export function DiffView({ diffText, fileStats, projectId, sessionId, repository, isDefaultRepository, onCommitted }: DiffViewProps) {
   const isLazyMode = !diffText && !!fileStats;
+  const repositoryId = repository?.id;
+  const gitScope = useMemo<GitScope | null>(() => projectId && repositoryId ? ({
+    projectId,
+    sessionId,
+    repositoryId,
+  }) : null, [projectId, sessionId, repositoryId]);
 
   const files = useMemo(() => {
     if (diffText) return splitUnifiedDiffByFile(diffText);
     if (fileStats) {
       return fileStats.map((f): ParsedDiffFile => ({
-        key: f.path,
-        oldPath: f.status === "added" ? "/dev/null" : f.path,
+        key: `${f.original_path ?? f.path}->${f.path}`,
+        oldPath: f.status === "added" ? "/dev/null" : (f.original_path ?? f.path),
         newPath: f.status === "deleted" ? "/dev/null" : f.path,
         diffText: "",
-        isBinary: false,
+        isBinary: !!f.binary,
         additions: f.insertions,
         deletions: f.deletions,
         isNewFile: f.status === "added",
         isDeletedFile: f.status === "deleted",
         fileLang: null,
+        workspacePath: f.workspace_path,
       }));
     }
     return [];
@@ -125,16 +136,11 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
     );
   }, []);
 
-  const refreshGitStatus = useCallback(() => {
-    if (!projectId) return;
-    gitApi.status(projectId, sessionId).then(applyGitStatus).catch(() => applyGitStatus(null));
-  }, [projectId, sessionId, applyGitStatus]);
-
   // Auto-refresh git status every 5s when the git panel is open — but skip the
   // poll while the tab is hidden (a background tab shouldn't burn CPU), and
   // refresh once as soon as it becomes visible again.
   useEffect(() => {
-    if (!projectId) return;
+    if (!gitScope) return;
     const poll = () => { if (!document.hidden) setStatusTick((t) => t + 1); };
     const interval = setInterval(poll, 5_000);
     document.addEventListener("visibilitychange", poll);
@@ -142,15 +148,22 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
       clearInterval(interval);
       document.removeEventListener("visibilitychange", poll);
     };
-  }, [projectId]);
+  }, [gitScope]);
 
-  const gitStatusKeyRef = useRef<string | null>(null);
+  const statusRequestGeneration = useRef(0);
   useEffect(() => {
-    const key = `${projectId}:${diffText?.length ?? 0}:${statusTick}`;
-    if (!projectId || gitStatusKeyRef.current === key) return;
-    gitStatusKeyRef.current = key;
-    gitApi.status(projectId, sessionId).then(applyGitStatus).catch(() => applyGitStatus(null));
-  }, [projectId, sessionId, diffText, statusTick, applyGitStatus]);
+    if (!gitScope) return;
+    const generation = ++statusRequestGeneration.current;
+    let cancelled = false;
+    gitApi.status(gitScope)
+      .then((data) => {
+        if (!cancelled && generation === statusRequestGeneration.current) applyGitStatus(data);
+      })
+      .catch(() => {
+        if (!cancelled && generation === statusRequestGeneration.current) applyGitStatus(null);
+      });
+    return () => { cancelled = true; };
+  }, [gitScope, diffText, statusTick, applyGitStatus]);
 
   const filteredFiles = useMemo(() => {
     if (!fileFilter.trim()) return files;
@@ -197,14 +210,19 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   }, [viewMode]);
 
   const toggleViewed = useCallback((key: string) => {
-    setViewedFiles((prev) => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+    setViewedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   }, []);
 
   const handleDiscard = (filePath: string) => {
-    if (!projectId) return;
+    if (!gitScope) return;
     const doDiscard = async () => {
       setDiscardingFile(filePath);
-      try { await gitApi.discard(projectId, { file_path: filePath }, sessionId); onCommitted?.(); }
+      try { await gitApi.discard(gitScope, { file_path: filePath }); onCommitted?.(); }
       catch (e) { console.error("Failed to discard:", e); toast.error("Discard failed", { description: String(e) }); }
       finally { setDiscardingFile(null); }
     };
@@ -223,10 +241,10 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   }, [gitStatus, files]);
 
   const handleCommit = async () => {
-    if (!projectId || !commitMsg.trim() || commitFilePaths.length === 0) return;
+    if (!gitScope || !commitMsg.trim() || commitFilePaths.length === 0) return;
     setCommitting(true);
     try {
-      await gitApi.commit(projectId, { file_paths: commitFilePaths, message: commitMsg.trim() }, sessionId);
+      await gitApi.commit(gitScope, { file_paths: commitFilePaths, message: commitMsg.trim() });
       setCommitMsg("");
       setStatusTick((t) => t + 1);
       setFileRefreshKey((t) => t + 1);
@@ -236,9 +254,9 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   };
 
   const handleGenerateMessage = async () => {
-    if (!projectId || commitFilePaths.length === 0) return;
+    if (!gitScope || commitFilePaths.length === 0) return;
     setGeneratingMsg(true);
-    try { setCommitMsg((await gitApi.generateMessage(projectId, { file_paths: commitFilePaths }, sessionId)).message); }
+    try { setCommitMsg((await gitApi.generateMessage(gitScope, { file_paths: commitFilePaths })).message); }
     catch (e) { console.error("Failed to generate message:", e); toast.error("Failed to generate message", { description: String(e) }); }
     finally { setGeneratingMsg(false); }
   };
@@ -250,14 +268,14 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   }, [onCommitted]);
 
   const handleDiscardAll = (paths: string[]) => {
-    if (!projectId || paths.length === 0) return;
+    if (!gitScope || paths.length === 0) return;
     toast.warning(`Discard all changes to ${paths.length} file(s)?`, {
       duration: Infinity,
       action: {
         label: "Discard All",
         onClick: async () => {
           for (const p of paths) {
-            try { await gitApi.discard(projectId, { file_path: p }, sessionId); }
+            try { await gitApi.discard(gitScope, { file_path: p }); }
             catch (e) { console.error(`Failed to discard ${p}:`, e); }
           }
           onCommitted?.();
@@ -268,9 +286,9 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   };
 
   const handleStageFiles = async (paths: string[]) => {
-    if (!projectId || paths.length === 0) return;
+    if (!gitScope || paths.length === 0) return;
     try {
-      await gitApi.stage(projectId, { file_paths: paths }, sessionId);
+      await gitApi.stage(gitScope, { file_paths: paths });
       setStatusTick((t) => t + 1);
       setFileRefreshKey((t) => t + 1);
     } catch (e) {
@@ -279,9 +297,9 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   };
 
   const handleUnstageFiles = async (paths: string[]) => {
-    if (!projectId || paths.length === 0) return;
+    if (!gitScope || paths.length === 0) return;
     try {
-      await gitApi.unstage(projectId, { file_paths: paths }, sessionId);
+      await gitApi.unstage(gitScope, { file_paths: paths });
       setStatusTick((t) => t + 1);
       setFileRefreshKey((t) => t + 1);
     } catch (e) {
@@ -304,7 +322,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
     setCurrentChangeIdx(0);
     setChangeCount(0);
     autoScrolledRef.current = false;
-  }, [activeFile]);
+  }, [activeFile, activeFileCategory]);
 
   // Auto-scroll to first change when diff content loads for a newly selected file
   useEffect(() => {
@@ -364,14 +382,16 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   }, [viewMode, filteredFiles, activeFileIdx, changeCount, currentChangeIdx]);
 
   // Always called to satisfy hooks rules; state is self-contained
-  const history = HistoryTab({ projectId: projectId || "", sessionId, autoLoad: activeTab === "history" && !!projectId });
+  const history = HistoryTab({ scope: gitScope, repository, allowLegacyComments: isDefaultRepository, autoLoad: activeTab === "history" && !!gitScope });
 
   const renderFileRow = (file: ParsedDiffFile, category: FileCategory) => {
     const path = getFilePath(file);
     const fileName = path.split("/").pop() || path;
     const dirPath = path.includes("/") ? path.substring(0, path.lastIndexOf("/")) : "";
     const isStaged = category === "staged";
-    const commentCount = sessionComments.filter((c) => c.filePath === path).length;
+    const commentCount = sessionComments.filter((c) =>
+      c.filePath === path && (c.repositoryId === repository?.id || (!c.repositoryId && isDefaultRepository))
+    ).length;
     return (
       <div
         key={file.key}
@@ -418,8 +438,8 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
 
   return (
     <div className="flex flex-col h-full">
-      {projectId && (
-        <BranchToolbar projectId={projectId} sessionId={sessionId} onBranchChanged={handleRefreshAll}
+      {gitScope && (
+        <BranchToolbar scope={gitScope} onBranchChanged={handleRefreshAll}
           aheadCount={gitStatus?.ahead}
           navLabel={activeTab === "changes" && activeFile ? navLabel : undefined}
           onNavigate={activeTab === "changes" && activeFile && filteredFiles.length > 0 ? handleNavigate : undefined}
@@ -556,8 +576,9 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
                   {filteredFiles.map((file) => (
                     <div key={file.key} ref={(el) => { fileRefs.current[file.key] = el; }}>
                       <DiffFileCard file={file} isViewed={viewedFiles.has(file.key)} isActive={activeFile === file.key}
-                        onToggleViewed={() => toggleViewed(file.key)} lazyLoad={isLazyMode} projectId={projectId} sessionId={sessionId}
-                        refreshKey={fileRefreshKey}
+                        onToggleViewed={toggleViewed} lazyLoad={isLazyMode} projectId={projectId} sessionId={sessionId}
+                        refreshKey={fileRefreshKey} repository={repository}
+                        allowLegacyComments={isDefaultRepository}
                         staged={activeFile === file.key ? activeFileCategory === "staged" : undefined} />
                     </div>
                   ))}
@@ -567,8 +588,9 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
                 return file ? (
                   <div className="h-full">
                     <DiffFileCard key={`${file.key}:${activeFileCategory}`} file={file} isViewed={viewedFiles.has(file.key)} isActive
-                      onToggleViewed={() => toggleViewed(file.key)} lazyLoad={isLazyMode} projectId={projectId} sessionId={sessionId}
-                      defaultExpanded borderless fullFile onChangeCount={setChangeCount} refreshKey={fileRefreshKey}
+                      onToggleViewed={toggleViewed} lazyLoad={isLazyMode} projectId={projectId} sessionId={sessionId}
+                      defaultExpanded borderless fullFile onChangeCount={setChangeCount} refreshKey={fileRefreshKey} repository={repository}
+                      allowLegacyComments={isDefaultRepository}
                       staged={activeFileCategory === "staged"} />
                   </div>
                 ) : (

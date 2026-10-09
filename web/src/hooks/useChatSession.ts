@@ -46,7 +46,11 @@ const EMPTY_RICH_QUEUE: RichQueuedMessage[] = [];
 /** Serialize inline comments into a compact text block for the AI. */
 function serializeComments(comments: RichQueuedMessage["pickedComments"]): string {
   return comments
-    .map((c) => `- ${c.filePath}:${c.lineNumber}: ${c.text}`)
+    .map((c) => {
+      const repository = c.repositoryDisplayPath ? `[repo: ${c.repositoryDisplayPath}] ` : "";
+      const workspace = c.workspacePath ? ` (workspace: ${c.workspacePath})` : "";
+      return `- ${repository}${c.filePath}:${c.lineNumber}${workspace}: ${c.text}`;
+    })
     .join("\n");
 }
 

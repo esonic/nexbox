@@ -1,11 +1,11 @@
 import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import { Loader2, ArrowLeft } from "lucide-react";
-import { cn, formatRelativeDate } from "@/lib/utils";
-import { splitUnifiedDiffByFile } from "@/lib/diff-parser";
-import { gitApi, type GitCommitInfo, type GitCommitFileEntry } from "@/lib/api";
-import { DiffFileCard, getFilePath } from "./DiffFileCard";
+import { cn, formatAbsoluteDateTime } from "@/lib/utils";
+import { getFilePath, splitUnifiedDiffByFile } from "@/lib/diff-parser";
+import { gitApi, type GitCommitInfo, type GitCommitFileEntry, type GitRepository, type GitScope } from "@/lib/api";
+import { DiffFileCard } from "./DiffFileCard";
 
-export function HistoryTab({ projectId, sessionId, autoLoad }: { projectId: string; sessionId?: string; autoLoad: boolean }) {
+export function HistoryTab({ scope, repository, allowLegacyComments, autoLoad }: { scope: GitScope | null; repository?: GitRepository; allowLegacyComments?: boolean; autoLoad: boolean }) {
   const PAGE_SIZE = 20;
   const LOAD_MORE_SIZE = 10;
   const [commits, setCommits] = useState<GitCommitInfo[]>([]);
@@ -18,6 +18,7 @@ export function HistoryTab({ projectId, sessionId, autoLoad }: { projectId: stri
   const [commitFileList, setCommitFileList] = useState<GitCommitFileEntry[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const fileRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const commitRequestGeneration = useRef(0);
 
   const commitDiffFiles = useMemo(
     () => (commitDiffText ? splitUnifiedDiffByFile(commitDiffText) : []),
@@ -25,26 +26,26 @@ export function HistoryTab({ projectId, sessionId, autoLoad }: { projectId: stri
   );
 
   const loadHistory = useCallback(async () => {
-    if (!projectId) return;
+    if (!scope) return;
     setLoading(true);
     try {
-      const data = await gitApi.log(projectId, PAGE_SIZE, undefined, sessionId);
+      const data = await gitApi.log(scope, PAGE_SIZE);
       setCommits(data);
       setHasMore(data.length >= PAGE_SIZE);
     } catch (e) { console.error("Failed to load history:", e); }
     finally { setLoading(false); }
-  }, [projectId, sessionId]);
+  }, [scope]);
 
   const loadMore = useCallback(async () => {
-    if (!projectId || loadingMore) return;
+    if (!scope || loadingMore) return;
     setLoadingMore(true);
     try {
-      const data = await gitApi.log(projectId, LOAD_MORE_SIZE, commits.length, sessionId);
+      const data = await gitApi.log(scope, LOAD_MORE_SIZE, commits.length);
       setCommits((prev) => [...prev, ...data]);
       setHasMore(data.length >= LOAD_MORE_SIZE);
     } catch (e) { console.error("Failed to load more:", e); }
     finally { setLoadingMore(false); }
-  }, [projectId, sessionId, commits.length, loadingMore]);
+  }, [scope, commits.length, loadingMore]);
 
   const loadedRef = useRef(false);
   useEffect(() => {
@@ -55,27 +56,32 @@ export function HistoryTab({ projectId, sessionId, autoLoad }: { projectId: stri
   }, [autoLoad, loadHistory, commits.length]);
 
   const handleSelectCommit = async (hash: string) => {
+    if (!scope) return;
+    const generation = ++commitRequestGeneration.current;
     setSelectedCommit(hash);
     setLoadingDiff(true);
     setCommitFileList([]);
     setActiveFile(null);
     try {
       const [diffData, filesData] = await Promise.all([
-        gitApi.commitDiff(projectId, hash, sessionId),
-        gitApi.commitFiles(projectId, hash, sessionId),
+        gitApi.commitDiff(scope, hash),
+        gitApi.commitFiles(scope, hash),
       ]);
+      if (generation !== commitRequestGeneration.current) return;
       setCommitDiffText(diffData.diff);
       setCommitFileList(filesData);
     } catch (e) {
+      if (generation !== commitRequestGeneration.current) return;
       console.error("Failed to load commit diff:", e);
       setCommitDiffText(null);
       setCommitFileList([]);
     } finally {
-      setLoadingDiff(false);
+      if (generation === commitRequestGeneration.current) setLoadingDiff(false);
     }
   };
 
   const handleBack = () => {
+    commitRequestGeneration.current++;
     setSelectedCommit(null);
     setCommitDiffText(null);
     setCommitFileList([]);
@@ -109,7 +115,9 @@ export function HistoryTab({ projectId, sessionId, autoLoad }: { projectId: stri
               <div className="flex items-center gap-2 mt-1 text-[10px] text-muted-foreground">
                 <code className="font-mono">{commit.short_hash}</code>
                 <span>{commit.author}</span>
-                <span className="ml-auto">{formatRelativeDate(commit.date)}</span>
+                <span className="ml-auto whitespace-nowrap font-mono">
+                  {formatAbsoluteDateTime(commit.date)}
+                </span>
               </div>
             </button>
           ))}
@@ -198,7 +206,10 @@ export function HistoryTab({ projectId, sessionId, autoLoad }: { projectId: stri
         <div className="space-y-2">
           {commitDiffFiles.map((file) => (
             <div key={file.key} ref={(el) => { fileRefs.current[file.key] = el; }}>
-              <DiffFileCard file={file} isViewed={false} isActive={activeFile === file.key} onToggleViewed={() => {}} hideViewedToggle />
+              <DiffFileCard file={file} isViewed={false} isActive={activeFile === file.key} hideViewedToggle
+                projectId={scope?.projectId} sessionId={scope?.sessionId} repository={repository}
+                allowLegacyComments={allowLegacyComments}
+                workspacePath={commitFileList.find((entry) => entry.path === getFilePath(file))?.workspace_path} />
             </div>
           ))}
         </div>

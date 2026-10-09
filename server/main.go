@@ -19,6 +19,7 @@ import (
 	"github.com/esonic/nexbox/agent"
 	"github.com/esonic/nexbox/api"
 	"github.com/esonic/nexbox/config"
+	"github.com/esonic/nexbox/gitrepo"
 	nexmcp "github.com/esonic/nexbox/mcp"
 	chromemcp "github.com/esonic/nexbox/mcp/chrome"
 	"github.com/esonic/nexbox/store"
@@ -293,6 +294,7 @@ func main() {
 		ChromeManager:     chromeManager,
 		ListenPort:        *port,
 		MarketplaceStats:  api.NewMarketplaceStatsBuffer(),
+		GitRepositories:  gitrepo.NewResolver(gitrepo.DefaultOptions()),
 		OnMCPToolsChanged: mcpServer.NotifyToolListChanged,
 		WeChat:            api.NewWeChatJSSDK(os.Getenv("WECHAT_APPID"), os.Getenv("WECHAT_APPSECRET")),
 	}

@@ -71,6 +71,14 @@ func (s *Server) HandleTerminalSessionWS(w http.ResponseWriter, r *http.Request)
 // otherwise falls back to the project's git_repo_path.
 func (s *Server) sessionWorkDir(session *Session) string {
 	if session.WorktreeMode == "worktree" && session.WorktreePath != "" {
+		if session.ProjectID != "" {
+			project, err := s.getProjectWithLocalPath(session.ProjectID)
+			if err == nil && project != nil && project.GitRepoPath != "" {
+				if effectiveDir, normalizeErr := projectPathInWorktree(session.WorktreePath, project.GitRepoPath); normalizeErr == nil {
+					return effectiveDir
+				}
+			}
+		}
 		return session.WorktreePath
 	}
 	if session.ProjectID != "" {
