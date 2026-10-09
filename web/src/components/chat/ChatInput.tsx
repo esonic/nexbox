@@ -14,7 +14,7 @@ import {
   type QuestionAnswer,
 } from "@/components/chat/QuestionCard";
 import { TodoPanel } from "@/components/chat/TodoPanel";
-import { imageApi, filesApi, type DiffResponse, type FileEntry } from "@/lib/api";
+import { imageApi, filesApi, promptTemplatesApi, sessionsApi, type DiffResponse, type FileEntry, type PromptTemplate } from "@/lib/api";
 import { createPortal } from "react-dom";
 import { useAppStore } from "@/stores/app";
 import { STATUS_ICONS } from "@/plugins/task/task-icons";
@@ -38,14 +38,14 @@ export const SLASH_COMMANDS = [
   {
     name: "browser",
     label: "Enable Browser Control",
-    description: "Enable Chrome DevTools tools for browser control",
+    description: "Enable browser control, or connect to an existing Chrome",
     prompt: "You now have Chrome DevTools MCP tools available for browser control. " +
       "Use take_snapshot to see the page structure (accessibility tree with UIDs), then interact with elements using their UIDs. " +
       "Typical workflow: navigate_page -> take_snapshot -> click/fill/type_text -> take_screenshot to verify. " +
       "Always call take_snapshot before interacting to get fresh UIDs.",
     features: ["chrome_devtools"],
     needsInput: true,
-    inputHint: "What should the browser do (e.g. URL, action, expected outcome)...",
+    inputHint: "What should the browser do, or connect http://127.0.0.1:9222 [task]...",
   },
 ] as const;
 
@@ -518,6 +518,7 @@ export function ChatInput({
   const [slashFilter, setSlashFilter] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [activeCommand, setActiveCommand] = useState<SlashCommand | null>(null);
+  const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
   const [showAgentMenu, setShowAgentMenu] = useState(false);
   const agentMenuRef = useRef<HTMLDivElement>(null);
   const [showModelMenu, setShowModelMenu] = useState(false);
@@ -629,6 +630,18 @@ export function ChatInput({
     cmd.name.toLowerCase().includes(slashFilter.toLowerCase()) ||
     cmd.label.toLowerCase().includes(slashFilter.toLowerCase())
   );
+  const filteredTemplates = promptTemplates.filter((t) => {
+    const q = slashFilter.toLowerCase();
+    return t.name.toLowerCase().includes(q) || t.content.toLowerCase().includes(q);
+  });
+  const slashItemCount = filteredCommands.length + filteredTemplates.length;
+
+  // Refetch on every open so edits made in Settings show up immediately.
+  useEffect(() => {
+    if (!showSlashMenu) return;
+    promptTemplatesApi.list().then(setPromptTemplates).catch(() => {});
+  }, [showSlashMenu]);
+
   const filteredPickerFiles = filePickerFiles
     .filter((f) => !filePickerQuery || f.path.toLowerCase().includes(filePickerQuery.toLowerCase()))
     .slice(0, 10);
@@ -687,7 +700,11 @@ export function ChatInput({
 
   const canInterjectFront = canInterject && richQueue.length > 0;
 
-  const handleSend = () => {
+  const browserConfigPending = useRef(false);
+  const [savingBrowserConfig, setSavingBrowserConfig] = useState(false);
+
+  const handleSend = async () => {
+    if (browserConfigPending.current) return;
     const hasContent = hasComposerContent();
     if (!hasContent) return;
     if (attachedImages.length > 0 && !attachedImages.every(i => i.filename)) return;
@@ -695,12 +712,36 @@ export function ChatInput({
     let message = input;
     let features: string[] | undefined;
 
-    if (activeCommand) {
-      const userInput = input.trim();
+    const inlineBrowser = !activeCommand && /^\/browser(?:\s|$)/.test(input.trim());
+    const command = activeCommand ?? (inlineBrowser ? SLASH_COMMANDS[0] : null);
+    if (command) {
+      let userInput = inlineBrowser ? input.trim().replace(/^\/browser\s*/, "") : input.trim();
+      let browserPrompt: string = command.prompt;
+      if (/^connect(?:\s|$)/.test(userInput)) {
+        const match = /^connect\s+(\S+)(?:\s+([\s\S]*))?$/.exec(userInput);
+        if (!match) {
+          toast.error("Use /browser connect http://127.0.0.1:9222 [task]");
+          return;
+        }
+        const browserURL = match[1];
+        browserConfigPending.current = true;
+        setSavingBrowserConfig(true);
+        try {
+          await sessionsApi.update(sessionId, { chrome_browser_url: browserURL });
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : "Failed to save Chrome address");
+          return;
+        } finally {
+          browserConfigPending.current = false;
+          setSavingBrowserConfig(false);
+        }
+        userInput = match[2]?.trim() ?? "List the existing tabs and wait for my next instruction.";
+        browserPrompt += `\nConnect to my externally managed Chrome at ${browserURL}. Start by listing existing tabs. Chrome's lifecycle is managed by me.`;
+      }
       message = userInput
-        ? `${activeCommand.prompt}\n\nUser request: ${userInput}`
-        : activeCommand.prompt;
-      features = "features" in activeCommand ? ([...activeCommand.features] as string[]) : undefined;
+        ? `${browserPrompt}\n\nUser request: ${userInput}`
+        : browserPrompt;
+      features = [...command.features];
       setActiveCommand(null);
     }
 
@@ -759,13 +800,31 @@ export function ChatInput({
     onSend(cmd.prompt, undefined, features);
   };
 
+  const applyTemplate = (tpl: PromptTemplate) => {
+    setShowSlashMenu(false);
+    setSlashFilter("");
+    setInput(tpl.content);
+    saveDraft(tpl.content);
+    setTimeout(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(tpl.content.length, tpl.content.length);
+    }, 0);
+  };
+
+  const selectSlashItem = (index: number) => {
+    if (index < filteredCommands.length) executeSlashCommand(filteredCommands[index]);
+    else applyTemplate(filteredTemplates[index - filteredCommands.length]);
+  };
+
   useEffect(() => {
-    if (!showSlashMenu || filteredCommands.length === 0) return;
+    if (!showSlashMenu || slashItemCount === 0) return;
     const container = slashMenuRef.current;
     if (!container) return;
     const item = container.querySelector(`[data-cmd-index="${selectedCommandIndex}"]`);
     if (item) item.scrollIntoView({ block: "nearest" });
-  }, [selectedCommandIndex, showSlashMenu, filteredCommands.length]);
+  }, [selectedCommandIndex, showSlashMenu, slashItemCount]);
 
   const insertFileRef = useCallback((file: FileEntry) => {
     const el = textareaRef.current;
@@ -831,9 +890,9 @@ export function ChatInput({
       }
     }
 
-    if (showSlashMenu && filteredCommands.length > 0) {
-      if (navigateMenu(e, filteredCommands.length, selectedCommandIndex, setSelectedCommandIndex,
-        () => executeSlashCommand(filteredCommands[selectedCommandIndex]),
+    if (showSlashMenu && slashItemCount > 0) {
+      if (navigateMenu(e, slashItemCount, selectedCommandIndex, setSelectedCommandIndex,
+        () => selectSlashItem(selectedCommandIndex),
         () => { setShowSlashMenu(false); setInput(""); },
       )) return;
     }
@@ -979,12 +1038,14 @@ export function ChatInput({
             </div>
           )}
           {/* Slash command menu */}
-          {showSlashMenu && filteredCommands.length > 0 && (
+          {showSlashMenu && slashItemCount > 0 && (
             <div ref={slashMenuRef} className="absolute bottom-full left-0 right-0 mb-2 bg-background border rounded-lg shadow-lg overflow-hidden z-10 max-h-64 overflow-y-auto">
-              <div className="p-2 text-xs text-muted-foreground border-b">
-                <Command className="inline h-3 w-3 mr-1" />
-                Commands
-              </div>
+              {filteredCommands.length > 0 && (
+                <div className="p-2 text-xs text-muted-foreground border-b">
+                  <Command className="inline h-3 w-3 mr-1" />
+                  Commands
+                </div>
+              )}
               {filteredCommands.map((cmd, index) => (
                 <button
                   key={cmd.name}
@@ -1001,6 +1062,30 @@ export function ChatInput({
                   </div>
                 </button>
               ))}
+              {filteredTemplates.length > 0 && (
+                <div className="p-2 text-xs text-muted-foreground border-b border-t">
+                  <FileText className="inline h-3 w-3 mr-1" />
+                  Prompt templates
+                </div>
+              )}
+              {filteredTemplates.map((tpl, i) => {
+                const index = filteredCommands.length + i;
+                return (
+                  <button
+                    key={tpl.name}
+                    data-cmd-index={index}
+                    onClick={() => applyTemplate(tpl)}
+                    className={`w-full text-left px-3 py-2 hover:bg-accent transition-colors ${
+                      index === selectedCommandIndex ? "bg-accent" : ""
+                    }`}
+                  >
+                    <div className="text-sm font-medium truncate">{tpl.name}</div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      {tpl.content.slice(0, 200).replace(/\s+/g, " ")}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           )}
           {/* Active command chip */}
@@ -1168,7 +1253,7 @@ export function ChatInput({
               }
             }}
             placeholder={!isConnected ? "Connecting..." : activeCommand && "inputHint" in activeCommand ? activeCommand.inputHint : "/ for commands, @ for files..."}
-            disabled={!isConnected}
+            disabled={!isConnected || savingBrowserConfig}
             className="resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 min-h-0 overflow-y-auto text-[15px]"
             rows={1}
           />

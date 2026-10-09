@@ -30,6 +30,16 @@ type Config struct {
 	// (rendered as quick-reply buttons). Pointer so "absent" defaults to ON —
 	// nil means enabled; only an explicit false disables it.
 	SuggestNextActions *bool `json:"suggest_next_actions,omitempty"`
+	// PromptTemplates are global (not per-project) reusable prompts.
+	PromptTemplates []PromptTemplate `json:"prompt_templates,omitempty"`
+}
+
+// PromptTemplate is a reusable, user-defined prompt that can be picked in the
+// chat composer. Name is unique among templates; content is plain text and is
+// inserted verbatim.
+type PromptTemplate struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
 }
 
 // Manager provides thread-safe load/save operations for Config.

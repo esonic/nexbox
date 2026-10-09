@@ -27,6 +27,15 @@ func NewSnapshotManager() *SnapshotManager {
 	}
 }
 
+// Reset invalidates UIDs after a connection change while keeping the manager
+// shared by concurrent handlers. Keep the sequence increasing so stale UIDs
+// cannot be reassigned to unrelated nodes after reconnection.
+func (sm *SnapshotManager) Reset() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.uidToNode = make(map[string]cdp.BackendNodeID)
+}
+
 // axTreeResult receives the raw CDP response for Accessibility.getFullAXTree.
 // We use jsontext.Value for lenient parsing to avoid failures on unknown enum
 // values in newer Chrome versions.
@@ -37,14 +46,14 @@ type axTreeResult struct {
 // axNode is a lenient representation of an accessibility tree node.
 // Uses standard encoding/json so unknown enum values are accepted as strings.
 type axNode struct {
-	NodeID           string        `json:"nodeId"`
-	Ignored          bool          `json:"ignored"`
-	Role             *axVal        `json:"role,omitempty"`
-	Name             *axVal        `json:"name,omitempty"`
-	Value            *axVal        `json:"value,omitempty"`
-	Properties       []*axProp     `json:"properties,omitempty"`
-	ParentID         string        `json:"parentId,omitempty"`
-	ChildIDs         []string      `json:"childIds,omitempty"`
+	NodeID           string            `json:"nodeId"`
+	Ignored          bool              `json:"ignored"`
+	Role             *axVal            `json:"role,omitempty"`
+	Name             *axVal            `json:"name,omitempty"`
+	Value            *axVal            `json:"value,omitempty"`
+	Properties       []*axProp         `json:"properties,omitempty"`
+	ParentID         string            `json:"parentId,omitempty"`
+	ChildIDs         []string          `json:"childIds,omitempty"`
 	BackendDOMNodeID cdp.BackendNodeID `json:"backendDOMNodeId,omitempty"`
 }
 
@@ -61,6 +70,10 @@ type axProp struct {
 // TakeSnapshot captures the page's accessibility tree and returns a text
 // representation with UIDs assigned to each interactive or named element.
 func (sm *SnapshotManager) TakeSnapshot(ctx context.Context) (string, error) {
+	// A reset waits for an in-progress capture; a response from an old
+	// connection cannot repopulate the mapping after it was invalidated.
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	var raw axTreeResult
 	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		return cdp.Execute(ctx, "Accessibility.getFullAXTree", nil, &raw)
@@ -72,9 +85,6 @@ func (sm *SnapshotManager) TakeSnapshot(ctx context.Context) (string, error) {
 	if err := json.Unmarshal([]byte(raw.Nodes), &nodes); err != nil {
 		return "", fmt.Errorf("parse accessibility nodes: %w", err)
 	}
-
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
 
 	sm.snapshotSeq++
 	sm.uidToNode = make(map[string]cdp.BackendNodeID, len(nodes))

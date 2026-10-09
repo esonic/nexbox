@@ -10,7 +10,7 @@ import (
 )
 
 // ChromeManager creates and manages per-session Chrome MCP servers.
-// Each session gets its own Chrome instance with an isolated user data dir.
+// Each session uses an isolated managed Chrome or a configured external Chrome.
 type ChromeManager struct {
 	mu          sync.Mutex
 	sessions    map[string]*Server
@@ -58,7 +58,7 @@ func NewChromeManager(baseDir, listenHost string, headlessFn func() bool, isActi
 
 // GetOrCreate returns the Chrome MCP server for the given session, creating
 // one on first call. The server is lazily started (call EnsureStarted after).
-func (m *ChromeManager) GetOrCreate(sessionID string) *Server {
+func (m *ChromeManager) GetOrCreate(sessionID string, browserURL ...string) *Server {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -76,17 +76,23 @@ func (m *ChromeManager) GetOrCreate(sessionID string) *Server {
 	browserOpts := BrowserOptions{
 		Headless: m.headlessFn(),
 	}
+	if len(browserURL) > 0 {
+		browserOpts.BrowserURL = browserURL[0]
+	}
 	if execPath := os.Getenv("NEX_CHROME_EXEC_PATH"); execPath != "" {
 		browserOpts.ExecPath = execPath
 	}
-	if dataDir := os.Getenv("NEX_CHROME_DATA_DIR"); dataDir != "" {
-		browserOpts.UserDataDir = dataDir
-	} else {
-		userDataDir := filepath.Join(sessionDir, "chrome-profile")
-		if err := os.MkdirAll(userDataDir, 0755); err != nil {
-			log.Printf("[chrome-manager] Failed to create user data dir %s: %v", userDataDir, err)
+	// External Chrome owns its profile; only screenshots are local.
+	if browserOpts.BrowserURL == "" {
+		if dataDir := os.Getenv("NEX_CHROME_DATA_DIR"); dataDir != "" {
+			browserOpts.UserDataDir = dataDir
+		} else {
+			userDataDir := filepath.Join(sessionDir, "chrome-profile")
+			if err := os.MkdirAll(userDataDir, 0755); err != nil {
+				log.Printf("[chrome-manager] Failed to create user data dir %s: %v", userDataDir, err)
+			}
+			browserOpts.UserDataDir = userDataDir
 		}
-		browserOpts.UserDataDir = userDataDir
 	}
 
 	srv := NewServer(m.listenHost+":0", screenshotDir, browserOpts)

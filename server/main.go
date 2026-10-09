@@ -57,7 +57,7 @@ func (c *chromeEnablerImpl) EnableChrome(sessionID string) (string, []string, er
 	if err := c.store.UpdateSessionFeatures(sessionID, features); err != nil {
 		return "", nil, fmt.Errorf("failed to save feature: %w", err)
 	}
-	chromeSrv := c.manager.GetOrCreate(sessionID)
+	chromeSrv := c.manager.GetOrCreate(sessionID, sess.ChromeBrowserURL)
 	if err := chromeSrv.EnsureStarted(context.Background()); err != nil {
 		return "", nil, fmt.Errorf("failed to start Chrome MCP: %w", err)
 	}

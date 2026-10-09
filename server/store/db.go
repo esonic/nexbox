@@ -586,6 +586,10 @@ func (db *DB) migrate() error {
 	type colMigration struct{ check, alter string }
 	colMigrations := []colMigration{
 		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='chrome_browser_url'`,
+			alter: `ALTER TABLE sessions ADD COLUMN chrome_browser_url TEXT NOT NULL DEFAULT ''`,
+		},
+		{
 			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='model'`,
 			alter: `ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
 		},

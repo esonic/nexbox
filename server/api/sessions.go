@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/esonic/nexbox/agent"
+	chromemcp "github.com/esonic/nexbox/mcp/chrome"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -109,6 +110,21 @@ func (s *Server) UpdateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	if req.ChromeBrowserURL != nil {
+		url := strings.TrimSpace(*req.ChromeBrowserURL)
+		if err := chromemcp.ValidateBrowserURL(url); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		req.ChromeBrowserURL = &url
+		if s.SessionManager != nil && !s.SessionManager.TrySetActive(id) {
+			writeError(w, http.StatusConflict, "wait for the current turn to finish before changing the Chrome connection")
+			return
+		}
+		if s.SessionManager != nil {
+			defer s.SessionManager.SetActive(id, false)
+		}
+	}
 	if req.Model != nil {
 		existing, err := s.Store.GetSession(id)
 		if writeStoreError(w, err, "GetSession", "failed to load session") {
@@ -139,6 +155,9 @@ func (s *Server) UpdateSession(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
+	}
+	if req.ChromeBrowserURL != nil && s.ChromeManager != nil {
+		s.ChromeManager.Remove(id)
 	}
 	writeJSON(w, http.StatusOK, sess)
 }

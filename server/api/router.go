@@ -262,6 +262,8 @@ func registerAuthedAPIRoutes(s *Server, r chi.Router) {
 	r.Put("/default-agent", s.SetDefaultAgent)
 	r.Get("/settings", s.GetSettings)
 	r.Put("/settings", s.UpdateSettings)
+	r.Get("/prompt-templates", s.ListPromptTemplates)
+	r.Put("/prompt-templates", s.ReplacePromptTemplates)
 
 	s.RegisterWorkflowRoutes(r)
 	s.RegisterRalphRoutes(r)

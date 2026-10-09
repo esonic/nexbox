@@ -163,7 +163,7 @@ export const sessionsApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  update: (id: string, data: Partial<{ name: string; project_id: string; agent: string; model: string; effort: string }>) =>
+  update: (id: string, data: Partial<{ name: string; project_id: string; agent: string; model: string; effort: string; chrome_browser_url: string }>) =>
     request<Session>(`/sessions/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
@@ -563,6 +563,20 @@ export interface ServerInfo {
   user_name?: string;
   server_url?: string;
 }
+
+export interface PromptTemplate {
+  name: string;
+  content: string;
+}
+
+export const promptTemplatesApi = {
+  list: () => request<PromptTemplate[]>("/prompt-templates"),
+  replace: (templates: PromptTemplate[]) =>
+    request<PromptTemplate[]>("/prompt-templates", {
+      method: "PUT",
+      body: JSON.stringify(templates),
+    }),
+};
 
 export const serverApi = {
   info: () => request<ServerInfo>("/info"),
