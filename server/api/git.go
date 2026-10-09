@@ -43,7 +43,7 @@ func getCurrentBranchContext(ctx context.Context, dir string) (string, error) {
 type GitFileEntry struct {
 	Path         string `json:"path"`
 	OriginalPath string `json:"original_path,omitempty"`
-	Status       string `json:"status"` // modified, added, deleted, renamed, untracked
+	Status       string `json:"status"` // modified, added, deleted, renamed, untracked, conflicted
 }
 
 // GitStatusResponse represents the structured git status
@@ -95,6 +95,9 @@ type GitBranchInfo struct {
 	Name      string `json:"name"`
 	IsCurrent bool   `json:"is_current"`
 	IsRemote  bool   `json:"is_remote"`
+	// LocalName is the branch name without the remote prefix, set only for
+	// remote-tracking branches (origin/feature -> feature).
+	LocalName string `json:"local_name,omitempty"`
 	Upstream  string `json:"upstream,omitempty"`
 	Ahead     int    `json:"ahead,omitempty"`
 	Behind    int    `json:"behind,omitempty"`
@@ -111,6 +114,10 @@ type GitBranchResponse struct {
 type GitCheckoutRequest struct {
 	Branch string `json:"branch"`
 	Create bool   `json:"create"`
+	// StartPoint, when set with Create, is the remote-tracking branch the new
+	// branch starts from and tracks (e.g. origin/feature). Only
+	// remote-tracking refs are accepted.
+	StartPoint string `json:"start_point,omitempty"`
 }
 
 // GitStageRequest represents a stage/unstage request
@@ -198,11 +205,17 @@ func (s *Server) GitCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Atomic commit: reset -> add selected -> commit
-	// Step 1: Reset staging area
-	if err := runGitCommand(r.Context(), workDir, "reset", "HEAD"); err != nil {
-		// For fresh repos, reset may fail - that's ok
-		log.Printf("[git] reset HEAD warning (may be fresh repo): %v", err)
+	// Build the index from scratch so the commit contains only the requested
+	// paths. An unborn repository has no HEAD for `git reset HEAD`, so clear its
+	// index explicitly instead of leaving previously staged paths in place.
+	if gitrepo.HasCommit(r.Context(), workDir) {
+		if err := runGitCommand(r.Context(), workDir, "reset", "HEAD"); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("git reset failed: %v", err))
+			return
+		}
+	} else if err := runGitCommand(r.Context(), workDir, "read-tree", "--empty"); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("git index reset failed: %v", err))
+		return
 	}
 
 	// Step 2: Stage only selected files
@@ -574,6 +587,16 @@ func (s *Server) GitCheckout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid branch name")
 		return
 	}
+	if req.StartPoint != "" {
+		if !req.Create {
+			writeError(w, http.StatusBadRequest, "start_point requires create")
+			return
+		}
+		if err := validateRemoteTrackingBranch(r.Context(), workDir, req.StartPoint); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	unlock, err := s.lockRepositoryMutation(r, repositoryContext)
 	if err != nil {
 		writeRepositoryError(w, err)
@@ -581,10 +604,20 @@ func (s *Server) GitCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 	defer unlock()
 
+	// Without create, only an existing local branch is a valid target: git would
+	// otherwise DWIM an arbitrary revision into a detached HEAD.
+	if !req.Create && !localBranchExists(r.Context(), workDir, req.Branch) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("local branch %q does not exist", req.Branch))
+		return
+	}
+
 	var args []string
-	if req.Create {
+	switch {
+	case req.Create && req.StartPoint != "":
+		args = []string{"checkout", "-b", req.Branch, "--track", req.StartPoint}
+	case req.Create:
 		args = []string{"checkout", "-b", req.Branch}
-	} else {
+	default:
 		args = []string{"checkout", req.Branch}
 	}
 
@@ -793,6 +826,24 @@ func validateRemoteBranchOperation(ctx context.Context, workDir string) error {
 		return errors.New("operation is not supported from detached HEAD")
 	}
 	return nil
+}
+
+// validateRemoteTrackingBranch verifies name refers to an existing
+// remote-tracking branch (e.g. origin/feature), so a checkout start point can
+// never resolve to an arbitrary revision.
+func validateRemoteTrackingBranch(ctx context.Context, workDir, name string) error {
+	if err := runGitCommand(ctx, workDir, "check-ref-format", "--branch", name); err != nil {
+		return errors.New("invalid start point")
+	}
+	if err := runGitCommand(ctx, workDir, "rev-parse", "--verify", "--quiet", "--end-of-options", remoteRefPrefix+name+"^{commit}"); err != nil {
+		return errors.New("start point is not a remote-tracking branch")
+	}
+	return nil
+}
+
+// localBranchExists reports whether refs/heads/<name> is present.
+func localBranchExists(ctx context.Context, workDir, name string) bool {
+	return runGitCommand(ctx, workDir, "rev-parse", "--verify", "--quiet", "--end-of-options", "refs/heads/"+name) == nil
 }
 
 // --- Git helper functions ---
@@ -1050,9 +1101,11 @@ func getCommitDiff(ctx context.Context, dir string, hash string) (string, error)
 	return stdout.String(), nil
 }
 
+const remoteRefPrefix = "refs/remotes/"
+
 // parseGitBranches lists branches with tracking info
 func parseGitBranches(ctx context.Context, dir string) (*GitBranchResponse, error) {
-	cmd := exec.CommandContext(ctx, "git", "branch", "-a", "--format=%(HEAD)|%(refname:short)|%(upstream:short)|%(upstream:track)")
+	cmd := exec.CommandContext(ctx, "git", "branch", "-a", "--format=%(HEAD)|%(refname)|%(refname:short)|%(upstream:short)|%(upstream:track)")
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -1069,28 +1122,39 @@ func parseGitBranches(ctx context.Context, dir string) (*GitBranchResponse, erro
 	scanner := bufio.NewScanner(&stdout)
 	for scanner.Scan() {
 		line := scanner.Text()
-		parts := strings.SplitN(line, "|", 4)
-		if len(parts) < 4 {
+		parts := strings.SplitN(line, "|", 5)
+		if len(parts) < 5 {
 			continue
 		}
 
 		isCurrent := strings.TrimSpace(parts[0]) == "*"
-		name := strings.TrimSpace(parts[1])
-		upstream := strings.TrimSpace(parts[2])
-		trackInfo := strings.TrimSpace(parts[3])
+		refName := strings.TrimSpace(parts[1])
+		name := strings.TrimSpace(parts[2])
+		upstream := strings.TrimSpace(parts[3])
+		trackInfo := strings.TrimSpace(parts[4])
 
-		isRemote := strings.HasPrefix(name, "origin/")
+		// Classify from the full refname: %(refname:short) shortens
+		// refs/remotes/<remote>/HEAD all the way down to "<remote>", so the short
+		// name alone cannot tell a local branch from a remote one.
+		isRemote := strings.HasPrefix(refName, remoteRefPrefix)
+		localName := ""
 		if isRemote {
-			// Skip HEAD pointer
-			if name == "origin/HEAD" {
+			// Skip the remote's default-branch symref (refs/remotes/<remote>/HEAD)
+			if strings.HasSuffix(refName, "/HEAD") {
 				continue
 			}
+			_, branchPath, found := strings.Cut(strings.TrimPrefix(refName, remoteRefPrefix), "/")
+			if !found || branchPath == "" {
+				continue
+			}
+			localName = branchPath
 		}
 
 		branch := GitBranchInfo{
 			Name:      name,
 			IsCurrent: isCurrent,
 			IsRemote:  isRemote,
+			LocalName: localName,
 			Upstream:  upstream,
 		}
 
