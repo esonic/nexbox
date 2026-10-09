@@ -665,7 +665,7 @@ export interface InstalledPluginEntry {
 
 export interface MarketplaceSource {
   id: string;
-  type: string;   // "local" or "git"
+  type: string;   // "local", "git", or "mcp"
   url: string;
   path: string;
   name: string;
@@ -685,6 +685,12 @@ export const marketplaceApi = {
     request<MarketplaceSource>("/marketplace/sources", {
       method: "POST",
       body: JSON.stringify({ input }),
+    }),
+
+  addMCPSource: (name: string, url: string, headers: Record<string, string>) =>
+    request<MarketplaceSource>("/marketplace/mcp-sources", {
+      method: "POST",
+      body: JSON.stringify({ name, url, headers }),
     }),
 
   removeSource: (id: string) =>

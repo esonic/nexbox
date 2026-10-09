@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,6 +25,183 @@ import (
 
 type AddMarketplaceSourceRequest struct {
 	Input string `json:"input"` // local path or git URL (auto-detected)
+}
+
+type AddManualMCPSourceRequest struct {
+	Name    string            `json:"name"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+}
+
+var (
+	manualMCPHeaderNamePattern = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+	manualMCPNamePattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$`)
+)
+
+// AddManualMCPSource creates a minimal local marketplace entry for one remote
+// MCP. It deliberately does not install the MCP; installation continues through
+// the normal marketplace card flow, including project selection.
+func (s *Server) AddManualMCPSource(w http.ResponseWriter, r *http.Request) {
+	if s.Store == nil {
+		writeError(w, http.StatusServiceUnavailable, "local store not available")
+		return
+	}
+	var req AddManualMCPSourceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if !manualMCPNamePattern.MatchString(name) {
+		writeError(w, http.StatusBadRequest, "name must be 1-40 characters, start with a letter or number, and contain only letters, numbers, hyphens, or underscores")
+		return
+	}
+	rawURL := strings.TrimSpace(req.URL)
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
+		writeError(w, http.StatusBadRequest, "url must be a valid http:// or https:// URL")
+		return
+	}
+	if parsedURL.Fragment != "" {
+		writeError(w, http.StatusBadRequest, "url must not contain a fragment")
+		return
+	}
+	if parsedURL.User != nil {
+		writeError(w, http.StatusBadRequest, "url must not contain credentials; use headers instead")
+		return
+	}
+	parsedURL.Scheme = strings.ToLower(parsedURL.Scheme)
+	parsedURL.Host = strings.ToLower(parsedURL.Host)
+	rawURL = parsedURL.String()
+
+	headers := make(map[string]string, len(req.Headers))
+	seenHeaders := make(map[string]bool, len(req.Headers))
+	for name, value := range req.Headers {
+		name = strings.TrimSpace(name)
+		if !manualMCPHeaderNamePattern.MatchString(name) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid header name %q", name))
+			return
+		}
+		lowerName := strings.ToLower(name)
+		if seenHeaders[lowerName] {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("duplicate header name %q", name))
+			return
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("header %q must be a single line", name))
+			return
+		}
+		seenHeaders[lowerName] = true
+		headers[name] = value
+	}
+
+	mpDir := s.marketplaceDir()
+	if mpDir == "" {
+		writeError(w, http.StatusInternalServerError, "marketplace directory not configured")
+		return
+	}
+	if err := os.MkdirAll(mpDir, 0755); err != nil {
+		writeError(w, http.StatusInternalServerError, "create marketplace dir: "+err.Error())
+		return
+	}
+
+	hash := sha256.Sum256([]byte(rawURL))
+	shortHash := hex.EncodeToString(hash[:6])
+	sourceID := "mcp-" + shortHash
+	sourceDirName := "manual-" + sourceID
+	sourceDir := filepath.Join(mpDir, sourceDirName)
+	existingPlugins, err := loadMarketplacePlugins(mpDir, sourcesByPath(s.Store))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load marketplace: "+err.Error())
+		return
+	}
+	currentSourceOwnsName := false
+	for _, plugin := range existingPlugins {
+		if plugin.Type == "mcp" && strings.EqualFold(plugin.Name, name) {
+			if plugin.InstallPath == sourceDir {
+				currentSourceOwnsName = true
+				continue
+			}
+			writeError(w, http.StatusConflict, fmt.Sprintf("an MCP named %q already exists", name))
+			return
+		}
+	}
+	installedMCPs, err := s.Store.ListInstalledMCPs("*")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load installed MCPs: "+err.Error())
+		return
+	}
+	for _, installed := range installedMCPs {
+		if strings.EqualFold(installed.Name, name) && !currentSourceOwnsName {
+			writeError(w, http.StatusConflict, fmt.Sprintf("an installed MCP named %q already exists", name))
+			return
+		}
+	}
+	pluginDir := filepath.Join(sourceDir, ".claude-plugin")
+	if err := os.MkdirAll(pluginDir, 0700); err != nil {
+		writeError(w, http.StatusInternalServerError, "create MCP source: "+err.Error())
+		return
+	}
+	if err := os.Chmod(sourceDir, 0700); err != nil {
+		writeError(w, http.StatusInternalServerError, "secure MCP source: "+err.Error())
+		return
+	}
+	if err := os.Chmod(pluginDir, 0700); err != nil {
+		writeError(w, http.StatusInternalServerError, "secure MCP source: "+err.Error())
+		return
+	}
+	// Headers can contain credentials, so both generated files are private.
+	pluginData, err := json.MarshalIndent(map[string]string{
+		"name":        name,
+		"description": rawURL,
+	}, "", "  ")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "encode MCP source: "+err.Error())
+		return
+	}
+	mcpData, err := json.MarshalIndent(map[string]any{
+		"mcpServers": map[string]any{
+			name: map[string]any{
+				"url":     rawURL,
+				"headers": headers,
+			},
+		},
+	}, "", "  ")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "encode MCP source: "+err.Error())
+		return
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), pluginData, 0600); err != nil {
+		writeError(w, http.StatusInternalServerError, "write MCP source: "+err.Error())
+		return
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, ".mcp.json"), mcpData, 0600); err != nil {
+		writeError(w, http.StatusInternalServerError, "write MCP source: "+err.Error())
+		return
+	}
+	if err := os.Chmod(filepath.Join(pluginDir, "plugin.json"), 0600); err != nil {
+		writeError(w, http.StatusInternalServerError, "secure MCP source: "+err.Error())
+		return
+	}
+	if err := os.Chmod(filepath.Join(sourceDir, ".mcp.json"), 0600); err != nil {
+		writeError(w, http.StatusInternalServerError, "secure MCP source: "+err.Error())
+		return
+	}
+
+	src := store.MarketplaceSource{
+		ID:      sourceID,
+		Type:    "mcp",
+		URL:     rawURL,
+		Path:    sourceDir,
+		Name:    sourceDirName,
+		AddedAt: store.UnixTime(time.Now()),
+	}
+	if err := s.Store.UpsertMarketplaceSource(src); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	log.Printf("[marketplace] added manual MCP source: %s", rawURL)
+	writeJSON(w, http.StatusCreated, src)
 }
 
 // hasValidPluginContent checks whether a directory contains any recognized plugin format.

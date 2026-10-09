@@ -1,10 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/esonic/nexbox/store"
@@ -118,6 +122,347 @@ func TestParseMCPConfig_NoAuth(t *testing.T) {
 	}
 	if len(envVars) != 0 {
 		t.Errorf("envVars = %v, want empty", envVars)
+	}
+}
+
+func TestResolveMCPHeaderTemplates(t *testing.T) {
+	headers, used, err := resolveMCPHeaderTemplates(
+		map[string]string{
+			"Authorization": "Bearer ${TOKEN}",
+			"X-Org-ID":      "${ORG_ID}",
+			"X-Static":      "kept-as-written",
+		},
+		map[string]string{"TOKEN": "secret-token", "ORG_ID": "org-42"},
+	)
+	if err != nil {
+		t.Fatalf("resolveMCPHeaderTemplates: %v", err)
+	}
+	if got := headers["Authorization"]; got != "Bearer secret-token" {
+		t.Errorf("Authorization = %q", got)
+	}
+	if got := headers["X-Org-ID"]; got != "org-42" {
+		t.Errorf("X-Org-ID = %q", got)
+	}
+	if got := headers["X-Static"]; got != "kept-as-written" {
+		t.Errorf("X-Static = %q", got)
+	}
+	if !used["TOKEN"] || !used["ORG_ID"] {
+		t.Errorf("used = %v", used)
+	}
+}
+
+func TestResolveMCPHeaderTemplatesMissingValue(t *testing.T) {
+	_, _, err := resolveMCPHeaderTemplates(
+		map[string]string{"Authorization": "Bearer ${TOKEN}", "X-Org-ID": "${ORG_ID}"},
+		map[string]string{"TOKEN": "secret-token"},
+	)
+	if err == nil || err.Error() != "missing header values: [ORG_ID]" {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestMCPRequestHeadersUsesManifestWithoutGuessing(t *testing.T) {
+	mcp := &store.InstalledMCP{
+		Manifest:  `{"url":"https://example.com/mcp","headers":{"X-API-Key":"key-value","X-Org-ID":"org-42"}}`,
+		EnvValues: `{"UNRELATED_TOKEN":"must-not-be-used"}`,
+		AuthType:  "apikey",
+	}
+	headers, err := (&Server{}).mcpRequestHeaders(mcp)
+	if err != nil {
+		t.Fatalf("mcpRequestHeaders: %v", err)
+	}
+	if len(headers) != 2 || headers["X-API-Key"] != "key-value" || headers["X-Org-ID"] != "org-42" {
+		t.Fatalf("headers = %v", headers)
+	}
+	if _, ok := headers["Authorization"]; ok {
+		t.Fatalf("unexpected guessed Authorization header: %v", headers)
+	}
+}
+
+func TestMCPRequestHeadersOAuthOverridesOnlyAuthorization(t *testing.T) {
+	db, err := store.New(testTempDir(t))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	localStore := store.NewSQLiteStore(db)
+	if err := localStore.UpsertMCPOAuthToken(store.MCPOAuthToken{
+		MCPName:     "example",
+		AccessToken: "oauth-access-token",
+	}); err != nil {
+		t.Fatalf("UpsertMCPOAuthToken: %v", err)
+	}
+
+	mcp := &store.InstalledMCP{
+		Name:      "example",
+		Manifest:  `{"url":"https://example.com/mcp","headers":{"authorization":"Bearer stale","X-Org-ID":"org-42"}}`,
+		EnvValues: `{}`,
+		AuthType:  "oauth",
+		ProjectID: "",
+	}
+	headers, err := (&Server{Store: localStore}).mcpRequestHeaders(mcp)
+	if err != nil {
+		t.Fatalf("mcpRequestHeaders: %v", err)
+	}
+	if got := headers["Authorization"]; got != "Bearer oauth-access-token" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if _, exists := headers["authorization"]; exists {
+		t.Fatalf("case-variant Authorization was not replaced: %v", headers)
+	}
+	if got := headers["X-Org-ID"]; got != "org-42" {
+		t.Fatalf("X-Org-ID = %q", got)
+	}
+}
+
+func TestProbeMCPNeedsAuthSendsConfiguredHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret-token" || r.Header.Get("X-Org-ID") != "org-42" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	needsAuth, err := probeMCPNeedsAuth(upstream.URL, map[string]string{
+		"Authorization": "Bearer secret-token",
+		"X-Org-ID":      "org-42",
+	})
+	if err != nil {
+		t.Fatalf("probeMCPNeedsAuth: %v", err)
+	}
+	if needsAuth {
+		t.Fatal("probe reported auth was required even though all headers were sent")
+	}
+}
+
+func TestInstallMCPStoresResolvedHeaders(t *testing.T) {
+	db, err := store.New(testTempDir(t))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	localStore := store.NewSQLiteStore(db)
+	server := &Server{Store: localStore}
+
+	body := []byte(`{
+		"name":"example",
+		"package_id":"manual",
+		"mcp_key":"example",
+		"manifest":{"mcpServers":{"example":{"url":"https://example.com/mcp","headers":{"Authorization":"Bearer ${TOKEN}","X-Org-ID":"${ORG_ID}"}}}},
+		"env":{"TOKEN":"secret-token","ORG_ID":"org-42"},
+		"auth_type":"apikey"
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/marketplace/installed-mcps", bytes.NewReader(body))
+	recorder := httptest.NewRecorder()
+	server.InstallMCP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	installed, err := localStore.GetInstalledMCP("example", "")
+	if err != nil || installed == nil {
+		t.Fatalf("GetInstalledMCP: installed=%v err=%v", installed, err)
+	}
+	var manifest struct {
+		Headers map[string]string `json:"headers"`
+	}
+	if err := json.Unmarshal([]byte(installed.Manifest), &manifest); err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	if manifest.Headers["Authorization"] != "Bearer secret-token" || manifest.Headers["X-Org-ID"] != "org-42" {
+		t.Fatalf("headers = %v", manifest.Headers)
+	}
+	if installed.EnvValues != "{}" {
+		t.Fatalf("header values should only be stored in the manifest, env_values = %s", installed.EnvValues)
+	}
+}
+
+func TestInstallMCPStoresResolvedOAuthClientID(t *testing.T) {
+	db, err := store.New(testTempDir(t))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	localStore := store.NewSQLiteStore(db)
+	server := &Server{Store: localStore}
+
+	body := []byte(`{
+		"name":"oauth-example",
+		"package_id":"marketplace-oauth",
+		"manifest":{"mcpServers":{"oauth-example":{"url":"https://example.com/mcp","oauth":{"clientId":"${CLIENT_ID}","scope":"tools"}}}},
+		"env":{"CLIENT_ID":"client-42"},
+		"auth_type":"oauth"
+	}`)
+	recorder := httptest.NewRecorder()
+	server.InstallMCP(recorder, httptest.NewRequest(http.MethodPost, "/marketplace/installed-mcps", bytes.NewReader(body)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	installed, err := localStore.GetInstalledMCP("oauth-example", "")
+	if err != nil || installed == nil {
+		t.Fatalf("GetInstalledMCP: installed=%v err=%v", installed, err)
+	}
+	var manifest struct {
+		OAuth map[string]string `json:"oauth"`
+	}
+	if err := json.Unmarshal([]byte(installed.Manifest), &manifest); err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	if manifest.OAuth["clientId"] != "client-42" || manifest.OAuth["scope"] != "tools" {
+		t.Fatalf("oauth = %v", manifest.OAuth)
+	}
+	if installed.EnvValues != "{}" {
+		t.Fatalf("OAuth client ID should only be stored in the manifest, env_values = %s", installed.EnvValues)
+	}
+}
+
+func TestAddManualMCPSourceCreatesUninstalledMarketplaceCard(t *testing.T) {
+	dataDir := testTempDir(t)
+	db, err := store.New(dataDir)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	localStore := store.NewSQLiteStore(db)
+	server := &Server{Store: localStore, DataDir: dataDir}
+
+	body := []byte(`{
+		"name":"oklog-user",
+		"url":"https://MCP.example.com/team/mcp?region=hk",
+		"headers":{"Authorization":"Bearer test-value","X-Org-ID":"org-42"}
+	}`)
+	recorder := httptest.NewRecorder()
+	server.AddManualMCPSource(recorder, httptest.NewRequest(http.MethodPost, "/marketplace/mcp-sources", bytes.NewReader(body)))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	var source store.MarketplaceSource
+	if err := json.Unmarshal(recorder.Body.Bytes(), &source); err != nil {
+		t.Fatalf("source response: %v", err)
+	}
+	if source.Type != "mcp" || source.URL != "https://mcp.example.com/team/mcp?region=hk" {
+		t.Fatalf("source = %+v", source)
+	}
+	if !strings.HasPrefix(filepath.Base(source.Path), "manual-mcp-") {
+		t.Fatalf("unexpected source path: %s", source.Path)
+	}
+	if info, err := os.Stat(source.Path); err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("source permissions = %v, err = %v", info, err)
+	}
+	configPath := filepath.Join(source.Path, ".mcp.json")
+	if info, err := os.Stat(configPath); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("config permissions = %v, err = %v", info, err)
+	}
+
+	plugins, err := loadMarketplacePlugins(server.marketplaceDir(), sourcesByPath(localStore))
+	if err != nil {
+		t.Fatalf("loadMarketplacePlugins: %v", err)
+	}
+	if len(plugins) != 1 {
+		t.Fatalf("plugins = %+v", plugins)
+	}
+	plugin := plugins[0]
+	if plugin.Name != "oklog-user" || plugin.Type != "mcp" || plugin.SourceLabel != "Manual" || plugin.Description != source.URL {
+		t.Fatalf("plugin = %+v", plugin)
+	}
+	var config struct {
+		MCPServers map[string]struct {
+			URL     string            `json:"url"`
+			Headers map[string]string `json:"headers"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(plugin.MCPConfig), &config); err != nil {
+		t.Fatalf("mcp config: %v", err)
+	}
+	serverConfig := config.MCPServers[plugin.Name]
+	if serverConfig.URL != source.URL || serverConfig.Headers["Authorization"] != "Bearer test-value" || serverConfig.Headers["X-Org-ID"] != "org-42" {
+		t.Fatalf("server config = %+v", serverConfig)
+	}
+
+	installed, err := localStore.ListInstalledMCPs("*")
+	if err != nil {
+		t.Fatalf("ListInstalledMCPs: %v", err)
+	}
+	if len(installed) != 0 {
+		t.Fatalf("Add MCP installed unexpectedly: %+v", installed)
+	}
+}
+
+func TestAddManualMCPSourceUpdatesSameURL(t *testing.T) {
+	dataDir := testTempDir(t)
+	db, err := store.New(dataDir)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	localStore := store.NewSQLiteStore(db)
+	server := &Server{Store: localStore, DataDir: dataDir}
+
+	add := func(value string) store.MarketplaceSource {
+		t.Helper()
+		body, _ := json.Marshal(AddManualMCPSourceRequest{
+			Name:    "example-mcp",
+			URL:     "https://example.com/mcp",
+			Headers: map[string]string{"X-Test": value},
+		})
+		recorder := httptest.NewRecorder()
+		server.AddManualMCPSource(recorder, httptest.NewRequest(http.MethodPost, "/marketplace/mcp-sources", bytes.NewReader(body)))
+		if recorder.Code != http.StatusCreated {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		var source store.MarketplaceSource
+		if err := json.Unmarshal(recorder.Body.Bytes(), &source); err != nil {
+			t.Fatalf("source response: %v", err)
+		}
+		return source
+	}
+
+	first := add("first")
+	second := add("second")
+	if first.ID != second.ID || first.Path != second.Path {
+		t.Fatalf("same URL created different sources: first=%+v second=%+v", first, second)
+	}
+	sources, err := localStore.ListMarketplaceSources()
+	if err != nil || len(sources) != 1 {
+		t.Fatalf("sources = %+v, err = %v", sources, err)
+	}
+	plugins, err := loadMarketplacePlugins(server.marketplaceDir(), sourcesByPath(localStore))
+	if err != nil || len(plugins) != 1 || !strings.Contains(plugins[0].MCPConfig, `"X-Test": "second"`) {
+		t.Fatalf("updated plugins = %+v, err = %v", plugins, err)
+	}
+}
+
+func TestAddManualMCPSourceValidatesNameAndRejectsDuplicates(t *testing.T) {
+	dataDir := testTempDir(t)
+	db, err := store.New(dataDir)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	server := &Server{Store: store.NewSQLiteStore(db), DataDir: dataDir}
+
+	add := func(name, rawURL string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, _ := json.Marshal(AddManualMCPSourceRequest{Name: name, URL: rawURL})
+		recorder := httptest.NewRecorder()
+		server.AddManualMCPSource(recorder, httptest.NewRequest(http.MethodPost, "/marketplace/mcp-sources", bytes.NewReader(body)))
+		return recorder
+	}
+
+	for _, name := range []string{"", "has spaces", "-starts-with-dash", "包含中文", strings.Repeat("a", 41)} {
+		if recorder := add(name, "https://invalid-name.example.com/mcp"); recorder.Code != http.StatusBadRequest {
+			t.Errorf("name %q: status = %d, body = %s", name, recorder.Code, recorder.Body.String())
+		}
+	}
+	if recorder := add("team_mcp-1", "https://one.example.com/mcp"); recorder.Code != http.StatusCreated {
+		t.Fatalf("valid name: status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := add("TEAM_MCP-1", "https://two.example.com/mcp"); recorder.Code != http.StatusConflict {
+		t.Fatalf("duplicate name: status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -470,8 +815,8 @@ func TestMCPTargetURL(t *testing.T) {
 }
 
 func TestResolveOAuthConfig_ExplicitOAuth(t *testing.T) {
-	manifest := `{"url":"https://slack.mcp.com","oauth":{"clientId":"my-client-123"}}`
-	mcp := &storeInstalledMCPShim{manifest: manifest, authType: "oauth"}
+	manifest := `{"url":"https://slack.mcp.com/mcp/v1","oauth":{"clientId":"my-client-123"}}`
+	mcp := &storeInstalledMCPShim{manifest: manifest, authType: "oauth", envValues: `{"CLIENT_ID":"fallback-must-not-win"}`}
 
 	clientID, serverURL, err := resolveOAuthConfig(mcp.toStoreMCP())
 	if err != nil {

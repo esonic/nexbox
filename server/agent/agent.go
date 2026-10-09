@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 )
 
@@ -75,7 +76,8 @@ type MCPServerEntry struct {
 	Key              string            `json:"key"`                          // server name in mcpServers config (e.g. "github")
 	Type             string            `json:"type"`                         // "http" or "stdio"
 	URL              string            `json:"url,omitempty"`                // for http transport
-	Headers          map[string]string `json:"headers,omitempty"`            // HTTP headers for http transport; user-provided values stored with "header:" prefix in env_values
+	Headers          map[string]string `json:"headers,omitempty"`            // complete HTTP headers forwarded to the MCP server
+	OAuth            json.RawMessage   `json:"oauth,omitempty"`              // optional marketplace OAuth client configuration; not passed to agent runtimes
 	Cmd              string            `json:"cmd,omitempty"`                // for stdio transport
 	Args             []string          `json:"args,omitempty"`               // for stdio transport
 	Env              map[string]string `json:"env,omitempty"`                // env vars for stdio transport

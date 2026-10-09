@@ -133,6 +133,9 @@ func applySourceLabel(p *MarketplacePlugin, sourceRoot string, byPath map[string
 	if src.Type == "git" && src.URL != "" {
 		p.SourceLabel = gitSourceLabel(src.URL)
 		p.SourceFull = src.URL
+	} else if src.Type == "mcp" && src.URL != "" {
+		p.SourceLabel = "Manual"
+		p.SourceFull = src.URL
 	} else {
 		p.SourceLabel = filepath.Base(src.Path)
 		p.SourceFull = src.Path

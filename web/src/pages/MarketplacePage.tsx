@@ -29,6 +29,16 @@ type TabType = "mcp" | "skill" | "plugin";
 
 const SCOPE_ALL = "";
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isMCPServerConfig(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const config = value as Record<string, unknown>;
+  return Boolean(config.command || config.url);
+}
+
 export function MarketplacePage() {
   const [tab, setTab] = useState<TabType>("mcp");
   const [search, setSearch] = useState("");
@@ -42,6 +52,7 @@ export function MarketplacePage() {
   const [installing, setInstalling] = useState<string | null>(null);
   const [dialogPlugin, setDialogPlugin] = useState<LocalPlugin | null>(null);
   const [showAddMarketplace, setShowAddMarketplace] = useState(false);
+  const [showAddMCP, setShowAddMCP] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -60,8 +71,8 @@ export function MarketplacePage() {
       setInstalledPlugins(pluginEntries || []);
       setProjects(projs || []);
       setSources(srcs || []);
-    } catch (e: any) {
-      toast.error("Failed to load marketplace", { description: e.message });
+    } catch (error: unknown) {
+      toast.error("Failed to load marketplace", { description: errorMessage(error) });
     } finally {
       setLoading(false);
     }
@@ -111,22 +122,21 @@ export function MarketplacePage() {
     envValues: Record<string, string>,
   ) => {
     if (plugin.type === "mcp") {
-      const mcpConfig = plugin.mcp_config ? JSON.parse(plugin.mcp_config) : {};
+      const mcpConfig = (plugin.mcp_config ? JSON.parse(plugin.mcp_config) : {}) as Record<string, unknown>;
       let manifest: Record<string, unknown>;
       if (mcpConfig.mcpServers) {
         manifest = { mcpServers: mcpConfig.mcpServers };
       } else {
         // .mcp.json uses flat format: {"serverName": {"command":...}}
         // Wrap it as mcpServers
-        const hasServerEntries = Object.values(mcpConfig).some(
-          (v: any) => v && typeof v === "object" && (v.command || v.url),
-        );
+        const hasServerEntries = Object.values(mcpConfig).some(isMCPServerConfig);
         manifest = hasServerEntries
           ? { mcpServers: mcpConfig }
           : { mcpServers: { [plugin.name]: { command: plugin.command, ...(plugin.args?.length ? { args: plugin.args } : {}) } } };
       }
       await marketplaceApi.installMCP({
         name: plugin.name,
+        package_id: plugin.id,
         version: plugin.version || "0.0.0",
         mcp_key: plugin.name,
         manifest,
@@ -174,8 +184,8 @@ export function MarketplacePage() {
         try {
           await installToScope(plugin, projectId, envValues);
           succeeded.push(scopeName(projectId));
-        } catch (e: any) {
-          failures.push(`${scopeName(projectId)}: ${e.message}`);
+        } catch (error: unknown) {
+          failures.push(`${scopeName(projectId)}: ${errorMessage(error)}`);
         }
       }
       if (succeeded.length > 0) {
@@ -188,6 +198,13 @@ export function MarketplacePage() {
     } finally {
       setInstalling(null);
     }
+  };
+
+  const handleAddMCP = async (name: string, url: string, headers: Record<string, string>) => {
+    await marketplaceApi.addMCPSource(name, url, headers);
+    toast.success("MCP added to Marketplace");
+    await loadData();
+    setShowAddMCP(false);
   };
 
   // Uninstall a plugin. projectId undefined → remove from ALL scopes (delete-by-name);
@@ -211,8 +228,8 @@ export function MarketplacePage() {
         toast.success(`Uninstalled plugin: ${plugin.name}${where}`);
       }
       await loadData();
-    } catch (e: any) {
-      toast.error(`Failed to uninstall ${plugin.name}`, { description: e.message });
+    } catch (error: unknown) {
+      toast.error(`Failed to uninstall ${plugin.name}`, { description: errorMessage(error) });
     } finally {
       setInstalling(null);
     }
@@ -301,13 +318,25 @@ export function MarketplacePage() {
                 </button>
               ))}
             </div>
-            <button
-              onClick={() => setShowAddMarketplace(true)}
-              className="flex h-8 items-center gap-1.5 px-2.5 border rounded-md text-xs font-medium hover:bg-accent transition-colors shrink-0"
-            >
-              <FolderPlus className="h-3.5 w-3.5" />
-              Add Marketplace
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              {tab === "mcp" && (
+                <button
+                  onClick={() => setShowAddMCP(true)}
+                  disabled={loading}
+                  className="flex h-8 items-center gap-1.5 px-2.5 border rounded-md text-xs font-medium hover:bg-accent transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add MCP
+                </button>
+              )}
+              <button
+                onClick={() => setShowAddMarketplace(true)}
+                className="flex h-8 items-center gap-1.5 px-2.5 border rounded-md text-xs font-medium hover:bg-accent transition-colors"
+              >
+                <FolderPlus className="h-3.5 w-3.5" />
+                Add Marketplace
+              </button>
+            </div>
           </div>
         </div>
 
@@ -395,8 +424,8 @@ export function MarketplacePage() {
                       await marketplaceApi.removeSource(src.id);
                       toast.success("Marketplace source removed");
                       loadData();
-                    } catch (e: any) {
-                      toast.error("Failed to remove source", { description: e.message });
+                    } catch (error: unknown) {
+                      toast.error("Failed to remove source", { description: errorMessage(error) });
                     }
                   }}
                   className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-red-500 transition-colors"
@@ -427,6 +456,139 @@ export function MarketplacePage() {
           onAdded={() => { setShowAddMarketplace(false); loadData(); }}
         />
       )}
+
+      {/* Add MCP Dialog */}
+      {showAddMCP && (
+        <AddMCPDialog
+          onClose={() => setShowAddMCP(false)}
+          onConfirm={handleAddMCP}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── AddMCPDialog ─────────────────────────────────────────────────────────
+
+interface AddMCPDialogProps {
+  onClose: () => void;
+  onConfirm: (name: string, url: string, headers: Record<string, string>) => Promise<void>;
+}
+
+const MCP_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
+
+function parseHeadersInput(input: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const normalizedNames = new Set<string>();
+  for (const [index, rawLine] of input.split("\n").entries()) {
+    if (!rawLine.trim()) continue;
+    const separator = rawLine.indexOf(":");
+    if (separator <= 0) {
+      throw new Error(`Header line ${index + 1} must use "Name: value"`);
+    }
+    const name = rawLine.slice(0, separator).trim();
+    const value = rawLine.slice(separator + 1).trim();
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) {
+      throw new Error(`Header line ${index + 1} has an invalid name`);
+    }
+    const normalizedName = name.toLowerCase();
+    if (normalizedNames.has(normalizedName)) {
+      throw new Error(`Header line ${index + 1} repeats ${name}`);
+    }
+    normalizedNames.add(normalizedName);
+    headers[name] = value;
+  }
+  return headers;
+}
+
+function AddMCPDialog({ onClose, onConfirm }: AddMCPDialogProps) {
+  const [name, setName] = useState("");
+  const [url, setURL] = useState("");
+  const [headersInput, setHeadersInput] = useState("");
+  const [adding, setAdding] = useState(false);
+
+  const handleAdd = async () => {
+    try {
+      const normalizedName = name.trim();
+      if (!MCP_NAME_PATTERN.test(normalizedName)) {
+        throw new Error("Name must be 1-40 characters, start with a letter or number, and use only letters, numbers, - or _");
+      }
+      const parsedURL = new URL(url.trim());
+      if (parsedURL.protocol !== "http:" && parsedURL.protocol !== "https:") {
+        throw new Error("URL must start with http:// or https://");
+      }
+      const headers = parseHeadersInput(headersInput);
+      setAdding(true);
+      await onConfirm(normalizedName, parsedURL.toString(), headers);
+    } catch (error) {
+      toast.error("Failed to add MCP", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-2xl mx-4 p-6 flex flex-col gap-5">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <h2 className="text-base font-semibold">Add MCP</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">Add a remote MCP to this Marketplace</p>
+          </div>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-lg leading-none mt-0.5">&times;</button>
+        </div>
+
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium">Name</label>
+            <input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="my-mcp"
+              maxLength={40}
+              className="w-full px-3 py-2 text-sm bg-background border rounded-lg outline-none focus:ring-1 focus:ring-primary font-mono"
+              autoFocus
+            />
+            <p className="text-[11px] text-muted-foreground">1–40 characters. Letters, numbers, hyphens and underscores only.</p>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium">URL</label>
+            <input
+              value={url}
+              onChange={(event) => setURL(event.target.value)}
+              placeholder="https://example.com/mcp"
+              className="w-full px-3 py-2 text-sm bg-background border rounded-lg outline-none focus:ring-1 focus:ring-primary font-mono"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium">Headers</label>
+            <textarea
+              value={headersInput}
+              onChange={(event) => setHeadersInput(event.target.value)}
+              placeholder={"Authorization: Bearer token\nX-Org-ID: organization"}
+              rows={5}
+              spellCheck={false}
+              className="w-full px-3 py-2 text-sm bg-background border rounded-lg outline-none focus:ring-1 focus:ring-primary font-mono resize-y"
+            />
+            <p className="text-[11px] text-muted-foreground">Optional. Enter one header per line.</p>
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button onClick={onClose} className="px-4 py-2 text-sm rounded-lg border hover:bg-accent transition-colors">
+            Cancel
+          </button>
+          <button
+            onClick={handleAdd}
+            disabled={!name.trim() || !url.trim() || adding}
+            className="px-4 py-2 text-sm rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {adding ? "Adding..." : "Add"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -581,7 +743,7 @@ function InstallDialog({ plugin, projects, onConfirm, onClose }: InstallDialogPr
 
   const envVars = plugin.env_vars || [];
   const needsOAuth = plugin.auth_type === "oauth" || plugin.auth_type === "oauth_discovery";
-  const envOk = envVars.every((v) => !!envValues[v]?.trim() || needsOAuth);
+  const envOk = envVars.every((v) => !!envValues[v]?.trim());
   const canSubmit = envOk && scopes.length > 0;
 
   const selectableProjects = projects.filter((p) => p.git_repo_path);
@@ -686,18 +848,18 @@ function InstallDialog({ plugin, projects, onConfirm, onClose }: InstallDialogPr
                 <div className="flex items-center gap-2">
                   <label className="text-sm font-medium">{varName}</label>
                   <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600">
-                    {needsOAuth ? "OAuth" : "Required"}
+                    Required
                   </span>
                 </div>
                 <div className="relative">
                   <input
                     type={revealed[varName] ? "text" : "password"}
-                    placeholder={needsOAuth ? "Set via OAuth" : "Required"}
+                    placeholder="Required"
                     value={envValues[varName] || ""}
                     onChange={(e) => setEnvValues((prev) => ({ ...prev, [varName]: e.target.value }))}
                     className={cn(
                       "w-full pr-9 pl-3 py-2 text-sm bg-background border rounded-lg outline-none focus:ring-1 focus:ring-primary",
-                      !envValues[varName] && !needsOAuth && "border-red-400"
+                      !envValues[varName] && "border-red-400"
                     )}
                   />
                   <button
@@ -710,7 +872,7 @@ function InstallDialog({ plugin, projects, onConfirm, onClose }: InstallDialogPr
                 </div>
               </div>
             ))}
-            <p className="text-[11px] text-muted-foreground">These values are stored locally and injected at runtime.</p>
+            <p className="text-[11px] text-muted-foreground">These values are saved locally when the MCP is installed.</p>
           </div>
         )}
 
@@ -760,8 +922,8 @@ function AddMarketplaceDialog({ onClose, onAdded }: AddMarketplaceDialogProps) {
       await marketplaceApi.addSource(input.trim());
       toast.success("Marketplace source added");
       onAdded();
-    } catch (e: any) {
-      toast.error("Failed to add marketplace", { description: e.message });
+    } catch (error: unknown) {
+      toast.error("Failed to add marketplace", { description: errorMessage(error) });
     } finally {
       setAdding(false);
     }

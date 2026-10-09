@@ -85,8 +85,8 @@ type MCPOAuthToken struct {
 // MarketplaceSource records a user-added marketplace directory or git repo.
 type MarketplaceSource struct {
 	ID      string   `json:"id"`
-	Type    string   `json:"type"` // "local" or "git"
-	URL     string   `json:"url"`  // git URL (for git type)
+	Type    string   `json:"type"` // "local", "git", or "mcp"
+	URL     string   `json:"url"`  // git or remote MCP URL
 	Path    string   `json:"path"` // absolute path on disk
 	Name    string   `json:"name"` // display name
 	AddedAt UnixTime `json:"added_at"`

@@ -2,8 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"sort"
 	"time"
 
@@ -11,6 +13,74 @@ import (
 	agentpkg "github.com/esonic/nexbox/agent"
 	"github.com/esonic/nexbox/store"
 )
+
+var mcpHeaderVariablePattern = regexp.MustCompile(`\$\{([^{}]+)\}`)
+
+// resolveMCPHeaderTemplates replaces ${VAR} placeholders in header values once,
+// when an MCP is installed. The returned headers are the complete runtime
+// headers and can be forwarded without guessing which value is a token.
+func resolveMCPHeaderTemplates(headers, values map[string]string) (map[string]string, map[string]bool, error) {
+	if len(headers) == 0 {
+		return nil, nil, nil
+	}
+
+	resolved := make(map[string]string, len(headers))
+	used := make(map[string]bool)
+	missing := make(map[string]bool)
+	for name, value := range headers {
+		resolved[name] = mcpHeaderVariablePattern.ReplaceAllStringFunc(value, func(match string) string {
+			variable := match[2 : len(match)-1]
+			if replacement, ok := values[variable]; ok {
+				used[variable] = true
+				return replacement
+			}
+			missing[variable] = true
+			return match
+		})
+	}
+	if len(missing) > 0 {
+		names := make([]string, 0, len(missing))
+		for name := range missing {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return nil, nil, fmt.Errorf("missing header values: %v", names)
+	}
+	return resolved, used, nil
+}
+
+// resolveMCPOAuthTemplates resolves the clientId field while preserving any
+// other OAuth manifest fields. Marketplace manifests commonly express it as
+// ${CLIENT_ID}; keeping that placeholder after install would make OAuth send
+// the literal template as the client ID.
+func resolveMCPOAuthTemplates(raw json.RawMessage, values map[string]string) (json.RawMessage, map[string]bool, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return raw, nil, nil
+	}
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return nil, nil, fmt.Errorf("invalid OAuth configuration: %w", err)
+	}
+	clientIDRaw, ok := config["clientId"]
+	if !ok {
+		return raw, nil, nil
+	}
+	var clientID string
+	if err := json.Unmarshal(clientIDRaw, &clientID); err != nil {
+		return nil, nil, fmt.Errorf("OAuth clientId must be a string")
+	}
+	resolved, used, err := resolveMCPHeaderTemplates(map[string]string{"clientId": clientID}, values)
+	if err != nil {
+		return nil, nil, err
+	}
+	encodedClientID, _ := json.Marshal(resolved["clientId"])
+	config["clientId"] = encodedClientID
+	encodedConfig, err := json.Marshal(config)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode OAuth configuration: %w", err)
+	}
+	return encodedConfig, used, nil
+}
 
 // ---------------------------------------------------------------------------
 // Local MCP install/uninstall
@@ -71,6 +141,7 @@ func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
 		manifestStr = raw
 	}
 
+	resolvedVariables := make(map[string]bool)
 	var mcpServersWrap struct {
 		MCPServers map[string]struct {
 			URL     string            `json:"url"`
@@ -78,6 +149,7 @@ func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
 			Args    []string          `json:"args"`
 			Env     map[string]string `json:"env"`
 			Headers map[string]string `json:"headers"`
+			OAuth   json.RawMessage   `json:"oauth"`
 		} `json:"mcpServers"`
 	}
 	if json.Unmarshal([]byte(manifestStr), &mcpServersWrap) == nil && len(mcpServersWrap.MCPServers) > 0 {
@@ -92,8 +164,25 @@ func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
 		if cfg.URL != "" {
 			entry.Type = "http"
 			entry.URL = cfg.URL
+			resolvedOAuth, used, err := resolveMCPOAuthTemplates(cfg.OAuth, req.Env)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			entry.OAuth = resolvedOAuth
+			for name := range used {
+				resolvedVariables[name] = true
+			}
 			if len(cfg.Headers) > 0 {
-				entry.Headers = cfg.Headers
+				resolved, used, err := resolveMCPHeaderTemplates(cfg.Headers, req.Env)
+				if err != nil {
+					writeError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				entry.Headers = resolved
+				for name := range used {
+					resolvedVariables[name] = true
+				}
 			}
 		} else {
 			entry.Type = "stdio"
@@ -125,7 +214,13 @@ func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
 
 	envValues := "{}"
 	if len(req.Env) > 0 {
-		if b, err := json.Marshal(req.Env); err == nil {
+		remainingEnv := make(map[string]string, len(req.Env))
+		for name, value := range req.Env {
+			if !resolvedVariables[name] {
+				remainingEnv[name] = value
+			}
+		}
+		if b, err := json.Marshal(remainingEnv); err == nil {
 			envValues = string(b)
 		}
 	}

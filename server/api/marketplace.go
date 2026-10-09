@@ -51,6 +51,7 @@ func (s *Server) resolveInstalledMCPsAndMap(projectID string) ([]agentpkg.MCPSer
 				Args    []string          `json:"args"`
 				Env     map[string]string `json:"env"`
 				Headers map[string]string `json:"headers"`
+				OAuth   json.RawMessage   `json:"oauth"`
 			} `json:"mcpServers"`
 		}
 		if json.Unmarshal([]byte(manifestJSON), &mcpWrap) == nil && len(mcpWrap.MCPServers) > 0 {
@@ -60,6 +61,7 @@ func (s *Server) resolveInstalledMCPsAndMap(projectID string) ([]agentpkg.MCPSer
 					entry.Type = "http"
 					entry.URL = cfg.URL
 					entry.Headers = cfg.Headers
+					entry.OAuth = cfg.OAuth
 				} else {
 					entry.Type = "stdio"
 					entry.Cmd = cfg.Command
@@ -185,6 +187,7 @@ func (s *Server) RegisterMarketplaceRoutes(r chi.Router) {
 		// Marketplace sources (Add Marketplace)
 		r.Get("/sources", s.ListMarketplaceSources)
 		r.Post("/sources", s.AddMarketplaceSource)
+		r.Post("/mcp-sources", s.AddManualMCPSource)
 		r.Delete("/sources/{id}", s.RemoveMarketplaceSource)
 
 		// Local install/uninstall
