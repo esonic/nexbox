@@ -304,6 +304,49 @@ func TestReadStatusPreservesRenameAndDeduplicatesSummary(t *testing.T) {
 	}
 }
 
+func TestReadStatusClassifiesAddAddConflictAsConflicted(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, root)
+	runRepoGit(t, root, "commit", "--allow-empty", "-q", "-m", "base")
+	baseBranch := strings.TrimSpace(runRepoGit(t, root, "branch", "--show-current"))
+	runRepoGit(t, root, "checkout", "-q", "-b", "side")
+	if err := os.WriteFile(filepath.Join(root, "conflict.txt"), []byte("side\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runRepoGit(t, root, "add", "--", "conflict.txt")
+	runRepoGit(t, root, "commit", "-q", "-m", "side addition")
+	runRepoGit(t, root, "checkout", "-q", baseBranch)
+	if err := os.WriteFile(filepath.Join(root, "conflict.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runRepoGit(t, root, "add", "--", "conflict.txt")
+	runRepoGit(t, root, "commit", "-q", "-m", "base addition")
+
+	merge := exec.Command("git", "merge", "side")
+	merge.Dir = root
+	if output, err := merge.CombinedOutput(); err == nil {
+		t.Fatalf("merge unexpectedly succeeded: %s", output)
+	}
+	raw := runRepoGit(t, root, "status", "--porcelain=v2", "--untracked-files=all")
+	if !strings.Contains(raw, "u AA ") {
+		t.Fatalf("test did not create an add/add porcelain-v2 conflict: %q", raw)
+	}
+
+	status, err := ReadStatus(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Staged) != 1 || status.Staged[0].Path != "conflict.txt" || status.Staged[0].Status != "conflicted" {
+		t.Fatalf("unexpected staged conflict: %#v", status.Staged)
+	}
+	if len(status.Unstaged) != 1 || status.Unstaged[0].Path != "conflict.txt" || status.Unstaged[0].Status != "conflicted" {
+		t.Fatalf("unexpected unstaged conflict: %#v", status.Unstaged)
+	}
+	if summary := status.Summary(); summary.Total != 1 || summary.Staged != 1 || summary.Unstaged != 1 {
+		t.Fatalf("unexpected conflict summary: %#v", summary)
+	}
+}
+
 func TestDiscoverOuterAndNestedRepositories(t *testing.T) {
 	workspace := t.TempDir()
 	initRepo(t, workspace)

@@ -926,11 +926,23 @@ func ReadStatus(ctx context.Context, root string) (*Status, error) {
 		case 'u':
 			parts := bytes.SplitN(record, []byte{' '}, 11)
 			if len(parts) == 11 {
-				appendV2Status(result, parts[1], string(parts[10]), "")
+				appendUnmergedStatus(result, string(parts[10]))
 			}
 		}
 	}
 	return result, nil
+}
+
+// Porcelain v2 uses several XY pairs for unmerged entries (DD, AU, UD, UA,
+// DU, AA, and UU). They all represent an unresolved conflict; interpreting
+// the two letters as ordinary index/worktree statuses would mislabel cases
+// such as AA as "added". Keep the entry in both groups so callers can offer
+// both index and worktree conflict actions while Summary still de-duplicates
+// the path.
+func appendUnmergedStatus(result *Status, path string) {
+	file := FileStatus{Path: path, Status: "conflicted"}
+	result.Staged = append(result.Staged, file)
+	result.Unstaged = append(result.Unstaged, file)
 }
 
 func appendV2Status(result *Status, xy []byte, path, originalPath string) {

@@ -135,6 +135,69 @@ func TestGitRepositoriesAndScopedStatus(t *testing.T) {
 	}
 }
 
+func TestGitWorkspaceStatusOnlyComputesLineStatsWhenRequested(t *testing.T) {
+	server := newWorktreeServer(t)
+	repository := t.TempDir()
+	initAPIRepo(t, repository)
+	commitAPIFile(t, repository, "tracked.txt", "base\n")
+	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("changed\nsecond\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "untracked.txt"), []byte("new one\nnew two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	project := createAPIProject(t, server, repository)
+
+	type workspaceStatusResponse struct {
+		Summary struct {
+			RepositoryCount int  `json:"repository_count"`
+			TotalFiles      int  `json:"total_files"`
+			Insertions      int  `json:"insertions"`
+			Deletions       int  `json:"deletions"`
+			StatsIncluded   bool `json:"stats_included"`
+		} `json:"summary"`
+		Repositories []struct {
+			TotalFiles int `json:"total_files"`
+			Insertions int `json:"insertions"`
+			Deletions  int `json:"deletions"`
+		} `json:"repositories"`
+		Files []gitWorkspaceFileStatus `json:"files"`
+	}
+	readStatus := func(query string) workspaceStatusResponse {
+		t.Helper()
+		response := doRequest(t, server, http.MethodGet, fmt.Sprintf("/api/projects/%s/git-workspace-status%s", project.ID, query), nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("workspace status %q = %d: %s", query, response.Code, response.Body.String())
+		}
+		var body workspaceStatusResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	defaultStatus := readStatus("")
+	if defaultStatus.Summary.RepositoryCount != 1 || defaultStatus.Summary.TotalFiles != 2 || defaultStatus.Summary.StatsIncluded {
+		t.Fatalf("unexpected cheap workspace summary: %+v", defaultStatus.Summary)
+	}
+	if defaultStatus.Summary.Insertions != 0 || defaultStatus.Summary.Deletions != 0 || len(defaultStatus.Files) != 0 {
+		t.Fatalf("default request unexpectedly computed stats or files: %+v", defaultStatus)
+	}
+
+	filesStatus := readStatus("?include_files=true")
+	if filesStatus.Summary.StatsIncluded || filesStatus.Summary.Insertions != 0 || filesStatus.Summary.Deletions != 0 || len(filesStatus.Files) != 2 {
+		t.Fatalf("file-decoration request unexpectedly computed line stats: %+v", filesStatus)
+	}
+
+	statsStatus := readStatus("?include_stats=true")
+	if !statsStatus.Summary.StatsIncluded || statsStatus.Summary.TotalFiles != 2 || statsStatus.Summary.Insertions != 4 || statsStatus.Summary.Deletions != 1 {
+		t.Fatalf("explicit line stats = %+v, want 2 files +4/-1", statsStatus.Summary)
+	}
+	if len(statsStatus.Repositories) != 1 || statsStatus.Repositories[0].Insertions != 4 || statsStatus.Repositories[0].Deletions != 1 {
+		t.Fatalf("explicit repository line stats = %+v", statsStatus.Repositories)
+	}
+}
+
 func TestSingleRepositoryHistoryKeepsLegacyUnscopedShape(t *testing.T) {
 	server := newWorktreeServer(t)
 	repository := t.TempDir()
@@ -693,6 +756,35 @@ func TestGitCommitAndUnstageKeepRenamePathsTogether(t *testing.T) {
 			t.Fatalf("renamed worktree file disappeared: %v", err)
 		}
 	})
+}
+
+func TestGitCommitInUnbornRepositoryExcludesPreviouslyStagedFiles(t *testing.T) {
+	server := newWorktreeServer(t)
+	repository := t.TempDir()
+	initAPIRepo(t, repository)
+	if err := os.WriteFile(filepath.Join(repository, "already-staged.txt"), []byte("not selected\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "requested.txt"), []byte("selected\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runAPIGit(t, repository, "add", "--", "already-staged.txt")
+	project := createAPIProject(t, server, repository)
+	repositoryID := discoverOnlyAPIRepository(t, server, project.ID)
+
+	response := doRequest(t, server, http.MethodPost, fmt.Sprintf("/api/projects/%s/git-commit?repository_id=%s", project.ID, repositoryID), GitCommitRequest{
+		FilePaths: []string{"requested.txt"},
+		Message:   "selected initial file",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("commit selected unborn file = %d: %s", response.Code, response.Body.String())
+	}
+	if tree := runAPIGit(t, repository, "ls-tree", "-r", "--name-only", "HEAD"); tree != "requested.txt\n" {
+		t.Fatalf("initial commit tree = %q, want only requested.txt", tree)
+	}
+	if status := runAPIGit(t, repository, "status", "--porcelain=v2", "--untracked-files=all"); status != "? already-staged.txt\n" {
+		t.Fatalf("unselected staged file was not preserved as untracked: %q", status)
+	}
 }
 
 func TestRepositoryScopedFileRejectsSymlinkEscape(t *testing.T) {

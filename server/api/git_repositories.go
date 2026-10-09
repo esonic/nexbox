@@ -317,7 +317,11 @@ func (s *Server) GetGitWorkspaceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	includeFiles := r.URL.Query().Get("include_files") == "true"
-	runtimes := collectRepositoryRuntimes(r.Context(), s.repositoryResolver(), workspace.Root, discovery.Repositories, true, false, false)
+	// File totals and path decorations come directly from porcelain status and
+	// are cheap enough to poll. Line statistics require a full numstat plus
+	// reading every untracked text file, so callers must request them explicitly.
+	includeStats := r.URL.Query().Get("include_stats") == "true"
+	runtimes := collectRepositoryRuntimes(r.Context(), s.repositoryResolver(), workspace.Root, discovery.Repositories, includeStats, false, false)
 	type repoSummary struct {
 		RepositoryID string `json:"repository_id"`
 		TotalFiles   int    `json:"total_files"`
@@ -385,9 +389,10 @@ func (s *Server) GetGitWorkspaceStatus(w http.ResponseWriter, r *http.Request) {
 		return workspaceFiles[i].RepositoryID < workspaceFiles[j].RepositoryID
 	})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"summary": map[string]int{
+		"summary": map[string]interface{}{
 			"repository_count": len(discovery.Repositories), "dirty_repository_count": dirtyRepositories,
 			"total_files": totalFiles, "insertions": insertions, "deletions": deletions,
+			"stats_included": includeStats,
 		},
 		"repositories": repoSummaries,
 		"files":        workspaceFiles,
