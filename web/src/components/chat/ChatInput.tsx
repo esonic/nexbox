@@ -14,7 +14,7 @@ import {
   type QuestionAnswer,
 } from "@/components/chat/QuestionCard";
 import { TodoPanel } from "@/components/chat/TodoPanel";
-import { imageApi, filesApi, type DiffResponse, type FileEntry } from "@/lib/api";
+import { imageApi, filesApi, promptTemplatesApi, type DiffResponse, type FileEntry, type PromptTemplate } from "@/lib/api";
 import { createPortal } from "react-dom";
 import { useAppStore } from "@/stores/app";
 import { STATUS_ICONS } from "@/plugins/task/task-icons";
@@ -518,6 +518,7 @@ export function ChatInput({
   const [slashFilter, setSlashFilter] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [activeCommand, setActiveCommand] = useState<SlashCommand | null>(null);
+  const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
   const [showAgentMenu, setShowAgentMenu] = useState(false);
   const agentMenuRef = useRef<HTMLDivElement>(null);
   const [showModelMenu, setShowModelMenu] = useState(false);
@@ -629,6 +630,18 @@ export function ChatInput({
     cmd.name.toLowerCase().includes(slashFilter.toLowerCase()) ||
     cmd.label.toLowerCase().includes(slashFilter.toLowerCase())
   );
+  const filteredTemplates = promptTemplates.filter((t) => {
+    const q = slashFilter.toLowerCase();
+    return t.name.toLowerCase().includes(q) || t.content.toLowerCase().includes(q);
+  });
+  const slashItemCount = filteredCommands.length + filteredTemplates.length;
+
+  // Refetch on every open so edits made in Settings show up immediately.
+  useEffect(() => {
+    if (!showSlashMenu) return;
+    promptTemplatesApi.list().then(setPromptTemplates).catch(() => {});
+  }, [showSlashMenu]);
+
   const filteredPickerFiles = filePickerFiles
     .filter((f) => !filePickerQuery || f.path.toLowerCase().includes(filePickerQuery.toLowerCase()))
     .slice(0, 10);
@@ -759,13 +772,31 @@ export function ChatInput({
     onSend(cmd.prompt, undefined, features);
   };
 
+  const applyTemplate = (tpl: PromptTemplate) => {
+    setShowSlashMenu(false);
+    setSlashFilter("");
+    setInput(tpl.content);
+    saveDraft(tpl.content);
+    setTimeout(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(tpl.content.length, tpl.content.length);
+    }, 0);
+  };
+
+  const selectSlashItem = (index: number) => {
+    if (index < filteredCommands.length) executeSlashCommand(filteredCommands[index]);
+    else applyTemplate(filteredTemplates[index - filteredCommands.length]);
+  };
+
   useEffect(() => {
-    if (!showSlashMenu || filteredCommands.length === 0) return;
+    if (!showSlashMenu || slashItemCount === 0) return;
     const container = slashMenuRef.current;
     if (!container) return;
     const item = container.querySelector(`[data-cmd-index="${selectedCommandIndex}"]`);
     if (item) item.scrollIntoView({ block: "nearest" });
-  }, [selectedCommandIndex, showSlashMenu, filteredCommands.length]);
+  }, [selectedCommandIndex, showSlashMenu, slashItemCount]);
 
   const insertFileRef = useCallback((file: FileEntry) => {
     const el = textareaRef.current;
@@ -831,9 +862,9 @@ export function ChatInput({
       }
     }
 
-    if (showSlashMenu && filteredCommands.length > 0) {
-      if (navigateMenu(e, filteredCommands.length, selectedCommandIndex, setSelectedCommandIndex,
-        () => executeSlashCommand(filteredCommands[selectedCommandIndex]),
+    if (showSlashMenu && slashItemCount > 0) {
+      if (navigateMenu(e, slashItemCount, selectedCommandIndex, setSelectedCommandIndex,
+        () => selectSlashItem(selectedCommandIndex),
         () => { setShowSlashMenu(false); setInput(""); },
       )) return;
     }
@@ -979,12 +1010,14 @@ export function ChatInput({
             </div>
           )}
           {/* Slash command menu */}
-          {showSlashMenu && filteredCommands.length > 0 && (
+          {showSlashMenu && slashItemCount > 0 && (
             <div ref={slashMenuRef} className="absolute bottom-full left-0 right-0 mb-2 bg-background border rounded-lg shadow-lg overflow-hidden z-10 max-h-64 overflow-y-auto">
-              <div className="p-2 text-xs text-muted-foreground border-b">
-                <Command className="inline h-3 w-3 mr-1" />
-                Commands
-              </div>
+              {filteredCommands.length > 0 && (
+                <div className="p-2 text-xs text-muted-foreground border-b">
+                  <Command className="inline h-3 w-3 mr-1" />
+                  Commands
+                </div>
+              )}
               {filteredCommands.map((cmd, index) => (
                 <button
                   key={cmd.name}
@@ -1001,6 +1034,30 @@ export function ChatInput({
                   </div>
                 </button>
               ))}
+              {filteredTemplates.length > 0 && (
+                <div className="p-2 text-xs text-muted-foreground border-b border-t">
+                  <FileText className="inline h-3 w-3 mr-1" />
+                  Prompt templates
+                </div>
+              )}
+              {filteredTemplates.map((tpl, i) => {
+                const index = filteredCommands.length + i;
+                return (
+                  <button
+                    key={tpl.name}
+                    data-cmd-index={index}
+                    onClick={() => applyTemplate(tpl)}
+                    className={`w-full text-left px-3 py-2 hover:bg-accent transition-colors ${
+                      index === selectedCommandIndex ? "bg-accent" : ""
+                    }`}
+                  >
+                    <div className="text-sm font-medium truncate">{tpl.name}</div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      {tpl.content.slice(0, 200).replace(/\s+/g, " ")}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           )}
           {/* Active command chip */}

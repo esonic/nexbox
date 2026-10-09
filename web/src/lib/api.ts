@@ -564,6 +564,20 @@ export interface ServerInfo {
   server_url?: string;
 }
 
+export interface PromptTemplate {
+  name: string;
+  content: string;
+}
+
+export const promptTemplatesApi = {
+  list: () => request<PromptTemplate[]>("/prompt-templates"),
+  replace: (templates: PromptTemplate[]) =>
+    request<PromptTemplate[]>("/prompt-templates", {
+      method: "PUT",
+      body: JSON.stringify(templates),
+    }),
+};
+
 export const serverApi = {
   info: () => request<ServerInfo>("/info"),
   availableAgents: () => request<{
