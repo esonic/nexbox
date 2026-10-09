@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +23,10 @@ import (
 
 //go:embed pi_nexbox_extension.ts
 var piNexboxExtension []byte
+
+// piLeafCheckpointPrefix distinguishes completed-turn leaf cursors from the
+// user-entry cursors stored by older versions.
+const piLeafCheckpointPrefix = "pi-leaf-v1:"
 
 // PiAgent adapts the Pi coding-agent CLI's RPC mode. A fresh pi process is
 // started for each Nexbox turn; Pi owns its session files and resumes them by
@@ -239,8 +244,10 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 		args = append(args, "--skill", skillDir)
 	}
 	servers := a.mcpServers(req)
+	// The extension also provides the exact-position fork command, so it is
+	// loaded even when no MCP servers are configured.
 	var extensionPath string
-	if len(servers) > 0 {
+	{
 		extensionDir := filepath.Join(req.WorkDir, ".nexbox", "pi-extensions")
 		if err := os.MkdirAll(extensionDir, 0700); err != nil {
 			return Result{}, fmt.Errorf("create Pi extension directory: %w", err)
@@ -280,7 +287,7 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 	}
 
 	client := newPiRPCClient(a.CLIPath, args, a.Verbose)
-	if extensionPath != "" {
+	if len(servers) > 0 {
 		encoded, err := json.Marshal(servers)
 		if err != nil {
 			return Result{}, fmt.Errorf("encode Pi MCP configuration: %w", err)
@@ -321,20 +328,52 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 		a.handleEvent(event, cb, &result, &resultMu, &terminalErr, func() { settledOnce.Do(func() { close(settled) }) })
 	}
 
+	exactFork := false
 	if req.Fork != nil {
-		var forkResult struct {
-			Cancelled bool `json:"cancelled"`
+		leafID, versioned := strings.CutPrefix(req.Fork.Checkpoint, piLeafCheckpointPrefix)
+		if versioned {
+			exactFork = true
+		} else {
+			// Upgrade old user-entry checkpoints in place when the selected turn is
+			// still on the parent's active branch. This makes existing BeeHub
+			// conversations benefit from exact forks as well as newly created ones.
+			var entries piEntriesState
+			if err := client.command(ctx, "get_entries", nil, &entries); err == nil {
+				leafID = piCompletedTurnLeaf(entries, req.Fork.Checkpoint)
+				exactFork = leafID != ""
+			}
 		}
-		if err := client.command(ctx, "fork", map[string]interface{}{"entryId": req.Fork.Checkpoint}, &forkResult); err != nil {
-			return Result{}, fmt.Errorf("fork pi session: %w", err)
-		}
-		if forkResult.Cancelled {
-			return Result{}, fmt.Errorf("fork pi session: cancelled by a Pi extension")
+		if exactFork {
+			if leafID == "" || strings.ContainsAny(leafID, " \t\r\n") {
+				return Result{}, fmt.Errorf("pi fork has invalid leaf checkpoint")
+			}
+			// Pi RPC's public fork command always branches before a user entry.
+			// The BeeHub extension exposes the runtime's position:"at" behavior so
+			// the selected completed turn remains in the new model context.
+			if err := client.command(ctx, "prompt", map[string]interface{}{"message": "/beehub-fork-at-entry " + leafID}, nil); err != nil {
+				return Result{}, fmt.Errorf("fork pi session at completed turn: %w", err)
+			}
+		} else {
+			// Backward compatibility for checkpoints written before leaf cursors
+			// were introduced. These identify a user entry and retain Pi's legacy
+			// fork-before behavior.
+			var forkResult struct {
+				Cancelled bool `json:"cancelled"`
+			}
+			if err := client.command(ctx, "fork", map[string]interface{}{"entryId": req.Fork.Checkpoint}, &forkResult); err != nil {
+				return Result{}, fmt.Errorf("fork pi session: %w", err)
+			}
+			if forkResult.Cancelled {
+				return Result{}, fmt.Errorf("fork pi session: cancelled by a Pi extension")
+			}
 		}
 	}
 	var state piState
 	if err := client.command(ctx, "get_state", nil, &state); err != nil {
 		return Result{}, fmt.Errorf("get pi session state: %w", err)
+	}
+	if req.Fork != nil && exactFork && state.SessionID == req.Fork.SessionID {
+		return Result{}, fmt.Errorf("fork pi session: exact-position fork did not create a new session")
 	}
 	resultMu.Lock()
 	result.SessionID = state.SessionID
@@ -366,14 +405,12 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 		return result, client.connectionError()
 	}
 	resultMu.Lock()
-	err := terminalErr
+	settledErr := terminalErr
 	resultMu.Unlock()
-	if err != nil {
-		return result, err
+	if settledErr != nil {
+		return result, settledErr
 	}
 
-	// Pi's fork cursor is a user entry. Query it after the turn settles and
-	// retain the latest one on the assistant message as Nexbox's checkpoint.
 	// Report live context-window occupancy (post-compaction-aware, unlike the
 	// per-turn token sums accumulated in Metadata) so the UI's usage indicator
 	// matches what Pi itself uses to decide when to compact.
@@ -392,14 +429,13 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 		cb(StreamEvent{Type: EventContextUsage, Metadata: usageMeta})
 	}
 
-	var forkMessages struct {
-		Messages []struct {
-			EntryID string `json:"entryId"`
-		} `json:"messages"`
-	}
-	if err := client.command(ctx, "get_fork_messages", nil, &forkMessages); err == nil && len(forkMessages.Messages) > 0 {
+	// Persist the current Pi leaf, which represents the complete turn (user
+	// message, tool activity, and final assistant response). The extension's
+	// exact-position fork command can retain this whole prefix in a new session.
+	var entries piEntriesState
+	if err := client.command(ctx, "get_entries", nil, &entries); err == nil && entries.LeafID != "" {
 		resultMu.Lock()
-		result.Checkpoint = forkMessages.Messages[len(forkMessages.Messages)-1].EntryID
+		result.Checkpoint = piLeafCheckpointPrefix + entries.LeafID
 		resultMu.Unlock()
 	}
 	resultMu.Lock()
@@ -445,6 +481,55 @@ func withPiMCPSession(raw, session string) string {
 
 type piState struct {
 	SessionID string `json:"sessionId"`
+}
+
+type piEntry struct {
+	ID       string `json:"id"`
+	ParentID string `json:"parentId"`
+	Type     string `json:"type"`
+	Message  struct {
+		Role string `json:"role"`
+	} `json:"message"`
+}
+
+type piEntriesState struct {
+	Entries []piEntry `json:"entries"`
+	LeafID  string    `json:"leafId"`
+}
+
+// piCompletedTurnLeaf maps a legacy user-entry checkpoint to the final
+// assistant entry in that turn on the active branch.
+func piCompletedTurnLeaf(state piEntriesState, userEntryID string) string {
+	byID := make(map[string]int, len(state.Entries))
+	for i := range state.Entries {
+		byID[state.Entries[i].ID] = i
+	}
+	var reversed []int
+	for id := state.LeafID; id != ""; {
+		i, ok := byID[id]
+		if !ok {
+			return ""
+		}
+		reversed = append(reversed, i)
+		id = state.Entries[i].ParentID
+	}
+	slices.Reverse(reversed)
+	foundUser := false
+	assistantID := ""
+	for _, i := range reversed {
+		entry := state.Entries[i]
+		if !foundUser {
+			foundUser = entry.ID == userEntryID
+			continue
+		}
+		if entry.Type == "message" && entry.Message.Role == "user" {
+			break
+		}
+		if entry.Type == "message" && entry.Message.Role == "assistant" {
+			assistantID = entry.ID
+		}
+	}
+	return assistantID
 }
 
 type piRPCRecord struct {

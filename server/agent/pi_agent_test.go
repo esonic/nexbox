@@ -31,8 +31,8 @@ while IFS= read -r line; do
     *'"type":"get_session_stats"'*)
       printf '{"id":"%s","type":"response","command":"get_session_stats","success":true,"data":{"contextUsage":{"tokens":42,"contextWindow":1000}}}\n' "$id"
       ;;
-    *'"type":"get_fork_messages"'*)
-      printf '{"id":"%s","type":"response","command":"get_fork_messages","success":true,"data":{"messages":[{"entryId":"user-entry-1"}]}}\n' "$id"
+    *'"type":"get_entries"'*)
+      printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":[],"leafId":"assistant-entry-1"}}\n' "$id"
       ;;
   esac
 done
@@ -49,7 +49,7 @@ done
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	if result.SessionID != "pi-session" || result.Checkpoint != "user-entry-1" {
+	if result.SessionID != "pi-session" || result.Checkpoint != piLeafCheckpointPrefix+"assistant-entry-1" {
 		t.Fatalf("result = %+v", result)
 	}
 	var gotText, gotStart, gotResult, gotDone bool
@@ -133,6 +133,7 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >> "$0.calls"
   id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
   case "$line" in
+    *'"type":"get_entries"'*) printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":[],"leafId":null}}\n' "$id" ;;
     *'"type":"fork"'*) printf '{"id":"%s","type":"response","command":"fork","success":true,"data":{"cancelled":true}}\n' "$id" ;;
   esac
 done
@@ -214,6 +215,102 @@ func TestPiAgentUsageUsesAPICompatibleNumbers(t *testing.T) {
 // TestPiAgentRPCIntegration exercises the published pi CLI against a real
 // configured provider. It is opt-in because it consumes a provider request
 // and leaves normal Pi-owned session files behind.
+func TestPiCompletedTurnLeafUpgradesLegacyUserCheckpoint(t *testing.T) {
+	entry := func(id, parent, role string) piEntry {
+		e := piEntry{ID: id, ParentID: parent, Type: "message"}
+		e.Message.Role = role
+		return e
+	}
+	state := piEntriesState{
+		Entries: []piEntry{
+			entry("user-1", "", "user"),
+			entry("assistant-tool-call", "user-1", "assistant"),
+			entry("tool-result", "assistant-tool-call", "toolResult"),
+			entry("assistant-final", "tool-result", "assistant"),
+			entry("user-2", "assistant-final", "user"),
+			entry("assistant-2", "user-2", "assistant"),
+		},
+		LeafID: "assistant-2",
+	}
+	if got := piCompletedTurnLeaf(state, "user-1"); got != "assistant-final" {
+		t.Fatalf("completed turn leaf = %q, want assistant-final", got)
+	}
+	if got := piCompletedTurnLeaf(state, "missing"); got != "" {
+		t.Fatalf("missing legacy checkpoint resolved to %q", got)
+	}
+}
+
+func TestPiAgentExactForkRetainsCompletedTurnLeaf(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fake-pi.sh")
+	script := `#!/bin/sh
+session=parent-session
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$0.calls"
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *beehub-fork-at-entry*)
+      session=child-session
+      printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
+      ;;
+    *'"type":"get_state"'*)
+      printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"sessionId":"%s"}}\n' "$id" "$session"
+      ;;
+    *'"type":"prompt"'*)
+      printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
+      printf '%s\n' '{"type":"agent_settled"}'
+      ;;
+    *'"type":"get_entries"'*)
+      printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":[],"leafId":"new-assistant-leaf"}}\n' "$id"
+      ;;
+  esac
+done
+`
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&PiAgent{CLIPath: path}).SendMessage(context.Background(), Request{
+		WorkDir: dir,
+		Message: "continue from the completed turn",
+		Fork: &ForkContext{
+			SessionID:  "parent-session",
+			Checkpoint: piLeafCheckpointPrefix + "assistant-leaf",
+		},
+	}, func(StreamEvent) {})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if result.SessionID != "child-session" || result.Checkpoint != piLeafCheckpointPrefix+"new-assistant-leaf" {
+		t.Fatalf("result = %+v", result)
+	}
+	calls, err := os.ReadFile(path + ".calls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(calls), `/beehub-fork-at-entry assistant-leaf`) {
+		t.Fatalf("exact fork command missing: %s", calls)
+	}
+	if strings.Contains(string(calls), `"type":"fork"`) {
+		t.Fatalf("exact checkpoint used legacy fork command: %s", calls)
+	}
+}
+
+func TestPiAgentSendToSessionAllowsFullTurn(t *testing.T) {
+	// Pi loads this embedded extension . Unlike normal
+	// MCP calls, send_to_session must survive a full target-session turn.
+	source := string(piNexboxExtension)
+	for _, want := range []string{
+		"const sendToSessionTimeout = 10 * 60 * 60 * 1000;",
+		`spec.key === "nexbox" && tool.name === "send_to_session" ? sendToSessionTimeout : defaultMCPTimeout`,
+		"signal: timeout(signal, timeoutMs)",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("Pi MCP extension lost the long send_to_session timeout: missing %q", want)
+		}
+	}
+}
+
 func TestPiAgentRPCIntegration(t *testing.T) {
 	if os.Getenv("PI_INTEGRATION") == "" {
 		t.Skip("set PI_INTEGRATION=1 to run against a configured Pi provider")
