@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// writeFakeCodexSubAgentServer replays the ordering observed from
-// codex-cli 0.147.0: the root announces subAgentActivity, the child streams a
-// complete turn on its own thread id, and only then does the root finish.
+// writeFakeCodexSubAgentServer starts with the ordering observed from
+// codex-cli 0.147.0 (subAgentActivity contains only the child path), then sends
+// the prompt-bearing spawnAgent shape advertised by the collaboration schema.
+// The latter verifies that a richer/later event updates the existing card.
 func writeFakeCodexSubAgentServer(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -34,6 +35,8 @@ while IFS= read -r line; do
       printf '%s\n' '{"method":"item/completed","params":{"threadId":"root-thread","turnId":"root-turn","item":{"type":"userMessage","id":"root-user","content":[]}}}'
       printf '%s\n' '{"method":"item/started","params":{"threadId":"root-thread","turnId":"root-turn","item":{"type":"subAgentActivity","id":"activity-1","agentThreadId":"child-thread","agentPath":"/root/protocol_child","kind":"started"}}}'
       printf '%s\n' '{"method":"item/completed","params":{"threadId":"root-thread","turnId":"root-turn","item":{"type":"subAgentActivity","id":"activity-1","agentThreadId":"child-thread","agentPath":"/root/protocol_child","kind":"started"}}}'
+      printf '%s\n' '{"method":"item/started","params":{"threadId":"root-thread","turnId":"root-turn","item":{"type":"collabAgentToolCall","id":"spawn-1","tool":"spawnAgent","status":"inProgress","senderThreadId":"root-thread","receiverThreadIds":["child-thread"],"prompt":"Inspect the child protocol.\nReturn a concise result.","agentsStates":{}}}}'
+      printf '%s\n' '{"method":"item/completed","params":{"threadId":"root-thread","turnId":"root-turn","item":{"type":"collabAgentToolCall","id":"spawn-1","tool":"spawnAgent","status":"completed","senderThreadId":"root-thread","receiverThreadIds":["child-thread"],"prompt":"Inspect the child protocol.\nReturn a concise result.","agentsStates":{}}}}'
       printf '%s\n' '{"method":"turn/started","params":{"threadId":"child-thread","turn":{"id":"child-turn","status":"inProgress"}}}'
       printf '%s\n' '{"method":"item/started","params":{"threadId":"child-thread","turnId":"child-turn","item":{"type":"reasoning","id":"child-reasoning","summary":[],"content":[]}}}'
       printf '%s\n' '{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"child-thread","turnId":"child-turn","itemId":"child-reasoning","delta":"CHILD_THINKING"}}'
@@ -95,6 +98,7 @@ func TestCodexAgentRoutesSubAgentEventsByThread(t *testing.T) {
 	subtaskDone := 0
 	childToolStarts := 0
 	childToolResults := 0
+	var subtaskDescriptions []string
 	for _, event := range events {
 		switch event.Type {
 		case EventTextDelta:
@@ -111,6 +115,15 @@ func TestCodexAgentRoutesSubAgentEventsByThread(t *testing.T) {
 				agentStarts++
 				if event.ToolID != "activity-1" || event.ParentToolID != "" {
 					t.Fatalf("unexpected Agent start: %+v", event)
+				}
+				if strings.Contains(event.Input, "thread_id") || strings.Contains(event.Input, "agent_path") {
+					t.Fatalf("internal sub-agent routing fields leaked into card input: %s", event.Input)
+				}
+				if !strings.Contains(event.Input, `"name":"protocol_child"`) {
+					t.Fatalf("Agent card input missing readable name: %s", event.Input)
+				}
+				if strings.Contains(event.Input, `"prompt"`) {
+					t.Fatalf("Agent card invented a prompt before the protocol supplied one: %s", event.Input)
 				}
 			case "Bash":
 				childToolStarts++
@@ -129,6 +142,7 @@ func TestCodexAgentRoutesSubAgentEventsByThread(t *testing.T) {
 			}
 		case EventSubTaskStart:
 			subtaskStarts++
+			subtaskDescriptions = append(subtaskDescriptions, event.Content)
 		case EventSubTaskDone:
 			subtaskDone++
 			if event.Content != "CHILD_ONLY" {
@@ -143,8 +157,17 @@ func TestCodexAgentRoutesSubAgentEventsByThread(t *testing.T) {
 	if doneCount != 1 {
 		t.Fatalf("done events = %d, want 1", doneCount)
 	}
-	if agentStarts != 1 || subtaskStarts != 1 || subtaskDone != 1 {
-		t.Fatalf("Agent lifecycle counts = start:%d subtask_start:%d subtask_done:%d, want 1/1/1", agentStarts, subtaskStarts, subtaskDone)
+	if agentStarts != 1 || subtaskStarts != 2 || subtaskDone != 1 {
+		t.Fatalf("Agent lifecycle counts = start:%d subtask_start:%d subtask_done:%d, want 1/2/1", agentStarts, subtaskStarts, subtaskDone)
+	}
+	wantDescriptions := []string{"protocol_child", "Inspect the child protocol.\nReturn a concise result."}
+	if len(subtaskDescriptions) != len(wantDescriptions) {
+		t.Fatalf("subtask descriptions = %#v, want %#v", subtaskDescriptions, wantDescriptions)
+	}
+	for i := range wantDescriptions {
+		if subtaskDescriptions[i] != wantDescriptions[i] {
+			t.Fatalf("subtask description %d = %q, want %q", i, subtaskDescriptions[i], wantDescriptions[i])
+		}
 	}
 	if childToolStarts != 1 || childToolResults != 1 {
 		t.Fatalf("child tool lifecycle counts = start:%d result:%d, want 1/1", childToolStarts, childToolResults)
@@ -156,6 +179,19 @@ func TestCodexAgentRoutesSubAgentEventsByThread(t *testing.T) {
 		if event.Type == EventContextUsage {
 			t.Fatalf("child token usage leaked into root context usage: %+v", event)
 		}
+	}
+}
+
+func TestCodexSubAgentDescriptionPreservesFullPrompt(t *testing.T) {
+	item := codexThreadItem{
+		Prompt:    "First instruction.\nSecond instruction.",
+		AgentPath: "/root/protocol_child",
+	}
+	if got, want := codexSubAgentDescription(item), item.Prompt; got != want {
+		t.Fatalf("description = %q, want full prompt %q", got, want)
+	}
+	if got, want := codexSubAgentName(item), "protocol_child"; got != want {
+		t.Fatalf("name = %q, want %q", got, want)
 	}
 }
 

@@ -363,11 +363,12 @@ func codexIsSpawnAgentTool(tool string) bool {
 
 func codexSubAgentDescription(item codexThreadItem) string {
 	if prompt := strings.TrimSpace(item.Prompt); prompt != "" {
-		if line, _, ok := strings.Cut(prompt, "\n"); ok {
-			prompt = line
-		}
 		return prompt
 	}
+	return codexSubAgentName(item)
+}
+
+func codexSubAgentName(item codexThreadItem) string {
 	agentPath := strings.Trim(strings.TrimSpace(item.AgentPath), "/")
 	if agentPath == "" {
 		return "Sub-agent"

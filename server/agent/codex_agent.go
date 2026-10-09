@@ -209,6 +209,7 @@ type codexSubAgentRun struct {
 	ParentToolID    string
 	ContainerToolID string
 	AgentPath       string
+	Description     string
 	Summary         string
 	Completed       bool
 }
@@ -278,7 +279,7 @@ func (a *CodexAgent) SendMessage(
 		log.Printf("[codex-agent] conversationID: %s", req.ConversationID)
 		log.Printf("[codex-agent] sessionID: %s (new: %v)", req.SessionID, req.SessionID == "")
 		log.Printf("[codex-agent] workDir: %s", req.WorkDir)
-		log.Printf("[codex-agent] message: %s", req.Message)
+		log.Printf("[codex-agent] message length: %d bytes", len(req.Message))
 		log.Printf("[codex-agent] ===============================")
 	}
 
@@ -325,6 +326,7 @@ func (a *CodexAgent) SendMessage(
 		latestTokenUsage    *codexThreadTokenUsageUpdatedNotification
 		subAgentRuns        = make(map[string]*codexSubAgentRun) // child thread id -> active/latest run
 		subAgentSourceSeen  = make(map[string]struct{})          // protocol item id + child thread id
+		subAgentPrompts     = make(map[string]string)            // collab item id -> prompt until child id is known
 	)
 	turnDone := make(chan struct{}, 1)
 	var turnDoneOnce sync.Once
@@ -345,6 +347,23 @@ func (a *CodexAgent) SendMessage(
 	}
 
 	registerSubAgent := func(ownerThreadID string, item codexThreadItem) {
+		// Newer app-server schemas can send the spawn prompt before they send the
+		// receiving/new thread id. Retain it by collaboration item id so the
+		// completed notification can create (or enrich) the same Agent card.
+		prompt := strings.TrimSpace(item.Prompt)
+		if item.ID != "" {
+			stateMu.Lock()
+			if prompt != "" {
+				subAgentPrompts[item.ID] = prompt
+			} else {
+				prompt = subAgentPrompts[item.ID]
+			}
+			stateMu.Unlock()
+			if prompt != "" {
+				item.Prompt = prompt
+			}
+		}
+
 		receiverThreadIDs := codexCollabReceiverThreadIDs(item)
 		childThreadIDs := make([]string, 0, len(receiverThreadIDs)+1)
 		seenChildThreads := make(map[string]struct{}, len(receiverThreadIDs)+1)
@@ -369,6 +388,7 @@ func (a *CodexAgent) SendMessage(
 				continue
 			}
 			description := codexSubAgentDescription(item)
+			agentName := codexSubAgentName(item)
 
 			stateMu.Lock()
 			parentToolID := ""
@@ -381,6 +401,33 @@ func (a *CodexAgent) SendMessage(
 				parentToolID = ownerRun.ContainerToolID
 			}
 
+			if existing := subAgentRuns[childThreadID]; existing != nil && !existing.Completed {
+				if existing.AgentPath == "" {
+					existing.AgentPath = item.AgentPath
+				}
+				// subAgentActivity in codex-cli 0.147 only carries agentPath. A
+				// collab spawn item may arrive later with the actual prompt; update
+				// the existing card instead of emitting a duplicate Agent tool.
+				descriptionUpdated := prompt != "" && existing.Description != description
+				if descriptionUpdated {
+					existing.Description = description
+				}
+				toolID := existing.ToolID
+				parentToolID := existing.ParentToolID
+				stateMu.Unlock()
+				if descriptionUpdated && parentToolID == "" {
+					cb(StreamEvent{
+						Type:    EventSubTaskStart,
+						Content: description,
+						Metadata: map[string]interface{}{
+							"task_id":     toolID,
+							"tool_use_id": toolID,
+						},
+					})
+				}
+				continue
+			}
+
 			sourceKey := item.ID + "\x00" + childThreadID
 			if item.ID == "" {
 				sourceKey = item.Type + "\x00" + item.Kind + "\x00" + childThreadID
@@ -390,14 +437,6 @@ func (a *CodexAgent) SendMessage(
 				continue
 			}
 			subAgentSourceSeen[sourceKey] = struct{}{}
-
-			if existing := subAgentRuns[childThreadID]; existing != nil && !existing.Completed {
-				if existing.AgentPath == "" {
-					existing.AgentPath = item.AgentPath
-				}
-				stateMu.Unlock()
-				continue
-			}
 
 			toolID := item.ID
 			if toolID == "" {
@@ -416,15 +455,16 @@ func (a *CodexAgent) SendMessage(
 				ParentToolID:    parentToolID,
 				ContainerToolID: containerToolID,
 				AgentPath:       item.AgentPath,
+				Description:     description,
 			}
 			stateMu.Unlock()
 
-			input := map[string]string{
-				"description": description,
-				"thread_id":   childThreadID,
-			}
-			if item.AgentPath != "" {
-				input["agent_path"] = item.AgentPath
+			// Thread ids and internal agent paths are routing metadata, not user
+			// content. Keep them in subAgentRuns and expose the readable name and,
+			// only when the app-server actually supplies it, the delegated prompt.
+			input := map[string]string{"name": agentName}
+			if prompt != "" {
+				input["prompt"] = prompt
 			}
 			inputJSON, _ := json.Marshal(input)
 			cb(StreamEvent{
@@ -672,7 +712,7 @@ func (a *CodexAgent) SendMessage(
 			call, err := parseCodexDynamicToolCall(params)
 			if err != nil {
 				if a.Verbose {
-					log.Printf("[codex-agent] failed to parse item/tool/call: %v, params=%s", err, string(params))
+					log.Printf("[codex-agent] failed to parse item/tool/call: %v", err)
 				}
 				return buildCodexDynamicToolResponse(false, "Failed to parse tool call: "+err.Error()), nil
 			}

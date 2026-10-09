@@ -601,11 +601,24 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 
 			case agent.EventSubTaskStart:
 				taskID, _ := event.Metadata["task_id"].(string)
-				log.Printf("[chat] Sub-agent start: %s (task_id=%s)", event.Content, taskID)
+				toolUseID, _ := event.Metadata["tool_use_id"].(string)
+				// event.Content may contain the full delegated prompt. Keep it in the
+				// user-visible message parts, but never duplicate it into server logs.
+				log.Printf("[chat] Sub-agent start (task_id=%s)", taskID)
+				if toolUseID != "" {
+					mu.Lock()
+					var changed bool
+					msgParts, changed = recordSubAgentDescription(msgParts, toolUseID, event.Content)
+					if changed {
+						dirty = true
+					}
+					mu.Unlock()
+				}
 				s.Hub.Emit(sessionID, ChatEvent{
 					Type:    "subtask_start",
 					Content: event.Content,
 					TaskID:  taskID,
+					ToolID:  toolUseID,
 				})
 
 			case agent.EventSubTaskProgress:
@@ -646,7 +659,9 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 				toolUseID, _ := event.Metadata["tool_use_id"].(string)
 				status, _ := event.Metadata["status"].(string)
 				raw, _ := event.Metadata["workflow_progress"].(json.RawMessage)
-				log.Printf("[chat] Sub-agent done: %s (task_id=%s)", event.Content, taskID)
+				displaySummary := strings.TrimSpace(stripNextActionsBlocks(event.Content))
+				isError := event.IsError || subAgentStatusIsError(status)
+				log.Printf("[chat] Sub-agent done (task_id=%s)", taskID)
 				snap := wfSnapshots[toolUseID]
 				// Only treat this as a workflow when we actually saw workflow
 				// progress: a snapshot exists from prior task_progress, or this
@@ -662,14 +677,14 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 					if status != "" {
 						snap.status = status
 					}
-					if event.Content != "" {
-						snap.summary = event.Content
+					if displaySummary != "" {
+						snap.summary = displaySummary
 					}
 					full := snap.snapshotJSON()
 					attachWorkflowProgress(&mu, msgParts, toolUseID, full, &dirty)
 					s.Hub.Emit(sessionID, ChatEvent{
 						Type:             "subtask_done",
-						Content:          event.Content,
+						Content:          displaySummary,
 						TaskID:           taskID,
 						ToolID:           toolUseID,
 						WorkflowProgress: full,
@@ -681,19 +696,19 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 					// (so a mid-turn refresh stays consistent) and live to clients.
 					if toolUseID != "" {
 						mu.Lock()
-						for i := range msgParts {
-							if msgParts[i].Type == "tool_use" && msgParts[i].ToolCallID == toolUseID && msgParts[i].State == "running" {
-								msgParts[i].State = "complete"
-								dirty = true
-							}
+						var changed bool
+						msgParts, changed = recordSubAgentCompletion(msgParts, toolUseID, displaySummary, isError)
+						if changed {
+							dirty = true
 						}
 						mu.Unlock()
 					}
 					s.Hub.Emit(sessionID, ChatEvent{
 						Type:    "subtask_done",
-						Content: event.Content,
+						Content: displaySummary,
 						TaskID:  taskID,
 						ToolID:  toolUseID,
+						IsError: isError,
 					})
 				}
 

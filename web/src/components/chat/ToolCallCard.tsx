@@ -226,6 +226,50 @@ function RawOutput({ output, isError }: { output?: string; isError?: boolean }) 
   );
 }
 
+function agentPromptText(input: string): string {
+  const parsed = parseJSON(input);
+  return asText(parsed.prompt || parsed.task || parsed.message).trim();
+}
+
+function agentNameText(input: string): string {
+  const parsed = parseJSON(input);
+  return asText(parsed.name || parsed.description).trim();
+}
+
+function agentTaskText(input: string): string {
+  return agentPromptText(input) || agentNameText(input);
+}
+
+// Agent inputs can contain backend routing fields (thread ids, agent paths,
+// model settings, etc.). Render only the delegated task text so those protocol
+// details never leak into the user-facing card, including for older messages.
+function AgentTaskBlock({ task }: { task: string }) {
+  if (!task) return null;
+  return (
+    <div className="rounded bg-muted/30 px-2 py-1.5 text-[11px] text-muted-foreground">
+      <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wide opacity-50">Task</div>
+      <div className="whitespace-pre-wrap break-words text-foreground/80">{task}</div>
+    </div>
+  );
+}
+
+function AgentResultBlock({ output, isError }: { output: string; isError?: boolean }) {
+  const safeOutput = asText(output);
+  const text = safeOutput.length > 4000 ? safeOutput.slice(0, 4000) + "\n... (truncated)" : safeOutput;
+  if (!text && !isError) return null;
+  return (
+    <div className={cn(
+      "rounded px-2 py-1.5 text-[11px]",
+      isError ? "bg-red-500/5 text-red-700 dark:text-red-400" : "bg-emerald-500/5 text-muted-foreground",
+    )}>
+      <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wide opacity-50">
+        {isError ? "Error" : "Result"}
+      </div>
+      <div className="whitespace-pre-wrap break-words">{text || "(failed with no result)"}</div>
+    </div>
+  );
+}
+
 // ── Todo rendering ──
 
 interface TodoItem { id: string; content: string; status: string }
@@ -417,8 +461,8 @@ const toolRegistry: Record<string, ToolMeta> = {
   },
 
   // ── Task / planning ──
-  Task:       { icon: Sparkles,   label: tense("Agent", "Agent"), subtitle: textField("description") },
-  Agent:      { icon: Sparkles,   label: tense("Agent", "Agent"), subtitle: textField("description") },
+  Task:       { icon: Sparkles,   label: tense("Agent", "Agent"), subtitle: (i) => truncate(agentTaskText(i), 80) },
+  Agent:      { icon: Sparkles,   label: tense("Agent", "Agent"), subtitle: (i) => truncate(agentTaskText(i), 80) },
   CreatePlan: { icon: ListChecks, label: tense("Created plan", "Creating plan"),          subtitle: textField("name") },
 
   // ── Mode / diagnostics ──
@@ -631,8 +675,22 @@ export const ToolCallCard = memo(function ToolCallCard({
 
   const meta = getToolMeta(toolName);
   const label = meta.label(displayState);
-  const subtitle = summary || (meta.subtitle ? meta.subtitle(input) : "");
-  const hasDetails = !!(input || result || (nestedTools && nestedTools.length > 0));
+  const agentName = isAgentTool ? agentNameText(input) : "";
+  const explicitAgentTask = isAgentTool ? agentPromptText(input) : "";
+  // Codex 0.147 reports only subAgentActivity.agentPath, so the initial
+  // summary equals the Agent name. Do not present that routing name as a task.
+  // When a newer collab event backfills prompt, summary changes and the Task
+  // block appears on this same card. Claude's explicit input.prompt wins.
+  const summarizedAgentTask = isAgentTool && summary?.trim() !== agentName ? summary?.trim() || "" : "";
+  const agentTask = explicitAgentTask || summarizedAgentTask;
+  const subtitle = isAgentTool
+    ? truncate(agentName || agentTask, 80)
+    : summary || (meta.subtitle ? meta.subtitle(input) : "");
+  const showAgentInput = isAgentTool && agentTask !== "";
+  const showAgentResult = isAgentTool && !!result &&
+    (state === "complete" || state === "error") &&
+    (!!result.isError || asText(result.output).trim() !== "");
+  const hasDetails = !!((isAgentTool ? showAgentInput : input) || showAgentResult || (!isAgentTool && result) || (nestedTools && nestedTools.length > 0));
 
   return (
     <Collapsible open={expanded} onOpenChange={hasDetails ? setExpanded : undefined}>
@@ -662,7 +720,9 @@ export const ToolCallCard = memo(function ToolCallCard({
 
       <CollapsibleContent>
         <div className="ml-5 pl-3 border-l border-border/40 mt-0.5 mb-1 space-y-1.5">
-          {input && (meta.renderInput ? meta.renderInput(input) : <RawJSON input={input} />)}
+          {isAgentTool
+            ? (showAgentInput && <AgentTaskBlock task={agentTask} />)
+            : (!!input && (meta.renderInput ? meta.renderInput(input) : <RawJSON input={input} />))}
           {nestedTools && nestedTools.length > 0 && (
             <div className="space-y-0">
               {nestedTools.map((nt) => (
@@ -677,10 +737,12 @@ export const ToolCallCard = memo(function ToolCallCard({
               ))}
             </div>
           )}
-          {/* Agent/Task tool_result is just the "Async agent launched…" launch
-              receipt — no value to show, and because it arrives ~20ms after
-              launch (long before the nested calls) it renders out of order,
-              below them. Hide it; the card's substance is its nested calls. */}
+          {showAgentResult && result && (
+            <AgentResultBlock output={result.output ?? ""} isError={result.isError} />
+          )}
+          {/* While an Agent is running, its early tool_result is only a launch
+              receipt. The terminal subtask_done replaces that value and flips
+              the card state, at which point AgentResultBlock renders it. */}
           {result && !isAgentTool && (
             result.diff
               ? <DiffPreview diff={result.diff} />

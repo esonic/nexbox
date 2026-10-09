@@ -64,7 +64,7 @@ interface AppState {
   addToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean, diff?: string) => void;
   // Mark an Agent/Task tool_use complete once its sub-agent truly finishes (its
   // own tool_result returns immediately at launch, so it can't complete the card).
-  completeAgentTool: (sessionId: string, toolCallId: string) => void;
+  completeAgentTool: (sessionId: string, toolCallId: string, output?: string, isError?: boolean) => void;
   appendThinkingDelta: (sessionId: string, text: string) => void;
   setAgentToolSummary: (sessionId: string, summary: string, toolCallId?: string) => void;
   setWorkflowProgress: (sessionId: string, toolCallId: string, snapshot: WorkflowProgressSnapshot) => void;
@@ -283,17 +283,42 @@ export const useAppStore = create<AppState>()(
       }),
     ),
 
-  completeAgentTool: (sessionId, toolCallId) =>
+  completeAgentTool: (sessionId, toolCallId, output = "", isError = false) =>
     set((state) =>
-      updateLastAssistant(state, sessionId, (parts) =>
+      updateLastAssistant(state, sessionId, (parts) => {
         patchToolUse(parts, toolCallId, (p) => ({
           ...p,
-          state: "complete",
+          state: isError ? "error" : "complete",
           nestedTools: p.nestedTools?.map((n) =>
             n.state === "running" || n.state === "streaming" ? { ...n, state: "complete" as const } : n,
           ),
-        })),
-      ),
+        }));
+
+        // Claude may already have inserted an immediate "agent launched"
+        // receipt. Replace it with the terminal child response; Codex reaches
+        // this path without a prior result, so add one when non-empty.
+        let foundResult = false;
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const p = parts[i];
+          if (p.type === "tool_result" && p.toolCallId === toolCallId) {
+            parts[i] = { ...p, output, isError };
+            foundResult = true;
+            break;
+          }
+        }
+        if (!foundResult && (output !== "" || isError)) {
+          const toolUseIndex = parts.findIndex((p) => p.type === "tool_use" && p.toolCallId === toolCallId);
+          const result = { type: "tool_result" as const, toolCallId, output, isError };
+          if (toolUseIndex >= 0) {
+            // Keep the result adjacent to the Agent card so completed turns
+            // still pair them when work and main-agent text interleave.
+            parts.splice(toolUseIndex + 1, 0, result);
+          } else {
+            parts.push(result);
+          }
+        }
+        return parts;
+      }),
     ),
 
   appendThinkingDelta: (sessionId, text) =>
