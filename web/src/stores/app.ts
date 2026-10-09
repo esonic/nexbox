@@ -17,7 +17,10 @@ export interface PickedWorkflow {
 
 export interface InlineComment {
   id: string;
+  repositoryId?: string;
+  repositoryDisplayPath?: string;
   filePath: string;
+  workspacePath?: string;
   lineNumber: number;
   side: "old" | "new";  // "old" for deletion lines, "new" for addition/context lines
   lineContent: string;
@@ -149,6 +152,32 @@ interface AppState {
   setMarketplaceUpdateCount: (count: number) => void;
 }
 
+// `session-updated` fires whenever ANY session finishes a turn, and every
+// listener re-fetches the full sessions/projects list. The API hands back
+// freshly-deserialized objects each time, so a naive `set({ sessions })` churns
+// the identity of every row and cascades a re-render through anything derived
+// from one — most visibly the Git panel, which would tear down and rebuild
+// (losing a half-typed commit message) because an unrelated session finished.
+//
+// Reconcile instead: keep the previous object for every entry whose content is
+// unchanged, and keep the array itself when nothing moved. A session finishing
+// then only invalidates that one session's object. Deep-comparing the list runs
+// once per turn end, which is far cheaper than the render cascade it prevents.
+function reconcileById<T extends { id: string }>(prev: T[], next: T[]): T[] {
+  const previousById = new Map(prev.map((item) => [item.id, item]));
+  let changed = prev.length !== next.length;
+  const merged = next.map((item, index) => {
+    const previous = previousById.get(item.id);
+    if (previous && JSON.stringify(previous) === JSON.stringify(item)) {
+      if (prev[index] !== previous) changed = true; // same content, new position
+      return previous;
+    }
+    changed = true;
+    return item;
+  });
+  return changed ? merged : prev;
+}
+
 /** Replace a session's message array. Reduces boilerplate around chatMessages spread. */
 function patchMessages(
   state: AppState,
@@ -194,14 +223,16 @@ export const useAppStore = create<AppState>()(
   activeSessionId: null,
   sessions: [],
   projects: [],
-  setCurrentProject: (project) => set({ currentProject: project }),
-  setCurrentSession: (session) => set({ currentSession: session }),
+  setCurrentProject: (project) =>
+    set((s) => (s.currentProject === project ? {} : { currentProject: project })),
+  setCurrentSession: (session) =>
+    set((s) => (s.currentSession === session ? {} : { currentSession: session })),
   setActiveSessionId: (id) => {
     console.log('[Store] setActiveSessionId:', id);
     set({ activeSessionId: id });
   },
-  setSessions: (sessions) => set({ sessions }),
-  setProjects: (projects) => set({ projects }),
+  setSessions: (sessions) => set((s) => ({ sessions: reconcileById(s.sessions, sessions) })),
+  setProjects: (projects) => set((s) => ({ projects: reconcileById(s.projects, projects) })),
 
   chatMessages: {},
   setChatMessages: (sessionId, messages) =>

@@ -780,6 +780,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
 
   // Track if a load is for the current projectId/sessionId; ignore stale results after switch.
   const loadGenRef = useRef(0);
+  const workspaceStatusRequestRef = useRef(0);
 
   // Tree pane collapse — gives the content/editor pane the full width.
   const [treeCollapsed, setTreeCollapsed] = useState(false);
@@ -918,7 +919,19 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   // changes made elsewhere (agent edits, terminal, the git panel's stage/commit).
   const refreshGitStatus = useCallback(() => {
     if (!projectId) return;
-    gitApi.status(projectId, sessionId).then(setGitStatus).catch(() => setGitStatus(null));
+    const request = ++workspaceStatusRequestRef.current;
+    gitApi.workspaceStatus(projectId, sessionId, { includeFiles: true }).then((data) => {
+      if (request !== workspaceStatusRequestRef.current) return;
+      const status: GitStatusResponse = { staged: [], unstaged: [], untracked: [] };
+      for (const file of data.files) {
+        if (file.index_status) status.staged.push({ path: file.workspace_path, status: file.index_status });
+        if (file.worktree_status === "untracked") status.untracked.push({ path: file.workspace_path, status: "untracked" });
+        else if (file.worktree_status) status.unstaged.push({ path: file.workspace_path, status: file.worktree_status });
+      }
+      setGitStatus(status);
+    }).catch(() => {
+      if (request === workspaceStatusRequestRef.current) setGitStatus(null);
+    });
   }, [projectId, sessionId]);
 
   useEffect(() => {

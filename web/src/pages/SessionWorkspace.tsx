@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, useCallback, memo, lazy, Suspense } from "react";
 
 import {
   X,
   GitBranch,
   Check,
+  ChevronDown,
+  RefreshCw,
   PanelRightClose,
   PanelBottom,
   PanelRight,
@@ -21,7 +23,10 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AgentIcon } from "@/components/ui/AgentIcon";
-import { sessionsApi, projectsApi, diffApi, type DiffResponse } from "@/lib/api";
+import {
+  sessionsApi, projectsApi, diffApi, gitApi,
+  type DiffResponse, type GitRepository, type GitRepositoriesResponse, type GitScope,
+} from "@/lib/api";
 import { TaskPlugin } from "@/plugins/task/TaskPlugin";
 import { AssetPanel } from "@/plugins/asset/AssetPanel";
 import { WorkflowPanel } from "@/components/workflow/WorkflowPanel";
@@ -35,6 +40,7 @@ import type { Project } from "@/types";
 import { useAppStore } from "@/stores/app";
 import { useLayoutStore } from "@/stores/layout";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
+import { gitContextKey, useGitStore } from "@/stores/git";
 import { globalWS } from "@/lib/ws";
 import { cn } from "@/lib/utils";
 import {
@@ -125,44 +131,215 @@ function ProjectSelector({
 
 // ── GitPanelContent ─────────────────────────────────────────────────────
 
-function GitPanelContent({
+// Shared empty array so the `warnings` prop stays reference-stable and does not
+// defeat GitPanelContent's memo on every render.
+const NO_WARNINGS: string[] = [];
+const NO_REPOSITORIES: GitRepository[] = [];
+
+function equalDiffStats(left: DiffResponse | null, right: DiffResponse): boolean {
+  if (!left
+    || left.repository_id !== right.repository_id
+    || left.total_files !== right.total_files
+    || left.insertions !== right.insertions
+    || left.deletions !== right.deletions
+    || left.files.length !== right.files.length) {
+    return false;
+  }
+  return left.files.every((file, index) => {
+    const other = right.files[index];
+    return file.path === other.path
+      && file.original_path === other.original_path
+      && file.workspace_path === other.workspace_path
+      && file.status === other.status
+      && file.insertions === other.insertions
+      && file.deletions === other.deletions
+      && file.binary === other.binary;
+  });
+}
+
+function GitRepositorySelector({ repositories, selected, loading, onSelect, onRefresh }: {
+  repositories: GitRepository[];
+  selected: GitRepository | null;
+  loading: boolean;
+  onSelect: (repositoryId: string) => void;
+  onRefresh: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  if (!selected) {
+    return (
+      <button type="button" onClick={onRefresh} disabled={loading} className="ml-1 h-6 flex items-center gap-1.5 rounded border bg-background px-2 text-xs text-muted-foreground hover:bg-accent disabled:cursor-wait disabled:opacity-60">
+        {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <FolderGit2 className="h-3 w-3" />}
+        {loading ? "Scanning…" : "Rescan repositories"}
+      </button>
+    );
+  }
+
+  return (
+    <div className="ml-1 flex min-w-0 items-center gap-1" ref={ref}>
+      {repositories.length === 1 ? (
+        <div
+          className="h-6 min-w-0 max-w-[260px] flex items-center gap-1.5 rounded border bg-background px-2 text-xs"
+          title={`${selected.name} · ${selected.display_path}`}
+        >
+          <FolderGit2 className="h-3 w-3 shrink-0 text-muted-foreground" />
+          <span className="truncate font-medium">{selected.name}</span>
+          <span className="truncate text-muted-foreground">{selected.display_path}</span>
+          {selected.branch && <span className="truncate text-muted-foreground/70">· {selected.branch}</span>}
+        </div>
+      ) : (
+        <div className="relative min-w-0 max-w-[260px]">
+          <button
+            type="button"
+            onClick={() => setOpen((value) => !value)}
+            aria-expanded={open}
+            aria-haspopup="listbox"
+            className="h-6 min-w-0 w-full flex items-center gap-1.5 rounded px-2 text-xs border bg-background hover:bg-accent"
+            title={`${selected.name} · ${selected.display_path}`}
+          >
+            <FolderGit2 className="h-3 w-3 shrink-0 text-muted-foreground" />
+            <span className="truncate font-medium">{selected.name}</span>
+            <span className="truncate text-muted-foreground">{selected.display_path}</span>
+            {selected.branch && <span className="truncate text-muted-foreground/70">· {selected.branch}</span>}
+            <ChevronDown className="h-3 w-3 shrink-0" />
+          </button>
+          {open && (
+            <div role="listbox" className="absolute left-0 top-full z-50 mt-1 w-80 max-h-80 overflow-y-auto rounded-md border bg-popover shadow-lg">
+              {repositories.map((repository) => (
+                <button
+                  key={repository.id}
+                  type="button"
+                  role="option"
+                  aria-selected={repository.id === selected.id}
+                  onClick={() => { onSelect(repository.id); setOpen(false); }}
+                  className={cn("w-full flex items-center gap-2 px-3 py-2 text-left text-xs hover:bg-accent", repository.id === selected.id && "bg-accent/50")}
+                >
+                  <span className="w-3 shrink-0">{repository.id === selected.id && <Check className="h-3 w-3" />}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">{repository.name}</span>
+                    <span className="block truncate text-[10px] text-muted-foreground">{repository.display_path}{repository.shared ? " · linked · shared in worktree" : repository.is_symlink ? " · linked" : repository.outside_workspace ? " · parent repository" : ""}</span>
+                  </span>
+                  <span className="shrink-0 text-[10px] text-muted-foreground">{repository.branch || "detached"}</span>
+                  <span className={cn("shrink-0 text-[10px]", repository.status.total ? "text-amber-500" : "text-muted-foreground")}>{repository.status.total || "clean"}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      <button type="button" onClick={() => { setOpen(false); onRefresh(); }} disabled={loading} className="h-6 w-6 shrink-0 inline-flex items-center justify-center rounded border bg-background text-muted-foreground hover:bg-accent disabled:cursor-wait disabled:opacity-60" title="Rescan repositories">
+        <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} />
+      </button>
+    </div>
+  );
+}
+
+// memo: a defence-in-depth boundary so chat activity cannot drag the diff tree
+// along with it. Every prop is a primitive or a reference-stable value.
+const GitPanelContent = memo(function GitPanelContent({
   projectId,
   sessionId,
+  defaultRepositoryId,
+  repository,
+  repositories,
+  loadingRepositories,
+  onSelectRepository,
+  onRescan,
   diffData,
   loadingDiff,
   onRefresh,
+  warnings,
 }: {
   projectId: string;
   sessionId?: string;
-  gitRepoPath: string;
+  defaultRepositoryId?: string;
+  repository: GitRepository | null;
+  repositories: GitRepository[];
+  loadingRepositories: boolean;
+  onSelectRepository: (repositoryId: string) => void;
+  onRescan: () => void;
   diffData: DiffResponse | null;
   loadingDiff: boolean;
   onRefresh: () => void;
+  warnings: string[];
 }) {
+  const [dismissedWarningKeys, setDismissedWarningKeys] = useState<Set<string>>(() => new Set());
+  const warningKey = JSON.stringify([projectId, sessionId ?? null, warnings]);
+  const showWarnings = warnings.length > 0 && !dismissedWarningKeys.has(warningKey);
+
   return (
     <div className="flex flex-col flex-1 overflow-hidden">
+      <div className="flex items-center gap-1 px-3 py-1.5 border-b shrink-0">
+        <GitRepositorySelector
+          repositories={repositories}
+          selected={repository}
+          loading={loadingRepositories}
+          onSelect={onSelectRepository}
+          onRefresh={onRescan}
+        />
+      </div>
+      {showWarnings && (
+        <div className="flex items-start gap-2 border-b bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+          <span className="min-w-0 flex-1 break-words">{warnings.join(" · ")}</span>
+          <button
+            type="button"
+            onClick={() => setDismissedWarningKeys((previous) => {
+              const next = new Set(previous);
+              next.add(warningKey);
+              return next;
+            })}
+            className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="Dismiss warning"
+            aria-label="Dismiss warning"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      )}
       {loadingDiff ? (
         <div className="flex items-center justify-center h-full text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin mr-2" />
           Loading changes...
         </div>
-      ) : diffData?.files ? (
-        <DiffView fileStats={diffData.files} projectId={projectId} sessionId={sessionId} onCommitted={onRefresh} />
+      ) : repository && diffData?.files ? (
+        <DiffView key={`${projectId}:${sessionId ?? "local"}:${repository.id}`} fileStats={diffData.files} projectId={projectId} sessionId={sessionId} repository={repository} isDefaultRepository={repository.id === defaultRepositoryId} onCommitted={onRefresh} />
       ) : (
         <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-          No changes found
+          {repository ? "No changes found" : "No Git repositories found"}
         </div>
       )}
     </div>
   );
-}
+});
 
 export function SessionWorkspace() {
-  const {
-    sessions, setSessions, activeSessionId,
-    setCurrentSession, setCurrentProject,
-    projects, setProjects, setGitDiffStats, chatMessages,
-  } = useAppStore();
+  // Select field-by-field rather than destructuring the whole store: an
+  // unselected `useAppStore()` re-renders on every `set()`, and streaming a
+  // reply calls `set()` once per token, dragging the Git panel into the loop.
+  const sessions = useAppStore((s) => s.sessions);
+  const setSessions = useAppStore((s) => s.setSessions);
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const setCurrentSession = useAppStore((s) => s.setCurrentSession);
+  const setCurrentProject = useAppStore((s) => s.setCurrentProject);
+  const projects = useAppStore((s) => s.projects);
+  const setProjects = useAppStore((s) => s.setProjects);
+  const gitDiffStats = useAppStore((s) => s.gitDiffStats);
+  // Only the boolean matters here, so token-level message churn cannot cause a
+  // re-render; this flips at most once per session.
+  const hasUserMessage = useAppStore((s) => {
+    const id = s.activeSessionId;
+    return !!id && (s.chatMessages[id] || []).some((m) => m.role === "user");
+  });
   const {
     rightPanel, setRightPanel, panelWidth, setPanelWidth,
     terminalHeight, setTerminalHeight,
@@ -209,8 +386,11 @@ export function SessionWorkspace() {
   // Used to immediately disable the worktree selector and show a preparing indicator.
   const [preparingWorktrees, setPreparingWorktrees] = useState<Set<string>>(new Set());
 
-  const gitDiffData = useAppStore((s) => s.gitDiffStats);
+  const [gitDiffData, setGitDiffData] = useState<DiffResponse | null>(null);
+  const [gitRepositoriesData, setGitRepositoriesData] = useState<GitRepositoriesResponse | null>(null);
+  const [loadingGitRepositories, setLoadingGitRepositories] = useState(false);
   const [loadingGitDiff, setLoadingGitDiff] = useState(false);
+  const [gitDiffRefreshToken, setGitDiffRefreshToken] = useState(0);
   const isResizing = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   // New project dialog
@@ -219,6 +399,7 @@ export function SessionWorkspace() {
   const activeSession = sessions.find((s) => s.id === activeSessionId) || null;
   const hasProjectId = !!(activeSession?.project_id);
   const boundProject = hasProjectId ? (projects.find((p) => p.id === activeSession!.project_id) || null) : null;
+  const boundProjectId = boundProject?.id;
   const isRealProject = !!boundProject && boundProject.name !== UNASSIGNED_PROJECT;
   isRealProjectRef.current = isRealProject;
 
@@ -293,23 +474,142 @@ export function SessionWorkspace() {
     setCurrentProject(boundProject);
   }, [activeSession, boundProject, setCurrentSession, setCurrentProject]);
 
-  const worktreeSessionId = activeSession?.worktree_mode === "worktree" ? activeSession.id : undefined;
+  // Until the linked worktree actually exists, Files/Git still operate on the
+  // project's local checkout. Switch context only when worktree_path is ready
+  // so a local repository ID cannot be restored into the new checkout.
+  const worktreeSessionId = activeSession?.worktree_mode === "worktree" && activeSession.worktree_path
+    ? activeSession.id
+    : undefined;
+  const selectedRepositoryByContext = useGitStore((state) => state.selectedRepositoryByContext);
+  const setSelectedRepository = useGitStore((state) => state.setSelectedRepository);
+  const repositoryContextKey = boundProject ? gitContextKey(boundProject.id, worktreeSessionId) : "";
+  const selectedRepositoryId = repositoryContextKey ? selectedRepositoryByContext[repositoryContextKey] : undefined;
+  const selectedRepository = gitRepositoriesData?.repositories.find((repository) => repository.id === selectedRepositoryId) ?? null;
+  const selectedRepositoryResolvedId = selectedRepository?.id;
+  const repositoryLoadGeneration = useRef(0);
+  const diffLoadGeneration = useRef(0);
+  const invalidRepositoryRefreshRef = useRef<string | null>(null);
 
-  // Reset built-in panel data when the bound project changes
-  const prevProjectIdRef = useRef(boundProject?.id);
-  useEffect(() => {
-    if (prevProjectIdRef.current !== boundProject?.id) {
-      prevProjectIdRef.current = boundProject?.id;
-      setGitDiffStats(null);
-      if (rightPanel === "git" && boundProject?.git_repo_path) {
-        setLoadingGitDiff(true);
-        diffApi.stats(boundProject.id)
-          .then(setGitDiffStats)
-          .catch((e) => console.error("Failed to load git diff:", e))
-          .finally(() => setLoadingGitDiff(false));
-      }
+  const loadGitRepositories = useCallback(async (refresh = false) => {
+    const generation = ++repositoryLoadGeneration.current;
+    if (!boundProject?.git_repo_path) {
+      setLoadingGitRepositories(false);
+      setGitRepositoriesData(null);
+      setGitDiffData(null);
+      return;
     }
-  }, [boundProject, rightPanel, setGitDiffStats]);
+    setLoadingGitRepositories(true);
+    try {
+      const data = await gitApi.repositories(boundProject.id, worktreeSessionId, refresh);
+      if (generation !== repositoryLoadGeneration.current) return;
+      setGitRepositoriesData(data);
+      const contextKey = gitContextKey(boundProject.id, worktreeSessionId);
+      const saved = useGitStore.getState().selectedRepositoryByContext[contextKey];
+      const next = data.repositories.some((repository) => repository.id === saved)
+        ? saved
+        : data.default_repository_id || data.repositories[0]?.id;
+      if (next) setSelectedRepository(contextKey, next);
+      else useGitStore.getState().clearSelectedRepository(contextKey);
+    } catch (error) {
+      if (generation !== repositoryLoadGeneration.current) return;
+      console.error("Failed to discover Git repositories:", error);
+      setGitRepositoriesData({
+        workspace_mode: worktreeSessionId ? "worktree" : "local",
+        default_repository_id: "",
+        repositories: [],
+        dirty_repository_count: 0,
+        truncated: false,
+        warnings: [String(error)],
+      });
+    } finally {
+      if (generation === repositoryLoadGeneration.current) setLoadingGitRepositories(false);
+    }
+  }, [boundProject, worktreeSessionId, setSelectedRepository]);
+
+  const rescanGitRepositories = useCallback(async () => {
+    await loadGitRepositories(true);
+    // Repository IDs are stable when only status changes, so explicitly
+    // restart the scoped diff load after a user-requested topology rescan.
+    setGitDiffRefreshToken((value) => value + 1);
+  }, [loadGitRepositories]);
+
+  // This effect blanks the panel, so it must fire only when the git scope
+  // genuinely changes — never because an unrelated `session-updated` refresh
+  // handed back a new `boundProject` object and thus a new `loadGitRepositories`
+  // identity. Deps are primitives for that reason; the loader is read through a
+  // ref so it stays current without pulling identity churn into the dep list.
+  const loadGitRepositoriesRef = useRef(loadGitRepositories);
+  loadGitRepositoriesRef.current = loadGitRepositories;
+  useEffect(() => {
+    diffLoadGeneration.current++;
+    setGitDiffData(null);
+    loadGitRepositoriesRef.current(false);
+  }, [boundProjectId, boundProject?.git_repo_path, worktreeSessionId, activeSession?.worktree_path]);
+
+  useEffect(() => {
+    const handleInvalidRepository = async (event: Event) => {
+      const scope = (event as CustomEvent<GitScope>).detail;
+      if (!boundProject || scope.projectId !== boundProject.id || scope.repositoryId !== selectedRepositoryId) return;
+      if ((scope.sessionId ?? "") !== (worktreeSessionId ?? "")) return;
+      const key = `${scope.projectId}:${scope.sessionId ?? "local"}:${scope.repositoryId}`;
+      if (invalidRepositoryRefreshRef.current === key) return;
+      invalidRepositoryRefreshRef.current = key;
+      toast.warning("The selected repository changed. Refreshing repositories…");
+      try {
+        await loadGitRepositories(true);
+      } finally {
+        if (invalidRepositoryRefreshRef.current === key) invalidRepositoryRefreshRef.current = null;
+      }
+    };
+    window.addEventListener("git-repository-invalid", handleInvalidRepository);
+    return () => window.removeEventListener("git-repository-invalid", handleInvalidRepository);
+  }, [boundProject, selectedRepositoryId, worktreeSessionId, loadGitRepositories]);
+
+  useEffect(() => {
+    if (rightPanel !== "git" || !boundProjectId || !selectedRepositoryResolvedId) return;
+    const projectId = boundProjectId;
+    const repositoryId = selectedRepositoryResolvedId;
+    const scope: GitScope = { projectId, sessionId: worktreeSessionId, repositoryId };
+    let cancelled = false;
+    let inFlight = false;
+
+    const refreshSelectedDiff = async (initial: boolean) => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      const generation = ++diffLoadGeneration.current;
+      if (initial) setLoadingGitDiff(true);
+      try {
+        const data = await diffApi.stats(scope);
+        if (cancelled || generation !== diffLoadGeneration.current) return;
+        if (useGitStore.getState().selectedRepositoryByContext[repositoryContextKey] !== repositoryId) return;
+        setGitDiffData((previous) => equalDiffStats(previous, data) ? previous : data);
+      } catch (error) {
+        if (cancelled || generation !== diffLoadGeneration.current) return;
+        if (initial) {
+          console.error("Failed to load git diff:", error);
+          setGitDiffData(null);
+        }
+      } finally {
+        inFlight = false;
+        // Also clear the initial spinner after the panel closes. A newer scope
+        // increments the generation, so an old request cannot hide its loader.
+        if (initial && generation === diffLoadGeneration.current) setLoadingGitDiff(false);
+      }
+    };
+
+    void refreshSelectedDiff(true);
+    const poll = () => {
+      if (!document.hidden) void refreshSelectedDiff(false);
+    };
+    const interval = window.setInterval(poll, 5_000);
+    document.addEventListener("visibilitychange", poll);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", poll);
+    };
+  }, [rightPanel, boundProjectId, worktreeSessionId, selectedRepositoryResolvedId, repositoryContextKey, gitDiffRefreshToken]);
+
 
   // When terminal occupies the right slot and the user opens a panel
   // (Files/Git/Tasks/etc.), the panel takes over the slot and the terminal hides.
@@ -328,20 +628,21 @@ export function SessionWorkspace() {
     }
   }, [setRightPanel, setTerminalShow, terminalPosition, activeSessionId, rightPanel]);
 
+
   const handleOpenGit = useCallback(async () => {
     if (!boundProject) return;
     setRightPanelExclusive("git");
-    setLoadingGitDiff(true);
-    try {
-      const data = await diffApi.stats(boundProject.id, worktreeSessionId);
-      setGitDiffStats(data);
-    } catch (e) {
-      console.error("Failed to load git diff:", e);
-      toast.error("Failed to load git diff", { description: String(e) });
-    } finally {
-      setLoadingGitDiff(false);
-    }
-  }, [boundProject, worktreeSessionId, setGitDiffStats, setRightPanelExclusive]);
+    if (!gitRepositoriesData) await loadGitRepositories(false);
+  }, [boundProject, gitRepositoriesData, loadGitRepositories, setRightPanelExclusive]);
+
+  const handleSelectGitRepository = useCallback((repositoryId: string) => {
+    if (!repositoryContextKey || repositoryId === selectedRepositoryId) return;
+    diffLoadGeneration.current++;
+    setGitDiffData(null);
+    setSelectedRepository(repositoryContextKey, repositoryId);
+  }, [repositoryContextKey, selectedRepositoryId, setSelectedRepository]);
+
+  // Allow other components to open the Git panel via custom event
 
   // Allow other components to open the Git panel via custom event
   useEffect(() => {
@@ -351,12 +652,13 @@ export function SessionWorkspace() {
   }, [handleOpenGit]);
 
   // Allow other components (e.g. the diff viewer) to reveal a file in the Files
-  // panel. We seed the selected path into the per-project store, then switch to
-  // the Files panel — FileBrowser opens it on mount (or via its own listener if
-  // already mounted).
+  // panel. We seed the selected (workspace-relative) path into the per-project
+  // store, then switch to the Files panel; FileBrowser opens it on mount (or
+  // via its own listener if already mounted).
   useEffect(() => {
     const handler = (e: Event) => {
-      const path = (e as CustomEvent<{ path?: string }>).detail?.path;
+      const detail = (e as CustomEvent<{ path?: string }>).detail;
+      const path = detail?.path;
       if (!path || !boundProject) return;
       useFileBrowserStore.getState().setSelectedPath(boundProject.id, path);
       setRightPanelExclusive("files");
@@ -394,15 +696,21 @@ export function SessionWorkspace() {
   }, [setTerminalShowExclusive]);
 
   const refreshGitReview = useCallback(async () => {
-    if (!boundProject) return;
+    if (!boundProject || !selectedRepository) return;
+    if (useGitStore.getState().selectedRepositoryByContext[repositoryContextKey] !== selectedRepository.id) return;
+    const generation = ++diffLoadGeneration.current;
+    const scope: GitScope = { projectId: boundProject.id, sessionId: worktreeSessionId, repositoryId: selectedRepository.id };
     try {
-      const data = await diffApi.stats(boundProject.id, worktreeSessionId);
-      setGitDiffStats(data);
+      const [data] = await Promise.all([diffApi.stats(scope), loadGitRepositories(false)]);
+      if (generation !== diffLoadGeneration.current) return;
+      if (useGitStore.getState().selectedRepositoryByContext[repositoryContextKey] !== selectedRepository.id) return;
+      setGitDiffData(data);
     } catch (e) {
+      if (generation !== diffLoadGeneration.current) return;
       console.error("Failed to refresh git:", e);
       toast.error("Failed to refresh git", { description: String(e) });
     }
-  }, [boundProject, worktreeSessionId, setGitDiffStats]);
+  }, [boundProject, selectedRepository, worktreeSessionId, loadGitRepositories, repositoryContextKey]);
 
   // Right panel resize handler
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -525,7 +833,7 @@ export function SessionWorkspace() {
           >
             <GitBranch className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Git</span>
-            {gitDiffData && (gitDiffData.insertions > 0 || gitDiffData.deletions > 0) && (
+            {gitDiffStats && gitDiffStats.total_files > 0 && (
               <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-blue-500" />
             )}
           </Button>
@@ -560,7 +868,7 @@ export function SessionWorkspace() {
                 locked: !!activeSession.agent_session_id
                   || preparingWorktrees.has(activeSession.id)
                   || !!activeSession.worktree_path
-                  || (chatMessages[activeSession.id] || []).some((m) => m.role === "user"),
+                  || hasUserMessage,
                 worktreePending: preparingWorktrees.has(activeSession.id) && !activeSession.worktree_path,
                 hasGitRepo: !!boundProject?.git_repo_path,
                 onSetMode: handleSetWorktreeMode,
@@ -688,10 +996,16 @@ export function SessionWorkspace() {
                   <GitPanelContent
                     projectId={boundProject.id}
                     sessionId={worktreeSessionId}
-                    gitRepoPath={boundProject.git_repo_path}
+                    defaultRepositoryId={gitRepositoriesData?.default_repository_id}
+                    repository={selectedRepository}
+                    repositories={gitRepositoriesData?.repositories ?? NO_REPOSITORIES}
+                    loadingRepositories={loadingGitRepositories}
+                    onSelectRepository={handleSelectGitRepository}
+                    onRescan={rescanGitRepositories}
                     diffData={gitDiffData}
-                    loadingDiff={loadingGitDiff}
+                    loadingDiff={loadingGitDiff || loadingGitRepositories}
                     onRefresh={refreshGitReview}
+                    warnings={gitRepositoriesData?.warnings ?? NO_WARNINGS}
                   />
                 )}
                 {rightPanel === "files" && boundProject && (

@@ -938,9 +938,16 @@ export function ChatInput({
             <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/60 text-xs">
               <div className="flex items-center gap-2 text-muted-foreground">
                 <GitBranch className="h-3 w-3" />
+                {gitDiffStats.repository_count && gitDiffStats.repository_count > 1 && (
+                  <span>{gitDiffStats.repository_count} repositories</span>
+                )}
                 <span>{gitDiffStats.total_files} file{gitDiffStats.total_files !== 1 ? "s" : ""} changed</span>
-                <span className="text-green-500 font-medium">+{gitDiffStats.insertions}</span>
-                <span className="text-red-500 font-medium">-{gitDiffStats.deletions}</span>
+                {gitDiffStats.stats_included && (
+                  <>
+                    <span className="text-green-500 font-medium">+{gitDiffStats.insertions}</span>
+                    <span className="text-red-500 font-medium">-{gitDiffStats.deletions}</span>
+                  </>
+                )}
               </div>
               {onOpenGit && (
                 <button

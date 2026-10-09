@@ -6,7 +6,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ChatInput } from "@/components/chat/ChatInput";
 import type { WorktreeSelectorProps } from "@/components/chat/WorktreeSelector";
 import { useChatSession } from "@/hooks/useChatSession";
-import { diffApi, sessionsApi } from "@/lib/api";
+import { gitApi, sessionsApi } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
 import { UNASSIGNED_PROJECT } from "@/lib/constants";
 import { formatDuration, formatMessageTime } from "@/lib/format";
@@ -204,36 +204,51 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
   const projectId = project?.id;
   const projectGitRepo = project?.git_repo_path;
   const worktreeSessionId = session.worktree_mode === "worktree" ? session.id : undefined;
+  const diffStatsRequestRef = useRef(0);
 
-  const fetchDiffStats = useCallback(async () => {
+  const fetchWorkspaceGitSummary = useCallback(async () => {
     if (!projectGitRepo || !projectId) return;
+    const request = ++diffStatsRequestRef.current;
     try {
-      const data = await diffApi.stats(projectId, worktreeSessionId);
-      setGitDiffStats(data);
+      const data = await gitApi.workspaceStatus(projectId, worktreeSessionId);
+      if (request !== diffStatsRequestRef.current) return;
+      setGitDiffStats({
+        files: [],
+        total_files: data.summary.total_files,
+        insertions: data.summary.insertions,
+        deletions: data.summary.deletions,
+        stats_included: data.summary.stats_included,
+        repository_count: data.summary.repository_count,
+      });
     } catch {
       // silently ignore polling errors
     }
   }, [projectId, projectGitRepo, worktreeSessionId, setGitDiffStats]);
 
   useEffect(() => {
-    if (!hasGitRepo) { setGitDiffStats(null); return; }
-    fetchDiffStats();
+    const requestRef = diffStatsRequestRef;
+    requestRef.current++;
+    setGitDiffStats(null);
+    if (!hasGitRepo) return;
+    fetchWorkspaceGitSummary();
     // Skip the poll while the tab is hidden; refresh once when it comes back.
-    const poll = () => { if (!document.hidden) fetchDiffStats(); };
+    const poll = () => { if (!document.hidden) fetchWorkspaceGitSummary(); };
     const interval = setInterval(poll, 10_000);
     document.addEventListener("visibilitychange", poll);
     return () => {
+      requestRef.current++;
       clearInterval(interval);
       document.removeEventListener("visibilitychange", poll);
     };
-  }, [hasGitRepo, fetchDiffStats, setGitDiffStats]);
+  }, [hasGitRepo, fetchWorkspaceGitSummary, setGitDiffStats]);
 
-  // Refresh diff stats when streaming stops (agent may have changed files)
+  // Refresh the cheap workspace summary when streaming stops (the selected
+  // Git panel owns repository-scoped line statistics).
   const prevStreaming = useRef(isStreaming);
   useEffect(() => {
     if (prevStreaming.current && !isStreaming) {
       if (hasGitRepo) {
-        const timer = setTimeout(fetchDiffStats, 2000);
+        const timer = setTimeout(fetchWorkspaceGitSummary, 2000);
         return () => clearTimeout(timer);
       }
       // Refresh session to pick up worktree_path set during first message
@@ -244,7 +259,7 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
       }
     }
     prevStreaming.current = isStreaming;
-  }, [isStreaming, hasGitRepo, fetchDiffStats, session, sessions, setSessions]);
+  }, [isStreaming, hasGitRepo, fetchWorkspaceGitSummary, session, sessions, setSessions]);
 
   const handleOpenGit = useCallback(() => {
     window.dispatchEvent(new CustomEvent("open-git-panel"));

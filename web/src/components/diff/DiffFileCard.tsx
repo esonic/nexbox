@@ -1,5 +1,4 @@
-import { useState, useMemo, useRef, useCallback, useEffect, type ReactNode } from "react";
-import { toast } from "sonner";
+import { useState, useMemo, useRef, useCallback, useEffect, memo, type ReactNode } from "react";
 import {
   FileText,
   ChevronRight,
@@ -16,20 +15,20 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { type ParsedDiffFile } from "@/lib/diff-parser";
-import { diffApi } from "@/lib/api";
+import { getFilePath, type ParsedDiffFile } from "@/lib/diff-parser";
+import { diffApi, type GitRepository, type GitScope, type RepositoryFileRef } from "@/lib/api";
 import { getLangFromPath, ensureLangRegistered, highlightCode } from "@/lib/highlight";
 import { applyRangesToHtml } from "@/lib/inline-diff";
 import { computeDiffOps } from "@/lib/vscode-diff";
 import { useAppStore, type InlineComment } from "@/stores/app";
 
-export function getFilePath(f: ParsedDiffFile) {
-  return f.isNewFile ? f.newPath : f.isDeletedFile ? f.oldPath : f.newPath || f.oldPath;
-}
-
 const LARGE_DIFF_THRESHOLD = 100;
 
-export function DiffFileCard({
+// memo: the git panel lives inside SessionWorkspace, which re-renders for
+// reasons that have nothing to do with the diff (session list refreshes, chat
+// state). Re-rendering a card means re-running syntax highlighting over every
+// line, so the memo boundary is load-bearing, not a micro-optimization.
+export const DiffFileCard = memo(function DiffFileCard({
   file,
   isViewed,
   isActive,
@@ -38,77 +37,87 @@ export function DiffFileCard({
   lazyLoad,
   projectId,
   sessionId,
+  repository,
   defaultExpanded,
   borderless,
   fullFile,
   onChangeCount,
   refreshKey,
   staged,
+  workspacePath,
+  allowLegacyComments,
 }: {
   file: ParsedDiffFile;
   isViewed: boolean;
   isActive: boolean;
-  onToggleViewed: () => void;
+  /** Receives the file key so callers can pass one stable callback for every
+   *  row instead of a fresh arrow per render (which would defeat the memo). */
+  onToggleViewed?: (key: string) => void;
   hideViewedToggle?: boolean;
   lazyLoad?: boolean;
   projectId?: string;
   sessionId?: string;
+  repository?: GitRepository;
   defaultExpanded?: boolean;
   borderless?: boolean;
   fullFile?: boolean;
   onChangeCount?: (count: number) => void;
   refreshKey?: number;
   staged?: boolean;
+  workspacePath?: string;
+  allowLegacyComments?: boolean;
 }) {
   const totalChanges = file.additions + file.deletions;
   const isLarge = totalChanges > LARGE_DIFF_THRESHOLD;
+  const displayPath = getFilePath(file);
   const [expanded, setExpanded] = useState(defaultExpanded ?? !isLarge);
-  const [lazyDiffText, setLazyDiffText] = useState<string | null>(null);
+  const [lazyDiff, setLazyDiff] = useState<{ key: string; text: string } | null>(null);
   const [loadingDiff, setLoadingDiff] = useState(false);
+  const diffRequestGeneration = useRef(0);
+  const repositoryId = repository?.id;
+  const gitScope = useMemo<GitScope | null>(() => projectId && repositoryId ? ({
+    projectId,
+    sessionId,
+    repositoryId,
+  }) : null, [projectId, sessionId, repositoryId]);
+  const lazyRequestKey = `${repositoryId ?? ""}:${displayPath}:${fullFile ? 1 : 0}:${staged ? 1 : 0}:${refreshKey ?? 0}`;
+  const effectiveDiffText = lazyLoad
+    ? (lazyDiff?.key === lazyRequestKey ? lazyDiff.text : null)
+    : file.diffText;
 
-  const effectiveDiffText = lazyLoad ? lazyDiffText : file.diffText;
-
-  // When refreshKey or staged changes, clear stale cached diff so it gets re-fetched
   useEffect(() => {
-    setLazyDiffText(null);
-  }, [refreshKey, staged]);
-
-  useEffect(() => {
-    if (!lazyLoad || !projectId || (isLarge && !defaultExpanded)) return;
-    const filePath = getFilePath(file);
-    setLoadingDiff(true);
-    diffApi.fileDiff(projectId, filePath, fullFile, sessionId, staged).then((result) => {
-      setLazyDiffText(result.diff);
-    }).catch((e) => {
-      console.error("Failed to auto-load file diff:", e);
-    }).finally(() => {
-      setLoadingDiff(false);
-    });
-  }, [lazyLoad, isLarge, projectId, refreshKey, staged]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleExpand = async () => {
-    if (expanded) {
-      setExpanded(false);
-      return;
-    }
-    setExpanded(true);
-    if (lazyLoad && !lazyDiffText && projectId) {
-      const filePath = getFilePath(file);
+    if (!lazyLoad || !gitScope || !expanded || file.isBinary) return;
+    const generation = ++diffRequestGeneration.current;
+    let cancelled = false;
+    void Promise.resolve().then(async () => {
+      if (cancelled || generation !== diffRequestGeneration.current) return;
       setLoadingDiff(true);
       try {
-        const result = await diffApi.fileDiff(projectId, filePath, fullFile, sessionId, staged);
-        setLazyDiffText(result.diff);
-      } catch (e) {
-        console.error("Failed to load file diff:", e);
-        toast.error("Failed to load diff", { description: String(e) });
-        setLazyDiffText(null);
+        const result = await diffApi.fileDiff(gitScope, displayPath, fullFile, staged);
+        if (cancelled || generation !== diffRequestGeneration.current) return;
+        setLazyDiff({ key: lazyRequestKey, text: result.diff });
+      } catch (error) {
+        if (cancelled || generation !== diffRequestGeneration.current) return;
+        console.error("Failed to auto-load file diff:", error);
       } finally {
-        setLoadingDiff(false);
+        if (!cancelled && generation === diffRequestGeneration.current) setLoadingDiff(false);
       }
-    }
+    });
+    return () => { cancelled = true; };
+  }, [lazyLoad, gitScope, expanded, file.isBinary, displayPath, fullFile, staged, lazyRequestKey]);
+
+  const handleExpand = () => {
+    setExpanded((value) => !value);
   };
 
-  const displayPath = getFilePath(file);
+  const effectiveWorkspacePath = workspacePath ?? file.workspacePath;
+  const fileRef: RepositoryFileRef | null = repository ? {
+    repository_id: repository.id,
+    repository_name: repository.name,
+    repository_display_path: repository.display_path,
+    path: displayPath,
+    workspace_path: effectiveWorkspacePath,
+  } : null;
 
   const FileIcon = file.isBinary
     ? FileImage
@@ -148,9 +157,9 @@ export function DiffFileCard({
               {displayPath}
             </span>
             <button
-              onClick={() =>
-                window.dispatchEvent(new CustomEvent("open-file", { detail: { path: displayPath } }))
-              }
+              onClick={() => window.dispatchEvent(new CustomEvent("open-file", {
+                detail: fileRef ? { path: fileRef.workspace_path ?? displayPath, file: fileRef } : { path: displayPath },
+              }))}
               className="shrink-0 p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
               title="Open in Files panel"
             >
@@ -198,7 +207,7 @@ export function DiffFileCard({
           <span className="text-red-600 dark:text-red-400">-{file.deletions}</span>
           {!hideViewedToggle && (
             <button
-              onClick={onToggleViewed}
+              onClick={() => onToggleViewed?.(file.key)}
               className={cn(
                 "p-1 rounded hover:bg-muted transition-colors",
                 isViewed ? "text-green-500" : "text-muted-foreground"
@@ -229,7 +238,7 @@ export function DiffFileCard({
 
       {expanded && !loadingDiff && !file.isBinary && effectiveDiffText && (
         <div className="overflow-x-auto">
-          <DiffLines diffText={effectiveDiffText} filename={displayPath} hideHeaders={fullFile}
+          <DiffLines diffText={effectiveDiffText} filename={displayPath} hideHeaders={fullFile} repository={repository} workspacePath={effectiveWorkspacePath} allowLegacyComments={allowLegacyComments}
             onChangeCount={onChangeCount} />
         </div>
       )}
@@ -245,7 +254,7 @@ export function DiffFileCard({
       )}
     </div>
   );
-}
+});
 
 // --- Diff line rendering ---
 
@@ -444,11 +453,14 @@ function CommentInput({ onAdd, onCancel, autoFocus }: {
   );
 }
 
-function DiffLines({ diffText, filename, hideHeaders, onChangeCount }: {
+const DiffLines = memo(function DiffLines({ diffText, filename, hideHeaders, onChangeCount, repository, workspacePath, allowLegacyComments }: {
   diffText: string;
   filename?: string;
   hideHeaders?: boolean;
   onChangeCount?: (count: number) => void;
+  repository?: GitRepository;
+  workspacePath?: string;
+  allowLegacyComments?: boolean;
 }) {
   const parsed = useMemo(() => parseDiffLines(diffText), [diffText]);
   const [langReady, setLangReady] = useState(false);
@@ -460,28 +472,26 @@ function DiffLines({ diffText, filename, hideHeaders, onChangeCount }: {
   const addPickedComment = useAppStore((s) => s.addPickedComment);
   const removePickedComment = useAppStore((s) => s.removePickedComment);
   const fileComments: InlineComment[] = chatSessionId
-    ? (allComments[chatSessionId] || []).filter((c) => c.filePath === filename)
+    ? (allComments[chatSessionId] || []).filter((c) => c.filePath === filename && (c.repositoryId === repository?.id || (!c.repositoryId && allowLegacyComments)))
     : [];
 
   const [commentingLine, setCommentingLine] = useState<{ lineNum: number; side: "old" | "new" } | null>(null);
-
-  // Reset comment input when file changes
-  useEffect(() => {
-    setCommentingLine(null);
-  }, [filename]);
 
   const handleAddComment = useCallback((lineNum: number, side: "old" | "new", lineContent: string, text: string) => {
     if (!chatSessionId || !filename) return;
     addPickedComment(chatSessionId, {
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      repositoryId: repository?.id,
+      repositoryDisplayPath: repository?.display_path,
       filePath: filename,
+      workspacePath,
       lineNumber: lineNum,
       side,
       lineContent: lineContent.trim(),
       text,
     });
     setCommentingLine(null);
-  }, [chatSessionId, filename, addPickedComment]);
+  }, [chatSessionId, filename, repository, workspacePath, addPickedComment]);
 
   useEffect(() => {
     onChangeCount?.(parsed.changeCount);
@@ -496,21 +506,36 @@ function DiffLines({ diffText, filename, hideHeaders, onChangeCount }: {
     return () => { cancelled = true; };
   }, [lang]);
 
-  const highlightLine = useCallback(
-    (content: string): string => {
-      if (!langReady || !lang) return "";
-      return highlightCode(content, lang);
-    },
-    [langReady, lang],
+  const visibleLines = useMemo(
+    () => parsed.lines.filter((l) => l.type !== "meta" && !(hideHeaders && l.type === "header")),
+    [parsed.lines, hideHeaders],
   );
+
+  // hljs.highlight() is by far the most expensive thing this panel does, and it
+  // runs once per diff line. Keep it out of the render path entirely: it only
+  // depends on the diff text and the resolved language, so an unrelated parent
+  // re-render must not pay for it. Word-level <mark> ranges are baked in here
+  // too, since they are derived from the same inputs.
+  const highlightedLines = useMemo(() => {
+    if (!langReady || !lang) return null;
+    return visibleLines.map((line) => {
+      if (line.type === "header") return "";
+      const html = highlightCode(line.content, lang);
+      if (!html || !line.intraRanges?.length) return html;
+      return applyRangesToHtml(
+        html,
+        line.intraRanges,
+        line.type === "deletion" ? "diff-word-del" : "diff-word-add",
+      );
+    });
+  }, [visibleLines, lang, langReady]);
 
   const canComment = !!chatSessionId && !!filename;
 
   return (
     <table className="w-full text-[15px] font-mono">
       <tbody>
-        {parsed.lines
-          .filter((l) => l.type !== "meta" && !(hideHeaders && l.type === "header"))
+        {visibleLines
           .map((line, i) => {
             if (line.type === "header") {
               return (
@@ -525,13 +550,10 @@ function DiffLines({ diffText, filename, hideHeaders, onChangeCount }: {
             const prefix =
               line.type === "addition" ? "+" : line.type === "deletion" ? "-" : " ";
             // Paired modify lines get word-level marks; pure add/del lines stay
-            // fully colored.
+            // fully colored. Both are precomputed in highlightedLines above.
             const hasIntra = !!line.intraRanges && line.intraRanges.length > 0;
             const markClass = line.type === "deletion" ? "diff-word-del" : "diff-word-add";
-            let highlighted = langReady ? highlightLine(line.content) : "";
-            if (highlighted && hasIntra) {
-              highlighted = applyRangesToHtml(highlighted, line.intraRanges!, markClass);
-            }
+            const highlighted = highlightedLines?.[i] ?? "";
 
             const gutterCls =
               line.type === "addition"
@@ -696,4 +718,4 @@ function DiffLines({ diffText, filename, hideHeaders, onChangeCount }: {
       </tbody>
     </table>
   );
-}
+});

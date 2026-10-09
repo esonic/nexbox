@@ -23,6 +23,13 @@ function redirectToLogin() {
   window.location.assign(`/login?from=${from}`);
 }
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -35,8 +42,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     if (res.status === 401 && !AUTH_REDIRECT_SKIP.has(path)) {
       redirectToLogin();
     }
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || res.statusText);
+    const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string; code?: string };
+    throw new ApiError(err.error || res.statusText, res.status, err.code);
   }
   const text = await res.text();
   if (!text) return undefined as T;
@@ -251,25 +258,33 @@ export const queueApi = {
 // Git operations (project-level)
 export interface DiffFileInfo {
   path: string;
+  original_path?: string;
+  workspace_path?: string;
   status: string;
   insertions: number;
   deletions: number;
+  binary?: boolean;
 }
 
 export interface DiffResponse {
+  repository_id?: string;
   files: DiffFileInfo[];
   total_files: number;
   insertions: number;
   deletions: number;
   diff?: string;
+  stats_included?: boolean;
+  repository_count?: number;
 }
 
 export interface GitFileEntry {
   path: string;
+  original_path?: string;
   status: string;
 }
 
 export interface GitStatusResponse {
+  repository_id?: string;
   staged: GitFileEntry[];
   unstaged: GitFileEntry[];
   untracked: GitFileEntry[];
@@ -286,6 +301,8 @@ export interface GitCommitInfo {
 
 export interface GitCommitFileEntry {
   path: string;
+  original_path?: string;
+  workspace_path?: string;
   status: string;
 }
 
@@ -293,68 +310,188 @@ export interface GitBranchInfo {
   name: string;
   is_current: boolean;
   is_remote: boolean;
+  /** Branch name without the remote prefix; only set for remote-tracking branches. */
+  local_name?: string;
   upstream?: string;
   ahead?: number;
   behind?: number;
 }
 
 export interface GitBranchResponse {
+  repository_id?: string;
   current: string;
   branches: GitBranchInfo[];
 }
 
-function sid(sessionId?: string) {
-  return sessionId ? `?session_id=${sessionId}` : "";
+export interface GitScope {
+  projectId: string;
+  sessionId?: string;
+  repositoryId: string;
 }
-function sidAmp(sessionId?: string) {
-  return sessionId ? `&session_id=${sessionId}` : "";
+
+export interface GitRepository {
+  id: string;
+  name: string;
+  display_path: string;
+  relation: "workspace" | "ancestor" | "nested" | "symlink";
+  is_symlink: boolean;
+  shared: boolean;
+  outside_workspace: boolean;
+  aliases: string[];
+  branch: string;
+  detached: boolean;
+  remote_name?: string;
+  remote_url?: string;
+  status: {
+    branch: string;
+    detached: boolean;
+    staged: number;
+    unstaged: number;
+    untracked: number;
+    total: number;
+    ahead?: number;
+    behind?: number;
+  };
+}
+
+export interface GitRepositoriesResponse {
+  workspace_mode: "local" | "worktree";
+  default_repository_id: string;
+  repositories: GitRepository[];
+  dirty_repository_count: number;
+  truncated: boolean;
+  warnings: string[];
+}
+
+export interface GitWorkspaceStatusResponse {
+  summary: {
+    repository_count: number;
+    dirty_repository_count: number;
+    total_files: number;
+    insertions: number;
+    deletions: number;
+    stats_included: boolean;
+  };
+  repositories: Array<{ repository_id: string; total_files: number; insertions: number; deletions: number }>;
+  files: Array<{
+    repository_id: string;
+    repository_path: string;
+    workspace_path: string;
+    index_status?: string;
+    worktree_status?: string;
+  }>;
+}
+
+export interface RepositoryFileRef {
+  repository_id: string;
+  repository_name: string;
+  repository_display_path: string;
+  path: string;
+  workspace_path?: string;
+}
+
+function gitQuery(scope: GitScope, extras?: Record<string, string | number | boolean | undefined>) {
+  const params = new URLSearchParams();
+  if (scope.sessionId) params.set("session_id", scope.sessionId);
+  params.set("repository_id", scope.repositoryId);
+  for (const [key, value] of Object.entries(extras ?? {})) {
+    if (value !== undefined && value !== false && value !== "") params.set(key, String(value));
+  }
+  return `?${params.toString()}`;
+}
+
+function repositoryScoped<T extends { repository_id?: string }>(scope: GitScope, promise: Promise<T>): Promise<T> {
+  return promise
+    .then((result) => {
+      if (result.repository_id !== scope.repositoryId) {
+        throw new Error("Discarded a response from a previously selected Git repository");
+      }
+      return result;
+    })
+    .catch((error) => {
+      reportInvalidRepositoryScope(scope, error);
+      throw error;
+    });
+}
+
+function repositoryRequest<T>(scope: GitScope, promise: Promise<T>): Promise<T> {
+  return promise.catch((error) => {
+    reportInvalidRepositoryScope(scope, error);
+    throw error;
+  });
+}
+
+function repositoryMutation(scope: GitScope, promise: Promise<void>): Promise<void> {
+  return repositoryRequest(scope, promise);
+}
+
+function reportInvalidRepositoryScope(scope: GitScope, error: unknown) {
+  if (!(error instanceof ApiError) || (error.code !== "repository_stale" && error.code !== "repository_not_found")) return;
+  window.dispatchEvent(new CustomEvent("git-repository-invalid", { detail: scope }));
 }
 
 export const gitApi = {
-  status: (projectId: string, sessionId?: string) =>
-    request<GitStatusResponse>(`/projects/${projectId}/git-status${sid(sessionId)}`),
-  commit: (projectId: string, data: { file_paths: string[]; message: string }, sessionId?: string) =>
-    request<{ hash: string; short_hash: string }>(`/projects/${projectId}/git-commit${sid(sessionId)}`, {
+  repositories: (projectId: string, sessionId?: string, refresh = false) => {
+    const params = new URLSearchParams();
+    if (sessionId) params.set("session_id", sessionId);
+    if (refresh) params.set("refresh", "true");
+    return request<GitRepositoriesResponse>(`/projects/${projectId}/git-repositories${params.toString() ? `?${params}` : ""}`);
+  },
+  workspaceStatus: (
+    projectId: string,
+    sessionId?: string,
+    options: { includeFiles?: boolean; includeStats?: boolean } = {},
+  ) => {
+    const params = new URLSearchParams();
+    if (sessionId) params.set("session_id", sessionId);
+    if (options.includeFiles) params.set("include_files", "true");
+    if (options.includeStats) params.set("include_stats", "true");
+    return request<GitWorkspaceStatusResponse>(`/projects/${projectId}/git-workspace-status${params.toString() ? `?${params}` : ""}`);
+  },
+  status: (scope: GitScope) =>
+    repositoryScoped(scope, request<GitStatusResponse>(`/projects/${scope.projectId}/git-status${gitQuery(scope)}`)),
+  commit: (scope: GitScope, data: { file_paths: string[]; message: string }) =>
+    repositoryScoped(scope, request<{ repository_id?: string; hash: string; short_hash: string }>(`/projects/${scope.projectId}/git-commit${gitQuery(scope)}`, {
       method: "POST",
       body: JSON.stringify(data),
-    }),
-  discard: (projectId: string, data: { file_path: string }, sessionId?: string) =>
-    request<void>(`/projects/${projectId}/git-discard${sid(sessionId)}`, {
+    })),
+  discard: (scope: GitScope, data: { file_path: string }) =>
+    repositoryMutation(scope, request<void>(`/projects/${scope.projectId}/git-discard${gitQuery(scope)}`, {
       method: "POST",
       body: JSON.stringify(data),
-    }),
-  log: (projectId: string, limit?: number, skip?: number, sessionId?: string) =>
-    request<GitCommitInfo[]>(`/projects/${projectId}/git-log?limit=${limit || 20}${skip ? `&skip=${skip}` : ""}${sidAmp(sessionId)}`),
-  commitFiles: (projectId: string, hash: string, sessionId?: string) =>
-    request<GitCommitFileEntry[]>(`/projects/${projectId}/git-commit-files?hash=${hash}${sidAmp(sessionId)}`),
-  commitDiff: (projectId: string, hash: string, sessionId?: string) =>
-    request<{ diff: string }>(`/projects/${projectId}/git-commit-diff?hash=${hash}${sidAmp(sessionId)}`),
-  generateMessage: (projectId: string, data: { file_paths: string[] }, sessionId?: string) =>
-    request<{ message: string }>(`/projects/${projectId}/generate-commit-message${sid(sessionId)}`, {
+    })),
+  log: (scope: GitScope, limit?: number, skip?: number) =>
+    repositoryScoped(scope, request<{ repository_id?: string; commits: GitCommitInfo[] }>(`/projects/${scope.projectId}/git-log${gitQuery(scope, { limit: limit || 20, skip })}`)).then((result) => result.commits),
+  commitFiles: (scope: GitScope, hash: string) =>
+    repositoryScoped(scope, request<{ repository_id?: string; files: GitCommitFileEntry[] }>(`/projects/${scope.projectId}/git-commit-files${gitQuery(scope, { hash })}`)).then((result) => result.files),
+  commitDiff: (scope: GitScope, hash: string) =>
+    repositoryScoped(scope, request<{ repository_id?: string; diff: string }>(`/projects/${scope.projectId}/git-commit-diff${gitQuery(scope, { hash })}`)),
+  generateMessage: (scope: GitScope, data: { file_paths: string[] }) =>
+    repositoryScoped(scope, request<{ repository_id?: string; message: string }>(`/projects/${scope.projectId}/generate-commit-message${gitQuery(scope)}`, {
       method: "POST",
       body: JSON.stringify(data),
-    }),
-  branches: (projectId: string, sessionId?: string) =>
-    request<GitBranchResponse>(`/projects/${projectId}/git-branches${sid(sessionId)}`),
-  checkout: (projectId: string, data: { branch: string; create?: boolean }, sessionId?: string) =>
-    request<{ branch: string }>(`/projects/${projectId}/git-checkout${sid(sessionId)}`, {
+    })),
+  branches: (scope: GitScope) =>
+    repositoryScoped(scope, request<GitBranchResponse>(`/projects/${scope.projectId}/git-branches${gitQuery(scope)}`)),
+  checkout: (scope: GitScope, data: { branch: string; create?: boolean; start_point?: string }) =>
+    repositoryScoped(scope, request<{ repository_id?: string; branch: string }>(`/projects/${scope.projectId}/git-checkout${gitQuery(scope)}`, {
       method: "POST",
       body: JSON.stringify(data),
-    }),
-  stage: (projectId: string, data: { file_paths: string[] }, sessionId?: string) =>
-    request<void>(`/projects/${projectId}/git-stage${sid(sessionId)}`, {
+    })),
+  stage: (scope: GitScope, data: { file_paths: string[] }) =>
+    repositoryMutation(scope, request<void>(`/projects/${scope.projectId}/git-stage${gitQuery(scope)}`, {
       method: "POST",
       body: JSON.stringify(data),
-    }),
-  unstage: (projectId: string, data: { file_paths: string[] }, sessionId?: string) =>
-    request<void>(`/projects/${projectId}/git-unstage${sid(sessionId)}`, {
+    })),
+  unstage: (scope: GitScope, data: { file_paths: string[] }) =>
+    repositoryMutation(scope, request<void>(`/projects/${scope.projectId}/git-unstage${gitQuery(scope)}`, {
       method: "POST",
       body: JSON.stringify(data),
-    }),
-  push: (projectId: string, sessionId?: string) =>
-    request<{ output: string }>(`/projects/${projectId}/git-push${sid(sessionId)}`, { method: "POST" }),
-  pull: (projectId: string, sessionId?: string) =>
-    request<{ output: string }>(`/projects/${projectId}/git-pull${sid(sessionId)}`, { method: "POST" }),
+    })),
+  push: (scope: GitScope) =>
+    repositoryScoped(scope, request<{ repository_id?: string; output: string }>(`/projects/${scope.projectId}/git-push${gitQuery(scope)}`, { method: "POST" })),
+  pull: (scope: GitScope) =>
+    repositoryScoped(scope, request<{ repository_id?: string; output: string }>(`/projects/${scope.projectId}/git-pull${gitQuery(scope)}`, { method: "POST" })),
 };
 
 // File browser
@@ -393,24 +530,34 @@ export const filesApi = {
   // Flat list of files (not directories) — used by the chat file picker.
   flat: (projectId: string, sessionId?: string) =>
     request<FileEntry[]>(`/projects/${projectId}/files-flat${sessionId ? `?session_id=${sessionId}` : ""}`),
-  content: (projectId: string, path: string, sessionId?: string) =>
-    request<FileContentResponse>(`/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`),
+  content: (projectId: string, path: string, sessionId?: string, repositoryId?: string) => {
+    const promise = request<FileContentResponse>(`/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`);
+    return repositoryId ? repositoryRequest({ projectId, sessionId, repositoryId }, promise) : promise;
+  },
   // Committed (HEAD) version of a file, used as the dirty-diff baseline in the
   // editor. exists=false (with empty content) for new/untracked files.
-  head: (projectId: string, path: string, sessionId?: string) =>
-    request<{ path: string; in_repo: boolean; exists: boolean; content: string }>(`/projects/${projectId}/git-file-head?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`),
+  head: (projectId: string, path: string, sessionId?: string, repositoryId?: string) => {
+    const promise = request<{ repository_id?: string; path: string; in_repo: boolean; exists: boolean; content: string }>(`/projects/${projectId}/git-file-head?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`);
+    return repositoryId
+      ? repositoryScoped({ projectId, sessionId, repositoryId }, promise)
+      : promise;
+  },
   search: (projectId: string, query: string, type: "name" | "content" = "name", sessionId?: string) =>
     request<FileSearchResult[]>(`/projects/${projectId}/file-search?q=${encodeURIComponent(query)}&type=${type}${sessionId ? `&session_id=${sessionId}` : ""}`),
-  save: (projectId: string, path: string, content: string, sessionId?: string) =>
-    request<{ path: string; size?: number }>(
-      `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,
+  save: (projectId: string, path: string, content: string, sessionId?: string, repositoryId?: string) => {
+    const promise = request<{ path: string; size?: number }>(
+      `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`,
       { method: "PUT", body: JSON.stringify({ content }) },
-    ),
-  delete: (projectId: string, path: string, sessionId?: string) =>
-    request<void>(
-      `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,
+    );
+    return repositoryId ? repositoryRequest({ projectId, sessionId, repositoryId }, promise) : promise;
+  },
+  delete: (projectId: string, path: string, sessionId?: string, repositoryId?: string) => {
+    const promise = request<void>(
+      `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`,
       { method: "DELETE" },
-    ),
+    );
+    return repositoryId ? repositoryRequest({ projectId, sessionId, repositoryId }, promise) : promise;
+  },
   upload: async (
     projectId: string,
     directory: string,
@@ -437,10 +584,10 @@ export const filesApi = {
     }
     return res.json();
   },
-  downloadUrl: (projectId: string, path: string, sessionId?: string) =>
-    `${API_BASE}/projects/${projectId}/file-download?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,
-  serveUrl: (projectId: string, path: string, sessionId?: string) =>
-    `${API_BASE}/projects/${projectId}/file-serve?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,
+  downloadUrl: (projectId: string, path: string, sessionId?: string, repositoryId?: string) =>
+    `${API_BASE}/projects/${projectId}/file-download?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`,
+  serveUrl: (projectId: string, path: string, sessionId?: string, repositoryId?: string) =>
+    `${API_BASE}/projects/${projectId}/file-serve?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`,
   move: (projectId: string, from: string, to: string, sessionId?: string) =>
     request<{ from: string; to: string }>(
       `/projects/${projectId}/file-move${sessionId ? `?session_id=${sessionId}` : ""}`,
@@ -454,12 +601,12 @@ export const filesApi = {
 };
 
 export const diffApi = {
-  get: (projectId: string, sessionId?: string) =>
-    request<DiffResponse>(`/projects/${projectId}/diff${sid(sessionId)}`),
-  stats: (projectId: string, sessionId?: string) =>
-    request<DiffResponse>(`/projects/${projectId}/diff-stats${sid(sessionId)}`),
-  fileDiff: (projectId: string, path: string, full?: boolean, sessionId?: string, staged?: boolean) =>
-    request<{ diff: string }>(`/projects/${projectId}/file-diff?path=${encodeURIComponent(path)}${full ? "&full=true" : ""}${staged ? "&staged=true" : ""}${sidAmp(sessionId)}`),
+  get: (scope: GitScope) =>
+    repositoryScoped(scope, request<DiffResponse>(`/projects/${scope.projectId}/diff${gitQuery(scope)}`)),
+  stats: (scope: GitScope) =>
+    repositoryScoped(scope, request<DiffResponse>(`/projects/${scope.projectId}/diff-stats${gitQuery(scope)}`)),
+  fileDiff: (scope: GitScope, path: string, full?: boolean, staged?: boolean) =>
+    repositoryScoped(scope, request<{ repository_id?: string; diff: string }>(`/projects/${scope.projectId}/file-diff${gitQuery(scope, { path, full, staged })}`)),
 };
 
 // Labels (project-scoped)
