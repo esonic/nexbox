@@ -265,11 +265,11 @@ type autoTitleModelCatalog interface {
 	ListSupportedModels(context.Context) ([]agent.ModelInfo, string)
 }
 
-// resolveAutoTitleBackend selects the lightweight model used for auto-title
+// resolveUtilityBackend selects the lightweight model used for auto-title
 // generation from the configured default agent. Claude keeps its stable Haiku
 // alias. Codex's live picker is ordered strongest-to-weakest, so the last model
 // and its first (lowest) advertised effort are used.
-func (s *Server) resolveAutoTitleBackend(ctx context.Context) (agent.Agent, string, string, string, error) {
+func (s *Server) resolveUtilityBackend(ctx context.Context) (agent.Agent, string, string, string, error) {
 	agentName := s.getDefaultAgent()
 	a, ok := s.Agents[agentName]
 	if !ok || a == nil {
@@ -277,6 +277,10 @@ func (s *Server) resolveAutoTitleBackend(ctx context.Context) (agent.Agent, stri
 	}
 
 	switch agentName {
+	case "pi":
+		// An unscoped Pi catalog can contain unrelated providers and does not
+		// necessarily include the user's default; let Pi choose its own model.
+		return a, agentName, "", "", nil
 	case "claude":
 		return a, agentName, "haiku", "", nil
 	case "codex":
@@ -298,7 +302,7 @@ func (s *Server) resolveAutoTitleBackend(ctx context.Context) (agent.Agent, stri
 		}
 		return a, agentName, selected.ID, effort, nil
 	default:
-		return nil, agentName, "", "", fmt.Errorf("auto-title is not supported by default agent %q", agentName)
+		return nil, agentName, "", "", fmt.Errorf("utility generation is not supported by default agent %q", agentName)
 	}
 }
 
@@ -324,7 +328,7 @@ func (s *Server) generateAutoTitle(parentCtx context.Context, workDir, firstMess
 	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer cancel()
 
-	a, agentName, model, effort, err := s.resolveAutoTitleBackend(ctx)
+	a, agentName, model, effort, err := s.resolveUtilityBackend(ctx)
 	if err != nil {
 		return "", err
 	}
