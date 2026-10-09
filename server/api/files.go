@@ -42,30 +42,39 @@ func skipDir(name string) bool {
 // resolveFilesRoot resolves the root directory for file operations.
 // Prefers the session's worktree_path when session_id query param is provided.
 func (s *Server) resolveFilesRoot(r *http.Request, projectID string) (string, error) {
-	if sid := r.URL.Query().Get("session_id"); sid != "" {
-		sess, err := s.Store.GetSession(sid)
-		if err == nil && sess != nil && sess.WorktreeMode == "worktree" && sess.WorktreePath != "" {
-			return sess.WorktreePath, nil
-		}
+	workspace, err := s.resolveEffectiveWorkspace(r, projectID)
+	if err != nil {
+		return "", err
 	}
-	project, err := s.getProjectWithLocalPath(projectID)
-	if err != nil || project == nil {
-		return "", fmt.Errorf("project not found")
+	if r.URL.Query().Get("repository_id") == "" {
+		return workspace.Root, nil
 	}
-	if project.GitRepoPath == "" {
-		return "", fmt.Errorf("project has no working directory")
+	repositoryContext, err := s.repositoryResolver().Resolve(r.Context(), workspace.Root, r.URL.Query().Get("repository_id"))
+	if err != nil {
+		return "", err
 	}
-	return project.GitRepoPath, nil
+	return repositoryContext.Repository.CanonicalRoot, nil
+}
+
+func rejectRepositoryDirectoryOperation(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Query().Get("repository_id") == "" {
+		return false
+	}
+	writeRepositoryOperationUnsupported(w, fmt.Errorf("repository-scoped directory operations are not supported"))
+	return true
 }
 
 // ListProjectFiles returns the immediate children of a directory in the project.
 // Lazy loading: callers pass ?path=relative/dir to expand a specific folder; omit for root.
 // GET /api/projects/{projectId}/files[?path=...&session_id=xxx]
 func (s *Server) ListProjectFiles(w http.ResponseWriter, r *http.Request) {
+	if rejectRepositoryDirectoryOperation(w, r) {
+		return
+	}
 	projectID := chi.URLParam(r, "projectId")
 	root, err := s.resolveFilesRoot(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
 
@@ -159,10 +168,13 @@ func listDirLevel(basePath, currentPath string) ([]FileEntry, error) {
 // with symlink cycle detection. Used by the chat file picker.
 // GET /api/projects/{projectId}/files-flat[?session_id=xxx]
 func (s *Server) ListProjectFilesFlat(w http.ResponseWriter, r *http.Request) {
+	if rejectRepositoryDirectoryOperation(w, r) {
+		return
+	}
 	projectID := chi.URLParam(r, "projectId")
 	root, err := s.resolveFilesRoot(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
 
@@ -264,7 +276,7 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	root, err := s.resolveFilesRoot(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
 
@@ -274,24 +286,15 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Security: prevent path traversal
-	cleanPath := filepath.Clean(relPath)
-	if strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
-		writeError(w, http.StatusBadRequest, "invalid path")
+	cleanPath := filepath.ToSlash(filepath.Clean(relPath))
+	file, err := openRequestFile(r, root, relPath)
+	if err != nil {
+		writeRepositoryError(w, err)
 		return
 	}
+	defer file.Close()
 
-	fullPath := filepath.Join(root, cleanPath)
-
-	// Verify the resolved path is still within the root directory
-	absProject, _ := filepath.Abs(root)
-	absFile, _ := filepath.Abs(fullPath)
-	if !strings.HasPrefix(absFile, absProject) {
-		writeError(w, http.StatusBadRequest, "path outside project directory")
-		return
-	}
-
-	info, err := os.Stat(fullPath)
+	info, err := file.Stat()
 	if err != nil {
 		if os.IsNotExist(err) {
 			writeError(w, http.StatusNotFound, "file not found")
@@ -305,6 +308,17 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is a directory")
 		return
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, readErr := file.Readlink()
+		if readErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read symlink")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"path": cleanPath, "binary": false, "size": len(target), "content": target, "symlink": true,
+		})
+		return
+	}
 
 	// Limit file size to 2MB
 	const maxSize = 2 * 1024 * 1024
@@ -314,7 +328,7 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if file is likely binary
-	if isBinaryFile(fullPath) {
+	if isBinaryRequestFile(file) {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"path":    cleanPath,
 			"binary":  true,
@@ -324,7 +338,7 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content, err := os.ReadFile(fullPath)
+	content, err := file.ReadFile()
 	if err != nil {
 		log.Printf("[api] ReadProjectFile(%s,%s) read file error: %v", projectID, cleanPath, err)
 		writeError(w, http.StatusInternalServerError, "failed to read file")
@@ -342,10 +356,13 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request) {
 // SearchProjectFiles searches for files by name or content.
 // GET /api/projects/{projectId}/file-search?q=query&type=name|content[&session_id=xxx]
 func (s *Server) SearchProjectFiles(w http.ResponseWriter, r *http.Request) {
+	if rejectRepositoryDirectoryOperation(w, r) {
+		return
+	}
 	projectID := chi.URLParam(r, "projectId")
 	root, err := s.resolveFilesRoot(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
 

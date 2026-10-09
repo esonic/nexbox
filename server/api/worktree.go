@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -21,7 +22,20 @@ func (s *Server) ensureWorktree(sessionID string, session *Session, projectWorkD
 	}
 	// Already created
 	if session.WorktreePath != "" {
-		return session.WorktreePath
+		effectiveWorkDir, err := projectPathInWorktree(session.WorktreePath, projectWorkDir)
+		if err != nil {
+			log.Printf("[worktree] Failed to normalize existing worktree path for session %s: %v", sessionID, err)
+			return session.WorktreePath
+		}
+		if effectiveWorkDir != session.WorktreePath {
+			if err := s.Store.UpdateSessionWorktree(sessionID, "worktree", effectiveWorkDir); err != nil {
+				log.Printf("[worktree] Failed to persist normalized worktree path for session %s: %v", sessionID, err)
+			} else {
+				session.WorktreePath = effectiveWorkDir
+				s.Hub.NotifyChange("session", sessionID, "updated")
+			}
+		}
+		return effectiveWorkDir
 	}
 
 	shortID := sessionID
@@ -31,6 +45,13 @@ func (s *Server) ensureWorktree(sessionID string, session *Session, projectWorkD
 
 	worktreeDir := s.DataDir + "/worktrees/" + shortID
 	branchName := shortID
+	projectPrefix, err := gitRepositoryPrefix(projectWorkDir)
+	if err != nil {
+		log.Printf("[worktree] Failed to resolve project path inside repository for session %s: %v", sessionID, err)
+		_ = s.Store.UpdateSessionWorktree(sessionID, "local", "")
+		s.Hub.NotifyChange("session", sessionID, "updated")
+		return projectWorkDir
+	}
 
 	if err := os.MkdirAll(s.DataDir+"/worktrees", 0755); err != nil {
 		log.Printf("[worktree] Failed to create worktrees dir: %v", err)
@@ -49,19 +70,31 @@ func (s *Server) ensureWorktree(sessionID string, session *Session, projectWorkD
 		return projectWorkDir
 	}
 
-	log.Printf("[worktree] Created worktree %s (branch %s) for session %s", worktreeDir, branchName, sessionID)
-	if err := s.Store.UpdateSessionWorktree(sessionID, "worktree", worktreeDir); err != nil {
+	effectiveWorkDir, err := effectiveWorktreePath(worktreeDir, projectPrefix)
+	if err != nil {
+		log.Printf("[worktree] Failed to prepare project directory in worktree for session %s: %v", sessionID, err)
+		if removeErr := RemoveWorktree(worktreeDir); removeErr != nil {
+			log.Printf("[worktree] Failed to roll back worktree %s: %v", worktreeDir, removeErr)
+		}
+		_ = s.Store.UpdateSessionWorktree(sessionID, "local", "")
+		s.Hub.NotifyChange("session", sessionID, "updated")
+		return projectWorkDir
+	}
+
+	log.Printf("[worktree] Created worktree %s (working directory %s, branch %s) for session %s", worktreeDir, effectiveWorkDir, branchName, sessionID)
+	if err := s.Store.UpdateSessionWorktree(sessionID, "worktree", effectiveWorkDir); err != nil {
 		log.Printf("[worktree] Failed to update session worktree path: %v", err)
 	} else {
+		session.WorktreePath = effectiveWorkDir
 		s.Hub.NotifyChange("session", sessionID, "updated")
 	}
-	return worktreeDir
+	return effectiveWorkDir
 }
 
 // createWorkflowRunWorktree creates a fresh git worktree for a workflow run.
-// Returns the absolute worktree path on success. Caller is expected to persist
-// the path (e.g. on the WorkflowExecution row) and pass it to every session
-// spawned during the run.
+// Returns the absolute effective project directory on success (which may be
+// below the linked worktree root). Caller is expected to persist the path and
+// pass it to every session spawned during the run.
 //
 // Naming: directory and branch are both `wfrun-{executionID[:8]}`. This lets a
 // human reading `git worktree list` immediately tie a worktree back to a run.
@@ -73,10 +106,9 @@ func (s *Server) createWorkflowRunWorktree(executionID, projectID string) (strin
 	if project.GitRepoPath == "" {
 		return "", fmt.Errorf("project has no git repo path configured")
 	}
-	check := exec.Command("git", "rev-parse", "--git-dir")
-	check.Dir = project.GitRepoPath
-	if err := check.Run(); err != nil {
-		return "", fmt.Errorf("project path is not a git repository")
+	projectPrefix, err := gitRepositoryPrefix(project.GitRepoPath)
+	if err != nil {
+		return "", fmt.Errorf("project path is not a git repository: %w", err)
 	}
 
 	shortID := executionID
@@ -98,8 +130,95 @@ func (s *Server) createWorkflowRunWorktree(executionID, projectID string) (strin
 		return "", fmt.Errorf("git worktree add: %w\n%s", err, out)
 	}
 
-	log.Printf("[worktree] Created workflow-run worktree %s (branch %s) for execution %s", worktreeDir, branchName, executionID)
-	return worktreeDir, nil
+	effectiveWorkDir, err := effectiveWorktreePath(worktreeDir, projectPrefix)
+	if err != nil {
+		if removeErr := RemoveWorktree(worktreeDir); removeErr != nil {
+			log.Printf("[worktree] Failed to roll back workflow-run worktree %s: %v", worktreeDir, removeErr)
+		}
+		return "", fmt.Errorf("prepare project directory in worktree: %w", err)
+	}
+
+	log.Printf("[worktree] Created workflow-run worktree %s (working directory %s, branch %s) for execution %s", worktreeDir, effectiveWorkDir, branchName, executionID)
+	return effectiveWorkDir, nil
+}
+
+// gitRepositoryPrefix returns workDir's relative location below the repository
+// root. Git is the source of truth here so paths reached through symlinks and
+// linked worktrees use the same semantics as Git commands run from workDir.
+func gitRepositoryPrefix(workDir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-prefix")
+	cmd.Dir = workDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --show-prefix: %w", err)
+	}
+	prefix := strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		return "", nil
+	}
+	prefix = filepath.Clean(filepath.FromSlash(prefix))
+	if prefix == "." {
+		return "", nil
+	}
+	if filepath.IsAbs(prefix) || prefix == ".." || strings.HasPrefix(prefix, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("Git returned unsafe repository prefix %q", prefix)
+	}
+	return prefix, nil
+}
+
+// effectiveWorktreePath maps the project's repository-relative prefix into a
+// newly-created worktree. The directory may be absent when the source project
+// directory contains no tracked files, so create it before agents start there.
+func effectiveWorktreePath(worktreeRoot, projectPrefix string) (string, error) {
+	root, err := filepath.Abs(filepath.Clean(worktreeRoot))
+	if err != nil {
+		return "", fmt.Errorf("resolve worktree root: %w", err)
+	}
+	effective := root
+	if projectPrefix != "" {
+		effective = filepath.Join(root, projectPrefix)
+	}
+	relative, err := filepath.Rel(root, effective)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("project directory escapes worktree root")
+	}
+	if err := os.MkdirAll(effective, 0o755); err != nil {
+		return "", fmt.Errorf("create worktree project directory: %w", err)
+	}
+	return effective, nil
+}
+
+// projectPathInWorktree returns the project directory inside an existing
+// worktree. This upgrades legacy rows that stored only the worktree root while
+// the configured project itself was a subdirectory of its repository.
+func projectPathInWorktree(worktreePath, projectWorkDir string) (string, error) {
+	projectPrefix, err := gitRepositoryPrefix(projectWorkDir)
+	if err != nil {
+		return "", err
+	}
+	worktreeRoot, err := gitWorktreeRoot(worktreePath)
+	if err != nil {
+		return "", err
+	}
+	return effectiveWorktreePath(worktreeRoot, projectPrefix)
+}
+
+// gitWorktreeRoot resolves a stored effective working directory back to the
+// linked worktree root. Older rows already store the root itself, so this also
+// keeps those sessions compatible.
+func gitWorktreeRoot(worktreePath string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = worktreePath
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve Git worktree root: %w", err)
+	}
+	root := strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")
+	if root == "" {
+		return "", fmt.Errorf("Git returned an empty worktree root")
+	}
+	return filepath.Clean(root), nil
 }
 
 // SetWorktreeMode sets the worktree mode for a session before first message.
@@ -202,12 +321,17 @@ func isWorktreeDirty(worktreePath string) bool {
 	return false
 }
 
-// RemoveWorktree removes a git worktree directory and unregisters it.
+// RemoveWorktree removes and unregisters the linked worktree containing the
+// supplied effective working directory.
 // Exported so main.go can call it during trash cleanup.
 // The command runs from within the worktree so git can locate the main repo.
 func RemoveWorktree(worktreePath string) error {
-	cmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
-	cmd.Dir = worktreePath // run from within the worktree so git finds the parent repo
+	worktreeRoot, err := gitWorktreeRoot(worktreePath)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("git", "worktree", "remove", "--force", worktreeRoot)
+	cmd.Dir = worktreeRoot // run from within the worktree so git finds the parent repo
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git worktree remove: %w\n%s", err, out)

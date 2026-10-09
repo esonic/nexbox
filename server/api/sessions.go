@@ -489,9 +489,9 @@ func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // cloneWorktreeForFork creates a new git worktree for `newSess` branched
-// from `parent`'s current branch tip. Requires parent.WorktreePath to point
-// to an existing worktree directory. Updates the new session's worktree
-// fields on success.
+// from `parent`'s current branch tip. parent.WorktreePath may be either the
+// linked worktree root (legacy rows) or the project's effective subdirectory.
+// Updates the new session's worktree fields on success.
 //
 // On failure (parent missing, detached HEAD, git error), this function logs
 // and returns without updating the session — the new session is left in
@@ -501,6 +501,20 @@ func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
 // that drift over failing the whole fork: the user is more likely to want
 // "the fork still works, just from project HEAD" than "the fork is dead".
 func (s *Server) cloneWorktreeForFork(newSess *Session, parent *Session) {
+	projectPrefix, err := gitRepositoryPrefix(parent.WorktreePath)
+	if err != nil {
+		log.Printf("[fork-worktree] failed to resolve project prefix (session=%s, path=%s): %v",
+			parent.ID, parent.WorktreePath, err)
+		return
+	}
+	// Legacy sessions stored only the worktree root, so their live prefix can be
+	// empty even when the configured project is an ancestor-repository
+	// subdirectory. Prefer the configured prefix when it is still available.
+	if project, projectErr := s.getProjectWithLocalPath(parent.ProjectID); projectErr == nil && project != nil && project.GitRepoPath != "" {
+		if configuredPrefix, prefixErr := gitRepositoryPrefix(project.GitRepoPath); prefixErr == nil {
+			projectPrefix = configuredPrefix
+		}
+	}
 	parentBranch, err := exec.Command("git", "-C", parent.WorktreePath, "rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {
 		log.Printf("[fork-worktree] failed to read parent branch (session=%s, path=%s): %v",
@@ -538,15 +552,24 @@ func (s *Server) cloneWorktreeForFork(newSess *Session, parent *Session) {
 		return
 	}
 
-	if err := s.Store.UpdateSessionWorktree(newSess.ID, "worktree", newWorktreeDir); err != nil {
+	effectiveWorkDir, err := effectiveWorktreePath(newWorktreeDir, projectPrefix)
+	if err != nil {
+		log.Printf("[fork-worktree] failed to prepare project directory (session=%s): %v", newSess.ID, err)
+		if removeErr := RemoveWorktree(newWorktreeDir); removeErr != nil {
+			log.Printf("[fork-worktree] failed to roll back worktree %s: %v", newWorktreeDir, removeErr)
+		}
+		return
+	}
+
+	if err := s.Store.UpdateSessionWorktree(newSess.ID, "worktree", effectiveWorkDir); err != nil {
 		log.Printf("[fork-worktree] failed to record worktree path: %v", err)
 		// Fall through: we still created the worktree on disk; ensureWorktree
 		// would now fail because the dir already exists, but this is rare.
 		return
 	}
-	newSess.WorktreePath = newWorktreeDir
-	log.Printf("[fork-worktree] created worktree %s (branch %s) for forked session %s",
-		newWorktreeDir, newBranchName, newSess.ID)
+	newSess.WorktreePath = effectiveWorkDir
+	log.Printf("[fork-worktree] created worktree %s (working directory %s, branch %s) for forked session %s",
+		newWorktreeDir, effectiveWorkDir, newBranchName, newSess.ID)
 }
 
 // DeleteSession soft-deletes a session (moves to trash).

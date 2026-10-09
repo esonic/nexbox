@@ -231,6 +231,51 @@ func TestCreateWorkflowRunWorktree_Success(t *testing.T) {
 	}
 }
 
+func TestCreateWorkflowRunWorktree_PreservesAncestorProjectDirectory(t *testing.T) {
+	base := testTempDir(t)
+	repoDir := initGitRepo(t, filepath.Join(base, "repo"))
+	projectDir := filepath.Join(repoDir, "services", "api")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "services/api/main.go"}, {"commit", "-m", "add project subdirectory"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	s := newOrchestratorTestServer(t, base)
+	project, err := s.Store.CreateProject(store.CreateProjectRequest{Name: "subdirectory", GitRepoPath: projectDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	effectiveDirectory, err := s.createWorkflowRunWorktree("subdir123456", project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreeRoot, err := gitWorktreeRoot(effectiveDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(worktreeRoot, "services", "api"); effectiveDirectory != want {
+		t.Fatalf("workflow worktree directory = %q, want %q", effectiveDirectory, want)
+	}
+	cmd := exec.Command("git", "rev-parse", "--show-prefix")
+	cmd.Dir = effectiveDirectory
+	prefix, err := cmd.Output()
+	if err != nil || string(prefix) != "services/api/\n" {
+		t.Fatalf("workflow worktree prefix = %q, %v", prefix, err)
+	}
+	if err := RemoveWorktree(effectiveDirectory); err != nil {
+		t.Fatalf("remove workflow worktree: %v", err)
+	}
+}
+
 func TestCreateWorkflowRunWorktree_NoGitRepo(t *testing.T) {
 	base := testTempDir(t)
 	s := newOrchestratorTestServer(t, base)

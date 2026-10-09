@@ -8,6 +8,7 @@ import (
 
 	"github.com/esonic/nexbox/agent"
 	"github.com/esonic/nexbox/config"
+	"github.com/esonic/nexbox/gitrepo"
 	chromemcp "github.com/esonic/nexbox/mcp/chrome"
 	"github.com/esonic/nexbox/store"
 	"github.com/go-chi/chi/v5"
@@ -32,6 +33,7 @@ type Server struct {
 	ChromeManager    *chromemcp.ChromeManager // Per-session Chrome DevTools MCP manager for E2E testing
 	ListenPort       int                      // actual TCP port the HTTP server is listening on
 	MarketplaceStats *MarketplaceStatsBuffer  // In-memory stats accumulator
+	GitRepositories  *gitrepo.Resolver        // discovers and resolves repository scope within a workspace
 	WeChat           *WeChatJSSDK             // optional WeChat JS-SDK share signer (nil when unconfigured)
 
 	// humanGates: executionID+":"+nodeID → channel carrying user input for human node continuation
@@ -164,6 +166,8 @@ func registerAuthedAPIRoutes(s *Server, r chi.Router) {
 			r.Get("/scratch-session", s.GetOrCreateScratchSession)
 
 			// Git operations (project-level)
+			r.Get("/git-repositories", s.GetGitRepositories)
+			r.Get("/git-workspace-status", s.GetGitWorkspaceStatus)
 			r.Get("/git-status", s.GetGitStatus)
 			r.Post("/git-commit", s.GitCommit)
 			r.Post("/git-discard", s.GitDiscard)

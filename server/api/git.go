@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -15,13 +16,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/gitrepo"
+	"github.com/go-chi/chi/v5"
 )
 
 // getCurrentBranch returns the current branch name from a git working directory.
 func getCurrentBranch(dir string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	return getCurrentBranchContext(context.Background(), dir)
+}
+
+func getCurrentBranchContext(ctx context.Context, dir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
 	cmd.Dir = dir
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -35,16 +41,18 @@ func getCurrentBranch(dir string) (string, error) {
 
 // GitFileEntry represents a file in git status output
 type GitFileEntry struct {
-	Path   string `json:"path"`
-	Status string `json:"status"` // modified, added, deleted, renamed, untracked
+	Path         string `json:"path"`
+	OriginalPath string `json:"original_path,omitempty"`
+	Status       string `json:"status"` // modified, added, deleted, renamed, untracked
 }
 
 // GitStatusResponse represents the structured git status
 type GitStatusResponse struct {
-	Staged    []GitFileEntry `json:"staged"`
-	Unstaged  []GitFileEntry `json:"unstaged"`
-	Untracked []GitFileEntry `json:"untracked"`
-	Ahead     int            `json:"ahead,omitempty"`
+	RepositoryID string         `json:"repository_id,omitempty"`
+	Staged       []GitFileEntry `json:"staged"`
+	Unstaged     []GitFileEntry `json:"unstaged"`
+	Untracked    []GitFileEntry `json:"untracked"`
+	Ahead        int            `json:"ahead,omitempty"`
 }
 
 // GitCommitRequest represents a commit request
@@ -55,8 +63,9 @@ type GitCommitRequest struct {
 
 // GitCommitResponse represents the commit result
 type GitCommitResponse struct {
-	Hash      string `json:"hash"`
-	ShortHash string `json:"short_hash"`
+	RepositoryID string `json:"repository_id,omitempty"`
+	Hash         string `json:"hash"`
+	ShortHash    string `json:"short_hash"`
 }
 
 // GitDiscardRequest represents a discard request
@@ -75,8 +84,10 @@ type GitCommitInfo struct {
 
 // GitCommitFileEntry represents a file changed in a commit
 type GitCommitFileEntry struct {
-	Path   string `json:"path"`
-	Status string `json:"status"` // added, modified, deleted, renamed
+	Path          string `json:"path"`
+	OriginalPath  string `json:"original_path,omitempty"`
+	WorkspacePath string `json:"workspace_path,omitempty"`
+	Status        string `json:"status"` // added, modified, deleted, renamed
 }
 
 // GitBranchInfo represents a branch
@@ -91,8 +102,9 @@ type GitBranchInfo struct {
 
 // GitBranchResponse is the response for listing branches
 type GitBranchResponse struct {
-	Current  string          `json:"current"`
-	Branches []GitBranchInfo `json:"branches"`
+	RepositoryID string          `json:"repository_id,omitempty"`
+	Current      string          `json:"current"`
+	Branches     []GitBranchInfo `json:"branches"`
 }
 
 // GitCheckoutRequest represents a branch checkout request
@@ -118,29 +130,8 @@ type GenerateCommitMessageRequest struct {
 
 // --- Helpers ---
 
-// resolveWorkDir resolves the working directory from a project ID.
-func (s *Server) resolveWorkDir(projectID string) (string, error) {
-	project, err := s.getProjectWithLocalPath(projectID)
-	if err != nil || project == nil {
-		return "", fmt.Errorf("project not found")
-	}
-	if project.GitRepoPath == "" {
-		return "", fmt.Errorf("project has no git repo path configured")
-	}
-	return project.GitRepoPath, nil
-}
-
-// resolveRequestWorkDir resolves the working directory for a request.
-// If the request has a ?session_id= query parameter and the session is in worktree mode
-// with a created worktree, the worktree path is used instead of the project path.
-func (s *Server) resolveRequestWorkDir(r *http.Request, projectID string) (string, error) {
-	if sid := r.URL.Query().Get("session_id"); sid != "" {
-		sess, err := s.Store.GetSession(sid)
-		if err == nil && sess != nil && sess.WorktreeMode == "worktree" && sess.WorktreePath != "" {
-			return sess.WorktreePath, nil
-		}
-	}
-	return s.resolveWorkDir(projectID)
+func (s *Server) lockRepositoryMutation(r *http.Request, selected gitrepo.Context) (func(), error) {
+	return s.repositoryResolver().LockMutation(r.Context(), selected)
 }
 
 // --- Handlers ---
@@ -148,18 +139,21 @@ func (s *Server) resolveRequestWorkDir(r *http.Request, projectID string) (strin
 // GetGitStatus returns staged, unstaged, and untracked files
 func (s *Server) GetGitStatus(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
 
-	result, err := parseGitStatus(workDir)
+	workDir := repositoryContext.Repository.CanonicalRoot
+	status, err := s.repositoryResolver().Status(r.Context(), repositoryContext.Repository, false)
 	if err != nil {
 		log.Printf("[git] status error in %s: %v", workDir, err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("git status failed: %v", err))
 		return
 	}
+	result := gitStatusResponse(status)
+	result.RepositoryID = repositoryContext.Repository.ID
 
 	writeJSON(w, http.StatusOK, result)
 }
@@ -167,11 +161,12 @@ func (s *Server) GetGitStatus(w http.ResponseWriter, r *http.Request) {
 // GitCommit performs a selective commit of specified files
 func (s *Server) GitCommit(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
+	workDir := repositoryContext.Repository.CanonicalRoot
 
 	var req GitCommitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -186,23 +181,39 @@ func (s *Server) GitCommit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "at least one file path is required")
 		return
 	}
+	req.FilePaths, err = validateGitFilePaths(req.FilePaths)
+	if err != nil {
+		writeRepositoryError(w, err)
+		return
+	}
+	unlock, err := s.lockRepositoryMutation(r, repositoryContext)
+	if err != nil {
+		writeRepositoryError(w, err)
+		return
+	}
+	defer unlock()
+	req.FilePaths, err = expandRenamePaths(r.Context(), workDir, req.FilePaths)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("git status failed: %v", err))
+		return
+	}
 
 	// Atomic commit: reset -> add selected -> commit
 	// Step 1: Reset staging area
-	if err := runGitCommand(workDir, "reset", "HEAD"); err != nil {
+	if err := runGitCommand(r.Context(), workDir, "reset", "HEAD"); err != nil {
 		// For fresh repos, reset may fail - that's ok
 		log.Printf("[git] reset HEAD warning (may be fresh repo): %v", err)
 	}
 
 	// Step 2: Stage only selected files
-	addArgs := append([]string{"add", "--"}, req.FilePaths...)
-	if err := runGitCommand(workDir, addArgs...); err != nil {
+	addArgs := append([]string{"--literal-pathspecs", "add", "--"}, req.FilePaths...)
+	if err := runGitCommand(r.Context(), workDir, addArgs...); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("git add failed: %v", err))
 		return
 	}
 
 	// Step 3: Commit
-	cmd := exec.Command("git", "commit", "-m", req.Message)
+	cmd := exec.CommandContext(r.Context(), "git", "commit", "-m", req.Message)
 	cmd.Dir = workDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -213,23 +224,27 @@ func (s *Server) GitCommit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get the commit hash
-	hash, shortHash := getLastCommitHash(workDir)
+	hash, shortHash := getLastCommitHash(r.Context(), workDir)
 
-	log.Printf("[git] Committed %d files: %s (%s)", len(req.FilePaths), shortHash, req.Message)
+	log.Printf("[git-operation] project=%s repo=%s op=commit files=%d result=ok", projectID, repositoryContext.Repository.ID, len(req.FilePaths))
 	writeJSON(w, http.StatusOK, GitCommitResponse{
-		Hash:      hash,
-		ShortHash: shortHash,
+		RepositoryID: repositoryContext.Repository.ID,
+		Hash:         hash,
+		ShortHash:    shortHash,
 	})
 }
 
-// GitDiscard discards changes to a single file
+// GitDiscard discards all index and worktree changes associated with a single
+// status entry. Rename entries involve two paths, so both the current and
+// original path are restored together.
 func (s *Server) GitDiscard(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
+	workDir := repositoryContext.Repository.CanonicalRoot
 
 	var req GitDiscardRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -240,49 +255,136 @@ func (s *Server) GitDiscard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "file_path is required")
 		return
 	}
+	req.FilePath, err = gitrepo.ValidateRelativePath(req.FilePath)
+	if err != nil {
+		writeRepositoryError(w, err)
+		return
+	}
+	unlock, err := s.lockRepositoryMutation(r, repositoryContext)
+	if err != nil {
+		writeRepositoryError(w, err)
+		return
+	}
+	defer unlock()
 
-	// Check if the file is tracked or untracked
-	status, err := parseGitStatus(workDir)
+	// Read a fresh status snapshot while holding the mutation lock. In
+	// particular, a staged add is not reported as untracked and cannot be
+	// discarded with checkout alone.
+	status, err := parseGitStatus(r.Context(), workDir)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("git status failed: %v", err))
 		return
 	}
 
+	paths := []string{req.FilePath}
+	pathSeen := map[string]bool{req.FilePath: true}
+	trackedChange := false
+	addRelatedPath := func(entry GitFileEntry) {
+		isRename := entry.Status == "renamed" && entry.OriginalPath != ""
+		if entry.Path != req.FilePath && (!isRename || entry.OriginalPath != req.FilePath) {
+			return
+		}
+		trackedChange = true
+		related := []string{entry.Path}
+		if isRename {
+			related = append(related, entry.OriginalPath)
+		}
+		for _, path := range related {
+			if path != "" && !pathSeen[path] {
+				paths = append(paths, path)
+				pathSeen[path] = true
+			}
+		}
+	}
+	for _, entry := range status.Staged {
+		addRelatedPath(entry)
+	}
+	for _, entry := range status.Unstaged {
+		addRelatedPath(entry)
+	}
+
 	isUntracked := false
 	for _, f := range status.Untracked {
-		if f.Path == req.FilePath || strings.HasSuffix(f.Path, "/") && strings.HasPrefix(req.FilePath, f.Path) {
+		if f.Path == req.FilePath {
 			isUntracked = true
 			break
 		}
 	}
 
-	if isUntracked {
-		// Delete untracked file
-		fullPath := filepath.Join(workDir, req.FilePath)
-		if err := os.Remove(fullPath); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete file: %v", err))
+	if isUntracked && !trackedChange {
+		if err := removeRepositoryFiles(workDir, []string{req.FilePath}); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete untracked file: %v", err))
+			return
+		}
+	} else if gitrepo.HasCommit(r.Context(), workDir) {
+		paths, err = validateGitFilePaths(paths)
+		if err != nil {
+			writeRepositoryError(w, err)
+			return
+		}
+		// restore --staged --worktree resets both the index and working tree.
+		// Supplying both sides of a rename also removes the new path and brings
+		// the original path back in one operation.
+		restoreArgs := append([]string{"--literal-pathspecs", "restore", "--source=HEAD", "--staged", "--worktree", "--"}, paths...)
+		if err := runGitCommand(r.Context(), workDir, restoreArgs...); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("git restore failed: %v", err))
 			return
 		}
 	} else {
-		// Checkout from HEAD to discard changes
-		if err := runGitCommand(workDir, "checkout", "HEAD", "--", req.FilePath); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("git checkout failed: %v", err))
+		// An unborn repository has no source tree to restore from. Its indexed
+		// files are staged additions, so discard means remove them from the
+		// index and then remove the worktree entries themselves.
+		paths, err = validateGitFilePaths(paths)
+		if err != nil {
+			writeRepositoryError(w, err)
+			return
+		}
+		rmArgs := append([]string{"--literal-pathspecs", "rm", "--cached", "--ignore-unmatch", "--"}, paths...)
+		if err := runGitCommand(r.Context(), workDir, rmArgs...); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("git rm --cached failed: %v", err))
+			return
+		}
+		if err := removeRepositoryFiles(workDir, paths); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete file: %v", err))
 			return
 		}
 	}
 
-	log.Printf("[git] Discarded changes to %s", req.FilePath)
+	log.Printf("[git-operation] project=%s repo=%s op=discard result=ok", projectID, repositoryContext.Repository.ID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// removeRepositoryFiles removes final path entries through an already-open
+// repository root. os.Root prevents a concurrently retargeted parent symlink
+// from redirecting deletion outside the selected repository, while final
+// symlinks are removed as links rather than followed.
+func removeRepositoryFiles(workDir string, paths []string) error {
+	root, err := os.OpenRoot(workDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	for _, path := range paths {
+		clean, err := gitrepo.ValidateRelativePath(path)
+		if err != nil {
+			return err
+		}
+		if err := root.Remove(filepath.FromSlash(clean)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove %q: %w", clean, err)
+		}
+	}
+	return nil
 }
 
 // GitLog returns recent commit history
 func (s *Server) GitLog(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
+	workDir := repositoryContext.Repository.CanonicalRoot
 
 	limitStr := r.URL.Query().Get("limit")
 	limit := 20
@@ -302,62 +404,90 @@ func (s *Server) GitLog(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	commits, err := getGitLog(workDir, limit, skip)
+	commits, err := getGitLog(r.Context(), workDir, limit, skip)
 	if err != nil {
 		log.Printf("[git] log error in %s: %v", workDir, err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("git log failed: %v", err))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, commits)
+	// Preserve the legacy single-repository response shape for callers that do
+	// not send repository_id. Explicitly scoped callers receive the repository
+	// identity needed to reject stale cross-repository responses.
+	if r.URL.Query().Get("repository_id") == "" {
+		writeJSON(w, http.StatusOK, commits)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"repository_id": repositoryContext.Repository.ID, "commits": commits})
 }
 
 // GitCommitFiles returns the files changed in a specific commit
 func (s *Server) GitCommitFiles(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
+	workDir := repositoryContext.Repository.CanonicalRoot
 
 	hash := r.URL.Query().Get("hash")
 	if hash == "" {
 		writeError(w, http.StatusBadRequest, "hash parameter is required")
 		return
 	}
+	hash, err = validateCommitRef(r.Context(), workDir, hash)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
-	files, err := getCommitFiles(workDir, hash)
+	files, err := getCommitFiles(r.Context(), workDir, hash)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get commit files: %v", err))
 		return
 	}
+	for index := range files {
+		if workspacePath, ok := gitrepo.WorkspacePath(repositoryContext.WorkspaceRoot, repositoryContext.Repository, files[index].Path); ok {
+			files[index].WorkspacePath = workspacePath
+		}
+	}
 
-	writeJSON(w, http.StatusOK, files)
+	if r.URL.Query().Get("repository_id") == "" {
+		writeJSON(w, http.StatusOK, files)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"repository_id": repositoryContext.Repository.ID, "files": files})
 }
 
 // GitCommitDiff returns the full diff of a specific commit
 func (s *Server) GitCommitDiff(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
+	workDir := repositoryContext.Repository.CanonicalRoot
 
 	hash := r.URL.Query().Get("hash")
 	if hash == "" {
 		writeError(w, http.StatusBadRequest, "hash parameter is required")
 		return
 	}
+	hash, err = validateCommitRef(r.Context(), workDir, hash)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
-	diff, err := getCommitDiff(workDir, hash)
+	diff, err := getCommitDiff(r.Context(), workDir, hash)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get commit diff: %v", err))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"diff": diff})
+	writeJSON(w, http.StatusOK, map[string]string{"repository_id": repositoryContext.Repository.ID, "diff": diff})
 }
 
 // GenerateCommitMessage generates a commit message using AI based on the
@@ -365,48 +495,58 @@ func (s *Server) GitCommitDiff(w http.ResponseWriter, r *http.Request) {
 // or returns an error.
 func (s *Server) GenerateCommitMessage(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
+	workDir := repositoryContext.Repository.CanonicalRoot
 
 	var req GenerateCommitMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if len(req.FilePaths) > 0 {
+		req.FilePaths, err = validateGitFilePaths(req.FilePaths)
+		if err != nil {
+			writeRepositoryError(w, err)
+			return
+		}
+	}
 
-	diff := collectFileDiffs(workDir, req.FilePaths)
+	diff := collectFileDiffs(r.Context(), workDir, req.FilePaths)
 	if diff == "" {
-		writeJSON(w, http.StatusOK, map[string]string{"message": generateCommitMessage(workDir, req.FilePaths)})
+		writeJSON(w, http.StatusOK, map[string]string{"repository_id": repositoryContext.Repository.ID, "message": generateCommitMessage(r.Context(), workDir, req.FilePaths)})
 		return
 	}
 
 	message, err := s.generateAICommitMessage(r.Context(), workDir, diff)
 	if err != nil {
 		log.Printf("[git] AI commit message generation failed: %v, using heuristic", err)
-		message = generateCommitMessage(workDir, req.FilePaths)
+		message = generateCommitMessage(r.Context(), workDir, req.FilePaths)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"message": message})
+	writeJSON(w, http.StatusOK, map[string]string{"repository_id": repositoryContext.Repository.ID, "message": message})
 }
 
 // GetGitBranches returns local and remote branches with tracking info
 func (s *Server) GetGitBranches(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
+	workDir := repositoryContext.Repository.CanonicalRoot
 
-	result, err := parseGitBranches(workDir)
+	result, err := parseGitBranches(r.Context(), workDir)
 	if err != nil {
 		log.Printf("[git] branches error in %s: %v", workDir, err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("git branch failed: %v", err))
 		return
 	}
+	result.RepositoryID = repositoryContext.Repository.ID
 
 	writeJSON(w, http.StatusOK, result)
 }
@@ -414,11 +554,12 @@ func (s *Server) GetGitBranches(w http.ResponseWriter, r *http.Request) {
 // GitCheckout switches to or creates a branch
 func (s *Server) GitCheckout(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
+	workDir := repositoryContext.Repository.CanonicalRoot
 
 	var req GitCheckoutRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -429,6 +570,16 @@ func (s *Server) GitCheckout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "branch name is required")
 		return
 	}
+	if err := runGitCommand(r.Context(), workDir, "check-ref-format", "--branch", req.Branch); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid branch name")
+		return
+	}
+	unlock, err := s.lockRepositoryMutation(r, repositoryContext)
+	if err != nil {
+		writeRepositoryError(w, err)
+		return
+	}
+	defer unlock()
 
 	var args []string
 	if req.Create {
@@ -437,23 +588,24 @@ func (s *Server) GitCheckout(w http.ResponseWriter, r *http.Request) {
 		args = []string{"checkout", req.Branch}
 	}
 
-	if err := runGitCommand(workDir, args...); err != nil {
+	if err := runGitCommand(r.Context(), workDir, args...); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("git checkout failed: %v", err))
 		return
 	}
 
-	log.Printf("[git] Checked out branch %s (create=%v)", req.Branch, req.Create)
-	writeJSON(w, http.StatusOK, map[string]string{"branch": req.Branch})
+	log.Printf("[git-operation] project=%s repo=%s op=checkout create=%v result=ok", projectID, repositoryContext.Repository.ID, req.Create)
+	writeJSON(w, http.StatusOK, map[string]string{"repository_id": repositoryContext.Repository.ID, "branch": req.Branch})
 }
 
 // GitStage stages specified files
 func (s *Server) GitStage(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
+	workDir := repositoryContext.Repository.CanonicalRoot
 
 	var req GitStageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -464,25 +616,42 @@ func (s *Server) GitStage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "at least one file path is required")
 		return
 	}
+	req.FilePaths, err = validateGitFilePaths(req.FilePaths)
+	if err != nil {
+		writeRepositoryError(w, err)
+		return
+	}
+	unlock, err := s.lockRepositoryMutation(r, repositoryContext)
+	if err != nil {
+		writeRepositoryError(w, err)
+		return
+	}
+	defer unlock()
+	req.FilePaths, err = expandRenamePaths(r.Context(), workDir, req.FilePaths)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("git status failed: %v", err))
+		return
+	}
 
-	addArgs := append([]string{"add", "--"}, req.FilePaths...)
-	if err := runGitCommand(workDir, addArgs...); err != nil {
+	addArgs := append([]string{"--literal-pathspecs", "add", "--"}, req.FilePaths...)
+	if err := runGitCommand(r.Context(), workDir, addArgs...); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("git add failed: %v", err))
 		return
 	}
 
-	log.Printf("[git] Staged %d files", len(req.FilePaths))
+	log.Printf("[git-operation] project=%s repo=%s op=stage files=%d result=ok", projectID, repositoryContext.Repository.ID, len(req.FilePaths))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // GitUnstage unstages specified files
 func (s *Server) GitUnstage(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
 		return
 	}
+	workDir := repositoryContext.Repository.CanonicalRoot
 
 	var req GitStageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -493,27 +662,59 @@ func (s *Server) GitUnstage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "at least one file path is required")
 		return
 	}
-
-	resetArgs := append([]string{"reset", "HEAD", "--"}, req.FilePaths...)
-	if err := runGitCommand(workDir, resetArgs...); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("git reset failed: %v", err))
+	req.FilePaths, err = validateGitFilePaths(req.FilePaths)
+	if err != nil {
+		writeRepositoryError(w, err)
+		return
+	}
+	unlock, err := s.lockRepositoryMutation(r, repositoryContext)
+	if err != nil {
+		writeRepositoryError(w, err)
+		return
+	}
+	defer unlock()
+	req.FilePaths, err = expandRenamePaths(r.Context(), workDir, req.FilePaths)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("git status failed: %v", err))
 		return
 	}
 
-	log.Printf("[git] Unstaged %d files", len(req.FilePaths))
+	resetArgs := append([]string{"--literal-pathspecs", "reset", "HEAD", "--"}, req.FilePaths...)
+	if err := runGitCommand(r.Context(), workDir, resetArgs...); err != nil {
+		// Unborn repositories do not have HEAD. Removing paths from the index is
+		// the equivalent unstage operation in that case.
+		rmArgs := append([]string{"--literal-pathspecs", "rm", "--cached", "--ignore-unmatch", "--"}, req.FilePaths...)
+		if rmErr := runGitCommand(r.Context(), workDir, rmArgs...); rmErr != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("git reset failed: %v", err))
+			return
+		}
+	}
+
+	log.Printf("[git-operation] project=%s repo=%s op=unstage files=%d result=ok", projectID, repositoryContext.Repository.ID, len(req.FilePaths))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // GitPush pushes to remote
 func (s *Server) GitPush(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
+		return
+	}
+	workDir := repositoryContext.Repository.CanonicalRoot
+	unlock, err := s.lockRepositoryMutation(r, repositoryContext)
+	if err != nil {
+		writeRepositoryError(w, err)
+		return
+	}
+	defer unlock()
+	if err := validateRemoteBranchOperation(r.Context(), workDir); err != nil {
+		writeRepositoryOperationUnsupported(w, err)
 		return
 	}
 
-	cmd := exec.Command("git", "push")
+	cmd := exec.CommandContext(r.Context(), "git", "push")
 	cmd.Dir = workDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -521,9 +722,9 @@ func (s *Server) GitPush(w http.ResponseWriter, r *http.Request) {
 	if err := cmd.Run(); err != nil {
 		// If no upstream, try push -u origin <current-branch>
 		if strings.Contains(stderr.String(), "no upstream") || strings.Contains(stderr.String(), "has no upstream") {
-			branch, _ := getCurrentBranch(workDir)
+			branch, _ := getCurrentBranchContext(r.Context(), workDir)
 			if branch != "" {
-				cmd2 := exec.Command("git", "push", "-u", "origin", branch)
+				cmd2 := exec.CommandContext(r.Context(), "git", "push", "-u", "--end-of-options", "origin", branch)
 				cmd2.Dir = workDir
 				stdout.Reset()
 				stderr.Reset()
@@ -533,8 +734,8 @@ func (s *Server) GitPush(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusInternalServerError, fmt.Sprintf("git push failed: %s", stderr.String()))
 					return
 				}
-				log.Printf("[git] Pushed branch %s (set upstream)", branch)
-				writeJSON(w, http.StatusOK, GitPushPullResponse{Output: stdout.String() + stderr.String()})
+				log.Printf("[git-operation] project=%s repo=%s op=push set_upstream=true result=ok", projectID, repositoryContext.Repository.ID)
+				writeJSON(w, http.StatusOK, map[string]interface{}{"repository_id": repositoryContext.Repository.ID, "output": stdout.String() + stderr.String()})
 				return
 			}
 		}
@@ -542,20 +743,31 @@ func (s *Server) GitPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[git] Pushed to remote")
-	writeJSON(w, http.StatusOK, GitPushPullResponse{Output: stdout.String() + stderr.String()})
+	log.Printf("[git-operation] project=%s repo=%s op=push result=ok", projectID, repositoryContext.Repository.ID)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"repository_id": repositoryContext.Repository.ID, "output": stdout.String() + stderr.String()})
 }
 
 // GitPull pulls from remote
 func (s *Server) GitPull(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
-	workDir, err := s.resolveRequestWorkDir(r, projectID)
+	repositoryContext, err := s.resolveRepositoryContext(r, projectID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRepositoryError(w, err)
+		return
+	}
+	workDir := repositoryContext.Repository.CanonicalRoot
+	unlock, err := s.lockRepositoryMutation(r, repositoryContext)
+	if err != nil {
+		writeRepositoryError(w, err)
+		return
+	}
+	defer unlock()
+	if err := validateRemoteBranchOperation(r.Context(), workDir); err != nil {
+		writeRepositoryOperationUnsupported(w, err)
 		return
 	}
 
-	cmd := exec.Command("git", "pull")
+	cmd := exec.CommandContext(r.Context(), "git", "pull")
 	cmd.Dir = workDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -565,136 +777,57 @@ func (s *Server) GitPull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[git] Pulled from remote")
-	writeJSON(w, http.StatusOK, GitPushPullResponse{Output: stdout.String() + stderr.String()})
+	log.Printf("[git-operation] project=%s repo=%s op=pull result=ok", projectID, repositoryContext.Repository.ID)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"repository_id": repositoryContext.Repository.ID, "output": stdout.String() + stderr.String()})
+}
+
+func validateRemoteBranchOperation(ctx context.Context, workDir string) error {
+	if gitrepo.ReadRemoteURL(ctx, workDir) == "" {
+		return errors.New("selected repository has no origin remote")
+	}
+	status, err := gitrepo.ReadStatus(ctx, workDir)
+	if err != nil {
+		return fmt.Errorf("read repository status: %w", err)
+	}
+	if status.Detached {
+		return errors.New("operation is not supported from detached HEAD")
+	}
+	return nil
 }
 
 // --- Git helper functions ---
 
-// gitRelPrefix returns the path prefix that git appends to file paths when
-// running from a subdirectory of a repo. Commands like "git diff" and
-// "git status --porcelain" return paths relative to the git root, not the CWD.
-// If dir is already the git root (or on error), returns "".
-func gitRelPrefix(dir string) string {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	cmd.Dir = dir
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
-		return ""
+// parseGitStatus parses NUL-delimited porcelain output from a repository root.
+func parseGitStatus(ctx context.Context, dir string) (*GitStatusResponse, error) {
+	status, err := gitrepo.ReadStatus(ctx, dir)
+	if err != nil {
+		return nil, err
 	}
-	toplevel := strings.TrimSpace(stdout.String())
-	if toplevel == dir {
-		return ""
-	}
-	rel, err := filepath.Rel(toplevel, dir)
-	if err != nil || rel == "." || rel == "" {
-		return ""
-	}
-	return rel + "/"
+	return gitStatusResponse(status), nil
 }
 
-// parseGitStatus parses `git status -b --porcelain=v1` output
-func parseGitStatus(dir string) (*GitStatusResponse, error) {
-	prefix := gitRelPrefix(dir)
-
-	cmd := exec.Command("git", "status", "-b", "--porcelain=v1")
-	cmd.Dir = dir
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%w: %s", err, stderr.String())
-	}
-
+func gitStatusResponse(status *gitrepo.Status) *GitStatusResponse {
 	result := &GitStatusResponse{
 		Staged:    []GitFileEntry{},
 		Unstaged:  []GitFileEntry{},
 		Untracked: []GitFileEntry{},
+		Ahead:     status.Ahead,
 	}
-
-	scanner := bufio.NewScanner(&stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-		// Parse branch tracking line: ## main...origin/main [ahead 2]
-		if strings.HasPrefix(line, "## ") {
-			if idx := strings.Index(line, "[ahead "); idx != -1 {
-				rest := line[idx+7:]
-				if end := strings.IndexAny(rest, ",]"); end != -1 {
-					fmt.Sscanf(rest[:end], "%d", &result.Ahead)
-				}
-			}
-			continue
-		}
-		if len(line) < 4 {
-			continue
-		}
-
-		indexStatus := line[0] // staging area status
-		workStatus := line[1]  // working tree status
-		filePath := strings.TrimSpace(line[3:])
-
-		// Handle renamed files: "R  old -> new"
-		if strings.Contains(filePath, " -> ") {
-			parts := strings.SplitN(filePath, " -> ", 2)
-			filePath = parts[1]
-		}
-
-		// Strip the git-root-relative prefix so paths are relative to dir.
-		// git status --porcelain always outputs paths relative to the repo root,
-		// but we want paths relative to the project working directory.
-		filePath = strings.TrimPrefix(filePath, prefix)
-
-		// Untracked files
-		if indexStatus == '?' && workStatus == '?' {
-			result.Untracked = append(result.Untracked, GitFileEntry{
-				Path:   filePath,
-				Status: "untracked",
-			})
-			continue
-		}
-
-		// Staged changes (index status is not space or ?)
-		if indexStatus != ' ' && indexStatus != '?' {
-			result.Staged = append(result.Staged, GitFileEntry{
-				Path:   filePath,
-				Status: porcelainStatusToString(indexStatus),
-			})
-		}
-
-		// Unstaged changes (work tree status is not space or ?)
-		if workStatus != ' ' && workStatus != '?' {
-			result.Unstaged = append(result.Unstaged, GitFileEntry{
-				Path:   filePath,
-				Status: porcelainStatusToString(workStatus),
-			})
-		}
+	for _, file := range status.Staged {
+		result.Staged = append(result.Staged, GitFileEntry{Path: file.Path, OriginalPath: file.OriginalPath, Status: file.Status})
 	}
-
-	return result, nil
-}
-
-func porcelainStatusToString(s byte) string {
-	switch s {
-	case 'M':
-		return "modified"
-	case 'A':
-		return "added"
-	case 'D':
-		return "deleted"
-	case 'R':
-		return "renamed"
-	case 'C':
-		return "copied"
-	default:
-		return "modified"
+	for _, file := range status.Unstaged {
+		result.Unstaged = append(result.Unstaged, GitFileEntry{Path: file.Path, OriginalPath: file.OriginalPath, Status: file.Status})
 	}
+	for _, file := range status.Untracked {
+		result.Untracked = append(result.Untracked, GitFileEntry{Path: file.Path, Status: file.Status})
+	}
+	return result
 }
 
 // runGitCommand runs a git command in the given directory
-func runGitCommand(dir string, args ...string) error {
-	cmd := exec.Command("git", args...)
+func runGitCommand(ctx context.Context, dir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -704,9 +837,76 @@ func runGitCommand(dir string, args ...string) error {
 	return nil
 }
 
+func validateGitFilePaths(paths []string) ([]string, error) {
+	validated := make([]string, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		clean, err := gitrepo.ValidateRelativePath(path)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[clean] {
+			validated = append(validated, clean)
+			seen[clean] = true
+		}
+	}
+	return validated, nil
+}
+
+// expandRenamePaths turns either side of a detected rename into the complete
+// old+new path pair. This is required before reset/add: adding only the new
+// path after a reset would commit an addition while silently leaving the old
+// path's deletion behind.
+func expandRenamePaths(ctx context.Context, workDir string, paths []string) ([]string, error) {
+	validated, err := validateGitFilePaths(paths)
+	if err != nil {
+		return nil, err
+	}
+	status, err := parseGitStatus(ctx, workDir)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(validated))
+	for _, path := range validated {
+		seen[path] = true
+	}
+	for _, entries := range [][]GitFileEntry{status.Staged, status.Unstaged} {
+		for _, entry := range entries {
+			if entry.Status != "renamed" || entry.OriginalPath == "" || (!seen[entry.Path] && !seen[entry.OriginalPath]) {
+				continue
+			}
+			for _, path := range []string{entry.OriginalPath, entry.Path} {
+				if !seen[path] {
+					validated = append(validated, path)
+					seen[path] = true
+				}
+			}
+		}
+	}
+	return validateGitFilePaths(validated)
+}
+
+func validateCommitRef(ctx context.Context, dir, value string) (string, error) {
+	if len(value) < 4 || len(value) > 64 {
+		return "", errors.New("invalid commit hash")
+	}
+	for _, character := range value {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F')) {
+			return "", errors.New("invalid commit hash")
+		}
+	}
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--end-of-options", value+"^{commit}")
+	cmd.Dir = dir
+	output, err := cmd.Output()
+	if err != nil {
+		return "", errors.New("commit not found")
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
 // getLastCommitHash returns the hash and short hash of the last commit
-func getLastCommitHash(dir string) (string, string) {
-	cmd := exec.Command("git", "log", "-1", "--format=%H|%h")
+func getLastCommitHash(ctx context.Context, dir string) (string, string) {
+	cmd := exec.CommandContext(ctx, "git", "log", "-1", "--format=%H|%h")
 	cmd.Dir = dir
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -721,12 +921,15 @@ func getLastCommitHash(dir string) (string, string) {
 }
 
 // getGitLog returns recent commits
-func getGitLog(dir string, limit, skip int) ([]GitCommitInfo, error) {
+func getGitLog(ctx context.Context, dir string, limit, skip int) ([]GitCommitInfo, error) {
+	if !gitrepo.HasCommit(ctx, dir) {
+		return []GitCommitInfo{}, nil
+	}
 	args := []string{"log", fmt.Sprintf("-%d", limit), "--format=%H%x00%h%x00%s%x00%an%x00%aI"}
 	if skip > 0 {
 		args = append(args, fmt.Sprintf("--skip=%d", skip))
 	}
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -766,8 +969,8 @@ func getGitLog(dir string, limit, skip int) ([]GitCommitInfo, error) {
 }
 
 // getCommitFiles returns files changed in a specific commit
-func getCommitFiles(dir string, hash string) ([]GitCommitFileEntry, error) {
-	cmd := exec.Command("git", "diff-tree", "--no-commit-id", "--name-status", "-r", hash)
+func getCommitFiles(ctx context.Context, dir string, hash string) ([]GitCommitFileEntry, error) {
+	cmd := exec.CommandContext(ctx, "git", "diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-z", "--find-renames", "--end-of-options", hash)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -778,25 +981,41 @@ func getCommitFiles(dir string, hash string) ([]GitCommitFileEntry, error) {
 	}
 
 	var files []GitCommitFileEntry
-	scanner := bufio.NewScanner(&stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) < 2 {
+	records := bytes.Split(stdout.Bytes(), []byte{0})
+	for index := 0; index < len(records); {
+		if len(records[index]) == 0 {
+			index++
 			continue
+		}
+		statusCode := string(records[index])
+		index++
+		if index >= len(records) {
+			break
+		}
+		path := string(records[index])
+		index++
+		originalPath := ""
+		if strings.HasPrefix(statusCode, "R") || strings.HasPrefix(statusCode, "C") {
+			originalPath = path
+			if index >= len(records) {
+				break
+			}
+			path = string(records[index])
+			index++
 		}
 		status := "modified"
 		switch {
-		case parts[0] == "A":
+		case statusCode == "A":
 			status = "added"
-		case parts[0] == "D":
+		case statusCode == "D":
 			status = "deleted"
-		case strings.HasPrefix(parts[0], "R"):
+		case strings.HasPrefix(statusCode, "R"):
 			status = "renamed"
+		case strings.HasPrefix(statusCode, "C"):
+			status = "copied"
 		}
 		files = append(files, GitCommitFileEntry{
-			Path:   parts[1],
-			Status: status,
+			Path: path, OriginalPath: originalPath, Status: status,
 		})
 	}
 
@@ -807,9 +1026,9 @@ func getCommitFiles(dir string, hash string) ([]GitCommitFileEntry, error) {
 }
 
 // getCommitDiff returns the full diff for a specific commit
-func getCommitDiff(dir string, hash string) (string, error) {
+func getCommitDiff(ctx context.Context, dir string, hash string) (string, error) {
 	// Try parent diff first
-	cmd := exec.Command("git", "diff", hash+"^", hash)
+	cmd := exec.CommandContext(ctx, "git", "-c", "core.quotePath=false", "diff", "--end-of-options", hash+"^", hash)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -817,7 +1036,7 @@ func getCommitDiff(dir string, hash string) (string, error) {
 
 	if err := cmd.Run(); err != nil {
 		// Might be the root commit, use --root
-		cmd2 := exec.Command("git", "diff-tree", "-p", "--root", hash)
+		cmd2 := exec.CommandContext(ctx, "git", "-c", "core.quotePath=false", "diff-tree", "-p", "--root", "--end-of-options", hash)
 		cmd2.Dir = dir
 		stdout.Reset()
 		stderr.Reset()
@@ -832,8 +1051,8 @@ func getCommitDiff(dir string, hash string) (string, error) {
 }
 
 // parseGitBranches lists branches with tracking info
-func parseGitBranches(dir string) (*GitBranchResponse, error) {
-	cmd := exec.Command("git", "branch", "-a", "--format=%(HEAD)|%(refname:short)|%(upstream:short)|%(upstream:track)")
+func parseGitBranches(ctx context.Context, dir string) (*GitBranchResponse, error) {
+	cmd := exec.CommandContext(ctx, "git", "branch", "-a", "--format=%(HEAD)|%(refname:short)|%(upstream:short)|%(upstream:track)")
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -890,6 +1109,16 @@ func parseGitBranches(dir string) (*GitBranchResponse, error) {
 		}
 		result.Branches = append(result.Branches, branch)
 	}
+	if result.Current == "" {
+		current := exec.CommandContext(ctx, "git", "symbolic-ref", "--short", "-q", "HEAD")
+		current.Dir = dir
+		if output, err := current.Output(); err == nil && strings.TrimSpace(string(output)) != "" {
+			result.Current = strings.TrimSpace(string(output))
+			result.Branches = append([]GitBranchInfo{{Name: result.Current, IsCurrent: true}}, result.Branches...)
+		} else {
+			result.Current = "HEAD"
+		}
+	}
 
 	return result, nil
 }
@@ -917,7 +1146,7 @@ func extractTrackNum(track, keyword string) string {
 
 // collectFileDiffs returns the combined diff text for the given file paths,
 // truncated to a reasonable size so it fits in an AI prompt.
-func collectFileDiffs(dir string, filePaths []string) string {
+func collectFileDiffs(ctx context.Context, dir string, filePaths []string) string {
 	if len(filePaths) == 0 {
 		return ""
 	}
@@ -925,7 +1154,7 @@ func collectFileDiffs(dir string, filePaths []string) string {
 	const maxSize = 20000
 	var buf strings.Builder
 	for _, fp := range filePaths {
-		diff, err := getFileDiff(dir, fp, false, false)
+		diff, err := getFileDiff(ctx, dir, fp, false, false)
 		if err != nil || diff == "" {
 			continue
 		}
@@ -991,7 +1220,7 @@ func (s *Server) generateAICommitMessage(parentCtx context.Context, workDir, dif
 }
 
 // generateCommitMessage generates a conventional commit message heuristically
-func generateCommitMessage(dir string, filePaths []string) string {
+func generateCommitMessage(ctx context.Context, dir string, filePaths []string) string {
 	if len(filePaths) == 0 {
 		return "chore: update files"
 	}
@@ -1004,7 +1233,7 @@ func generateCommitMessage(dir string, filePaths []string) string {
 	hasDeleted := false
 
 	// Get status to check new/deleted
-	status, _ := parseGitStatus(dir)
+	status, _ := parseGitStatus(ctx, dir)
 	deletedSet := make(map[string]bool)
 	newSet := make(map[string]bool)
 	if status != nil {
