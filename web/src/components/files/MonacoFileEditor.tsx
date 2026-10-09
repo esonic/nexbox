@@ -4,11 +4,20 @@ import { Loader2 } from "lucide-react";
 import { computeDiffOps } from "@/lib/vscode-diff";
 
 type DirtyChangeKind = "add" | "modify" | "delete";
+/** One rendered row of a change region's peek view. */
+interface HunkLine {
+  kind: "del" | "ins";
+  text: string;
+  /** Character ranges to highlight inline (word-level diff), from computeDiffOps. */
+  ranges: [number, number][];
+}
 interface DirtyChange {
   /** 1-based line range in the *current* (modified) document. */
   startLine: number;
   endLine: number;
   kind: DirtyChangeKind;
+  /** Removed-then-added lines of this region, for the click-to-peek view. */
+  hunk: HunkLine[];
 }
 
 /**
@@ -19,6 +28,8 @@ interface DirtyChange {
  *   - modify — a region where lines were both removed and added (blue)
  *   - delete — lines removed with nothing added; marked on the line that now
  *              sits just below the deletion gap (red wedge)
+ * Each region also carries its own removed/added lines so clicking the gutter
+ * bar can show the hunk without re-diffing.
  */
 function computeDirtyChanges(baseline: string, current: string): DirtyChange[] {
   const baseLines = baseline.split("\n");
@@ -35,29 +46,130 @@ function computeDirtyChanges(baseline: string, current: string): DirtyChange[] {
     // Gather a contiguous run of non-equal ops (a single change region).
     let deletes = 0;
     const insertModIdx: number[] = [];
+    // Removed lines first, then added — the reading order of a unified diff.
+    const dels: HunkLine[] = [];
+    const ins: HunkLine[] = [];
     while (i < ops.length && ops[i].kind !== "equal") {
       const op = ops[i];
-      if (op.kind === "delete") deletes++;
-      else if (op.kind === "insert") insertModIdx.push(op.modIdx);
+      if (op.kind === "delete") {
+        deletes++;
+        dels.push({ kind: "del", text: baseLines[op.origIdx] ?? "", ranges: op.ranges });
+      } else if (op.kind === "insert") {
+        insertModIdx.push(op.modIdx);
+        ins.push({ kind: "ins", text: curLines[op.modIdx] ?? "", ranges: op.ranges });
+      }
       i++;
     }
+    const hunk = [...dels, ...ins];
 
     if (insertModIdx.length > 0) {
       changes.push({
         startLine: Math.min(...insertModIdx) + 1,
         endLine: Math.max(...insertModIdx) + 1,
         kind: deletes > 0 ? "modify" : "add",
+        hunk,
       });
     } else if (deletes > 0) {
       // Pure deletion: anchor the marker on the line that follows the gap in
       // the current document (the next equal op), or the last line at EOF.
       const next = ops[i];
       const line = next && next.kind === "equal" ? next.modIdx + 1 : Math.max(1, curLines.length);
-      changes.push({ startLine: line, endLine: line, kind: "delete" });
+      changes.push({ startLine: line, endLine: line, kind: "delete", hunk });
     }
   }
   return changes;
 }
+
+/**
+ * Place the peek box over the content area. Monaco's `contentWidth` does NOT
+ * exclude the vertical scrollbar / decorations overview ruler, so a full-width
+ * box would run underneath them and hide its own right edge (the close button).
+ */
+function fitPeekBox(editor: MonacoStandaloneEditor, box: HTMLElement): void {
+  const layout = editor.getLayoutInfo();
+  box.style.left = `${layout.contentLeft}px`;
+  box.style.width = `${Math.max(120, layout.contentWidth - layout.verticalScrollbarWidth - 2)}px`;
+}
+
+/**
+ * Build the peek card for a change region: a thin header with the -/+ counts
+ * and a close button, then one row per removed/added line with word-level
+ * highlights. Plain DOM (not React) because Monaco owns the node's lifecycle.
+ */
+function renderPeekDom(change: DirtyChange, onClose: () => void): HTMLElement {
+  const root = document.createElement("div");
+  root.className = "dirty-diff-peek";
+
+  const header = document.createElement("div");
+  header.className = "dirty-diff-peek-header";
+  const dels = change.hunk.filter((l) => l.kind === "del").length;
+  const ins = change.hunk.length - dels;
+  const counts = document.createElement("span");
+  counts.className = "dirty-diff-peek-counts";
+  if (dels) counts.appendChild(Object.assign(document.createElement("span"), {
+    className: "dirty-diff-peek-count-del", textContent: `−${dels}`,
+  }));
+  if (ins) counts.appendChild(Object.assign(document.createElement("span"), {
+    className: "dirty-diff-peek-count-ins", textContent: `+${ins}`,
+  }));
+  header.appendChild(counts);
+
+  const close = document.createElement("button");
+  close.className = "dirty-diff-peek-close";
+  close.type = "button";
+  close.title = "Close (Esc)";
+  close.textContent = "✕";
+  close.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClose();
+  });
+  header.appendChild(close);
+  root.appendChild(header);
+
+  const body = document.createElement("div");
+  body.className = "dirty-diff-peek-body";
+  for (const line of change.hunk) {
+    const row = document.createElement("div");
+    row.className = `dirty-diff-peek-line dirty-diff-peek-${line.kind}`;
+    const sign = document.createElement("span");
+    sign.className = "dirty-diff-peek-sign";
+    sign.textContent = line.kind === "del" ? "-" : "+";
+    row.appendChild(sign);
+
+    const text = document.createElement("span");
+    text.className = "dirty-diff-peek-text";
+    // Word-level highlight: emit the untouched slices as text and the changed
+    // ranges wrapped in <mark>. Ranges from computeDiffOps are sorted and
+    // non-overlapping; anything outside them is context.
+    let cursor = 0;
+    for (const [from, to] of line.ranges) {
+      if (from > cursor) text.appendChild(document.createTextNode(line.text.slice(cursor, from)));
+      const mark = document.createElement("mark");
+      mark.className = line.kind === "del" ? "diff-word-del" : "diff-word-add";
+      mark.textContent = line.text.slice(from, to);
+      text.appendChild(mark);
+      cursor = to;
+    }
+    text.appendChild(document.createTextNode(line.text.slice(cursor)));
+    row.appendChild(text);
+    body.appendChild(row);
+  }
+  root.appendChild(body);
+  return root;
+}
+
+/** Unique overlay-widget ids, so two editors never collide. */
+let peekWidgetSeq = 0;
+
+/**
+ * Width of the line-decorations strip that belongs to dirty diff. Monaco's
+ * folding controller hardcodes this same 4px as the region it will not treat as
+ * a folding-arrow click, so it is a ceiling, not a preference.
+ */
+const DIRTY_DIFF_STRIP_PX = 4;
+/** Line-number padding the hovered bar grows into; must match index.css. */
+const LINE_NUMBERS_PAD_PX = 3;
 
 const EXT_TO_MONACO: Record<string, string> = {
   js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
@@ -131,6 +243,16 @@ const MonacoFileEditor = forwardRef<MonacoFileEditorHandle, MonacoFileEditorProp
     const revealRafRef = useRef<number | null>(null);
     const dirtyDiffRef = useRef<ReturnType<MonacoStandaloneEditor["createDecorationsCollection"]> | null>(null);
     const dirtyDiffTimerRef = useRef<number | null>(null);
+    // Latest change regions, keyed on by the gutter click handler.
+    const dirtyChangesRef = useRef<DirtyChange[]>([]);
+    // The open peek view zone, if any. `line` is the change's startLine, used to
+    // toggle the peek closed when the same gutter bar is clicked again.
+    const peekRef = useRef<{
+      zoneId: string;
+      line: number;
+      widget: Parameters<MonacoStandaloneEditor["addOverlayWidget"]>[0];
+      box: HTMLElement;
+    } | null>(null);
 
     const onSaveRef = useRef(onSave);
     useEffect(() => {
@@ -285,11 +407,13 @@ const MonacoFileEditor = forwardRef<MonacoFileEditorHandle, MonacoFileEditorProp
       // No baseline (file not in git / still loading) → clear any markers.
       if (baseline == null) {
         dirtyDiffRef.current?.set([]);
+        dirtyChangesRef.current = [];
         return;
       }
 
       const current = model.getValue();
       const changes = current === baseline ? [] : computeDirtyChanges(baseline, current);
+      dirtyChangesRef.current = changes;
       const Lane = monaco.editor.OverviewRulerLane;
       const lineCount = model.getLineCount();
 
@@ -325,9 +449,158 @@ const MonacoFileEditor = forwardRef<MonacoFileEditorHandle, MonacoFileEditorProp
       };
     }, [applyDirtyDiff, value, baseline, filepath]);
 
+    // ── Dirty-diff peek ──────────────────────────────────────────────────────
+    // Clicking a gutter bar shows the change's removed/added lines above it
+    // (VSCode's dirty-diff peek, minus the nested diff editor and the
+    // navigate/revert actions).
+    //
+    // Structure follows VSCode's own ZoneWidget: the view zone is an EMPTY
+    // spacer that only reserves vertical space, and the visible card lives in an
+    // overlay widget kept aligned to the zone's top. Content placed directly
+    // inside a view zone is unusable — Monaco's mouse handling owns the scrolled
+    // content, so the cursor stays an I-beam, text can't be selected and clicks
+    // never reach the DOM. Overlay widgets (the find widget is one) sit outside
+    // that layer and get real events.
+    const closePeek = useCallback(() => {
+      const editor = editorRef.current;
+      const peek = peekRef.current;
+      if (!editor || !peek) return;
+      peekRef.current = null;
+      editor.changeViewZones((accessor) => accessor.removeZone(peek.zoneId));
+      editor.removeOverlayWidget(peek.widget);
+    }, []);
+
+    const openPeek = useCallback(
+      (change: DirtyChange) => {
+        const editor = editorRef.current;
+        const monaco = monacoRef.current;
+        if (!editor || !monaco || change.hunk.length === 0) return;
+
+        const lineHeight = editor.getOption(monaco.editor.EditorOption.lineHeight) || 19;
+        const HEADER_PX = 24;
+        const needed = HEADER_PX + change.hunk.length * lineHeight + 8;
+        // Never let a huge hunk swallow the viewport; the body scrolls instead.
+        const cap = Math.max(HEADER_PX + 3 * lineHeight, Math.round(editor.getLayoutInfo().height * 0.6));
+        const height = Math.min(needed, cap);
+
+        // The widget's own node stays at 0,0 (Monaco resets `top` on widgets
+        // with a null position, so the box we move is a child of it).
+        const widgetNode = document.createElement("div");
+        widgetNode.className = "dirty-diff-peek-overlay";
+        const box = document.createElement("div");
+        box.className = "dirty-diff-peek-box";
+        box.style.height = `${height}px`;
+        box.appendChild(renderPeekDom(change, closePeek));
+        widgetNode.appendChild(box);
+        fitPeekBox(editor, box);
+        // Interacting with the peek moves focus off Monaco's hidden textarea, so
+        // the editor's own Escape handler stops firing — handle it here too.
+        widgetNode.addEventListener("keydown", (e) => {
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            closePeek();
+            editor.focus();
+          }
+        });
+
+        const widgetId = `dirty-diff-peek.${++peekWidgetSeq}`;
+        const widget = {
+          getId: () => widgetId,
+          getDomNode: () => widgetNode,
+          // null position → we place the box ourselves from the zone's top.
+          getPosition: () => null,
+        };
+
+        let zoneId = "";
+        editor.changeViewZones((accessor) => {
+          zoneId = accessor.addZone({
+            // afterLineNumber 0 puts the zone above line 1.
+            afterLineNumber: Math.max(0, change.startLine - 1),
+            heightInPx: height,
+            domNode: document.createElement("div"),
+            // Fires on every zone render (including scroll), keeping the
+            // overlay glued to the reserved gap.
+            onDomNodeTop: (top) => {
+              box.style.top = `${top}px`;
+            },
+            onComputedHeight: (h) => {
+              box.style.height = `${h}px`;
+            },
+          });
+        });
+        editor.addOverlayWidget(widget);
+        peekRef.current = { zoneId, line: change.startLine, widget, box };
+      },
+      [closePeek],
+    );
+
+    const handleGutterClick = useCallback(
+      (line: number) => {
+        const change = dirtyChangesRef.current.find((c) => line >= c.startLine && line <= c.endLine);
+        const openAt = peekRef.current?.line;
+        closePeek();
+        // Clicking the bar of the already-open change toggles it shut.
+        if (change && change.startLine !== openAt) openPeek(change);
+      },
+      [closePeek, openPeek],
+    );
+
     const handleMount: OnMount = (editor, monaco) => {
       editorRef.current = editor;
       monacoRef.current = monaco;
+      const MouseTarget = monaco.editor.MouseTargetType;
+      editor.onMouseDown((e) => {
+        const type = e.target.type;
+        if (
+          type !== MouseTarget.GUTTER_LINE_DECORATIONS &&
+          type !== MouseTarget.GUTTER_LINE_NUMBERS
+        ) {
+          return;
+        }
+        // `type` discriminates a 3-member margin variant, so TS won't narrow the
+        // union from the check above; reach for the margin detail directly.
+        const { detail } = e.target as unknown as {
+          detail: {
+            offsetX: number;
+            glyphMarginLeft: number;
+            glyphMarginWidth: number;
+            lineNumbersWidth: number;
+          };
+        };
+        // x within the line-numbers band; the decorations band starts where it ends.
+        const x = detail.offsetX - detail.glyphMarginLeft - detail.glyphMarginWidth;
+        const inStrip =
+          type === MouseTarget.GUTTER_LINE_DECORATIONS
+            ? // The line-decorations gutter is shared with the folding arrows.
+              // Monaco's folding controller ignores clicks in the leftmost 4px,
+              // explicitly reserving them for dirty diff (contrib/folding/
+              // folding.js: "this is such that we don't collide with dirty
+              // diff"), so claim exactly that strip and leave the rest alone.
+              x - detail.lineNumbersWidth < DIRTY_DIFF_STRIP_PX
+            : // The line-number column gives up its last few px as padding (see
+              // index.css) and the hovered bar grows into it — so that overhang
+              // has to answer to clicks too.
+              x >= detail.lineNumbersWidth - LINE_NUMBERS_PAD_PX;
+        if (!inStrip) return;
+
+        const line = e.target.position?.lineNumber;
+        if (line != null) handleGutterClick(line);
+      });
+      editor.onKeyDown((e) => {
+        if (e.keyCode === monaco.KeyCode.Escape && peekRef.current) {
+          closePeek();
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      });
+      // Any edit (or an external content swap / file switch) invalidates the
+      // hunk on screen, so drop the peek rather than show stale lines.
+      editor.onDidChangeModelContent(() => closePeek());
+      // Resizing changes the content area; re-fit the open box.
+      editor.onDidLayoutChange(() => {
+        const peek = peekRef.current;
+        if (peek) fitPeekBox(editor, peek.box);
+      });
       // Track IME composition so syncExternalValue never rewrites the model (and
       // forces the caret to EOF) while the user is mid-composition.
       //

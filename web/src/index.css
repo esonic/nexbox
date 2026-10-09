@@ -206,31 +206,145 @@ mark.diff-word-del { background-color: hsl(0 72% 51% / 0.38); }
 .dark mark.diff-word-del { background-color: hsl(0 72% 58% / 0.42); }
 
 /* VSCode-style dirty-diff gutter bars in the Monaco editor's line-decorations
-   margin. The decoration element fills the line height; a left border draws the
-   vertical change bar. The scrollbar overview markers are handled by Monaco's
-   own overviewRuler option (see MonacoFileEditor). */
+   margin. Monaco gives every decoration element an inline left/width spanning
+   the whole gutter band, so the bar itself is drawn in ::before — that keeps the
+   hover growth free of inline-style fights. The scrollbar overview markers are
+   handled by Monaco's own overviewRuler option (see MonacoFileEditor).
+
+   The bar rests in the leftmost 4px of the band — the only part Monaco's folding
+   controller leaves to dirty diff (see the click handler in MonacoFileEditor) —
+   pushed to that strip's right edge, so it reads as sitting next to the folding
+   arrow rather than against the digits. The line-number column below gives up
+   its last 3px so the bar isn't crowding the numbers, and hovering a gutter row
+   grows that row's bar into exactly that gap: wider, easier to hit, and every
+   pixel of the grown bar is still a live target. The hover hangs off
+   `.margin-view-overlays > div` — Monaco renders one such div per visible line,
+   so only the pointed-at line reacts. */
+.monaco-editor .margin-view-overlays .line-numbers {
+  box-sizing: border-box;
+  padding-right: 3px;
+}
 .dirty-diff-glyph {
-  /* Sit flush against the line-number column; the bar is 3px wide. */
-  margin-left: 3px;
-  width: 3px !important;
+  cursor: pointer;
 }
-.dirty-diff-add { border-left: 3px solid #2ea043; }
-.dirty-diff-modify { border-left: 3px solid #0c7d9d; }
-/* Deletion has no line of its own: render a downward wedge straddling the gap
-   between the surrounding lines, anchored at the top of the marked line. */
-.dirty-diff-delete {
-  border-left: 3px solid transparent;
-  position: relative;
-}
-.dirty-diff-delete::before {
+.dirty-diff-glyph::before {
   content: "";
   position: absolute;
-  left: 0;
+  top: 0;
+  bottom: 0;
+  left: 1px;
+  width: 3px;
+  transition: left 80ms ease, width 80ms ease;
+}
+.dirty-diff-add::before { background-color: #2ea043; }
+.dirty-diff-modify::before { background-color: #0c7d9d; }
+.monaco-editor .margin-view-overlays > div:hover .dirty-diff-glyph::before {
+  left: -3px;
+  width: 7px;
+}
+
+/* Deletion has no line of its own: render a leftward wedge straddling the gap
+   between the surrounding lines, anchored at the top of the marked line. Listed
+   after the bar rules so it wins the equal-specificity tie. */
+.dirty-diff-delete::before {
   top: -3px;
+  bottom: auto;
+  width: 0;
+  height: 0;
   border-left: 4px solid #f85149;
   border-top: 4px solid transparent;
   border-bottom: 4px solid transparent;
+  transition: left 80ms ease, border-width 80ms ease;
 }
+.monaco-editor .margin-view-overlays > div:hover .dirty-diff-delete::before {
+  left: -3px;
+  width: 0;
+  top: -4px;
+  border-left-width: 7px;
+  border-top-width: 5px;
+  border-bottom-width: 5px;
+}
+
+/* Peek view zone opened by clicking a dirty-diff gutter bar: the removed and
+   added lines of that one change region. Rendered as plain DOM inside Monaco's
+   view-zones layer (see renderPeekDom in MonacoFileEditor). */
+/* Overlay-widget host: Monaco positions this node itself (and resets `top` for
+   widgets with a null position), so it stays at the editor's origin and the box
+   inside is what we move to the view zone's top. */
+.dirty-diff-peek-overlay {
+  top: 0;
+  left: 0;
+}
+.dirty-diff-peek-box {
+  position: absolute;
+  /* top/left/width/height come from the view zone + layout info at runtime. */
+}
+.dirty-diff-peek {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  border-radius: 4px;
+  background: hsl(var(--card));
+  font-family: var(--monaco-monospace-font, ui-monospace, monospace);
+  font-size: 13px;
+  line-height: inherit;
+  /* The editor root sets an I-beam cursor and disables selection; the peek is a
+     normal panel, so opt back out for its subtree. */
+  cursor: default;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.dirty-diff-peek-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 24px;
+  flex: 0 0 24px;
+  padding: 0 6px;
+  border-bottom: 1px solid hsl(var(--border));
+  font-size: 11px;
+  font-family: var(--font-sans, system-ui, sans-serif);
+}
+.dirty-diff-peek-counts {
+  display: flex;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.dirty-diff-peek-count-del { color: #f85149; }
+.dirty-diff-peek-count-ins { color: #2ea043; }
+.dirty-diff-peek-close {
+  border: 0;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+.dirty-diff-peek-close:hover { color: hsl(var(--foreground)); }
+.dirty-diff-peek-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  cursor: text;
+}
+.dirty-diff-peek-line {
+  display: flex;
+  gap: 6px;
+  padding: 0 6px;
+  white-space: pre;
+}
+.dirty-diff-peek-del { background-color: hsl(0 72% 51% / 0.12); }
+.dirty-diff-peek-ins { background-color: hsl(142 70% 45% / 0.12); }
+.dirty-diff-peek-sign {
+  flex: 0 0 auto;
+  opacity: 0.6;
+  user-select: none;
+}
+.dirty-diff-peek-del .dirty-diff-peek-sign { color: #f85149; }
+.dirty-diff-peek-ins .dirty-diff-peek-sign { color: #2ea043; }
+.dirty-diff-peek-text { flex: 1 1 auto; }
 
 /* Notification new-item entrance animation */
 @keyframes notification-in {
