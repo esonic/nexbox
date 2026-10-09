@@ -399,8 +399,8 @@ export const filesApi = {
   // editor. exists=false (with empty content) for new/untracked files.
   head: (projectId: string, path: string, sessionId?: string) =>
     request<{ path: string; in_repo: boolean; exists: boolean; content: string }>(`/projects/${projectId}/git-file-head?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`),
-  search: (projectId: string, query: string, type: "name" | "content" = "name", sessionId?: string) =>
-    request<FileSearchResult[]>(`/projects/${projectId}/file-search?q=${encodeURIComponent(query)}&type=${type}${sessionId ? `&session_id=${sessionId}` : ""}`),
+  search: (projectId: string, query: string, type: "name" | "content" = "name", sessionId?: string, caseSensitive?: boolean) =>
+    request<FileSearchResult[]>(`/projects/${projectId}/file-search?q=${encodeURIComponent(query)}&type=${type}${sessionId ? `&session_id=${sessionId}` : ""}${caseSensitive ? "&case=1" : ""}`),
   save: (projectId: string, path: string, content: string, sessionId?: string) =>
     request<{ path: string; size?: number }>(
       `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,

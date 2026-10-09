@@ -34,6 +34,7 @@ import { ProjectDialog } from "@/components/project/ProjectDialog";
 import type { Project } from "@/types";
 import { useAppStore } from "@/stores/app";
 import { useLayoutStore } from "@/stores/layout";
+import { QuickOpen } from "@/components/files/QuickOpen";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { globalWS } from "@/lib/ws";
 import { cn } from "@/lib/utils";
@@ -392,6 +393,27 @@ export function SessionWorkspace() {
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [setTerminalShowExclusive]);
+
+  // Cmd/Ctrl+P -> Quick Open (Go to file). Global so it works whichever right
+  // panel is open; selecting a file reveals it in the Files panel.
+  const [quickOpenVisible, setQuickOpenVisible] = useState(false);
+  const hasBoundProject = !!boundProject;
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.code === "KeyP") {
+        if (!hasBoundProject) return;
+        e.preventDefault();
+        setQuickOpenVisible(true);
+      }
+    };
+    const open = () => { if (hasBoundProject) setQuickOpenVisible(true); };
+    document.addEventListener("keydown", handler);
+    window.addEventListener("open-quick-open", open);
+    return () => {
+      document.removeEventListener("keydown", handler);
+      window.removeEventListener("open-quick-open", open);
+    };
+  }, [hasBoundProject]);
 
   const refreshGitReview = useCallback(async () => {
     if (!boundProject) return;
@@ -844,6 +866,15 @@ export function SessionWorkspace() {
         onOpenChange={setShowNewProjectDialog}
         onSuccess={handleProjectCreated}
       />
+
+      {quickOpenVisible && boundProject && (
+        <QuickOpen
+          projectId={boundProject.id}
+          sessionId={worktreeSessionId}
+          onSelect={(path) => window.dispatchEvent(new CustomEvent("open-file", { detail: { path } }))}
+          onClose={() => setQuickOpenVisible(false)}
+        />
+      )}
     </div>
   );
 }

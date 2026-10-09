@@ -240,6 +240,12 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 	// creation mutates both Git and the persisted session row, so letting two
 	// concurrent dispatches reach ensureWorktree before the atomic claim can
 	// make the loser revert a successfully-created worktree back to local mode.
+	// Persist message features before claiming the session. A client can send
+	// while the previous turn is still winding down; in that case this dispatch
+	// is queued below. Features such as chrome_devtools are session-scoped, so
+	// they must survive that busy path and be present when the queued turn runs.
+	activeFeatures := s.mergeSessionFeatures(sessionID, features)
+
 	if !s.SessionManager.TrySetActive(sessionID) {
 		if opts.noQueue {
 			return dispatchBusy, nil
@@ -435,9 +441,6 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 
 		sessionAgent, agentNameUsed := s.ResolveAgent(session)
 		log.Printf("[chat] Using agent: %s for session %s", agentNameUsed, sessionID)
-
-		// Merge session-level features with message features.
-		activeFeatures := s.mergeSessionFeatures(sessionID, features)
 
 		// E2E testing: ensure per-session Chrome MCP is started and agent supports it.
 		var chromeMCPURL string
@@ -1122,6 +1125,12 @@ func (s *Server) resolveImagePaths(sessionID string, filenames []string) []strin
 // handle. When no live turn accepts it, the request falls back to the ordinary
 // send/queue path.
 func (s *Server) handleInterject(sessionID, message string, parts []MessagePart, imageFilenames []string, features []string) {
+	// An interjection cannot add tools to an already-running agent process, but
+	// feature selections still need to stick for the next turn (and for the
+	// ordinary send/queue fallback below).
+	if len(features) > 0 {
+		s.mergeSessionFeatures(sessionID, features)
+	}
 	imagePaths := s.resolveImagePaths(sessionID, imageFilenames)
 	// Wrap with the interjection framing so the model knows this message arrived
 	// mid-turn (finish current task, then address it). No per-session static/
