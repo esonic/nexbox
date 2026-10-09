@@ -311,9 +311,6 @@ func TestAncestorRepositoryCanReadAndSaveOutsideProjectDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.Update(func(cfg *config.Config) { cfg.EnableFileEdit = true }); err != nil {
-		t.Fatal(err)
-	}
 	server.Config = manager
 	repositoryRoot := t.TempDir()
 	initAPIRepo(t, repositoryRoot)
@@ -343,9 +340,6 @@ func TestSymlinkRepositoryScopedFileRead(t *testing.T) {
 	server := newWorktreeServer(t)
 	manager, err := config.NewManager(filepath.Join(t.TempDir(), "config.json"))
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Update(func(cfg *config.Config) { cfg.EnableFileEdit = true }); err != nil {
 		t.Fatal(err)
 	}
 	server.Config = manager
@@ -822,9 +816,6 @@ func TestRepositoryScopedFileRejectsSymlinkEscape(t *testing.T) {
 	}
 	manager, err := config.NewManager(filepath.Join(t.TempDir(), "config.json"))
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Update(func(cfg *config.Config) { cfg.EnableFileEdit = true }); err != nil {
 		t.Fatal(err)
 	}
 	server.Config = manager
