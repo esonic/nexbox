@@ -24,6 +24,14 @@ import (
 //go:embed pi_nexbox_extension.ts
 var piNexboxExtension []byte
 
+// piSystemPrompt is appended to Pi's system prompt on every turn. Unlike the
+// static context (sent only with a session's first message), it survives long
+// sessions and compaction. Project .pi/APPEND_SYSTEM.md cannot be used for
+// this because NexBox runs Pi with --no-approve.
+//
+//go:embed pi_system_prompt.md
+var piSystemPrompt string
+
 // piLeafCheckpointPrefix distinguishes completed-turn leaf cursors from the
 // user-entry cursors stored by older versions.
 const piLeafCheckpointPrefix = "pi-leaf-v1:"
@@ -239,7 +247,7 @@ func piBareModelID(id string) string {
 func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback) (Result, error) {
 	// Explicitly load only Nexbox-managed project skills. --no-approve keeps
 	// Pi from trusting arbitrary project .pi resources or extensions.
-	args := []string{"--mode", "rpc", "--no-approve"}
+	args := []string{"--mode", "rpc", "--no-approve", "--append-system-prompt", piSystemPrompt}
 	if skillDir := filepath.Join(req.WorkDir, ".agents", "skills"); isDir(skillDir) {
 		args = append(args, "--skill", skillDir)
 	}

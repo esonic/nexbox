@@ -387,12 +387,12 @@ const toolRegistry: Record<string, ToolMeta> = {
   },
   Write: {
     icon: FilePen, label: tense("Created", "Creating"),
-    subtitle: pathField("file_path"),
+    subtitle: (i) => pathField("file_path")(i) || pathField("path")(i),
     renderInput: (i) => <FilePathBlock input={i} />,
   },
   MultiEdit: {
     icon: Pencil, label: tense("Multi-edited", "Multi-editing"),
-    subtitle: pathField("file_path"),
+    subtitle: (i) => pathField("file_path")(i) || pathField("path")(i),
     renderInput: (i) => <FilePathBlock input={i} />,
   },
   Delete: {
@@ -548,6 +548,17 @@ const toolRegistry: Record<string, ToolMeta> = {
   "nexbox/run_in_terminal":       { icon: SquareTerminal,    label: tense("Ran in terminal", "Running in terminal"),   subtitle: textField("command"), renderInput: (i) => <CommandBlock input={i} />, renderOutput: (o, err) => <TerminalOutput output={o} isError={err} /> },
 };
 
+// Lowercase name → registry key, for tools whose names differ by more than case.
+const LOWERCASE_TOOL_ALIASES: Record<string, string> = {
+  find: "Glob", // pi: find { pattern, path }
+};
+
+const lowercaseRegistryKeys: Record<string, string> = Object.fromEntries(
+  Object.keys(toolRegistry)
+    .filter((k) => !k.includes("/") && !k.startsWith("mcp__"))
+    .map((k) => [k.toLowerCase(), k]),
+);
+
 function normalizeToolName(toolName: string): string {
   // "mcp__nexbox__save_asset" → "save_asset"
   const mcpMatch = toolName.match(/^mcp__\w+__(.+)$/);
@@ -578,6 +589,12 @@ function getToolMeta(toolName: string): ToolMeta {
   if (lastSegment !== toolName && toolRegistry[lastSegment]) {
     return toolRegistry[lastSegment];
   }
+
+  // Case-insensitive fallback: pi (and some other agents) report built-in
+  // tools in lowercase ("bash", "read", "edit", "write", "grep", "ls").
+  const lower = (normalized || toolName).toLowerCase();
+  const aliased = LOWERCASE_TOOL_ALIASES[lower] ?? lowercaseRegistryKeys[lower];
+  if (aliased && toolRegistry[aliased]) return toolRegistry[aliased];
 
   return { icon: Sparkles, label: () => toolName };
 }
