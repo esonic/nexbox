@@ -10,7 +10,13 @@ const specs: ServerSpec[] = configPath ? JSON.parse(readFileSync(configPath, "ut
 if (configPath) unlinkSync(configPath);
 delete process.env.NEXBOX_PI_MCP_CONFIG;
 
-function timeout(signal?: AbortSignal, ms = 30_000) {
+const defaultMCPTimeout = 30_000;
+// send_to_session blocks until another session finishes a full turn (up to 10h).
+// Keep its deadline aligned with the server's per-turn limit, while leaving
+// short deadlines on ordinary MCP requests.
+const sendToSessionTimeout = 10 * 60 * 60 * 1000;
+
+function timeout(signal?: AbortSignal, ms = defaultMCPTimeout) {
 	return signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
 }
 
@@ -39,10 +45,10 @@ async function responseBody(response: Response, id: string) {
 	return response.json();
 }
 
-async function request(connection: Connection, method: string, params: unknown, id?: string, signal?: AbortSignal) {
+async function request(connection: Connection, method: string, params: unknown, id?: string, signal?: AbortSignal, timeoutMs = defaultMCPTimeout) {
 	const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": connection.protocolVersion, ...connection.spec.headers };
 	if (connection.sessionID) headers["mcp-session-id"] = connection.sessionID;
-	const response = await fetch(connection.spec.url, { method: "POST", headers, signal: timeout(signal), body: JSON.stringify({ jsonrpc: "2.0", ...(id ? { id } : {}), method, params }) });
+	const response = await fetch(connection.spec.url, { method: "POST", headers, signal: timeout(signal, timeoutMs), body: JSON.stringify({ jsonrpc: "2.0", ...(id ? { id } : {}), method, params }) });
 	if (!response.ok) throw new Error(`${connection.spec.key}: MCP ${method} failed (${response.status})`);
 	const sid = response.headers.get("mcp-session-id");
 	if (sid) connection.sessionID = sid;
@@ -74,6 +80,19 @@ export default async function (pi: ExtensionAPI) {
 		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...managedToolNames])]);
 	});
 
+	// Pi's public RPC fork command always branches before a user entry. BeeHub
+	// stores a completed-turn leaf instead, so this private command preserves the
+	// selected user/assistant turn by using the extension API's "at" position.
+	pi.registerCommand("beehub-fork-at-entry", {
+		description: "Internal BeeHub command for exact session forks",
+		handler: async (args, ctx) => {
+			const entryId = args.trim();
+			if (!entryId || /\s/.test(entryId)) throw new Error("invalid BeeHub fork entry ID");
+			const result = await ctx.fork(entryId, { position: "at" });
+			if (result.cancelled) throw new Error("BeeHub fork was cancelled");
+		},
+	});
+
 	for (const spec of specs) {
 		try {
 			const connection = await connect(spec);
@@ -88,7 +107,8 @@ export default async function (pi: ExtensionAPI) {
 					description: tool.description || `${spec.key} MCP tool: ${tool.name}`,
 					parameters: Type.Unsafe(tool.inputSchema || { type: "object", additionalProperties: true }),
 					async execute(_id, params, signal) {
-						const result = await request(connection, "tools/call", { name: tool.name, arguments: params }, `call-${crypto.randomUUID()}`, signal);
+						const timeoutMs = spec.key === "nexbox" && tool.name === "send_to_session" ? sendToSessionTimeout : defaultMCPTimeout;
+						const result = await request(connection, "tools/call", { name: tool.name, arguments: params }, `call-${crypto.randomUUID()}`, signal, timeoutMs);
 						return { content: [{ type: "text", text: resultText(result) }], details: {}, isError: (result as any)?.isError === true };
 					},
 				}));

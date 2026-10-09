@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/esonic/nexbox/agent"
 	"github.com/esonic/nexbox/store"
 )
 
@@ -210,6 +211,58 @@ func TestSetWorktreeMode_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestDispatchBusyDoesNotCreateFirstWorktree(t *testing.T) {
+	s := newWorktreeServer(t)
+	s.SessionManager = agent.NewSessionManager()
+
+	repository := t.TempDir()
+	wtInitRepo(t, repository)
+	wtCommitFile(t, repository, "tracked.txt", "initial\n")
+	project, err := s.Store.CreateProject(store.CreateProjectRequest{
+		Name:        "busy-worktree",
+		GitRepoPath: repository,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := s.Store.CreateSession(store.CreateSessionRequest{
+		Name:      "busy-worktree",
+		ProjectID: project.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Store.UpdateSessionWorktree(session.ID, "worktree", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Model the winning concurrent request. A second dispatch must observe the
+	// claim before it performs any first-turn worktree side effects.
+	s.SessionManager.SetActive(session.ID, true)
+	outcome, err := s.dispatchUserMessage(session.ID, "second", nil, nil, nil, dispatchOpts{noQueue: true})
+	if err != nil {
+		t.Fatalf("dispatchUserMessage: %v", err)
+	}
+	if outcome != dispatchBusy {
+		t.Fatalf("dispatch outcome = %v, want dispatchBusy", outcome)
+	}
+
+	persisted, err := s.Store.GetSession(session.ID)
+	if err != nil || persisted == nil {
+		t.Fatalf("load session: %v", err)
+	}
+	if persisted.WorktreeMode != "worktree" || persisted.WorktreePath != "" {
+		t.Fatalf("busy dispatch mutated worktree state: mode=%q path=%q", persisted.WorktreeMode, persisted.WorktreePath)
+	}
+	shortID := session.ID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	if _, err := os.Stat(filepath.Join(s.DataDir, "worktrees", shortID)); !os.IsNotExist(err) {
+		t.Fatalf("busy dispatch created a worktree: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // GetWorktreeStatus tests
 // ---------------------------------------------------------------------------
@@ -373,4 +426,29 @@ func TestRemoveWorktree_NonExistent(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when removing non-existent worktree")
 	}
+}
+
+func wtGit(t *testing.T, root string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+}
+
+func wtInitRepo(t *testing.T, root string) {
+	t.Helper()
+	wtGit(t, root, "init", "-q")
+	wtGit(t, root, "config", "user.email", "test@example.com")
+	wtGit(t, root, "config", "user.name", "NexBox Test")
+}
+
+func wtCommitFile(t *testing.T, root, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, path), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wtGit(t, root, "add", "--", path)
+	wtGit(t, root, "commit", "-q", "-m", "initial")
 }

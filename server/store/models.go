@@ -288,16 +288,23 @@ type MessagePart struct {
 	// tool calls made directly by the main agent.
 	ParentToolID string      `json:"parentToolCallId,omitempty"`
 	Input        interface{} `json:"input,omitempty"`
-	Output       string      `json:"output,omitempty"`
-	State        string      `json:"state,omitempty"`
-	IsError      bool        `json:"isError,omitempty"`
-	Count        int         `json:"count,omitempty"`
-	TaskID       string      `json:"taskId,omitempty"`
-	TaskData     interface{} `json:"task,omitempty"`
-	AssetID      string      `json:"assetId,omitempty"`
-	Title        string      `json:"title,omitempty"`
-	AssetType    string      `json:"assetType,omitempty"`
-	WorkflowID   string      `json:"workflowId,omitempty"`
+	// Summary is the human-readable description associated with an Agent/Task
+	// tool. It is kept separate from the final tool_result so the card can show
+	// both what was delegated and what the sub-agent returned after a reload.
+	Summary string `json:"summary,omitempty"`
+	Output  string `json:"output,omitempty"`
+	// Diff is a unified diff (git-style ---/+++/@@ hunks) attached to a
+	// tool_result part for a single-file edit/write-family tool call.
+	Diff       string      `json:"diff,omitempty"`
+	State      string      `json:"state,omitempty"`
+	IsError    bool        `json:"isError,omitempty"`
+	Count      int         `json:"count,omitempty"`
+	TaskID     string      `json:"taskId,omitempty"`
+	TaskData   interface{} `json:"task,omitempty"`
+	AssetID    string      `json:"assetId,omitempty"`
+	Title      string      `json:"title,omitempty"`
+	AssetType  string      `json:"assetType,omitempty"`
+	WorkflowID string      `json:"workflowId,omitempty"`
 	// Image file information for persistence
 	Filename string `json:"filename,omitempty"`
 	URL      string `json:"url,omitempty"`

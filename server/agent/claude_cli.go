@@ -140,6 +140,12 @@ type StreamMessage struct {
 	// (per Claude SDK convention) on system/result messages.
 	ParentToolUseID string `json:"parent_tool_use_id,omitempty"`
 
+	// ToolUseResult carries Claude Code's structured per-tool-call result data
+	// on "user" (tool_result) JSONL lines, sitting alongside `message`. For the
+	// Edit/Write/MultiEdit family it includes filePath/oldString/newString and
+	// (for Edit) a `structuredPatch` array of ready-made diff hunks.
+	ToolUseResult json.RawMessage `json:"toolUseResult,omitempty"`
+
 	// For result messages
 	Result        string                           `json:"result,omitempty"`
 	IsError       bool                             `json:"is_error,omitempty"`

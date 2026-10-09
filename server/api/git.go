@@ -945,8 +945,12 @@ func collectFileDiffs(dir string, filePaths []string) string {
 // message from the given diff text. The call is synchronous with a 60-second
 // timeout; the caller should fall back to the heuristic on error.
 func (s *Server) generateAICommitMessage(parentCtx context.Context, workDir, diff string) (string, error) {
-	if s.Agent == nil {
-		return "", fmt.Errorf("no agent configured")
+	ctx, cancel := context.WithTimeout(parentCtx, 60*time.Second)
+	defer cancel()
+
+	a, agentName, model, effort, err := s.resolveUtilityBackend(ctx)
+	if err != nil {
+		return "", err
 	}
 
 	prompt := "Based on the following git diff, generate a concise commit message following the Conventional Commits format.\n\n" +
@@ -960,13 +964,14 @@ func (s *Server) generateAICommitMessage(parentCtx context.Context, workDir, dif
 		"- Do NOT use any tools; just respond with the commit message\n\n" +
 		"Diff:\n" + diff
 
-	ctx, cancel := context.WithTimeout(parentCtx, 60*time.Second)
-	defer cancel()
+	log.Printf("[git] commit-message agent=%s model=%s effort=%s", agentName, model, effort)
 
 	var textBuf strings.Builder
-	_, err := s.Agent.SendMessage(ctx, agent.Request{
+	_, err = a.SendMessage(ctx, agent.Request{
 		ConversationID: fmt.Sprintf("commit-msg-%d", time.Now().UnixNano()),
 		WorkDir:        workDir,
+		Model:          model,
+		Effort:         effort,
 		Message:        prompt,
 	}, func(event agent.StreamEvent) {
 		if event.Type == agent.EventTextDelta {

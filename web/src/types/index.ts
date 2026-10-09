@@ -179,6 +179,7 @@ export interface ChatEvent {
     | "text_delta"
     | "tool_start"
     | "tool_input_delta"
+    | "tool_input_replace"
     | "tool_result"
     | "thinking_delta"
     | "subtask_start"
@@ -204,6 +205,9 @@ export interface ChatEvent {
   parent_tool_id?: string;
   input?: string;
   output?: string;
+  // Unified diff (git-style ---/+++/@@ hunks) for an edit/write-family
+  // tool_result, when the agent backend could derive one. Absent otherwise.
+  diff?: string;
   is_error?: boolean;
   message?: string;
   // Widget (visualize_show_widget)
@@ -267,13 +271,13 @@ export interface NestedTool {
   toolName: string;
   input: string;
   state: ToolUseState;
-  result?: { output: string; isError?: boolean };
+  result?: { output: string; isError?: boolean; diff?: string };
 }
 
 export type MessagePart =
   | { type: "text"; content: string }
   | { type: "tool_use"; toolCallId: string; toolName: string; input: string; summary?: string; state: ToolUseState; nestedTools?: NestedTool[]; parentToolCallId?: string; workflowProgress?: WorkflowProgressSnapshot }
-  | { type: "tool_result"; toolCallId: string; output: string; isError?: boolean }
+  | { type: "tool_result"; toolCallId: string; output: string; isError?: boolean; diff?: string }
   | { type: "thinking"; content?: string }
   | { type: "tool_group"; count: number }
   | { type: "task_ref"; taskId: string; task: Task }

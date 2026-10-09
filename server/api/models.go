@@ -87,6 +87,10 @@ type ChatEvent struct {
 	Input        string `json:"input,omitempty"`
 	Output       string `json:"output,omitempty"`
 	IsError      bool   `json:"is_error,omitempty"`
+	// Diff is a unified diff (git-style ---/+++/@@ hunks) describing the file
+	// mutation made by an edit/write-family tool call. Set on tool_result
+	// events for single-file tools; empty when no diff could be derived.
+	Diff string `json:"diff,omitempty"`
 	SessionID    string `json:"session_id,omitempty"`
 	Message      string `json:"message,omitempty"`
 

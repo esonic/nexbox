@@ -703,15 +703,25 @@ export function useChatSession({ session }: UseChatSessionOptions) {
           }
         }
         break;
+      case "tool_input_replace":
+        if (event.tool_id && event.input !== undefined) {
+          const isNested = !!event.parent_tool_id || nestedToolIdsRef.current.has(event.tool_id);
+          if (isNested) {
+            gs().replaceNestedToolInput(sid, event.tool_id, event.input);
+          } else {
+            gs().replaceToolInput(sid, event.tool_id, event.input);
+          }
+        }
+        break;
       case "tool_result":
         if (event.tool_id) {
           const isNested = !!event.parent_tool_id || nestedToolIdsRef.current.has(event.tool_id);
           if (isNested) {
-            gs().addNestedToolResult(sid, event.tool_id, event.output || "", event.is_error);
+            gs().addNestedToolResult(sid, event.tool_id, event.output || "", event.is_error, event.diff);
             textBreakRef.current.add(sid);
             nestedToolIdsRef.current.delete(event.tool_id);
           } else {
-            gs().addToolResult(sid, event.tool_id, event.output || "", event.is_error);
+            gs().addToolResult(sid, event.tool_id, event.output || "", event.is_error, event.diff);
           }
         }
         break;
@@ -774,10 +784,11 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         break;
       case "subtask_start": {
         ensureStreaming();
-        // task_id is the tool_use_id of the Task tool that launched this
-        // sub-agent — pass it through so the summary lands on the right
-        // Agent card when multiple sub-agents are running in parallel.
-        if (event.content) gs().setAgentToolSummary(sid, event.content, event.task_id);
+        // Claude task_id identifies the background job, while tool_id is the
+        // Agent/Task tool_use_id that owns the card. Codex currently uses the
+        // same value for both; prefer the explicit tool id for either backend.
+        const agentId = event.tool_id || event.task_id;
+        if (event.content) gs().setAgentToolSummary(sid, event.content, agentId);
         break;
       }
       case "subtask_progress":
@@ -799,10 +810,13 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         } else {
           // Regular Task sub-agent finished. Its Agent tool_result returned
           // immediately at launch (kept "running" on purpose), so this is the
-          // signal that truly completes the card; finishStreaming is the
-          // turn-end backstop if this event never arrives.
+          // signal that truly completes the card and carries the child result;
+          // finishStreaming is the turn-end backstop if this event never arrives.
           const agentId = event.tool_id || event.task_id;
-          if (agentId) { ensureStreaming(); gs().completeAgentTool(sid, agentId); }
+          if (agentId) {
+            ensureStreaming();
+            gs().completeAgentTool(sid, agentId, event.content || "", event.is_error);
+          }
         }
         break;
       case "system":

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -341,12 +342,20 @@ func (c *CodexAppServerClient) Stderr() string {
 }
 
 func (c *CodexAppServerClient) readLoop(stdout io.Reader) {
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 1024*1024), 20*1024*1024) // 20MB per line
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	// Codex speaks newline-delimited JSON, but thread/resume responses can
+	// contain the restored turns and therefore grow well beyond Scanner's
+	// maximum token size. Read complete lines without an artificial cap so a
+	// large persisted thread does not permanently strand the session.
+	reader := bufio.NewReaderSize(stdout, 1024*1024)
+	var loopErr error
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
+			if readErr != nil {
+				loopErr = readErr
+				break
+			}
 			continue
 		}
 
@@ -382,12 +391,16 @@ func (c *CodexAppServerClient) readLoop(stdout io.Reader) {
 				log.Printf("[codex-cli] <- unknown envelope: %s", string(line))
 			}
 		}
-	}
 
-	if err := scanner.Err(); err != nil {
-		c.readErr = fmt.Errorf("read codex stdout: %w", err)
-	} else {
+		if readErr != nil {
+			loopErr = readErr
+			break
+		}
+	}
+	if errors.Is(loopErr, io.EOF) {
 		c.readErr = io.EOF
+	} else {
+		c.readErr = fmt.Errorf("read codex stdout: %w", loopErr)
 	}
 
 	c.pendingMu.Lock()

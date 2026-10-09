@@ -65,7 +65,8 @@ type codexTurnSteerResponse struct {
 
 type codexThreadStartedNotification struct {
 	Thread struct {
-		ID string `json:"id"`
+		ID             string `json:"id"`
+		ParentThreadID string `json:"parentThreadId,omitempty"`
 	} `json:"thread"`
 }
 
@@ -184,18 +185,42 @@ type codexThreadItem struct {
 	// Action is the webSearch action descriptor introduced in codex-cli 0.124.0.
 	// Shape varies by `action.type`: "search" (queries[], query), "openPage" (url),
 	// "findInPage" (pattern, url), "other".
-	Action       json.RawMessage `json:"action,omitempty"`
-	Content      []string        `json:"content,omitempty"`
-	Summary      []string        `json:"summary,omitempty"`
-	ContentItems json.RawMessage `json:"contentItems,omitempty"` // dynamicToolCall result content
-	Success      *bool           `json:"success,omitempty"`      // dynamicToolCall
-	Prompt       string          `json:"prompt,omitempty"`       // collabAgentToolCall
-	AgentsStates json.RawMessage `json:"agentsStates,omitempty"` // collabAgentToolCall
+	Action            json.RawMessage `json:"action,omitempty"`
+	Content           []string        `json:"content,omitempty"`
+	Summary           []string        `json:"summary,omitempty"`
+	ContentItems      json.RawMessage `json:"contentItems,omitempty"` // dynamicToolCall result content
+	Success           *bool           `json:"success,omitempty"`      // dynamicToolCall
+	Prompt            string          `json:"prompt,omitempty"`       // collabAgentToolCall
+	AgentsStates      json.RawMessage `json:"agentsStates,omitempty"` // collabAgentToolCall
+	SenderThreadID    string          `json:"senderThreadId,omitempty"`
+	ReceiverThreadIDs []string        `json:"receiverThreadIds,omitempty"`
+	// ReceiverThreadID/NewThreadID are used by newer collabToolCall schemas.
+	// Keep the plural field above for codex-cli versions that still expose
+	// collabAgentToolCall.
+	ReceiverThreadID string `json:"receiverThreadId,omitempty"`
+	NewThreadID      string `json:"newThreadId,omitempty"`
+	AgentThreadID    string `json:"agentThreadId,omitempty"` // subAgentActivity
+	AgentPath        string `json:"agentPath,omitempty"`     // subAgentActivity
+	Kind             string `json:"kind,omitempty"`          // subAgentActivity
+}
+
+type codexSubAgentRun struct {
+	ToolID          string
+	ParentToolID    string
+	ContainerToolID string
+	AgentPath       string
+	Description     string
+	Summary         string
+	Completed       bool
 }
 
 type codexFileChange struct {
 	Path    string          `json:"path"`
 	KindRaw json.RawMessage `json:"kind"`
+	// Diff is a unified diff (or, for Add/Delete, the file's full content) as
+	// reported by codex-rs's native `fileChange` thread item. See
+	// app-server-protocol's FileUpdateChange.diff.
+	Diff string `json:"diff"`
 }
 
 // Kind returns the normalized kind string ("add", "update", "delete").
@@ -254,7 +279,7 @@ func (a *CodexAgent) SendMessage(
 		log.Printf("[codex-agent] conversationID: %s", req.ConversationID)
 		log.Printf("[codex-agent] sessionID: %s (new: %v)", req.SessionID, req.SessionID == "")
 		log.Printf("[codex-agent] workDir: %s", req.WorkDir)
-		log.Printf("[codex-agent] message: %s", req.Message)
+		log.Printf("[codex-agent] message length: %d bytes", len(req.Message))
 		log.Printf("[codex-agent] ===============================")
 	}
 
@@ -272,6 +297,7 @@ func (a *CodexAgent) SendMessage(
 	var (
 		result             Result
 		stateMu            sync.Mutex
+		mainThreadID       string
 		currentTurnID      string
 		doneEmitted        bool
 		planToolStarted    bool
@@ -290,6 +316,7 @@ func (a *CodexAgent) SendMessage(
 		compatPatchInputs  = make(map[string]string) // codex/event patch id -> buffered input for delayed start
 		compatPatchOutputs = make(map[string]string) // codex/event patch id -> buffered delta/message
 		compatPatchStarted = make(map[string]bool)   // codex/event patch id -> whether tool_start emitted
+		compatPatchDiffs   = make(map[string]string) // codex/event patch id -> raw patch text from patch_apply_begin
 		// webSearchDeferStart tracks webSearch items whose item/started arrived with an empty query
 		// (codex-cli >= 0.124.0 only fills `query` and `action` at item/completed). For these, we
 		// suppress tool_start at started and emit it on completion alongside tool_result.
@@ -297,9 +324,210 @@ func (a *CodexAgent) SendMessage(
 		streamedAgentText   = make(map[string]bool)
 		streamedReasoning   = make(map[string]bool)
 		latestTokenUsage    *codexThreadTokenUsageUpdatedNotification
+		subAgentRuns        = make(map[string]*codexSubAgentRun) // child thread id -> active/latest run
+		subAgentSourceSeen  = make(map[string]struct{})          // protocol item id + child thread id
+		subAgentPrompts     = make(map[string]string)            // collab item id -> prompt until child id is known
 	)
 	turnDone := make(chan struct{}, 1)
 	var turnDoneOnce sync.Once
+	isMainThread := func(threadID string) bool {
+		stateMu.Lock()
+		root := mainThreadID
+		stateMu.Unlock()
+		return threadID == "" || (root != "" && threadID == root)
+	}
+
+	parentToolForThread := func(threadID string) string {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		if run := subAgentRuns[threadID]; run != nil {
+			return run.ContainerToolID
+		}
+		return ""
+	}
+
+	registerSubAgent := func(ownerThreadID string, item codexThreadItem) {
+		// Newer app-server schemas can send the spawn prompt before they send the
+		// receiving/new thread id. Retain it by collaboration item id so the
+		// completed notification can create (or enrich) the same Agent card.
+		prompt := strings.TrimSpace(item.Prompt)
+		if item.ID != "" {
+			stateMu.Lock()
+			if prompt != "" {
+				subAgentPrompts[item.ID] = prompt
+			} else {
+				prompt = subAgentPrompts[item.ID]
+			}
+			stateMu.Unlock()
+			if prompt != "" {
+				item.Prompt = prompt
+			}
+		}
+
+		receiverThreadIDs := codexCollabReceiverThreadIDs(item)
+		childThreadIDs := make([]string, 0, len(receiverThreadIDs)+1)
+		seenChildThreads := make(map[string]struct{}, len(receiverThreadIDs)+1)
+		for _, childThreadID := range append([]string{item.AgentThreadID}, receiverThreadIDs...) {
+			childThreadID = strings.TrimSpace(childThreadID)
+			if childThreadID == "" {
+				continue
+			}
+			if _, seen := seenChildThreads[childThreadID]; seen {
+				continue
+			}
+			seenChildThreads[childThreadID] = struct{}{}
+			childThreadIDs = append(childThreadIDs, childThreadID)
+		}
+		if len(childThreadIDs) == 0 {
+			return
+		}
+
+		for childIndex, childThreadID := range childThreadIDs {
+			childThreadID = strings.TrimSpace(childThreadID)
+			if childThreadID == "" {
+				continue
+			}
+			description := codexSubAgentDescription(item)
+			agentName := codexSubAgentName(item)
+
+			stateMu.Lock()
+			parentToolID := ""
+			if ownerThreadID != "" && mainThreadID != "" && ownerThreadID != mainThreadID {
+				ownerRun := subAgentRuns[ownerThreadID]
+				if ownerRun == nil {
+					stateMu.Unlock()
+					continue
+				}
+				parentToolID = ownerRun.ContainerToolID
+			}
+
+			if existing := subAgentRuns[childThreadID]; existing != nil && !existing.Completed {
+				if existing.AgentPath == "" {
+					existing.AgentPath = item.AgentPath
+				}
+				// subAgentActivity in codex-cli 0.147 only carries agentPath. A
+				// collab spawn item may arrive later with the actual prompt; update
+				// the existing card instead of emitting a duplicate Agent tool.
+				descriptionUpdated := prompt != "" && existing.Description != description
+				if descriptionUpdated {
+					existing.Description = description
+				}
+				toolID := existing.ToolID
+				parentToolID := existing.ParentToolID
+				stateMu.Unlock()
+				if descriptionUpdated && parentToolID == "" {
+					cb(StreamEvent{
+						Type:    EventSubTaskStart,
+						Content: description,
+						Metadata: map[string]interface{}{
+							"task_id":     toolID,
+							"tool_use_id": toolID,
+						},
+					})
+				}
+				continue
+			}
+
+			sourceKey := item.ID + "\x00" + childThreadID
+			if item.ID == "" {
+				sourceKey = item.Type + "\x00" + item.Kind + "\x00" + childThreadID
+			}
+			if _, seen := subAgentSourceSeen[sourceKey]; seen {
+				stateMu.Unlock()
+				continue
+			}
+			subAgentSourceSeen[sourceKey] = struct{}{}
+
+			toolID := item.ID
+			if toolID == "" {
+				toolID = "subagent:" + childThreadID
+			} else if len(childThreadIDs) > 1 {
+				toolID = fmt.Sprintf("%s:%d", toolID, childIndex)
+			}
+			containerToolID := toolID
+			if parentToolID != "" {
+				// The current UI supports one nested level. Keep deeper descendants
+				// inside the nearest top-level Agent card instead of leaking them.
+				containerToolID = parentToolID
+			}
+			subAgentRuns[childThreadID] = &codexSubAgentRun{
+				ToolID:          toolID,
+				ParentToolID:    parentToolID,
+				ContainerToolID: containerToolID,
+				AgentPath:       item.AgentPath,
+				Description:     description,
+			}
+			stateMu.Unlock()
+
+			// Thread ids and internal agent paths are routing metadata, not user
+			// content. Keep them in subAgentRuns and expose the readable name and,
+			// only when the app-server actually supplies it, the delegated prompt.
+			input := map[string]string{"name": agentName}
+			if prompt != "" {
+				input["prompt"] = prompt
+			}
+			inputJSON, _ := json.Marshal(input)
+			cb(StreamEvent{
+				Type:         EventToolStart,
+				ToolID:       toolID,
+				ToolName:     "Agent",
+				Input:        string(inputJSON),
+				ParentToolID: parentToolID,
+			})
+			if parentToolID == "" {
+				cb(StreamEvent{
+					Type:    EventSubTaskStart,
+					Content: description,
+					Metadata: map[string]interface{}{
+						"task_id":     toolID,
+						"tool_use_id": toolID,
+					},
+				})
+			}
+		}
+	}
+
+	finishSubAgent := func(threadID, status string) {
+		stateMu.Lock()
+		run := subAgentRuns[threadID]
+		if run == nil || run.Completed {
+			stateMu.Unlock()
+			return
+		}
+		run.Completed = true
+		toolID := run.ToolID
+		parentToolID := run.ParentToolID
+		summary := run.Summary
+		stateMu.Unlock()
+
+		isError := status != "" && status != "completed"
+		if parentToolID != "" {
+			cb(StreamEvent{
+				Type:         EventToolResult,
+				ToolID:       toolID,
+				Output:       summary,
+				IsError:      isError,
+				ParentToolID: parentToolID,
+			})
+			return
+		}
+		if isError {
+			if summary == "" {
+				summary = "Sub-agent " + status
+			}
+			cb(StreamEvent{Type: EventToolResult, ToolID: toolID, Output: summary, IsError: true})
+			return
+		}
+		cb(StreamEvent{
+			Type:    EventSubTaskDone,
+			Content: summary,
+			Metadata: map[string]interface{}{
+				"task_id":     toolID,
+				"tool_use_id": toolID,
+				"status":      status,
+			},
+		})
+	}
 
 	emitDone := func(turnID string, turn *codexTurn) {
 		stateMu.Lock()
@@ -484,7 +712,7 @@ func (a *CodexAgent) SendMessage(
 			call, err := parseCodexDynamicToolCall(params)
 			if err != nil {
 				if a.Verbose {
-					log.Printf("[codex-agent] failed to parse item/tool/call: %v, params=%s", err, string(params))
+					log.Printf("[codex-agent] failed to parse item/tool/call: %v", err)
 				}
 				return buildCodexDynamicToolResponse(false, "Failed to parse tool call: "+err.Error()), nil
 			}
@@ -497,12 +725,17 @@ func (a *CodexAgent) SendMessage(
 			if strings.TrimSpace(toolInput) == "" || toolInput == "null" {
 				toolInput = "{}"
 			}
-			cb(StreamEvent{
-				Type:     EventToolStart,
-				ToolID:   toolID,
-				ToolName: call.ToolName,
-				Input:    toolInput,
-			})
+			parentToolID := parentToolForThread(call.ThreadID)
+			emitToolEvent := isMainThread(call.ThreadID) || parentToolID != ""
+			if emitToolEvent {
+				cb(StreamEvent{
+					Type:         EventToolStart,
+					ToolID:       toolID,
+					ToolName:     call.ToolName,
+					Input:        toolInput,
+					ParentToolID: parentToolID,
+				})
+			}
 
 			toolCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
@@ -513,12 +746,15 @@ func (a *CodexAgent) SendMessage(
 				if strings.TrimSpace(output) != "" {
 					msg += "\n" + output
 				}
-				cb(StreamEvent{
-					Type:    EventToolResult,
-					ToolID:  toolID,
-					Output:  msg,
-					IsError: true,
-				})
+				if emitToolEvent {
+					cb(StreamEvent{
+						Type:         EventToolResult,
+						ToolID:       toolID,
+						Output:       msg,
+						IsError:      true,
+						ParentToolID: parentToolID,
+					})
+				}
 				if call.ItemID != "" {
 					stateMu.Lock()
 					requestToolEmitted[call.ItemID] = struct{}{}
@@ -529,11 +765,14 @@ func (a *CodexAgent) SendMessage(
 				}
 				return buildCodexDynamicToolResponse(false, msg), nil
 			}
-			cb(StreamEvent{
-				Type:   EventToolResult,
-				ToolID: toolID,
-				Output: output,
-			})
+			if emitToolEvent {
+				cb(StreamEvent{
+					Type:         EventToolResult,
+					ToolID:       toolID,
+					Output:       output,
+					ParentToolID: parentToolID,
+				})
+			}
 			if call.ItemID != "" {
 				stateMu.Lock()
 				requestToolEmitted[call.ItemID] = struct{}{}
@@ -561,8 +800,11 @@ func (a *CodexAgent) SendMessage(
 		switch method {
 		case "thread/started":
 			var n codexThreadStartedNotification
-			if json.Unmarshal(params, &n) == nil && n.Thread.ID != "" {
+			if json.Unmarshal(params, &n) == nil && n.Thread.ID != "" && n.Thread.ParentThreadID == "" {
 				stateMu.Lock()
+				if mainThreadID == "" {
+					mainThreadID = n.Thread.ID
+				}
 				if result.SessionID == "" {
 					result.SessionID = n.Thread.ID
 				}
@@ -571,7 +813,7 @@ func (a *CodexAgent) SendMessage(
 
 		case "turn/started":
 			var n codexTurnStartedNotification
-			if json.Unmarshal(params, &n) == nil && n.Turn.ID != "" {
+			if json.Unmarshal(params, &n) == nil && n.Turn.ID != "" && isMainThread(n.ThreadID) {
 				stateMu.Lock()
 				currentTurnID = n.Turn.ID
 				stateMu.Unlock()
@@ -579,7 +821,7 @@ func (a *CodexAgent) SendMessage(
 
 		case "item/agentMessage/delta":
 			var n codexAgentMessageDeltaNotification
-			if err := json.Unmarshal(params, &n); err == nil && n.Delta != "" {
+			if err := json.Unmarshal(params, &n); err == nil && n.Delta != "" && isMainThread(n.ThreadID) {
 				stateMu.Lock()
 				streamedAgentText[n.ItemID] = true
 				stateMu.Unlock()
@@ -588,7 +830,7 @@ func (a *CodexAgent) SendMessage(
 
 		case "item/reasoning/textDelta":
 			var n codexReasoningTextDeltaNotification
-			if err := json.Unmarshal(params, &n); err == nil && n.Delta != "" {
+			if err := json.Unmarshal(params, &n); err == nil && n.Delta != "" && isMainThread(n.ThreadID) {
 				stateMu.Lock()
 				streamedReasoning[n.ItemID] = true
 				stateMu.Unlock()
@@ -597,7 +839,7 @@ func (a *CodexAgent) SendMessage(
 
 		case "item/reasoning/summaryTextDelta":
 			var n codexReasoningSummaryTextDeltaNotification
-			if err := json.Unmarshal(params, &n); err == nil && n.Delta != "" {
+			if err := json.Unmarshal(params, &n); err == nil && n.Delta != "" && isMainThread(n.ThreadID) {
 				stateMu.Lock()
 				streamedReasoning[n.ItemID] = true
 				stateMu.Unlock()
@@ -790,7 +1032,7 @@ func (a *CodexAgent) SendMessage(
 				}
 				toolID := "compat-patch:" + rawID
 
-				toolName, input, path := codexPatchToolStart(payload, params)
+				toolName, input, path, patchText := codexPatchToolStart(payload, params)
 				if input == "" {
 					input = "{}"
 				}
@@ -802,10 +1044,15 @@ func (a *CodexAgent) SendMessage(
 				compatPatchInputs[rawID] = input
 				compatPatchOutputs[rawID] = ""
 				compatPatchStarted[rawID] = false
+				compatPatchDiffs[rawID] = patchText
 				stateMu.Unlock()
-				// If path is unknown at begin, defer tool_start until we can infer file name
-				// from outputDelta/end message so UI can show "Edited <file>".
-				if path != "" {
+				// A multi-file patch already has everything it needs (the full
+				// per-file `changes` array) right here at begin — no reason to
+				// wait for a single `path` that will never come. Single-file
+				// patches whose path is still unknown at begin defer tool_start
+				// until we can infer the file name from outputDelta/end, so the
+				// UI can show "Edited <file>" instead of a blank card.
+				if toolName == "FileChange" || path != "" {
 					stateMu.Lock()
 					compatPatchStarted[rawID] = true
 					stateMu.Unlock()
@@ -838,17 +1085,33 @@ func (a *CodexAgent) SendMessage(
 				}
 				if _, ok := compatPatchOutputs[rawID]; ok {
 					compatPatchOutputs[rawID] += delta
-					if compatPatchPaths[rawID] == "" {
+					// A multi-file patch's tool_use input already carries the full
+					// per-file `changes` (built by codexPatchToolStart at begin) and
+					// has no single `path` to infer/overwrite it with — doing so
+					// here would silently drop every file's diff data (see the
+					// "FileChange" name check below).
+					isMultiFile := compatPatchNames[rawID] == "FileChange"
+					if !isMultiFile && compatPatchPaths[rawID] == "" {
 						compatPatchPaths[rawID] = extractPatchPathFromResultText(delta)
 					}
-					if !compatPatchStarted[rawID] && compatPatchPaths[rawID] != "" {
-						compatPatchStarted[rawID] = true
-						inputJSON, _ := json.Marshal(map[string]string{"path": compatPatchPaths[rawID]})
-						emitStart = &StreamEvent{
-							Type:     EventToolStart,
-							ToolID:   compatPatchTools[rawID],
-							ToolName: compatPatchNames[rawID],
-							Input:    string(inputJSON),
+					if !compatPatchStarted[rawID] {
+						if isMultiFile {
+							compatPatchStarted[rawID] = true
+							emitStart = &StreamEvent{
+								Type:     EventToolStart,
+								ToolID:   compatPatchTools[rawID],
+								ToolName: compatPatchNames[rawID],
+								Input:    compatPatchInputs[rawID],
+							}
+						} else if compatPatchPaths[rawID] != "" {
+							compatPatchStarted[rawID] = true
+							inputJSON, _ := json.Marshal(map[string]string{"path": compatPatchPaths[rawID]})
+							emitStart = &StreamEvent{
+								Type:     EventToolStart,
+								ToolID:   compatPatchTools[rawID],
+								ToolName: compatPatchNames[rawID],
+								Input:    string(inputJSON),
+							}
 						}
 					}
 				}
@@ -871,12 +1134,14 @@ func (a *CodexAgent) SendMessage(
 				toolInput := compatPatchInputs[rawID]
 				bufferedOutput := compatPatchOutputs[rawID]
 				started := compatPatchStarted[rawID]
+				patchText := compatPatchDiffs[rawID]
 				delete(compatPatchTools, rawID)
 				delete(compatPatchNames, rawID)
 				delete(compatPatchPaths, rawID)
 				delete(compatPatchInputs, rawID)
 				delete(compatPatchOutputs, rawID)
 				delete(compatPatchStarted, rawID)
+				delete(compatPatchDiffs, rawID)
 				stateMu.Unlock()
 
 				msg := firstJSONMapStringDeep(payload, "message", "result", "output")
@@ -887,7 +1152,11 @@ func (a *CodexAgent) SendMessage(
 					path = extractPatchPathFromResultText(msg)
 				}
 				if !started {
-					if path != "" {
+					// A multi-file patch's toolInput (from codexPatchToolStart at
+					// begin) already has the full `changes` array; a single
+					// inferred `path` here is never applicable to it and must not
+					// replace it (see the same guard in outputDelta above).
+					if toolName != "FileChange" && path != "" {
 						inputJSON, _ := json.Marshal(map[string]string{"path": path})
 						toolInput = string(inputJSON)
 					}
@@ -906,10 +1175,23 @@ func (a *CodexAgent) SendMessage(
 				}
 				success := firstJSONMapBoolDeep(payload, "success")
 				isError := !success && hasJSONMapKeyDeep(payload, "success")
+				// A multi-file FileChange call's diffs already live per-file in
+				// the tool_use's own input (changes[].diff, set at begin); the
+				// single tool_result.diff field can only ever hold one file's
+				// worth, so setting it here — to whichever single section `path`
+				// happens to resolve to — would make an expanded card show only
+				// that one file's diff and silently drop the rest. Leave it empty
+				// for FileChange; ToolCallCard/extractFileChanges both already
+				// read the multi-file diffs from the input instead.
+				var diff string
+				if !isError && toolName != "FileChange" {
+					diff = normalizeApplyPatchDiff(path, patchText)
+				}
 				cb(StreamEvent{
 					Type:    EventToolResult,
 					ToolID:  toolID,
 					Output:  msg,
+					Diff:    diff,
 					IsError: isError,
 				})
 			}
@@ -917,6 +1199,28 @@ func (a *CodexAgent) SendMessage(
 		case "item/started":
 			var n codexItemNotification
 			if err := json.Unmarshal(params, &n); err == nil {
+				switch n.Item.Type {
+				case "subAgentActivity":
+					if strings.EqualFold(n.Item.Kind, "interrupted") {
+						finishSubAgent(n.Item.AgentThreadID, "interrupted")
+					} else {
+						registerSubAgent(n.ThreadID, n.Item)
+					}
+					return
+				case "collabAgentToolCall", "collabToolCall":
+					if codexIsSpawnAgentTool(n.Item.Tool) {
+						registerSubAgent(n.ThreadID, n.Item)
+					}
+					return
+				}
+
+				parentToolID := ""
+				if !isMainThread(n.ThreadID) {
+					parentToolID = parentToolForThread(n.ThreadID)
+					if parentToolID == "" {
+						return
+					}
+				}
 				if n.Item.Type == "commandExecution" && n.Item.ID != "" {
 					stateMu.Lock()
 					if _, ok := compatExecSkip[n.Item.ID]; ok {
@@ -973,12 +1277,46 @@ func (a *CodexAgent) SendMessage(
 				if skip || deferStart {
 					return
 				}
-				emitCodexItemStarted(n.Item, cb)
+				emitCodexItemStarted(n.Item, codexParentedCallback(parentToolID, cb))
 			}
 
 		case "item/completed":
 			var n codexItemNotification
 			if err := json.Unmarshal(params, &n); err == nil {
+				switch n.Item.Type {
+				case "subAgentActivity":
+					if strings.EqualFold(n.Item.Kind, "interrupted") {
+						finishSubAgent(n.Item.AgentThreadID, "interrupted")
+					} else {
+						// item/completed is also accepted as a fallback in case a
+						// client opted out of item/started. Registration is deduped.
+						registerSubAgent(n.ThreadID, n.Item)
+					}
+					return
+				case "collabAgentToolCall", "collabToolCall":
+					if codexIsSpawnAgentTool(n.Item.Tool) {
+						registerSubAgent(n.ThreadID, n.Item)
+					}
+					return
+				}
+
+				parentToolID := ""
+				if !isMainThread(n.ThreadID) {
+					stateMu.Lock()
+					run := subAgentRuns[n.ThreadID]
+					if run != nil && n.Item.Type == "agentMessage" && strings.TrimSpace(n.Item.Text) != "" &&
+						(n.Item.Phase == "" || strings.EqualFold(n.Item.Phase, "final_answer")) {
+						run.Summary = n.Item.Text
+					}
+					if run != nil {
+						parentToolID = run.ContainerToolID
+					}
+					stateMu.Unlock()
+					if codexIsNonToolItem(n.Item.Type) || parentToolID == "" {
+						return
+					}
+				}
+
 				stateMu.Lock()
 				_, skip := requestToolEmitted[n.Item.ID]
 				if skip {
@@ -993,24 +1331,26 @@ func (a *CodexAgent) SendMessage(
 					return
 				}
 				if deferStart {
-					emitCodexItemStarted(n.Item, cb)
+					emitCodexItemStarted(n.Item, codexParentedCallback(parentToolID, cb))
 				}
 				stateMu.Lock()
 				agentStreamed := streamedAgentText[n.Item.ID]
 				reasoningStreamed := streamedReasoning[n.Item.ID]
+				delete(streamedAgentText, n.Item.ID)
+				delete(streamedReasoning, n.Item.ID)
 				stateMu.Unlock()
-				emitCodexItemCompleted(n.Item, agentStreamed, reasoningStreamed, cb)
+				emitCodexItemCompleted(n.Item, agentStreamed, reasoningStreamed, codexParentedCallback(parentToolID, cb))
 			}
 
 		case "item/mcpToolCall/progress":
 			var n codexMcpToolCallProgressNotification
-			if err := json.Unmarshal(params, &n); err == nil && n.Message != "" {
+			if err := json.Unmarshal(params, &n); err == nil && n.Message != "" && isMainThread(n.ThreadID) {
 				cb(StreamEvent{Type: EventSystem, Content: n.Message})
 			}
 
 		case "turn/plan/updated":
 			var n codexTurnPlanUpdatedNotification
-			if err := json.Unmarshal(params, &n); err == nil {
+			if err := json.Unmarshal(params, &n); err == nil && isMainThread(n.ThreadID) {
 				planJSON, _ := json.Marshal(n)
 				if !planToolStarted {
 					planToolStarted = true
@@ -1030,7 +1370,7 @@ func (a *CodexAgent) SendMessage(
 
 		case "thread/tokenUsage/updated":
 			var n codexThreadTokenUsageUpdatedNotification
-			if err := json.Unmarshal(params, &n); err == nil {
+			if err := json.Unmarshal(params, &n); err == nil && isMainThread(n.ThreadID) {
 				stateMu.Lock()
 				latestTokenUsage = &n
 				stateMu.Unlock()
@@ -1061,7 +1401,7 @@ func (a *CodexAgent) SendMessage(
 
 		case "error":
 			var n codexErrorNotification
-			if err := json.Unmarshal(params, &n); err == nil {
+			if err := json.Unmarshal(params, &n); err == nil && isMainThread(n.ThreadID) {
 				if n.WillRetry {
 					cb(StreamEvent{Type: EventSystem, Content: n.Error.Message})
 				} else {
@@ -1072,6 +1412,10 @@ func (a *CodexAgent) SendMessage(
 		case "turn/completed":
 			var n codexTurnCompletedNotification
 			if err := json.Unmarshal(params, &n); err == nil {
+				if !isMainThread(n.ThreadID) {
+					finishSubAgent(n.ThreadID, n.Turn.Status)
+					return
+				}
 				stateMu.Lock()
 				matchTurn := currentTurnID == "" || n.Turn.ID == "" || n.Turn.ID == currentTurnID
 				stateMu.Unlock()
@@ -1124,9 +1468,11 @@ func (a *CodexAgent) SendMessage(
 	// reader goroutine under stateMu; this write must take the same lock.
 	stateMu.Lock()
 	if threadID != "" {
+		mainThreadID = threadID
 		result.SessionID = threadID
 	} else {
 		threadID = result.SessionID
+		mainThreadID = threadID
 	}
 	stateMu.Unlock()
 	if threadID == "" {

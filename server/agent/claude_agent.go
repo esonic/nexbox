@@ -72,6 +72,38 @@ var terminalTaskStatuses = map[string]bool{
 
 func isTerminalTaskStatus(status string) bool { return terminalTaskStatuses[status] }
 
+func isFailedTaskStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "failed", "stopped", "killed":
+		return true
+	default:
+		return false
+	}
+}
+
+// assistantText returns the text from one complete assistant message. Claude
+// attaches parent_tool_use_id to sub-agent messages, so the caller can retain
+// the latest child response as the Agent card's result without forwarding it
+// into the main transcript.
+func assistantText(content []AssistantContent) string {
+	var parts []string
+	for _, block := range content {
+		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func claudeTaskPatchSummary(patch map[string]interface{}) string {
+	for _, key := range []string{"result", "summary"} {
+		if value, ok := patch[key].(string); ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // translateAssistantContent converts the content blocks of one complete
 // `assistant` stream-json message into unified StreamEvents.
 //
@@ -166,9 +198,10 @@ func (a *ClaudeAgent) SendMessage(
 	// inputs/outputs are passed through untouched.
 	rawCB := cb
 	cb = func(event StreamEvent) {
-		if event.Type == EventTextDelta || event.Type == EventThinking {
+		switch event.Type {
+		case EventTextDelta, EventThinking, EventSubTaskStart, EventSubTaskProgress, EventSubTaskDone:
 			event.Content = stripWatermarkChars(event.Content)
-			if event.Content == "" {
+			if event.Content == "" && (event.Type == EventTextDelta || event.Type == EventThinking) {
 				return
 			}
 		}
@@ -191,6 +224,9 @@ func (a *ClaudeAgent) SendMessage(
 
 	// Create Claude CLI client
 	client := NewClaudeClient()
+	if a.CLIPath != "" {
+		client.CLIPath = a.CLIPath
+	}
 	client.Verbose = a.Verbose
 
 	// Validate effort against the live Claude catalog. The catalog is the
@@ -335,7 +371,7 @@ func (a *ClaudeAgent) SendMessage(
 		log.Printf("[claude-agent] fork: parent=%s", req.Fork.SessionID)
 	}
 	log.Printf("[claude-agent] workDir: %s", req.WorkDir)
-	log.Printf("[claude-agent] message: %s", req.Message)
+	log.Printf("[claude-agent] message length: %d bytes", len(req.Message))
 	log.Printf("[claude-agent] allowedTools: %v", opts.AllowedTools)
 	if opts.MCPConfigPath != "" {
 		log.Printf("[claude-agent] mcpConfigPath: %s", opts.MCPConfigPath)
@@ -362,14 +398,136 @@ func (a *ClaudeAgent) SendMessage(
 	var lastAssistantUUID string
 
 	// Maps a sub-agent's task_id → the Agent tool_use_id that launched it. Built
-	// from task_started (which carries both ids). A background sub-agent signals
-	// completion with a `task_updated` message that carries ONLY task_id (no
-	// tool_use_id), so we need this map to translate it back to the tool_use_id
-	// the UI's Agent card is keyed on. Verified against the real CLI in
-	// claude_subagent_stream_test.go: sync tools finish via task_notification
-	// (with tool_use_id), but async sub-agents finish via task_updated. Accessed
-	// only from the single stream-reading goroutine, so no lock needed.
+	// primarily from task_started (which carries both ids). Claude Code 2.1.206+
+	// can instead report the lifecycle only through background_tasks_changed,
+	// whose entries have no tool_use_id, so top-level Agent/Task launches are also
+	// retained below as an ordered fallback. Accessed only from the single
+	// stream-reading goroutine, so no lock is needed.
 	subAgentTaskTool := map[string]string{}
+	subAgentTaskType := map[string]string{}
+	subAgentResults := map[string]string{} // Agent tool_use_id -> latest child assistant text
+	type subAgentLaunch struct {
+		toolUseID   string
+		description string
+	}
+	var subAgentLaunches []subAgentLaunch
+	subAgentLaunchSeen := map[string]bool{}
+	subAgentLaunchClaimed := map[string]bool{}
+	backgroundTaskSnapshot := map[string]ClaudeBackgroundTask{}
+	type subTaskDoneState struct {
+		status  string
+		summary string
+	}
+	subAgentDone := map[string]subTaskDoneState{}
+
+	emitSubAgentDone := func(msg StreamMessage, toolUseID, status, summary string) {
+		if toolUseID == "" {
+			toolUseID = subAgentTaskTool[msg.TaskID]
+		}
+		taskType := msg.TaskType
+		if taskType == "" {
+			taskType = subAgentTaskType[msg.TaskID]
+		}
+		if childResult := strings.TrimSpace(subAgentResults[toolUseID]); childResult != "" {
+			summary = childResult
+		}
+		summary = strings.TrimSpace(summary)
+
+		key := toolUseID
+		if key == "" {
+			key = msg.TaskID
+		}
+		if previous, seen := subAgentDone[key]; seen {
+			// task_updated is often followed by task_notification. Emit the
+			// latter only when it enriches an earlier empty result.
+			if previous.status == status {
+				if previous.summary == summary || previous.summary != "" || summary == "" {
+					return
+				}
+			}
+		}
+		subAgentDone[key] = subTaskDoneState{status: status, summary: summary}
+
+		cb(StreamEvent{
+			Type:    EventSubTaskDone,
+			Content: summary,
+			IsError: isFailedTaskStatus(status),
+			Metadata: map[string]interface{}{
+				"task_id":           msg.TaskID,
+				"status":            status,
+				"tool_use_id":       toolUseID,
+				"task_type":         taskType,
+				"workflow_progress": msg.WorkflowProgress,
+			},
+		})
+	}
+
+	launchDescription := func(input interface{}) string {
+		fields, ok := input.(map[string]interface{})
+		if !ok {
+			return ""
+		}
+		for _, key := range []string{"description", "prompt"} {
+			if value, ok := fields[key].(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+		return ""
+	}
+	rememberSubAgentLaunches := func(content []AssistantContent) {
+		for _, block := range content {
+			if block.Type != "tool_use" || block.ID == "" ||
+				(!strings.EqualFold(block.Name, "Agent") && !strings.EqualFold(block.Name, "Task")) {
+				continue
+			}
+			if subAgentLaunchSeen[block.ID] {
+				continue
+			}
+			subAgentLaunchSeen[block.ID] = true
+			subAgentLaunches = append(subAgentLaunches, subAgentLaunch{
+				toolUseID:   block.ID,
+				description: launchDescription(block.Input),
+			})
+		}
+	}
+	claimSubAgentLaunch := func(toolUseID string) {
+		if toolUseID != "" {
+			subAgentLaunchClaimed[toolUseID] = true
+		}
+	}
+	matchSubAgentLaunch := func(task ClaudeBackgroundTask) string {
+		if toolUseID := subAgentTaskTool[task.TaskID]; toolUseID != "" {
+			return toolUseID
+		}
+		if task.TaskType != "" && task.TaskType != "local_agent" {
+			return ""
+		}
+
+		description := strings.TrimSpace(task.Description)
+		matched := ""
+		if description != "" {
+			for _, launch := range subAgentLaunches {
+				if !subAgentLaunchClaimed[launch.toolUseID] &&
+					strings.EqualFold(launch.description, description) {
+					matched = launch.toolUseID
+					break
+				}
+			}
+		}
+		if matched == "" {
+			for _, launch := range subAgentLaunches {
+				if !subAgentLaunchClaimed[launch.toolUseID] {
+					matched = launch.toolUseID
+					break
+				}
+			}
+		}
+		if matched != "" {
+			subAgentTaskTool[task.TaskID] = matched
+			subAgentLaunchClaimed[matched] = true
+		}
+		return matched
+	}
 
 	resultSessionID, err := client.Query(ctx, combinedPrompt, opts, func(msg StreamMessage, parsed *AssistantMessage) {
 		if msg.Type != "stream_event" {
@@ -421,28 +579,90 @@ func (a *ClaudeAgent) SendMessage(
 			case "init_response":
 				log.Printf("[claude-agent] Initialize response: %d models", len(msg.InitModels))
 				a.updateModelCacheFromInit(msg.InitModels)
+			case "background_tasks_changed":
+				next := make(map[string]ClaudeBackgroundTask, len(msg.BackgroundTasks))
+				for _, task := range msg.BackgroundTasks {
+					if task.TaskID == "" {
+						continue
+					}
+					next[task.TaskID] = task
+					if task.TaskType != "" {
+						subAgentTaskType[task.TaskID] = task.TaskType
+					}
+					matchSubAgentLaunch(task)
+				}
+				for taskID, previousTask := range backgroundTaskSnapshot {
+					if _, stillRunning := next[taskID]; stillRunning {
+						continue
+					}
+					taskType := previousTask.TaskType
+					if taskType == "" {
+						taskType = subAgentTaskType[taskID]
+					}
+					if taskType != "" && taskType != "local_agent" && taskType != "local_workflow" {
+						continue
+					}
+					toolUseID := matchSubAgentLaunch(previousTask)
+					if toolUseID == "" {
+						continue
+					}
+					status := "completed"
+					if previous, seen := subAgentDone[toolUseID]; seen && previous.status != "" {
+						// Preserve an explicit failure/interruption received before the
+						// task disappeared from the status-only snapshot.
+						status = previous.status
+					}
+					emitSubAgentDone(StreamMessage{
+						TaskID:   taskID,
+						TaskType: taskType,
+					}, toolUseID, status, "")
+				}
+				backgroundTaskSnapshot = next
 			case "task_started":
-				if msg.TaskID != "" && msg.ToolUseID != "" {
-					subAgentTaskTool[msg.TaskID] = msg.ToolUseID
+				toolUseID := msg.ToolUseID
+				if toolUseID != "" {
+					if previous := subAgentTaskTool[msg.TaskID]; previous != "" && previous != toolUseID {
+						// An earlier snapshot-only fallback was provisional. Prefer the
+						// protocol's explicit association and release the old candidate.
+						delete(subAgentLaunchClaimed, previous)
+					}
+				}
+				if toolUseID == "" {
+					toolUseID = matchSubAgentLaunch(ClaudeBackgroundTask{
+						TaskID:      msg.TaskID,
+						TaskType:    msg.TaskType,
+						Description: msg.Description,
+					})
+				}
+				if msg.TaskID != "" && toolUseID != "" {
+					subAgentTaskTool[msg.TaskID] = toolUseID
+					claimSubAgentLaunch(toolUseID)
+				}
+				if msg.TaskID != "" && msg.TaskType != "" {
+					subAgentTaskType[msg.TaskID] = msg.TaskType
 				}
 				cb(StreamEvent{
 					Type:    EventSubTaskStart,
 					Content: msg.Description,
 					Metadata: map[string]interface{}{
 						"task_id":       msg.TaskID,
-						"tool_use_id":   msg.ToolUseID,
+						"tool_use_id":   toolUseID,
 						"task_type":     msg.TaskType,
 						"workflow_name": msg.WorkflowName,
 					},
 				})
 			case "task_progress":
+				toolUseID := msg.ToolUseID
+				if toolUseID == "" {
+					toolUseID = subAgentTaskTool[msg.TaskID]
+				}
 				cb(StreamEvent{
 					Type:    EventSubTaskProgress,
 					Content: msg.Description,
 					Metadata: map[string]interface{}{
 						"task_id":           msg.TaskID,
 						"last_tool_name":    msg.LastToolName,
-						"tool_use_id":       msg.ToolUseID,
+						"tool_use_id":       toolUseID,
 						"task_type":         msg.TaskType,
 						"workflow_progress": msg.WorkflowProgress,
 					},
@@ -457,17 +677,16 @@ func (a *ClaudeAgent) SendMessage(
 						}
 					}
 				}
-				cb(StreamEvent{
-					Type:    EventSubTaskDone,
-					Content: msg.Summary,
-					Metadata: map[string]interface{}{
-						"task_id":           msg.TaskID,
-						"status":            msg.Status,
-						"tool_use_id":       msg.ToolUseID,
-						"task_type":         msg.TaskType,
-						"workflow_progress": msg.WorkflowProgress,
-					},
-				})
+				toolUseID := msg.ToolUseID
+				if toolUseID == "" {
+					toolUseID = subAgentTaskTool[msg.TaskID]
+				}
+				emitSubAgentDone(msg, toolUseID, msg.Status, msg.Summary)
+				if isTerminalTaskStatus(msg.Status) {
+					delete(subAgentTaskTool, msg.TaskID)
+					delete(subAgentTaskType, msg.TaskID)
+					delete(subAgentResults, toolUseID)
+				}
 			case "task_updated":
 				// A background sub-agent (Agent tool) can signal terminal completion
 				// ONLY via task_updated — no task_notification (that's for sync
@@ -475,20 +694,12 @@ func (a *ClaudeAgent) SendMessage(
 				// lives in `patch`, not at top level, and only a TERMINAL status
 				// means done — pending/running/paused (or a patch with no status)
 				// must NOT complete the card. Translate task_id → the launching
-				// Agent tool_use_id and emit once (drop from the map).
+				// Agent tool_use_id. Keep the mapping briefly because a later
+				// task_notification may carry a richer completion summary.
 				patchStatus, _ := msg.Patch["status"].(string)
 				if isTerminalTaskStatus(patchStatus) {
 					if toolUseID := subAgentTaskTool[msg.TaskID]; toolUseID != "" {
-						delete(subAgentTaskTool, msg.TaskID)
-						cb(StreamEvent{
-							Type:    EventSubTaskDone,
-							Content: msg.Summary,
-							Metadata: map[string]interface{}{
-								"task_id":     msg.TaskID,
-								"status":      patchStatus,
-								"tool_use_id": toolUseID,
-							},
-						})
+						emitSubAgentDone(msg, toolUseID, patchStatus, claudeTaskPatchSummary(msg.Patch))
 					}
 				}
 			}
@@ -498,6 +709,14 @@ func (a *ClaudeAgent) SendMessage(
 				lastAssistantUUID = msg.UUID
 			}
 			if parsed != nil {
+				if msg.ParentToolUseID == "" {
+					rememberSubAgentLaunches(parsed.Content)
+				}
+				if msg.ParentToolUseID != "" {
+					if text := strings.TrimSpace(assistantText(parsed.Content)); text != "" {
+						subAgentResults[msg.ParentToolUseID] = text
+					}
+				}
 				translateAssistantContent(parsed.Content, msg.ParentToolUseID, hasPartialText, hasPartialThinking, cb)
 				// Reset partial flags after processing the complete assistant message.
 				hasPartialText = false
@@ -515,6 +734,20 @@ func (a *ClaudeAgent) SendMessage(
 				if err := json.Unmarshal(msg.Message, &userMsg); err == nil {
 					// Content can be an array of blocks
 					if contents, ok := userMsg.Content.([]interface{}); ok {
+						// msg.ToolUseResult is a single object at the top level of this
+						// JSONL line, not one-per-block. It's only safe to attribute to
+						// a specific tool_result when this message carries exactly one
+						// (parallel tool calls can land multiple tool_result blocks in
+						// the same "user" message, and we have no per-block key to
+						// disambiguate which one toolUseResult belongs to) — otherwise
+						// skip it rather than risk attaching the wrong file's diff to
+						// the wrong tool card.
+						toolResultCount := 0
+						for _, c := range contents {
+							if cm, ok := c.(map[string]interface{}); ok && cm["type"] == "tool_result" {
+								toolResultCount++
+							}
+						}
 						for _, c := range contents {
 							if cm, ok := c.(map[string]interface{}); ok {
 								if cm["type"] == "tool_result" {
@@ -579,10 +812,15 @@ func (a *ClaudeAgent) SendMessage(
 									} else {
 										log.Printf("[claude-agent] Tool result: id=%s, isError=%v, output_len=%d", toolUseID, isError, len(output))
 									}
+									var diff string
+									if toolResultCount == 1 {
+										diff = claudeToolResultDiff(msg.ToolUseResult)
+									}
 									cb(StreamEvent{
 										Type:         EventToolResult,
 										ToolID:       toolUseID,
 										Output:       output,
+										Diff:         diff,
 										IsError:      isError,
 										ParentToolID: msg.ParentToolUseID,
 									})
@@ -1139,4 +1377,50 @@ func toInt(v interface{}) (int, bool) {
 		return int(n), true
 	}
 	return 0, false
+}
+
+// claudeToolUseResultPatch is the shape of Claude Code's `toolUseResult` for
+// the Edit tool: a file path plus ready-made unified-diff hunks (each without
+// its own file header, just "@@ -a,b +c,d @@" followed by " "/"+"/"-" lines).
+type claudeToolUseResultPatch struct {
+	FilePath        string `json:"filePath"`
+	StructuredPatch []struct {
+		OldStart int      `json:"oldStart"`
+		OldLines int      `json:"oldLines"`
+		NewStart int      `json:"newStart"`
+		NewLines int      `json:"newLines"`
+		Lines    []string `json:"lines"`
+	} `json:"structuredPatch"`
+	// Write tool: full file content, no diff of its own to derive from.
+	Content string `json:"content"`
+}
+
+// claudeToolResultDiff extracts a unified diff from Claude Code's
+// `toolUseResult` field on a tool_result message, when present. Only the
+// Edit/MultiEdit family carries `structuredPatch`; Write/other tools have no
+// diff data in this field (Content is the full new file, with no "before" to
+// compare against), so they fall back to no diff rather than a fabricated
+// all-green view.
+func claudeToolResultDiff(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var patch claudeToolUseResultPatch
+	if json.Unmarshal(raw, &patch) != nil || patch.FilePath == "" || len(patch.StructuredPatch) == 0 {
+		return ""
+	}
+	hunks := make([]string, 0, len(patch.StructuredPatch))
+	for _, h := range patch.StructuredPatch {
+		if len(h.Lines) == 0 {
+			continue
+		}
+		var body strings.Builder
+		fmt.Fprintf(&body, "@@ -%d,%d +%d,%d @@\n", h.OldStart, h.OldLines, h.NewStart, h.NewLines)
+		for _, line := range h.Lines {
+			body.WriteString(line)
+			body.WriteString("\n")
+		}
+		hunks = append(hunks, body.String())
+	}
+	return unifiedDiffFromHunks(patch.FilePath, hunks)
 }

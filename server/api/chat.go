@@ -236,6 +236,35 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 		projectWorkDir = "."
 	}
 
+	// Claim the session before preparing its first-turn worktree. Worktree
+	// creation mutates both Git and the persisted session row, so letting two
+	// concurrent dispatches reach ensureWorktree before the atomic claim can
+	// make the loser revert a successfully-created worktree back to local mode.
+	if !s.SessionManager.TrySetActive(sessionID) {
+		if opts.noQueue {
+			return dispatchBusy, nil
+		}
+		s.enqueueMessage(sessionID, message, imageFilenames)
+		return dispatchBusy, nil
+	}
+
+	s.Hub.SetActive(sessionID)
+
+	// Configuration updates claim the same session while changing/removing
+	// its Chrome MCP. Reload after claiming so an update between the initial
+	// read and this claim cannot make us recreate an MCP with an old endpoint.
+	currentSession, err := s.Store.GetSession(sessionID)
+	if err != nil || currentSession == nil {
+		s.SessionManager.SetActive(sessionID, false)
+		loadErr := fmt.Errorf("reload Chrome configuration for session %s", sessionID)
+		if err != nil {
+			loadErr = fmt.Errorf("%w: %w", loadErr, err)
+		}
+		s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: loadErr.Error()})
+		return dispatchFailed, loadErr
+	}
+	session.ChromeBrowserURL = currentSession.ChromeBrowserURL
+
 	// Create worktree on first message if requested (worktree_mode="worktree", path not yet set).
 	workDir := s.ensureWorktree(sessionID, session, projectWorkDir)
 	if workDir == "" {
@@ -271,30 +300,6 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 
 	log.Printf("[chat] Agent request for session %s (project: %s, new: %v, refs: %d tasks, %d assets)",
 		sessionID, project.Name, isNewSession, len(refTasks), len(refAssets))
-
-	if !s.SessionManager.TrySetActive(sessionID) {
-		if opts.noQueue {
-			return dispatchBusy, nil
-		}
-		s.enqueueMessage(sessionID, message, imageFilenames)
-		return dispatchBusy, nil
-	}
-
-	// Configuration updates claim the same session while changing/removing
-	// its Chrome MCP. Reload after claiming so an update between the initial
-	// read and this claim cannot make us recreate an MCP with an old endpoint.
-	currentSession, err := s.Store.GetSession(sessionID)
-	if err != nil || currentSession == nil {
-		s.SessionManager.SetActive(sessionID, false)
-		loadErr := fmt.Errorf("reload Chrome configuration for session %s", sessionID)
-		if err != nil {
-			loadErr = fmt.Errorf("%w: %w", loadErr, err)
-		}
-		s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: loadErr.Error()})
-		return dispatchFailed, loadErr
-	}
-	session.ChromeBrowserURL = currentSession.ChromeBrowserURL
-	s.Hub.SetActive(sessionID)
 
 	// Persist user message
 	if len(parts) > 0 {
@@ -528,17 +533,42 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 					}
 				}
 
-			case agent.EventToolResult:
+			case agent.EventToolInputReplace:
+				// Replaces a tool_use's Input outright (unlike append-only
+				// tool_input_delta); used when a backend's authoritative payload
+				// (e.g. Codex per-file diffs) arrives after item/started.
 				mu.Lock()
 				for i := range msgParts {
 					if msgParts[i].Type == "tool_use" && msgParts[i].ToolCallID == event.ToolID {
-						msgParts[i].State = "complete"
+						msgParts[i].Input = event.Input
+						dirty = true
+						break
+					}
+				}
+				mu.Unlock()
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:         "tool_input_replace",
+					ToolID:       event.ToolID,
+					Input:        event.Input,
+					ParentToolID: event.ParentToolID,
+				})
+
+			case agent.EventToolResult:
+				mu.Lock()
+				terminalState := "complete"
+				if event.IsError {
+					terminalState = "error"
+				}
+				for i := range msgParts {
+					if msgParts[i].Type == "tool_use" && msgParts[i].ToolCallID == event.ToolID {
+						msgParts[i].State = terminalState
 					}
 				}
 				msgParts = append(msgParts, MessagePart{
 					Type:       "tool_result",
 					ToolCallID: event.ToolID,
 					Output:     event.Output,
+					Diff:       event.Diff,
 					IsError:    event.IsError,
 				})
 				// Track MCP call stats: mcp__<key>__<tool_name> → package name
@@ -560,6 +590,7 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 					Type:         "tool_result",
 					ToolID:       event.ToolID,
 					Output:       event.Output,
+					Diff:         event.Diff,
 					IsError:      event.IsError,
 					ParentToolID: event.ParentToolID,
 				})
@@ -593,11 +624,24 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 
 			case agent.EventSubTaskStart:
 				taskID, _ := event.Metadata["task_id"].(string)
-				log.Printf("[chat] Sub-agent start: %s (task_id=%s)", event.Content, taskID)
+				toolUseID, _ := event.Metadata["tool_use_id"].(string)
+				// event.Content may contain the full delegated prompt. Keep it in the
+				// user-visible message parts, but never duplicate it into server logs.
+				log.Printf("[chat] Sub-agent start (task_id=%s)", taskID)
+				if toolUseID != "" {
+					mu.Lock()
+					var changed bool
+					msgParts, changed = recordSubAgentDescription(msgParts, toolUseID, event.Content)
+					if changed {
+						dirty = true
+					}
+					mu.Unlock()
+				}
 				s.Hub.Emit(sessionID, ChatEvent{
 					Type:    "subtask_start",
 					Content: event.Content,
 					TaskID:  taskID,
+					ToolID:  toolUseID,
 				})
 
 			case agent.EventSubTaskProgress:
@@ -638,7 +682,9 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 				toolUseID, _ := event.Metadata["tool_use_id"].(string)
 				status, _ := event.Metadata["status"].(string)
 				raw, _ := event.Metadata["workflow_progress"].(json.RawMessage)
-				log.Printf("[chat] Sub-agent done: %s (task_id=%s)", event.Content, taskID)
+				displaySummary := strings.TrimSpace(stripNextActionsBlocks(event.Content))
+				isError := event.IsError || subAgentStatusIsError(status)
+				log.Printf("[chat] Sub-agent done (task_id=%s)", taskID)
 				snap := wfSnapshots[toolUseID]
 				// Only treat this as a workflow when we actually saw workflow
 				// progress: a snapshot exists from prior task_progress, or this
@@ -654,14 +700,14 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 					if status != "" {
 						snap.status = status
 					}
-					if event.Content != "" {
-						snap.summary = event.Content
+					if displaySummary != "" {
+						snap.summary = displaySummary
 					}
 					full := snap.snapshotJSON()
 					attachWorkflowProgress(&mu, msgParts, toolUseID, full, &dirty)
 					s.Hub.Emit(sessionID, ChatEvent{
 						Type:             "subtask_done",
-						Content:          event.Content,
+						Content:          displaySummary,
 						TaskID:           taskID,
 						ToolID:           toolUseID,
 						WorkflowProgress: full,
@@ -673,19 +719,19 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 					// (so a mid-turn refresh stays consistent) and live to clients.
 					if toolUseID != "" {
 						mu.Lock()
-						for i := range msgParts {
-							if msgParts[i].Type == "tool_use" && msgParts[i].ToolCallID == toolUseID && msgParts[i].State == "running" {
-								msgParts[i].State = "complete"
-								dirty = true
-							}
+						var changed bool
+						msgParts, changed = recordSubAgentCompletion(msgParts, toolUseID, displaySummary, isError)
+						if changed {
+							dirty = true
 						}
 						mu.Unlock()
 					}
 					s.Hub.Emit(sessionID, ChatEvent{
 						Type:    "subtask_done",
-						Content: event.Content,
+						Content: displaySummary,
 						TaskID:  taskID,
 						ToolID:  toolUseID,
+						IsError: isError,
 					})
 				}
 
