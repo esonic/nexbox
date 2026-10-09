@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/config"
 	"github.com/esonic/nexbox/store"
 )
 
@@ -207,6 +209,50 @@ func TestSetWorktreeMode_InvalidJSON(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestDispatchBusyPersistsMessageFeatures(t *testing.T) {
+	s := newWorktreeServer(t)
+	s.SessionManager = agent.NewSessionManager()
+	cfg, err := config.NewManager(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("config.NewManager: %v", err)
+	}
+	s.Config = cfg
+
+	project, err := s.Store.CreateProject(store.CreateProjectRequest{
+		Name:        "busy-features",
+		GitRepoPath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := s.Store.CreateSession(store.CreateSessionRequest{
+		Name:      "busy-features",
+		ProjectID: project.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.SessionManager.SetActive(session.ID, true)
+	outcome, err := s.dispatchUserMessage(
+		session.ID, "use the browser", nil, nil, []string{"chrome_devtools"}, dispatchOpts{noQueue: true},
+	)
+	if err != nil {
+		t.Fatalf("dispatchUserMessage: %v", err)
+	}
+	if outcome != dispatchBusy {
+		t.Fatalf("dispatch outcome = %v, want dispatchBusy", outcome)
+	}
+
+	persisted, err := s.Store.GetSession(session.ID)
+	if err != nil || persisted == nil {
+		t.Fatalf("load session: %v", err)
+	}
+	if persisted.Features != "chrome_devtools" {
+		t.Fatalf("persisted features = %q, want chrome_devtools", persisted.Features)
 	}
 }
 

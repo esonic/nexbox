@@ -27,6 +27,7 @@ export interface InlineComment {
 export interface RichQueuedMessage {
   id: string;
   text: string;
+  features?: string[];
   images?: { filename: string; url: string }[];
   pickedTasks: Task[];
   pickedAssets: PickedAsset[];

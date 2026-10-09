@@ -80,7 +80,7 @@ function sendRichQueuedMessageDirect(sid: string, msg: RichQueuedMessage) {
   gs.addChatMessage(sid, { id: uuid(), session_id: sid, role: "user", parts, metadata: {}, created_at: now });
   gs.addChatMessage(sid, { id: uuid(), session_id: sid, role: "assistant", parts: [], metadata: {}, created_at: now, isStreaming: true });
 
-  globalWS.send(sid, finalMessage, parts, imageFilenames.length > 0 ? imageFilenames : undefined);
+  globalWS.send(sid, finalMessage, parts, imageFilenames.length > 0 ? imageFilenames : undefined, msg.features);
   gs.setStreamingSession(sid, true);
 }
 
@@ -129,7 +129,7 @@ function sendRichInterjectDirect(sid: string, msg: RichQueuedMessage) {
   } else {
     gs.addChatMessage(sid, userMsg);
   }
-  globalWS.interject(sid, finalMessage, parts, imageFilenames.length > 0 ? imageFilenames : undefined);
+  globalWS.interject(sid, finalMessage, parts, imageFilenames.length > 0 ? imageFilenames : undefined, msg.features);
 }
 
 // WF[xxxxx] prefix written by the workflow orchestrator. We preserve it
@@ -859,6 +859,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       const richMsg: RichQueuedMessage = {
         id: uuid(),
         text: trimmed,
+        features,
         images: imageData && imageData.length > 0 ? imageData : undefined,
         pickedTasks: [...pickedTasks],
         pickedAssets: [...pickedAssets],
