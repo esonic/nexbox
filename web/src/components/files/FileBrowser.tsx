@@ -9,6 +9,7 @@ import {
   Loader2,
   RefreshCw,
   Search,
+  ListFilter,
   Upload,
   Download,
   Trash2,
@@ -202,7 +203,16 @@ function FileTreeItem({
             <File className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
           </>
         )}
-        <span className={cn("truncate min-w-0", entry.is_symlink && "italic", gitColor)}>{entry.name}</span>
+        {/* Server-compacted folder chains arrive as "a/b/c" (path = innermost folder);
+            render segments with dimmed separators like VSCode compact folders. */}
+        <span className={cn("truncate min-w-0", entry.is_symlink && "italic", gitColor)}>
+          {(entry.is_dir ? entry.name.split("/") : [entry.name]).map((segment, i) => (
+            <span key={i}>
+              {i > 0 && <span className="text-muted-foreground/40 px-px">/</span>}
+              {segment}
+            </span>
+          ))}
+        </span>
         {/* Git change marker at the right edge: a letter badge for files, a dot
             for folders that contain changes (VSCode-style). */}
         {gitLetter ? (
@@ -761,6 +771,8 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const [searchType, setSearchType] = useState<"name" | "content">("name");
   const [searchResults, setSearchResults] = useState<FileSearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
+  const searchSeqRef = useRef(0);
   const searchRef = useRef<HTMLInputElement>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const [fileSearchVisible, setFileSearchVisible] = useState(false);
@@ -1117,16 +1129,18 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
         // Monaco reveals the line and opens its own find widget; the overlay
         // search bar is only for the read-only CodeViewer.
         setFileSearchQuery(searchQuery.trim());
+        setFileSearchCaseSensitive(searchCaseSensitive);
         setPendingTargetLine(line);
         setSearchNavSeq((seq) => seq + 1);
       } else {
         skipIndexResetRef.current = true;
         setFileSearchVisible(true);
         setFileSearchQuery(searchQuery.trim());
+        setFileSearchCaseSensitive(searchCaseSensitive);
         setPendingTargetLine(line);
       }
     }
-  }, [projectId, sessionId, searchQuery, editEnabled, setSelectedPath, loadFileBaseline]);
+  }, [projectId, sessionId, searchQuery, searchCaseSensitive, editEnabled, setSelectedPath, loadFileBaseline]);
 
   // Determine the directory where new uploads should land based on highlight.
   // - Highlighted directory → upload into it
@@ -1414,18 +1428,20 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     setSearchLoading(true);
     clearTimeout(searchTimerRef.current);
     searchTimerRef.current = setTimeout(async () => {
+      // Ignore responses from superseded requests (slow earlier query landing late).
+      const seq = ++searchSeqRef.current;
       try {
-        const results = await filesApi.search(projectId, searchQuery.trim(), searchType, sessionId);
-        setSearchResults(results || []);
+        const results = await filesApi.search(projectId, searchQuery.trim(), searchType, sessionId, searchCaseSensitive);
+        if (seq === searchSeqRef.current) setSearchResults(results || []);
       } catch (e) {
         console.error("Search failed:", e);
-        setSearchResults([]);
+        if (seq === searchSeqRef.current) setSearchResults([]);
       } finally {
-        setSearchLoading(false);
+        if (seq === searchSeqRef.current) setSearchLoading(false);
       }
     }, 300);
     return () => clearTimeout(searchTimerRef.current);
-  }, [searchQuery, searchType, projectId, sessionId]);
+  }, [searchQuery, searchType, searchCaseSensitive, projectId, sessionId]);
 
   const handleToggleSearch = useCallback(() => {
     setShowSearch((prev) => {
@@ -1456,6 +1472,14 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
         <div className="flex items-center justify-between px-3 py-1.5 border-b shrink-0">
           <span className="text-xs text-muted-foreground font-medium">Files</span>
           <div className="flex items-center gap-0.5">
+            <button
+              onClick={() => window.dispatchEvent(new CustomEvent("open-quick-open"))}
+              className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+              title="Go to file (Cmd/Ctrl+P)"
+              aria-label="Go to file"
+            >
+              <ListFilter className="h-3.5 w-3.5" />
+            </button>
             <button
               onClick={handleToggleSearch}
               className={cn(
@@ -1531,6 +1555,19 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                 )}
               >
                 Content
+              </button>
+              <button
+                onClick={() => setSearchCaseSensitive((v) => !v)}
+                title="Match case"
+                aria-pressed={searchCaseSensitive}
+                className={cn(
+                  "ml-auto text-[10px] px-1.5 py-0.5 rounded font-mono transition-colors",
+                  searchCaseSensitive
+                    ? "bg-primary/10 text-primary font-medium"
+                    : "text-muted-foreground/60 hover:text-muted-foreground"
+                )}
+              >
+                Aa
               </button>
             </div>
           </div>
