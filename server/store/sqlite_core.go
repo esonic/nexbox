@@ -355,14 +355,14 @@ func (s *SQLiteStore) UnhideSession(id string) (bool, error) {
 
 // sessionColumns is the canonical column list for SELECTing a Session row.
 // Keep this in sync with scanSession.
-const sessionColumns = `id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, forked_from_session_id, forked_from_message_id, forked_at_agent_checkpoint, is_hidden, created_by, created_at, updated_at, deleted_at`
+const sessionColumns = `id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, sort_order, features, chrome_browser_url, worktree_mode, worktree_path, forked_from_session_id, forked_from_message_id, forked_at_agent_checkpoint, is_hidden, created_by, created_at, updated_at, deleted_at`
 
 func scanSession(row interface{ Scan(...interface{}) error }) (*Session, error) {
 	var sess Session
 	var deletedAt sql.NullTime
 	var isHidden int
 	if err := row.Scan(&sess.ID, &sess.NamespaceID, &sess.Name, &sess.ProjectID, &sess.Agent,
-		&sess.Model, &sess.Effort, &sess.AgentSessionID, &sess.StreamID, &sess.SortOrder, &sess.Features,
+		&sess.Model, &sess.Effort, &sess.AgentSessionID, &sess.StreamID, &sess.SortOrder, &sess.Features, &sess.ChromeBrowserURL,
 		&sess.WorktreeMode, &sess.WorktreePath,
 		&sess.ForkedFromSessionID, &sess.ForkedFromMessageID, &sess.ForkedAtAgentCheckpoint,
 		&isHidden,
@@ -460,11 +460,14 @@ func (s *SQLiteStore) UpdateSession(id string, req UpdateSessionRequest) (*Sessi
 	if req.Effort != nil {
 		sess.Effort = *req.Effort
 	}
+	if req.ChromeBrowserURL != nil {
+		sess.ChromeBrowserURL = *req.ChromeBrowserURL
+	}
 	sess.UpdatedAt = time.Now()
 
 	_, err = s.db.Exec(
-		`UPDATE sessions SET name = ?, project_id = ?, agent = ?, model = ?, effort = ?, updated_at = ? WHERE id = ?`,
-		sess.Name, sess.ProjectID, sess.Agent, sess.Model, sess.Effort, sess.UpdatedAt, sess.ID,
+		`UPDATE sessions SET name = ?, project_id = ?, agent = ?, model = ?, effort = ?, chrome_browser_url = ?, updated_at = ? WHERE id = ?`,
+		sess.Name, sess.ProjectID, sess.Agent, sess.Model, sess.Effort, sess.ChromeBrowserURL, sess.UpdatedAt, sess.ID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update session: %w", err)
@@ -503,7 +506,7 @@ func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint, agent
 	err = tx.QueryRow(
 		`SELECT `+sessionColumns+` FROM sessions WHERE id = ?`, parentID,
 	).Scan(&parent.ID, &parent.NamespaceID, &parent.Name, &parent.ProjectID, &parent.Agent,
-		&parent.Model, &parent.Effort, &parent.AgentSessionID, &parent.StreamID, &parent.SortOrder, &parent.Features,
+		&parent.Model, &parent.Effort, &parent.AgentSessionID, &parent.StreamID, &parent.SortOrder, &parent.Features, &parent.ChromeBrowserURL,
 		&parent.WorktreeMode, &parent.WorktreePath,
 		&parent.ForkedFromSessionID, &parent.ForkedFromMessageID, &parent.ForkedAtAgentCheckpoint,
 		&parentIsHidden,
@@ -545,6 +548,7 @@ func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint, agent
 		Agent:                   agent,
 		Model:                   parent.Model,
 		Effort:                  parent.Effort,
+		ChromeBrowserURL:        parent.ChromeBrowserURL,
 		Features:                parent.Features, // inherit per-session UI features (e.g. chrome_devtools)
 		WorktreeMode:            parent.WorktreeMode,
 		ForkedFromSessionID:     parent.ID,
@@ -565,14 +569,14 @@ func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint, agent
 	if _, err := tx.Exec(
 		`INSERT INTO sessions
 			(id, namespace_id, name, project_id, agent, model, effort,
-			 agent_session_id, stream_id, sort_order, features,
+			 agent_session_id, stream_id, sort_order, features, chrome_browser_url,
 			 worktree_mode, worktree_path,
 			 forked_from_session_id, forked_from_message_id, forked_at_agent_checkpoint,
 			 created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, ?, '', ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)`,
 		newSess.ID, newSess.NamespaceID, newSess.Name, newSess.ProjectID, newSess.Agent,
 		newSess.Model, newSess.Effort,
-		newSess.Features,
+		newSess.Features, newSess.ChromeBrowserURL,
 		newSess.WorktreeMode,
 		newSess.ForkedFromSessionID, newSess.ForkedFromMessageID, newSess.ForkedAtAgentCheckpoint,
 		newSess.CreatedBy, newSess.CreatedAt, newSess.UpdatedAt,

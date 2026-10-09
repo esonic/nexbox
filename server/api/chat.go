@@ -280,6 +280,20 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 		return dispatchBusy, nil
 	}
 
+	// Configuration updates claim the same session while changing/removing
+	// its Chrome MCP. Reload after claiming so an update between the initial
+	// read and this claim cannot make us recreate an MCP with an old endpoint.
+	currentSession, err := s.Store.GetSession(sessionID)
+	if err != nil || currentSession == nil {
+		s.SessionManager.SetActive(sessionID, false)
+		loadErr := fmt.Errorf("reload Chrome configuration for session %s", sessionID)
+		if err != nil {
+			loadErr = fmt.Errorf("%w: %w", loadErr, err)
+		}
+		s.Hub.Emit(sessionID, ChatEvent{Type: "error", Message: loadErr.Error()})
+		return dispatchFailed, loadErr
+	}
+	session.ChromeBrowserURL = currentSession.ChromeBrowserURL
 	s.Hub.SetActive(sessionID)
 
 	// Persist user message
@@ -432,7 +446,7 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 				return
 			}
 			if s.ChromeManager != nil {
-				chromeSrv := s.ChromeManager.GetOrCreate(sessionID)
+				chromeSrv := s.ChromeManager.GetOrCreate(sessionID, session.ChromeBrowserURL)
 				if err := chromeSrv.EnsureStarted(ctx); err != nil {
 					log.Printf("[chat] Chrome MCP start failed for session %s: %v", sessionID, err)
 					s.Hub.Emit(sessionID, ChatEvent{

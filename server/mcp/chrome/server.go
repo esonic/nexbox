@@ -140,7 +140,7 @@ func (s *Server) IsStarted() bool {
 	return s.started
 }
 
-// Shutdown stops the MCP server and closes Chrome.
+// Shutdown stops the MCP server; externally owned Chrome is only disconnected.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -161,7 +161,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// ReleaseBrowser stops the Chrome browser process to free memory/CPU while
+// ReleaseBrowser releases Chrome (or only the external connection) while
 // keeping the MCP HTTP server (and its port/URL) alive. A client that already
 // holds the URL keeps working: the next tool call relaunches Chrome lazily via
 // ensureBrowser. Returns true if a running browser was actually closed.
@@ -185,10 +185,9 @@ func (s *Server) ReleaseBrowser(cutoff time.Time) bool {
 	}
 	s.browser.Close()
 	// Drop stale accessibility UIDs: they'd resolve against a fresh Chrome after
-	// relaunch and could error or hit the wrong node. Safe to reassign here —
-	// inFlight==0 under mu means no handler is reading it (handlers touch the
-	// snapshot only after getPageCtx acquires mu, which serialises with this).
-	s.snapshot = NewSnapshotManager()
+	// relaunch and could error or hit the wrong node. Reset the shared manager
+	// under its own lock instead of replacing a pointer held by handlers.
+	s.snapshot.Reset()
 	log.Printf("[chrome-mcp] Released idle Chrome browser (MCP server kept alive on %s)", s.actualAddr)
 	return true
 }
@@ -214,29 +213,31 @@ func (s *Server) getPageCtx() (context.Context, error) {
 // ensureBrowser guarantees Chrome is running. Called lazily on first tool use.
 // If Chrome is not launched, it starts it. If it's unhealthy, it restarts it.
 func (s *Server) ensureBrowser() error {
+	// Serialise health checks, connection creation and snapshot invalidation.
+	// A second first-use caller must observe the completed connection instead
+	// of invalidating UIDs produced by the first caller.
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.parentCtx == nil {
-		s.mu.Unlock()
 		return fmt.Errorf("chrome MCP not initialized")
 	}
 	parentCtx := s.parentCtx
-	s.mu.Unlock()
 
 	if s.browser.IsLaunched() && s.browser.IsHealthy() {
 		return nil
 	}
 
 	if s.browser.IsLaunched() {
-		log.Printf("[chrome-mcp] Chrome unhealthy, restarting...")
+		log.Printf("[chrome-mcp] Browser connection unhealthy, reconnecting...")
 		s.browser.Close()
-		s.snapshot = NewSnapshotManager()
 	}
 
-	log.Printf("[chrome-mcp] Launching Chrome...")
+	log.Printf("[chrome-mcp] Preparing browser connection...")
 	if err := s.browser.Launch(parentCtx); err != nil {
-		return fmt.Errorf("launch chrome: %w", err)
+		return fmt.Errorf("prepare browser connection: %w", err)
 	}
-	log.Printf("[chrome-mcp] Chrome launched successfully")
+	s.snapshot.Reset()
+	log.Printf("[chrome-mcp] Browser connected successfully")
 	return nil
 }
 

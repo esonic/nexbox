@@ -10,13 +10,13 @@ import (
 // ---------------------------------------------------------------------------
 
 type Project struct {
-	ID          string    `json:"id"`
-	OwnerUserID int64     `json:"owner_user_id"`
-	NamespaceID string    `json:"namespace_id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	GitRepoPath string    `json:"git_repo_path"`
-	IsGitRepo   bool      `json:"is_git_repo"` // transient: true if <GitRepoPath>/.git exists
+	ID          string `json:"id"`
+	OwnerUserID int64  `json:"owner_user_id"`
+	NamespaceID string `json:"namespace_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	GitRepoPath string `json:"git_repo_path"`
+	IsGitRepo   bool   `json:"is_git_repo"` // transient: true if <GitRepoPath>/.git exists
 	// AutoManagedDir is true when GitRepoPath was created and is owned by the
 	// server (under data-dir/users/<user>/<name>/). When false, the user
 	// supplied an existing path; rename/delete must leave it alone.
@@ -67,7 +67,7 @@ type Task struct {
 	ClosedAt     *time.Time `json:"closed_at,omitempty"`
 	Labels       []string   `json:"labels"`
 	// Source identifies data origin: "local" (SQLite) or "gitlab" (GitLab API).
-	Source      string `json:"source"`
+	Source       string `json:"source"`
 	ExternalID   string `json:"external_id,omitempty"`
 	ExternalURL  string `json:"external_url,omitempty"`
 	ExternalType string `json:"external_type,omitempty"` // "Issue", "Task", etc.
@@ -165,19 +165,20 @@ type ReactionSummary struct {
 // ---------------------------------------------------------------------------
 
 type Session struct {
-	ID             string     `json:"id"`
-	NamespaceID    string     `json:"namespace_id"`
-	Name           string     `json:"name"`
-	ProjectID      string     `json:"project_id"`
-	Agent          string     `json:"agent"`
-	Model          string     `json:"model"`
-	Effort         string     `json:"effort"`
-	AgentSessionID string     `json:"agent_session_id"`
-	StreamID       string     `json:"stream_id"`
-	SortOrder      int        `json:"sort_order"`
-	Features       string     `json:"features"`
-	WorktreeMode   string     `json:"worktree_mode"` // "local" | "worktree"
-	WorktreePath   string     `json:"worktree_path"` // empty until worktree is created
+	ID               string `json:"id"`
+	NamespaceID      string `json:"namespace_id"`
+	Name             string `json:"name"`
+	ProjectID        string `json:"project_id"`
+	Agent            string `json:"agent"`
+	Model            string `json:"model"`
+	Effort           string `json:"effort"`
+	AgentSessionID   string `json:"agent_session_id"`
+	StreamID         string `json:"stream_id"`
+	SortOrder        int    `json:"sort_order"`
+	Features         string `json:"features"`
+	ChromeBrowserURL string `json:"chrome_browser_url"` // empty = NexBox-managed Chrome
+	WorktreeMode     string `json:"worktree_mode"`      // "local" | "worktree"
+	WorktreePath     string `json:"worktree_path"`      // empty until worktree is created
 	// session, these record the parent and the Nexbox message at which the
 	// fork was taken. ForkedAtAgentCheckpoint is an opaque value interpreted
 	// only by the selected agent adapter on the first turn of the fork.
@@ -200,11 +201,12 @@ type CreateSessionRequest struct {
 }
 
 type UpdateSessionRequest struct {
-	Name      *string `json:"name,omitempty"`
-	ProjectID *string `json:"project_id,omitempty"`
-	Agent     *string `json:"agent,omitempty"`
-	Model     *string `json:"model,omitempty"`
-	Effort    *string `json:"effort,omitempty"`
+	ChromeBrowserURL *string `json:"chrome_browser_url,omitempty"`
+	Name             *string `json:"name,omitempty"`
+	ProjectID        *string `json:"project_id,omitempty"`
+	Agent            *string `json:"agent,omitempty"`
+	Model            *string `json:"model,omitempty"`
+	Effort           *string `json:"effort,omitempty"`
 }
 
 type ReorderSessionsRequest struct {
@@ -277,25 +279,25 @@ type UpdateAssetRequest struct {
 // ---------------------------------------------------------------------------
 
 type MessagePart struct {
-	Type       string      `json:"type"`
-	Content    string      `json:"content,omitempty"`
-	ToolCallID string      `json:"toolCallId,omitempty"`
-	ToolName   string      `json:"toolName,omitempty"`
+	Type       string `json:"type"`
+	Content    string `json:"content,omitempty"`
+	ToolCallID string `json:"toolCallId,omitempty"`
+	ToolName   string `json:"toolName,omitempty"`
 	// ParentToolID, on tool_use parts, is the tool_use_id of the Task
 	// tool that launched this sub-agent's call. Empty for top-level
 	// tool calls made directly by the main agent.
 	ParentToolID string      `json:"parentToolCallId,omitempty"`
 	Input        interface{} `json:"input,omitempty"`
-	Output     string      `json:"output,omitempty"`
-	State      string      `json:"state,omitempty"`
-	IsError    bool        `json:"isError,omitempty"`
-	Count      int         `json:"count,omitempty"`
-	TaskID     string      `json:"taskId,omitempty"`
-	TaskData   interface{} `json:"task,omitempty"`
-	AssetID    string      `json:"assetId,omitempty"`
-	Title      string      `json:"title,omitempty"`
-	AssetType  string      `json:"assetType,omitempty"`
-	WorkflowID string      `json:"workflowId,omitempty"`
+	Output       string      `json:"output,omitempty"`
+	State        string      `json:"state,omitempty"`
+	IsError      bool        `json:"isError,omitempty"`
+	Count        int         `json:"count,omitempty"`
+	TaskID       string      `json:"taskId,omitempty"`
+	TaskData     interface{} `json:"task,omitempty"`
+	AssetID      string      `json:"assetId,omitempty"`
+	Title        string      `json:"title,omitempty"`
+	AssetType    string      `json:"assetType,omitempty"`
+	WorkflowID   string      `json:"workflowId,omitempty"`
 	// Image file information for persistence
 	Filename string `json:"filename,omitempty"`
 	URL      string `json:"url,omitempty"`

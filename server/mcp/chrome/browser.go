@@ -27,6 +27,7 @@ type PageInfo struct {
 
 // BrowserOptions configures the Chrome browser instance.
 type BrowserOptions struct {
+	BrowserURL  string // CDP HTTP/WS endpoint; non-empty means externally managed Chrome
 	Headless    bool   // Run in headless mode (no GUI); default false
 	ExecPath    string // Custom Chrome binary path; empty = auto-detect
 	UserDataDir string // Chrome user data directory; empty = temp dir
@@ -36,17 +37,19 @@ type BrowserOptions struct {
 
 // BrowserManager manages a Chrome browser instance and its pages.
 type BrowserManager struct {
-	mu          sync.Mutex
-	opts        BrowserOptions
-	allocCtx    context.Context
-	allocCancel context.CancelFunc
-	browserCtx  context.Context
-	pages       map[int]*pageState
-	currentPage int
-	nextPageID  int
-	launched    bool
-	generation  int             // bumped each Launch; ties an exit watcher to its instance
-	parentCtx   context.Context // long-lived parent for re-launch
+	mu              sync.Mutex
+	opts            BrowserOptions
+	allocCtx        context.Context
+	allocCancel     context.CancelFunc
+	transportCancel context.CancelFunc
+	remoteBrowser   *chromedp.Browser
+	browserCtx      context.Context
+	pages           map[int]*pageState
+	currentPage     int
+	nextPageID      int
+	launched        bool
+	generation      int             // bumped each Launch; ties an exit watcher to its instance
+	parentCtx       context.Context // long-lived parent for re-launch
 }
 
 type pageState struct {
@@ -72,13 +75,16 @@ func NewBrowserManager(opts ...BrowserOptions) *BrowserManager {
 	}
 }
 
-// Launch starts a new headed Chrome browser instance.
+// Launch starts managed Chrome or attaches to the configured external browser.
 func (bm *BrowserManager) Launch(parentCtx context.Context) error {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 
 	if bm.launched {
 		return nil
+	}
+	if bm.opts.BrowserURL != "" {
+		return bm.attachLocked(parentCtx)
 	}
 
 	chromeOpts := append(chromedp.DefaultExecAllocatorOptions[:],
@@ -203,11 +209,31 @@ func (bm *BrowserManager) Launch(parentCtx context.Context) error {
 	return nil
 }
 
-// Close shuts down the Chrome browser.
+// Close shuts down managed Chrome or disconnects from external Chrome.
 func (bm *BrowserManager) Close() {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 
+	bm.closeLocked()
+}
+
+func (bm *BrowserManager) closeLocked() {
+	// v0.14.2 cancels attached tabs before RemoteAllocator closes its socket.
+	// Close our independently owned CDP transport first so context cleanup
+	// cannot send Target.closeTarget to the external Chrome.
+	if bm.transportCancel != nil {
+		bm.transportCancel()
+		if bm.remoteBrowser != nil {
+			<-bm.remoteBrowser.LostConnection
+		}
+		bm.transportCancel = nil
+		bm.remoteBrowser = nil
+	}
+	// Cancel the root first in external mode; page cleanup then runs concurrently.
+	if bm.opts.BrowserURL != "" && bm.allocCancel != nil {
+		bm.allocCancel()
+		bm.allocCancel = nil
+	}
 	for _, ps := range bm.pages {
 		if ps.cancel != nil {
 			ps.cancel()
@@ -216,9 +242,11 @@ func (bm *BrowserManager) Close() {
 	bm.pages = make(map[int]*pageState)
 	if bm.allocCancel != nil {
 		bm.allocCancel()
+		bm.allocCancel = nil
 	}
+	bm.currentPage = 0
 	bm.launched = false
-	log.Printf("[chrome] Browser closed")
+	log.Printf("[chrome] Browser connection released")
 }
 
 // IsHealthy checks if Chrome is running and responsive (3s timeout).
@@ -246,6 +274,22 @@ func (bm *BrowserManager) EnsureActivePage() (context.Context, error) {
 
 	if !bm.launched {
 		return nil, fmt.Errorf("browser not launched")
+	}
+	if bm.opts.BrowserURL != "" {
+		if err := bm.syncExternalPagesLocked(); err != nil {
+			return nil, err
+		}
+		ps, ok := bm.pages[bm.currentPage]
+		if !ok {
+			return nil, fmt.Errorf("external Chrome has no open pages; open a tab in Chrome")
+		}
+		if err := bm.runPageLocked(ps.ctx, 5*time.Second); err != nil {
+			// A stalled/partially initialised attachment must not keep the
+			// manager locked indefinitely or be reused on the next call.
+			bm.closeLocked()
+			return nil, fmt.Errorf("attach to Chrome tab: %w", err)
+		}
+		return ps.ctx, nil
 	}
 
 	checkCtx, cancel := context.WithTimeout(bm.browserCtx, 3*time.Second)
@@ -394,6 +438,11 @@ func (bm *BrowserManager) CurrentPageContext() (context.Context, error) {
 func (bm *BrowserManager) ListPages() ([]PageInfo, int, error) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
+	if bm.opts.BrowserURL != "" {
+		if err := bm.syncExternalPagesLocked(); err != nil {
+			return nil, 0, err
+		}
+	}
 
 	targets, err := chromedp.Targets(bm.browserCtx)
 	if err != nil {
@@ -439,7 +488,7 @@ func (bm *BrowserManager) NewPage(url string) (PageInfo, error) {
 	}
 
 	newCtx, cancel := chromedp.NewContext(bm.browserCtx)
-	if err := chromedp.Run(newCtx, chromedp.Navigate(url)); err != nil {
+	if err := bm.runPageLocked(newCtx, 30*time.Second, chromedp.Navigate(url)); err != nil {
 		cancel()
 		return PageInfo{}, fmt.Errorf("new page: %w", err)
 	}
@@ -463,7 +512,12 @@ func (bm *BrowserManager) ClosePage(pageID int) error {
 	if !ok {
 		return fmt.Errorf("page %d not found", pageID)
 	}
-	if ps.cancel != nil {
+	if bm.opts.BrowserURL != "" {
+		// Explicit close_page is the only operation allowed to close an external tab.
+		if err := bm.closeExternalPageLocked(ps); err != nil {
+			return err
+		}
+	} else if ps.cancel != nil {
 		ps.cancel()
 	}
 	delete(bm.pages, pageID)
