@@ -155,8 +155,16 @@ const (
 	EventToolStart = "tool_start"
 
 	// EventToolResult indicates a tool call has completed.
-	// Fields: ToolID, Output, IsError
+	// Fields: ToolID, Output, IsError, Diff
 	EventToolResult = "tool_result"
+
+	// EventToolInputReplace replaces a tool_use's full Input in place, unlike
+	// EventToolStart's tool_input_delta counterpart (append-only, for
+	// streamed partial JSON). Used when a backend's authoritative payload for
+	// a tool call (e.g. Codex's per-file diffs on a FileChange item) can
+	// legitimately arrive or change after item/started already fired.
+	// Fields: ToolID, Input
+	EventToolInputReplace = "tool_input_replace"
 
 	// EventThinking is an extended thinking / reasoning chunk.
 	// Fields: Content, Metadata["signature"]
@@ -209,6 +217,12 @@ type StreamEvent struct {
 	Input    string `json:"input,omitempty"`
 	Output   string `json:"output,omitempty"`
 	IsError  bool   `json:"is_error,omitempty"`
+
+	// Diff carries a unified diff (git-style ---/+++/@@ hunks) describing a
+	// file mutation performed by an edit/write-family tool call. Populated on
+	// EventToolResult for single-file tools (edit/write/multiedit/...). Empty
+	// when the tool made no file change or no diff could be derived.
+	Diff string `json:"diff,omitempty"`
 
 	// ParentToolID is set when a tool call was issued from inside a
 	// sub-agent (Task tool). It holds the tool_use_id of the parent Task

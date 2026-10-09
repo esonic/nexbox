@@ -92,7 +92,7 @@ func TestCodexPatchToolStart_FromApplyPatchText(t *testing.T) {
 	payload := map[string]interface{}{
 		"diff": "*** Begin Patch\n*** Update File: build.sh\n@@\n-echo hi\n+echo hey\n*** End Patch\n",
 	}
-	toolName, input, path := codexPatchToolStart(payload, nil)
+	toolName, input, path, _ := codexPatchToolStart(payload, nil)
 	if toolName != "Edit" {
 		t.Fatalf("expected tool=Edit, got %q", toolName)
 	}
@@ -101,6 +101,60 @@ func TestCodexPatchToolStart_FromApplyPatchText(t *testing.T) {
 	}
 	if !strings.Contains(input, `"path":"build.sh"`) {
 		t.Fatalf("unexpected input: %s", input)
+	}
+}
+
+func TestCodexPatchToolStart_MultiFileEnvelopeEmitsFileChange(t *testing.T) {
+	payload := map[string]interface{}{
+		"diff": "*** Begin Patch\n" +
+			"*** Update File: a.txt\n@@\n-old a\n+new a\n" +
+			"*** Add File: b.txt\n+line one\n" +
+			"*** Delete File: c.txt\n" +
+			"*** End Patch\n",
+	}
+	toolName, input, path, _ := codexPatchToolStart(payload, nil)
+	if toolName != "FileChange" {
+		t.Fatalf("expected tool=FileChange for a multi-file patch, got %q", toolName)
+	}
+	if path != "" {
+		t.Fatalf("expected no single path for a multi-file patch, got %q", path)
+	}
+
+	var decoded struct {
+		Changes []struct {
+			Path string `json:"path"`
+			Kind string `json:"kind"`
+			Diff string `json:"diff"`
+		} `json:"changes"`
+	}
+	if err := json.Unmarshal([]byte(input), &decoded); err != nil {
+		t.Fatalf("input is not valid JSON: %v (%s)", err, input)
+	}
+	if len(decoded.Changes) != 3 {
+		t.Fatalf("expected 3 files, got %d: %+v", len(decoded.Changes), decoded.Changes)
+	}
+
+	byPath := map[string]struct {
+		Path string
+		Kind string
+		Diff string
+	}{}
+	for _, c := range decoded.Changes {
+		byPath[c.Path] = struct {
+			Path string
+			Kind string
+			Diff string
+		}{c.Path, c.Kind, c.Diff}
+	}
+
+	if byPath["a.txt"].Kind != "update" || !strings.Contains(byPath["a.txt"].Diff, "-old a") || !strings.Contains(byPath["a.txt"].Diff, "+new a") {
+		t.Fatalf("unexpected a.txt entry: %+v", byPath["a.txt"])
+	}
+	if byPath["b.txt"].Kind != "create" || !strings.Contains(byPath["b.txt"].Diff, "+line one") {
+		t.Fatalf("unexpected b.txt entry: %+v", byPath["b.txt"])
+	}
+	if byPath["c.txt"].Kind != "delete" {
+		t.Fatalf("unexpected c.txt entry: %+v", byPath["c.txt"])
 	}
 }
 

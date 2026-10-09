@@ -374,6 +374,24 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 
 	// Pi's fork cursor is a user entry. Query it after the turn settles and
 	// retain the latest one on the assistant message as Nexbox's checkpoint.
+	// Report live context-window occupancy (post-compaction-aware, unlike the
+	// per-turn token sums accumulated in Metadata) so the UI's usage indicator
+	// matches what Pi itself uses to decide when to compact.
+	var stats piSessionStats
+	statsCtx, cancelStats := context.WithTimeout(ctx, 1*time.Second)
+	statsErr := client.command(statsCtx, "get_session_stats", nil, &stats)
+	cancelStats()
+	if statsErr == nil && stats.ContextUsage != nil && stats.ContextUsage.Tokens != nil {
+		usageMeta := map[string]interface{}{"usedTokens": *stats.ContextUsage.Tokens}
+		if stats.ContextUsage.ContextWindow > 0 {
+			usageMeta["contextWindow"] = stats.ContextUsage.ContextWindow
+		}
+		if model != "" {
+			usageMeta["model"] = model
+		}
+		cb(StreamEvent{Type: EventContextUsage, Metadata: usageMeta})
+	}
+
 	var forkMessages struct {
 		Messages []struct {
 			EntryID string `json:"entryId"`
@@ -446,6 +464,17 @@ type piRPCRecord struct {
 	Error                 string          `json:"error,omitempty"`
 }
 
+// piSessionStats mirrors the `get_session_stats` RPC response (see
+// docs/rpc-commands.md). contextUsage.tokens is the live context-window
+// estimate Pi itself uses for compaction/footer display — distinct from the
+// cumulative per-turn token sums tracked in piUsage/piAccumulateUsage below.
+type piSessionStats struct {
+	ContextUsage *struct {
+		Tokens        *int `json:"tokens"`
+		ContextWindow int  `json:"contextWindow"`
+	} `json:"contextUsage"`
+}
+
 type piUsage struct {
 	Input       int `json:"input"`
 	Output      int `json:"output"`
@@ -477,7 +506,14 @@ func (a *PiAgent) handleEvent(event piRPCRecord, cb EventCallback, result *Resul
 	case "tool_execution_start":
 		cb(StreamEvent{Type: EventToolStart, ToolID: event.ToolCallID, ToolName: event.ToolName, Input: string(event.Args)})
 	case "tool_execution_end":
-		cb(StreamEvent{Type: EventToolResult, ToolID: event.ToolCallID, ToolName: event.ToolName, Output: piToolText(event.Result), IsError: event.IsError})
+		cb(StreamEvent{
+			Type:     EventToolResult,
+			ToolID:   event.ToolCallID,
+			ToolName: event.ToolName,
+			Output:   piToolText(event.Result),
+			Diff:     piToolDiff(event.ToolName, event.Args, event.Result),
+			IsError:  event.IsError,
+		})
 	case "compaction_start":
 		cb(StreamEvent{Type: EventSystem, Content: "Pi is compacting conversation context"})
 	case "compaction_end":
@@ -516,6 +552,35 @@ func (a *PiAgent) publishUsage(usage piUsage, cb EventCallback, result *Result, 
 	metadata := result.Metadata
 	resultMu.Unlock()
 	cb(StreamEvent{Type: EventContextUsage, Metadata: metadata})
+}
+
+// piToolDiff extracts a unified diff from a completed edit/multiedit tool
+// call. Pi's edit tool already computes `details.patch` as a standard
+// unified diff (git-style ---/+++/@@ headers) internally, before any
+// possibility of a disk-state race with BeeHub's own process, so it is
+// passed straight through. Pi's `write` tool does not currently return a
+// diff (it has no before/after comparison of its own), so writes fall back
+// to the plain "Successfully wrote to ..." text until pi adds one upstream;
+// re-deriving it here by re-reading the file would race the write itself.
+func piToolDiff(toolName string, args, raw json.RawMessage) string {
+	switch strings.ToLower(toolName) {
+	case "edit", "multiedit", "strreplace":
+	default:
+		return ""
+	}
+	var result struct {
+		Details struct {
+			Diff  string `json:"diff"`
+			Patch string `json:"patch"`
+		} `json:"details"`
+	}
+	if json.Unmarshal(raw, &result) != nil {
+		return ""
+	}
+	// `details.diff` is a display-oriented (line-numbered, no +/- markers on
+	// unchanged lines) format, not git-unified, so it isn't a usable fallback
+	// here; `patch` is always computed alongside it by pi's edit tool.
+	return strings.TrimSpace(result.Details.Patch)
 }
 
 func piToolText(raw json.RawMessage) string {
@@ -632,6 +697,15 @@ func (c *piRPCClient) command(ctx context.Context, kind string, fields map[strin
 	c.pendingMu.Lock()
 	c.pending[id] = ch
 	c.pendingMu.Unlock()
+	// A timed-out/cancelled/connection-lost call below leaves this id's entry
+	// in c.pending forever otherwise (readLoop only deletes it on a matching
+	// response, which may never arrive) — a slow leak that gets worse the
+	// more callers start using short-timeout calls like get_session_stats.
+	defer func() {
+		c.pendingMu.Lock()
+		delete(c.pending, id)
+		c.pendingMu.Unlock()
+	}()
 	data, err := json.Marshal(line)
 	if err != nil {
 		return err

@@ -514,6 +514,26 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 					}
 				}
 
+			case agent.EventToolInputReplace:
+				// Replaces a tool_use's Input outright (unlike append-only
+				// tool_input_delta); used when a backend's authoritative payload
+				// (e.g. Codex per-file diffs) arrives after item/started.
+				mu.Lock()
+				for i := range msgParts {
+					if msgParts[i].Type == "tool_use" && msgParts[i].ToolCallID == event.ToolID {
+						msgParts[i].Input = event.Input
+						dirty = true
+						break
+					}
+				}
+				mu.Unlock()
+				s.Hub.Emit(sessionID, ChatEvent{
+					Type:         "tool_input_replace",
+					ToolID:       event.ToolID,
+					Input:        event.Input,
+					ParentToolID: event.ParentToolID,
+				})
+
 			case agent.EventToolResult:
 				mu.Lock()
 				for i := range msgParts {
@@ -525,6 +545,7 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 					Type:       "tool_result",
 					ToolCallID: event.ToolID,
 					Output:     event.Output,
+					Diff:       event.Diff,
 					IsError:    event.IsError,
 				})
 				// Track MCP call stats: mcp__<key>__<tool_name> → package name
@@ -546,6 +567,7 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 					Type:         "tool_result",
 					ToolID:       event.ToolID,
 					Output:       event.Output,
+					Diff:         event.Diff,
 					IsError:      event.IsError,
 					ParentToolID: event.ParentToolID,
 				})

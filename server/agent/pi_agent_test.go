@@ -28,6 +28,9 @@ while IFS= read -r line; do
       printf '%s\n' '{"type":"tool_execution_end","toolCallId":"call-1","toolName":"bash","result":{"content":[{"type":"text","text":"/repo"}]}}'
       printf '%s\n' '{"type":"agent_settled"}'
       ;;
+    *'"type":"get_session_stats"'*)
+      printf '{"id":"%s","type":"response","command":"get_session_stats","success":true,"data":{"contextUsage":{"tokens":42,"contextWindow":1000}}}\n' "$id"
+      ;;
     *'"type":"get_fork_messages"'*)
       printf '{"id":"%s","type":"response","command":"get_fork_messages","success":true,"data":{"messages":[{"entryId":"user-entry-1"}]}}\n' "$id"
       ;;

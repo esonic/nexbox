@@ -196,6 +196,10 @@ type codexThreadItem struct {
 type codexFileChange struct {
 	Path    string          `json:"path"`
 	KindRaw json.RawMessage `json:"kind"`
+	// Diff is a unified diff (or, for Add/Delete, the file's full content) as
+	// reported by codex-rs's native `fileChange` thread item. See
+	// app-server-protocol's FileUpdateChange.diff.
+	Diff string `json:"diff"`
 }
 
 // Kind returns the normalized kind string ("add", "update", "delete").
@@ -290,6 +294,7 @@ func (a *CodexAgent) SendMessage(
 		compatPatchInputs  = make(map[string]string) // codex/event patch id -> buffered input for delayed start
 		compatPatchOutputs = make(map[string]string) // codex/event patch id -> buffered delta/message
 		compatPatchStarted = make(map[string]bool)   // codex/event patch id -> whether tool_start emitted
+		compatPatchDiffs   = make(map[string]string) // codex/event patch id -> raw patch text from patch_apply_begin
 		// webSearchDeferStart tracks webSearch items whose item/started arrived with an empty query
 		// (codex-cli >= 0.124.0 only fills `query` and `action` at item/completed). For these, we
 		// suppress tool_start at started and emit it on completion alongside tool_result.
@@ -790,7 +795,7 @@ func (a *CodexAgent) SendMessage(
 				}
 				toolID := "compat-patch:" + rawID
 
-				toolName, input, path := codexPatchToolStart(payload, params)
+				toolName, input, path, patchText := codexPatchToolStart(payload, params)
 				if input == "" {
 					input = "{}"
 				}
@@ -802,10 +807,15 @@ func (a *CodexAgent) SendMessage(
 				compatPatchInputs[rawID] = input
 				compatPatchOutputs[rawID] = ""
 				compatPatchStarted[rawID] = false
+				compatPatchDiffs[rawID] = patchText
 				stateMu.Unlock()
-				// If path is unknown at begin, defer tool_start until we can infer file name
-				// from outputDelta/end message so UI can show "Edited <file>".
-				if path != "" {
+				// A multi-file patch already has everything it needs (the full
+				// per-file `changes` array) right here at begin — no reason to
+				// wait for a single `path` that will never come. Single-file
+				// patches whose path is still unknown at begin defer tool_start
+				// until we can infer the file name from outputDelta/end, so the
+				// UI can show "Edited <file>" instead of a blank card.
+				if toolName == "FileChange" || path != "" {
 					stateMu.Lock()
 					compatPatchStarted[rawID] = true
 					stateMu.Unlock()
@@ -838,17 +848,33 @@ func (a *CodexAgent) SendMessage(
 				}
 				if _, ok := compatPatchOutputs[rawID]; ok {
 					compatPatchOutputs[rawID] += delta
-					if compatPatchPaths[rawID] == "" {
+					// A multi-file patch's tool_use input already carries the full
+					// per-file `changes` (built by codexPatchToolStart at begin) and
+					// has no single `path` to infer/overwrite it with — doing so
+					// here would silently drop every file's diff data (see the
+					// "FileChange" name check below).
+					isMultiFile := compatPatchNames[rawID] == "FileChange"
+					if !isMultiFile && compatPatchPaths[rawID] == "" {
 						compatPatchPaths[rawID] = extractPatchPathFromResultText(delta)
 					}
-					if !compatPatchStarted[rawID] && compatPatchPaths[rawID] != "" {
-						compatPatchStarted[rawID] = true
-						inputJSON, _ := json.Marshal(map[string]string{"path": compatPatchPaths[rawID]})
-						emitStart = &StreamEvent{
-							Type:     EventToolStart,
-							ToolID:   compatPatchTools[rawID],
-							ToolName: compatPatchNames[rawID],
-							Input:    string(inputJSON),
+					if !compatPatchStarted[rawID] {
+						if isMultiFile {
+							compatPatchStarted[rawID] = true
+							emitStart = &StreamEvent{
+								Type:     EventToolStart,
+								ToolID:   compatPatchTools[rawID],
+								ToolName: compatPatchNames[rawID],
+								Input:    compatPatchInputs[rawID],
+							}
+						} else if compatPatchPaths[rawID] != "" {
+							compatPatchStarted[rawID] = true
+							inputJSON, _ := json.Marshal(map[string]string{"path": compatPatchPaths[rawID]})
+							emitStart = &StreamEvent{
+								Type:     EventToolStart,
+								ToolID:   compatPatchTools[rawID],
+								ToolName: compatPatchNames[rawID],
+								Input:    string(inputJSON),
+							}
 						}
 					}
 				}
@@ -871,12 +897,14 @@ func (a *CodexAgent) SendMessage(
 				toolInput := compatPatchInputs[rawID]
 				bufferedOutput := compatPatchOutputs[rawID]
 				started := compatPatchStarted[rawID]
+				patchText := compatPatchDiffs[rawID]
 				delete(compatPatchTools, rawID)
 				delete(compatPatchNames, rawID)
 				delete(compatPatchPaths, rawID)
 				delete(compatPatchInputs, rawID)
 				delete(compatPatchOutputs, rawID)
 				delete(compatPatchStarted, rawID)
+				delete(compatPatchDiffs, rawID)
 				stateMu.Unlock()
 
 				msg := firstJSONMapStringDeep(payload, "message", "result", "output")
@@ -887,7 +915,11 @@ func (a *CodexAgent) SendMessage(
 					path = extractPatchPathFromResultText(msg)
 				}
 				if !started {
-					if path != "" {
+					// A multi-file patch's toolInput (from codexPatchToolStart at
+					// begin) already has the full `changes` array; a single
+					// inferred `path` here is never applicable to it and must not
+					// replace it (see the same guard in outputDelta above).
+					if toolName != "FileChange" && path != "" {
 						inputJSON, _ := json.Marshal(map[string]string{"path": path})
 						toolInput = string(inputJSON)
 					}
@@ -906,10 +938,23 @@ func (a *CodexAgent) SendMessage(
 				}
 				success := firstJSONMapBoolDeep(payload, "success")
 				isError := !success && hasJSONMapKeyDeep(payload, "success")
+				// A multi-file FileChange call's diffs already live per-file in
+				// the tool_use's own input (changes[].diff, set at begin); the
+				// single tool_result.diff field can only ever hold one file's
+				// worth, so setting it here — to whichever single section `path`
+				// happens to resolve to — would make an expanded card show only
+				// that one file's diff and silently drop the rest. Leave it empty
+				// for FileChange; ToolCallCard/extractFileChanges both already
+				// read the multi-file diffs from the input instead.
+				var diff string
+				if !isError && toolName != "FileChange" {
+					diff = normalizeApplyPatchDiff(path, patchText)
+				}
 				cb(StreamEvent{
 					Type:    EventToolResult,
 					ToolID:  toolID,
 					Output:  msg,
+					Diff:    diff,
 					IsError: isError,
 				})
 			}

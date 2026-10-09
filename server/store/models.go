@@ -287,6 +287,9 @@ type MessagePart struct {
 	ParentToolID string      `json:"parentToolCallId,omitempty"`
 	Input        interface{} `json:"input,omitempty"`
 	Output     string      `json:"output,omitempty"`
+	// Diff is a unified diff (git-style ---/+++/@@ hunks) attached to a
+	// tool_result part for a single-file edit/write-family tool call.
+	Diff       string      `json:"diff,omitempty"`
 	State      string      `json:"state,omitempty"`
 	IsError    bool        `json:"isError,omitempty"`
 	Count      int         `json:"count,omitempty"`

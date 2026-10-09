@@ -54,30 +54,11 @@ func emitCodexItemStarted(item codexThreadItem, cb EventCallback) {
 		})
 
 	case "fileChange":
-		type fileChangeEntry struct {
-			Path string `json:"path"`
-			Kind string `json:"kind"`
-		}
-		changes := make([]fileChangeEntry, 0, len(item.Changes))
-		for _, ch := range item.Changes {
-			kind := ch.Kind()
-			if kind == "add" {
-				kind = "create"
-			}
-			if kind == "" {
-				kind = "update"
-			}
-			changes = append(changes, fileChangeEntry{
-				Path: ch.Path,
-				Kind: kind,
-			})
-		}
-		changesJSON, _ := json.Marshal(map[string]interface{}{"changes": changes})
 		cb(StreamEvent{
 			Type:     EventToolStart,
 			ToolID:   item.ID,
 			ToolName: "FileChange",
-			Input:    string(changesJSON),
+			Input:    codexFileChangeInputJSON(item),
 		})
 
 	default:
@@ -146,6 +127,19 @@ func emitCodexItemCompleted(item codexThreadItem, agentStreamed, reasoningStream
 		})
 
 	case "fileChange":
+		// codex-cli may only fill in per-file `changes[].diff` by the time the
+		// item completes (item/started can fire before the patch is actually
+		// written); re-emit the input so late-arriving diffs aren't lost. This
+		// is a no-op-looking duplicate on servers that already populate
+		// changes at item/started, which is harmless (same content, replaces
+		// in place rather than appending).
+		if len(item.Changes) > 0 {
+			cb(StreamEvent{
+				Type:   EventToolInputReplace,
+				ToolID: item.ID,
+				Input:  codexFileChangeInputJSON(item),
+			})
+		}
 		isError := item.Status == "failed"
 		cb(StreamEvent{
 			Type:    EventToolResult,
@@ -205,6 +199,66 @@ func emitCodexItemCompleted(item codexThreadItem, agentStreamed, reasoningStream
 			})
 		}
 	}
+}
+
+type codexFileChangeEntry struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+	// Diff is a unified diff (git-style ---/+++/@@) for "update", or the
+	// full file content for "create"/"delete" (there is no "before"/
+	// "after" to diff against in those cases).
+	Diff string `json:"diff,omitempty"`
+}
+
+// codexFileChangeInputJSON builds the `{"changes": [...]}` JSON blob used as
+// the FileChange tool_use's input, shared between item/started and
+// item/completed (see the EventToolInputReplace re-emit above).
+func codexFileChangeInputJSON(item codexThreadItem) string {
+	changes := make([]codexFileChangeEntry, 0, len(item.Changes))
+	for _, ch := range item.Changes {
+		kind := ch.Kind()
+		if kind == "add" {
+			kind = "create"
+		}
+		if kind == "" {
+			kind = "update"
+		}
+		// codex-rs reports Update diffs as bare "@@ ... @@" hunks with no file
+		// header (similar::unified_diff() without .header()); wrap them in a
+		// git-style header so the frontend's diff parser can use the exact
+		// same code path as pi/claude/git diffs. Add/Delete instead carry the
+		// full file content with no hunks at all, so it must be turned into an
+		// add-/delete-only diff rather than passed through raw — raw file
+		// content would make DiffPreview misclassify normal lines starting
+		// with '+'/'-' as diff markers.
+		// Only used to test "is there any data at all"; the untrimmed ch.Diff
+		// is what actually goes into the diff below — trimming would silently
+		// eat meaningful leading/trailing blank lines or whitespace-only
+		// content in a create/delete's full file content.
+		hasContent := strings.TrimSpace(ch.Diff) != ""
+		var diff string
+		switch kind {
+		case "update":
+			if !hasContent {
+				// no-op
+			} else if looksLikeUnifiedDiff(ch.Diff) {
+				diff = ch.Diff // Already has headers (older/other codex-rs builds).
+			} else {
+				diff = unifiedDiffFromHunks(ch.Path, []string{ch.Diff})
+			}
+		case "create":
+			diff = unifiedDiffForFullContent(ch.Path, ch.Diff, false)
+		case "delete":
+			diff = unifiedDiffForFullContent(ch.Path, ch.Diff, true)
+		}
+		changes = append(changes, codexFileChangeEntry{
+			Path: ch.Path,
+			Kind: kind,
+			Diff: diff,
+		})
+	}
+	changesJSON, _ := json.Marshal(map[string]interface{}{"changes": changes})
+	return string(changesJSON)
 }
 
 func codexToolDisplayName(item codexThreadItem) string {

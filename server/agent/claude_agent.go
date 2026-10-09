@@ -515,6 +515,20 @@ func (a *ClaudeAgent) SendMessage(
 				if err := json.Unmarshal(msg.Message, &userMsg); err == nil {
 					// Content can be an array of blocks
 					if contents, ok := userMsg.Content.([]interface{}); ok {
+						// msg.ToolUseResult is a single object at the top level of this
+						// JSONL line, not one-per-block. It's only safe to attribute to
+						// a specific tool_result when this message carries exactly one
+						// (parallel tool calls can land multiple tool_result blocks in
+						// the same "user" message, and we have no per-block key to
+						// disambiguate which one toolUseResult belongs to) — otherwise
+						// skip it rather than risk attaching the wrong file's diff to
+						// the wrong tool card.
+						toolResultCount := 0
+						for _, c := range contents {
+							if cm, ok := c.(map[string]interface{}); ok && cm["type"] == "tool_result" {
+								toolResultCount++
+							}
+						}
 						for _, c := range contents {
 							if cm, ok := c.(map[string]interface{}); ok {
 								if cm["type"] == "tool_result" {
@@ -579,10 +593,15 @@ func (a *ClaudeAgent) SendMessage(
 									} else {
 										log.Printf("[claude-agent] Tool result: id=%s, isError=%v, output_len=%d", toolUseID, isError, len(output))
 									}
+									var diff string
+									if toolResultCount == 1 {
+										diff = claudeToolResultDiff(msg.ToolUseResult)
+									}
 									cb(StreamEvent{
 										Type:         EventToolResult,
 										ToolID:       toolUseID,
 										Output:       output,
+										Diff:         diff,
 										IsError:      isError,
 										ParentToolID: msg.ParentToolUseID,
 									})
@@ -1139,4 +1158,50 @@ func toInt(v interface{}) (int, bool) {
 		return int(n), true
 	}
 	return 0, false
+}
+
+// claudeToolUseResultPatch is the shape of Claude Code's `toolUseResult` for
+// the Edit tool: a file path plus ready-made unified-diff hunks (each without
+// its own file header, just "@@ -a,b +c,d @@" followed by " "/"+"/"-" lines).
+type claudeToolUseResultPatch struct {
+	FilePath        string `json:"filePath"`
+	StructuredPatch []struct {
+		OldStart int      `json:"oldStart"`
+		OldLines int      `json:"oldLines"`
+		NewStart int      `json:"newStart"`
+		NewLines int      `json:"newLines"`
+		Lines    []string `json:"lines"`
+	} `json:"structuredPatch"`
+	// Write tool: full file content, no diff of its own to derive from.
+	Content string `json:"content"`
+}
+
+// claudeToolResultDiff extracts a unified diff from Claude Code's
+// `toolUseResult` field on a tool_result message, when present. Only the
+// Edit/MultiEdit family carries `structuredPatch`; Write/other tools have no
+// diff data in this field (Content is the full new file, with no "before" to
+// compare against), so they fall back to no diff rather than a fabricated
+// all-green view.
+func claudeToolResultDiff(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var patch claudeToolUseResultPatch
+	if json.Unmarshal(raw, &patch) != nil || patch.FilePath == "" || len(patch.StructuredPatch) == 0 {
+		return ""
+	}
+	hunks := make([]string, 0, len(patch.StructuredPatch))
+	for _, h := range patch.StructuredPatch {
+		if len(h.Lines) == 0 {
+			continue
+		}
+		var body strings.Builder
+		fmt.Fprintf(&body, "@@ -%d,%d +%d,%d @@\n", h.OldStart, h.OldLines, h.NewStart, h.NewLines)
+		for _, line := range h.Lines {
+			body.WriteString(line)
+			body.WriteString("\n")
+		}
+		hunks = append(hunks, body.String())
+	}
+	return unifiedDiffFromHunks(patch.FilePath, hunks)
 }
