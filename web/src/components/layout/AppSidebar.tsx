@@ -108,6 +108,20 @@ export function AppSidebar() {
     return () => document.removeEventListener("mousedown", handler);
   }, [confirmDeleteSessionId]);
 
+  // Opens the given project's scratch session and makes it active, without
+  // navigating — the shared core of "click a project row" that the delete and
+  // auto-select fallbacks reuse so they land on the same surface a manual
+  // project click would.
+  const selectProjectDefaultSession = useCallback(async (projectId: string) => {
+    const scratch = await projectsApi.scratchSession(projectId);
+    const current = useAppStore.getState().sessions;
+    if (!current.some((s) => s.id === scratch.id)) {
+      setSessions([scratch, ...current]);
+    }
+    setActiveSessionId(scratch.id);
+    return scratch;
+  }, [setSessions, setActiveSessionId]);
+
   // Auto-select a session.
   //
   // On the FIRST run after projectsLoaded (cold app launch — new browser tab,
@@ -121,8 +135,9 @@ export function AppSidebar() {
   //
   // Fallback order in both modes:
   //   1. Default project scratch session
-  //   2. First visible session in the sidebar
-  //   3. Clear the selection
+  //   2. First sidebar project's scratch session (same as clicking its row)
+  //   3. First visible session in the sidebar
+  //   4. Clear the selection
   useEffect(() => {
     if (!projectsLoaded) return;
 
@@ -145,12 +160,7 @@ export function AppSidebar() {
     if (defaultProject) {
       (async () => {
         try {
-          const scratch = await projectsApi.scratchSession(defaultProject.id);
-          const current = useAppStore.getState().sessions;
-          if (!current.some((s) => s.id === scratch.id)) {
-            setSessions([scratch, ...current]);
-          }
-          setActiveSessionId(scratch.id);
+          await selectProjectDefaultSession(defaultProject.id);
         } catch (e) {
           console.error("Failed to open Default project scratch session:", e);
           if (!activeExists && visibleSessions.length > 0) {
@@ -162,13 +172,23 @@ export function AppSidebar() {
     }
 
     if (activeExists) return;
-    if (visibleSessions.length > 0) {
-      console.log('[AppSidebar] No valid active session, selecting first session');
-      setActiveSessionId(visibleSessions[0].id);
-    } else if (activeSessionId && !activeIsScratch) {
-      setActiveSessionId(null);
+    const selectFirstVisible = () => {
+      if (visibleSessions.length > 0) {
+        setActiveSessionId(visibleSessions[0].id);
+      } else if (activeSessionId && !activeIsScratch) {
+        setActiveSessionId(null);
+      }
+    };
+    const firstProjectId = groupedSessions[0]?.projectId;
+    if (firstProjectId) {
+      selectProjectDefaultSession(firstProjectId).catch((e) => {
+        console.error("Failed to select default project session:", e);
+        selectFirstVisible();
+      });
+    } else {
+      selectFirstVisible();
     }
-  }, [groupedSessions, sessions, activeSessionId, setActiveSessionId, projects, projectsLoaded, setSessions]);
+  }, [groupedSessions, sessions, activeSessionId, setActiveSessionId, projects, projectsLoaded, selectProjectDefaultSession]);
 
   // ── Session actions ──
 
@@ -209,18 +229,13 @@ export function AppSidebar() {
   // work just like a regular session in the meantime.
   const handleSelectProject = useCallback(async (projectId: string) => {
     try {
-      const scratch = await projectsApi.scratchSession(projectId);
-      const current = useAppStore.getState().sessions;
-      if (!current.some((s) => s.id === scratch.id)) {
-        setSessions([scratch, ...current]);
-      }
-      setActiveSessionId(scratch.id);
+      await selectProjectDefaultSession(projectId);
       if (location.pathname !== "/") navigate("/");
     } catch (e) {
       console.error("Failed to open project scratch session:", e);
       toast.error("Failed to open project", { description: String(e) });
     }
-  }, [setSessions, setActiveSessionId, location.pathname, navigate]);
+  }, [selectProjectDefaultSession, location.pathname, navigate]);
 
   const handleDeleteSession = async (sessionId: string) => {
     // Check if session has a dirty worktree and warn the user
@@ -238,10 +253,22 @@ export function AppSidebar() {
       }
     }
     try {
+      // If this session is active, switch to its own project's default (scratch)
+      // session *before* removing it, so the auto-select effect doesn't race in
+      // with its own fallback. Only applies when the project is a sidebar row.
+      if (activeSessionId === sessionId && session?.project_id &&
+          groupedSessions.some((g) => g.projectId === session.project_id)) {
+        try {
+          await selectProjectDefaultSession(session.project_id);
+        } catch (e) {
+          console.error("Failed to select default project session:", e);
+        }
+      }
       await sessionsApi.delete(sessionId);
-      const remaining = sessions.filter((s) => s.id !== sessionId);
+      const remaining = useAppStore.getState().sessions.filter((s) => s.id !== sessionId);
       setSessions(remaining);
-      if (activeSessionId === sessionId) {
+      if (useAppStore.getState().activeSessionId === sessionId) {
+        // Either not switched above, or the project fallback didn't apply/failed.
         setActiveSessionId(remaining.length > 0 ? remaining[0].id : null);
       }
     } catch (e) {
