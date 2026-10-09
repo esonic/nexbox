@@ -163,7 +163,7 @@ export const sessionsApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  update: (id: string, data: Partial<{ name: string; project_id: string; agent: string; model: string; effort: string }>) =>
+  update: (id: string, data: Partial<{ name: string; project_id: string; agent: string; model: string; effort: string; chrome_browser_url: string }>) =>
     request<Session>(`/sessions/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),

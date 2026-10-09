@@ -14,7 +14,7 @@ import {
   type QuestionAnswer,
 } from "@/components/chat/QuestionCard";
 import { TodoPanel } from "@/components/chat/TodoPanel";
-import { imageApi, filesApi, promptTemplatesApi, type DiffResponse, type FileEntry, type PromptTemplate } from "@/lib/api";
+import { imageApi, filesApi, promptTemplatesApi, sessionsApi, type DiffResponse, type FileEntry, type PromptTemplate } from "@/lib/api";
 import { createPortal } from "react-dom";
 import { useAppStore } from "@/stores/app";
 import { STATUS_ICONS } from "@/plugins/task/task-icons";
@@ -38,14 +38,14 @@ export const SLASH_COMMANDS = [
   {
     name: "browser",
     label: "Enable Browser Control",
-    description: "Enable Chrome DevTools tools for browser control",
+    description: "Enable browser control, or connect to an existing Chrome",
     prompt: "You now have Chrome DevTools MCP tools available for browser control. " +
       "Use take_snapshot to see the page structure (accessibility tree with UIDs), then interact with elements using their UIDs. " +
       "Typical workflow: navigate_page -> take_snapshot -> click/fill/type_text -> take_screenshot to verify. " +
       "Always call take_snapshot before interacting to get fresh UIDs.",
     features: ["chrome_devtools"],
     needsInput: true,
-    inputHint: "What should the browser do (e.g. URL, action, expected outcome)...",
+    inputHint: "What should the browser do, or connect http://127.0.0.1:9222 [task]...",
   },
 ] as const;
 
@@ -700,7 +700,11 @@ export function ChatInput({
 
   const canInterjectFront = canInterject && richQueue.length > 0;
 
-  const handleSend = () => {
+  const browserConfigPending = useRef(false);
+  const [savingBrowserConfig, setSavingBrowserConfig] = useState(false);
+
+  const handleSend = async () => {
+    if (browserConfigPending.current) return;
     const hasContent = hasComposerContent();
     if (!hasContent) return;
     if (attachedImages.length > 0 && !attachedImages.every(i => i.filename)) return;
@@ -708,12 +712,36 @@ export function ChatInput({
     let message = input;
     let features: string[] | undefined;
 
-    if (activeCommand) {
-      const userInput = input.trim();
+    const inlineBrowser = !activeCommand && /^\/browser(?:\s|$)/.test(input.trim());
+    const command = activeCommand ?? (inlineBrowser ? SLASH_COMMANDS[0] : null);
+    if (command) {
+      let userInput = inlineBrowser ? input.trim().replace(/^\/browser\s*/, "") : input.trim();
+      let browserPrompt: string = command.prompt;
+      if (/^connect(?:\s|$)/.test(userInput)) {
+        const match = /^connect\s+(\S+)(?:\s+([\s\S]*))?$/.exec(userInput);
+        if (!match) {
+          toast.error("Use /browser connect http://127.0.0.1:9222 [task]");
+          return;
+        }
+        const browserURL = match[1];
+        browserConfigPending.current = true;
+        setSavingBrowserConfig(true);
+        try {
+          await sessionsApi.update(sessionId, { chrome_browser_url: browserURL });
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : "Failed to save Chrome address");
+          return;
+        } finally {
+          browserConfigPending.current = false;
+          setSavingBrowserConfig(false);
+        }
+        userInput = match[2]?.trim() ?? "List the existing tabs and wait for my next instruction.";
+        browserPrompt += `\nConnect to my externally managed Chrome at ${browserURL}. Start by listing existing tabs. Chrome's lifecycle is managed by me.`;
+      }
       message = userInput
-        ? `${activeCommand.prompt}\n\nUser request: ${userInput}`
-        : activeCommand.prompt;
-      features = "features" in activeCommand ? ([...activeCommand.features] as string[]) : undefined;
+        ? `${browserPrompt}\n\nUser request: ${userInput}`
+        : browserPrompt;
+      features = [...command.features];
       setActiveCommand(null);
     }
 
@@ -1225,7 +1253,7 @@ export function ChatInput({
               }
             }}
             placeholder={!isConnected ? "Connecting..." : activeCommand && "inputHint" in activeCommand ? activeCommand.inputHint : "/ for commands, @ for files..."}
-            disabled={!isConnected}
+            disabled={!isConnected || savingBrowserConfig}
             className="resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 min-h-0 overflow-y-auto text-[15px]"
             rows={1}
           />
