@@ -703,15 +703,25 @@ export function useChatSession({ session }: UseChatSessionOptions) {
           }
         }
         break;
+      case "tool_input_replace":
+        if (event.tool_id && event.input !== undefined) {
+          const isNested = !!event.parent_tool_id || nestedToolIdsRef.current.has(event.tool_id);
+          if (isNested) {
+            gs().replaceNestedToolInput(sid, event.tool_id, event.input);
+          } else {
+            gs().replaceToolInput(sid, event.tool_id, event.input);
+          }
+        }
+        break;
       case "tool_result":
         if (event.tool_id) {
           const isNested = !!event.parent_tool_id || nestedToolIdsRef.current.has(event.tool_id);
           if (isNested) {
-            gs().addNestedToolResult(sid, event.tool_id, event.output || "", event.is_error);
+            gs().addNestedToolResult(sid, event.tool_id, event.output || "", event.is_error, event.diff);
             textBreakRef.current.add(sid);
             nestedToolIdsRef.current.delete(event.tool_id);
           } else {
-            gs().addToolResult(sid, event.tool_id, event.output || "", event.is_error);
+            gs().addToolResult(sid, event.tool_id, event.output || "", event.is_error, event.diff);
           }
         }
         break;

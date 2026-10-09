@@ -57,7 +57,11 @@ interface AppState {
   appendTextDelta: (sessionId: string, text: string, startNewPart?: boolean) => void;
   addToolStart: (sessionId: string, toolCallId: string, toolName: string, input?: string) => void;
   updateToolInput: (sessionId: string, toolCallId: string, inputDelta: string) => void;
-  addToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
+  // Replaces a tool_use's Input outright (vs. updateToolInput's append-only
+  // delta), for backends whose authoritative payload can arrive/change after
+  // the initial tool_start (e.g. Codex FileChange diffs at item/completed).
+  replaceToolInput: (sessionId: string, toolCallId: string, input: string) => void;
+  addToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean, diff?: string) => void;
   // Mark an Agent/Task tool_use complete once its sub-agent truly finishes (its
   // own tool_result returns immediately at launch, so it can't complete the card).
   completeAgentTool: (sessionId: string, toolCallId: string) => void;
@@ -66,7 +70,10 @@ interface AppState {
   setWorkflowProgress: (sessionId: string, toolCallId: string, snapshot: WorkflowProgressSnapshot) => void;
   addNestedToolStart: (sessionId: string, agentToolCallId: string, toolCallId: string, toolName: string, input: string) => void;
   updateNestedToolInput: (sessionId: string, toolCallId: string, inputDelta: string) => void;
-  addNestedToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
+  // Replace-in-place counterpart to updateNestedToolInput's append-only
+  // delta — see replaceToolInput's doc comment for why this exists.
+  replaceNestedToolInput: (sessionId: string, toolCallId: string, input: string) => void;
+  addNestedToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean, diff?: string) => void;
   addWidgetPart: (sessionId: string, title: string, widgetCode: string, loadingMessages?: string[]) => void;
 
   finishStreaming: (
@@ -249,7 +256,14 @@ export const useAppStore = create<AppState>()(
       ),
     ),
 
-  addToolResult: (sessionId, toolCallId, output, isError) =>
+  replaceToolInput: (sessionId, toolCallId, input) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) =>
+        patchToolUse(parts, toolCallId, (p) => ({ ...p, input })),
+      ),
+    ),
+
+  addToolResult: (sessionId, toolCallId, output, isError, diff) =>
     set((state) =>
       updateLastAssistant(state, sessionId, (parts) => {
         patchToolUse(parts, toolCallId, (p) => {
@@ -264,7 +278,7 @@ export const useAppStore = create<AppState>()(
           if (isAgent && !isError) return p;
           return { ...p, state: isError ? "error" : "complete" };
         });
-        parts.push({ type: "tool_result", toolCallId, output, isError });
+        parts.push({ type: "tool_result", toolCallId, output, isError, diff });
         return parts;
       }),
     ),
@@ -369,7 +383,26 @@ export const useAppStore = create<AppState>()(
       }),
     ),
 
-  addNestedToolResult: (sessionId, toolCallId, output, isError) =>
+  replaceNestedToolInput: (sessionId, toolCallId, input) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) => {
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const p = parts[i];
+          if (p.type === "tool_use" && p.nestedTools) {
+            const nIdx = p.nestedTools.findIndex((n) => n.toolCallId === toolCallId);
+            if (nIdx >= 0) {
+              const updated = [...p.nestedTools];
+              updated[nIdx] = { ...updated[nIdx], input };
+              parts[i] = { ...p, nestedTools: updated };
+              break;
+            }
+          }
+        }
+        return parts;
+      }),
+    ),
+
+  addNestedToolResult: (sessionId, toolCallId, output, isError, diff) =>
     set((state) =>
       updateLastAssistant(state, sessionId, (parts) => {
         for (let i = parts.length - 1; i >= 0; i--) {
@@ -381,7 +414,7 @@ export const useAppStore = create<AppState>()(
               updated[nIdx] = {
                 ...updated[nIdx],
                 state: isError ? "error" as const : "complete" as const,
-                result: { output, isError },
+                result: { output, isError, diff },
               };
               parts[i] = { ...p, nestedTools: updated };
               break;

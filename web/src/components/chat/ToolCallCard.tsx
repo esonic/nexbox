@@ -32,6 +32,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { WorkflowProgressView } from "@/components/chat/WorkflowProgressView";
+import { DiffPreview } from "@/components/chat/DiffPreview";
 import type { ToolUseState, NestedTool, WorkflowProgressSnapshot } from "@/types";
 
 // ── Helpers ──
@@ -446,18 +447,27 @@ const toolRegistry: Record<string, ToolMeta> = {
       if (changes.length === 1) return baseName(changes[0].path);
       return `${changes.length} files`;
     },
+    // Each file's diff lives right here in the tool_use input
+    // (changes[].diff) rather than the single tool_result.diff field —
+    // that field can only ever hold one file's worth, so it's deliberately
+    // left empty for this tool (see codex_agent.go) and every file's diff
+    // is rendered per-entry below instead, the same way a single-file
+    // edit/write tool_result.diff renders via DiffPreview.
     renderInput: (i) => {
-      const changes = (parseJSON(i).changes as Array<{ path: string; kind: string }>) || [];
+      const changes = (parseJSON(i).changes as Array<{ path: string; kind: string; diff?: string }>) || [];
       if (changes.length === 0) return null;
       const kindLabel: Record<string, string> = { create: "+", update: "~", delete: "-" };
       return (
-        <div className="space-y-0.5">
+        <div className="space-y-1.5">
           {changes.map((c, idx) => (
-            <div key={idx} className="flex items-center gap-1.5 text-[11px] font-mono text-muted-foreground bg-muted/30 rounded px-2 py-0.5">
-              <span className={c.kind === "create" ? "text-green-500" : c.kind === "delete" ? "text-red-500" : "text-yellow-500"}>
-                {kindLabel[c.kind] ?? "~"}
-              </span>
-              <span className="break-all">{c.path}</span>
+            <div key={idx} className="space-y-0.5">
+              <div className="flex items-center gap-1.5 text-[11px] font-mono text-muted-foreground bg-muted/30 rounded px-2 py-0.5">
+                <span className={c.kind === "create" ? "text-green-500" : c.kind === "delete" ? "text-red-500" : "text-yellow-500"}>
+                  {kindLabel[c.kind] ?? "~"}
+                </span>
+                <span className="break-all">{c.path}</span>
+              </div>
+              {c.diff && <DiffPreview diff={c.diff} />}
             </div>
           ))}
         </div>
@@ -548,7 +558,7 @@ interface ToolCallCardProps {
   input: string;
   summary?: string;
   state: ToolUseState;
-  result?: { output: string; isError?: boolean };
+  result?: { output: string; isError?: boolean; diff?: string };
   nestedTools?: NestedTool[];
   workflowProgress?: WorkflowProgressSnapshot;
 }
@@ -671,9 +681,12 @@ export const ToolCallCard = memo(function ToolCallCard({
               receipt — no value to show, and because it arrives ~20ms after
               launch (long before the nested calls) it renders out of order,
               below them. Hide it; the card's substance is its nested calls. */}
-          {result && !isAgentTool && (meta.renderOutput
-            ? meta.renderOutput(result.output ?? "", result.isError)
-            : <RawOutput output={result.output ?? ""} isError={result.isError} />
+          {result && !isAgentTool && (
+            result.diff
+              ? <DiffPreview diff={result.diff} />
+              : (meta.renderOutput
+                ? meta.renderOutput(result.output ?? "", result.isError)
+                : <RawOutput output={result.output ?? ""} isError={result.isError} />)
           )}
         </div>
       </CollapsibleContent>

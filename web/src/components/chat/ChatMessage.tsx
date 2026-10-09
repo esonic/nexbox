@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { ToolCallCard, TODO_TOOLS, HIDDEN_TOOLS } from "@/components/chat/ToolCallCard";
 import { ThinkingBlock } from "@/components/chat/ThinkingBlock";
 import { WidgetBlock } from "@/components/chat/WidgetBlock";
+import { DiffPreview, DiffStats } from "@/components/chat/DiffPreview";
 import { IssueRow } from "@/plugins/task/IssueRow";
 import { messagesApi, sessionsApi } from "@/lib/api";
 import { toast } from "sonner";
@@ -260,10 +261,10 @@ function ImageThumbnails({ parts }: { parts: MessagePart[] }) {
 
 function CollapsibleToolSteps({ parts }: { parts: MessagePart[] }) {
   const resultMap = useMemo(() => {
-    const m: Record<string, { output: string; isError?: boolean }> = {};
+    const m: Record<string, { output: string; isError?: boolean; diff?: string }> = {};
     for (const p of parts) {
       if (p.type === "tool_result") {
-        m[p.toolCallId] = { output: p.output ?? "", isError: p.isError };
+        m[p.toolCallId] = { output: p.output ?? "", isError: p.isError, diff: p.diff };
       }
     }
     return m;
@@ -662,53 +663,98 @@ export function extractPlainText(parts: MessagePart[]): string {
 type FileChangeKind = "create" | "update" | "delete";
 interface FileChangeEntry {
   path: string;
+  // The kind of the *last* operation that touched this path this turn.
   kind: FileChangeKind;
+  // Unified diff(s) for this file, in chronological order, when the agent
+  // backend could derive one per operation; each is independently parseable.
+  diffs: string[];
 }
 
-const FILE_WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "StrReplace", "Delete"]);
+// File-write tool names, normalized to lowercase so both PascalCase (codex/
+// claude) and lowercase (crush/pi) names are recognized.
+const FILE_WRITE_TOOLS = new Set(["edit", "write", "multiedit", "strreplace", "delete"]);
 
 function parseJSONSafe(s: string): Record<string, unknown> {
   try { return JSON.parse(s); } catch { return {}; }
 }
 
 function kindFromToolName(name: string): FileChangeKind {
-  if (name === "Write") return "create";
-  if (name === "Delete") return "delete";
+  const n = name.toLowerCase();
+  if (n === "write") return "create";
+  if (n === "delete") return "delete";
   return "update";
 }
 
-function extractFileChanges(parts: MessagePart[]): FileChangeEntry[] {
-  const map = new Map<string, FileChangeKind>();
-  const rank: Record<FileChangeKind, number> = { update: 0, create: 1, delete: 2 };
+type FileTouchingCall = {
+  toolName: string;
+  input: string;
+  toolCallId: string;
+  result?: { output: string; isError?: boolean; diff?: string };
+};
 
+// Flattens top-level tool_use/tool_result pairs *and* nested sub-agent tool
+// calls (which carry their own result inline, see NestedTool) into one
+// chronological list, so the "N files changed" summary reflects every file
+// the turn touched — not just the main agent's own direct calls.
+function flattenFileTouchingCalls(parts: MessagePart[]): FileTouchingCall[] {
+  const resultByToolCallId = new Map<string, { output: string; isError?: boolean; diff?: string }>();
+  for (const part of parts) {
+    if (part.type === "tool_result") {
+      resultByToolCallId.set(part.toolCallId, { output: part.output ?? "", isError: part.isError, diff: part.diff });
+    }
+  }
+
+  const calls: FileTouchingCall[] = [];
   for (const part of parts) {
     if (part.type !== "tool_use") continue;
-    const { toolName, input } = part;
+    calls.push({ toolName: part.toolName, input: part.input, toolCallId: part.toolCallId, result: resultByToolCallId.get(part.toolCallId) });
+    for (const nested of part.nestedTools ?? []) {
+      calls.push({ toolName: nested.toolName, input: nested.input, toolCallId: nested.toolCallId, result: nested.result });
+    }
+  }
+  return calls;
+}
+
+function extractFileChanges(parts: MessagePart[]): FileChangeEntry[] {
+  const kindByPath = new Map<string, FileChangeKind>();
+  const diffsByPath = new Map<string, string[]>();
+
+  const record = (path: string, kind: FileChangeKind, diff: string | undefined) => {
+    kindByPath.set(path, kind);
+    if (diff && diff.trim() !== "") {
+      const arr = diffsByPath.get(path) ?? [];
+      arr.push(diff);
+      diffsByPath.set(path, arr);
+    }
+  };
+
+  for (const call of flattenFileTouchingCalls(parts)) {
+    const { toolName, input, result } = call;
+    // A failed edit/write didn't actually change anything — don't count it
+    // (and don't let it clobber an earlier successful op's kind/diff).
+    if (result?.isError) continue;
 
     if (toolName === "FileChange") {
       const parsed = parseJSONSafe(input);
-      const changes = parsed.changes as Array<{ path?: string; kind?: string }> | undefined;
+      const changes = parsed.changes as Array<{ path?: string; kind?: string; diff?: string }> | undefined;
       if (!Array.isArray(changes)) continue;
       for (const c of changes) {
         if (!c?.path) continue;
         const k = (c.kind === "create" || c.kind === "delete") ? c.kind : "update";
-        const prev = map.get(c.path);
-        if (prev == null || rank[k] > rank[prev]) map.set(c.path, k);
+        record(c.path, k, c.diff);
       }
       continue;
     }
 
-    if (FILE_WRITE_TOOLS.has(toolName)) {
+    if (FILE_WRITE_TOOLS.has(toolName.toLowerCase())) {
       const parsed = parseJSONSafe(input);
       const path = (parsed.file_path as string) || (parsed.path as string) || "";
       if (!path) continue;
-      const k = kindFromToolName(toolName);
-      const prev = map.get(path);
-      if (prev == null || rank[k] > rank[prev]) map.set(path, k);
+      record(path, kindFromToolName(toolName), result?.diff);
     }
   }
 
-  return Array.from(map.entries()).map(([path, kind]) => ({ path, kind }));
+  return Array.from(kindByPath.entries()).map(([path, kind]) => ({ path, kind, diffs: diffsByPath.get(path) ?? [] }));
 }
 
 function toRelativePath(absPath: string, projectRoot: string | undefined): string {
@@ -923,7 +969,7 @@ function nestSubagentTools(parts: MessagePart[]): MessagePart[] {
           updated[ni] = {
             ...updated[ni],
             state: (part.isError ? "error" : "complete") as ToolUseState,
-            result: { output: part.output, isError: part.isError },
+            result: { output: part.output, isError: part.isError, diff: part.diff },
           };
           result[pIdx] = { ...parent, nestedTools: updated };
         }
@@ -979,17 +1025,47 @@ function NextActions({ actions, sessionId }: { actions: string[]; sessionId: str
   );
 }
 
-function FileChangesSummary({ files, projectRoot }: { files: FileChangeEntry[]; projectRoot?: string }) {
-  const [expanded, setExpanded] = useState(true);
-  if (files.length === 0) return null;
-
-  const summary = `${files.length} file${files.length === 1 ? "" : "s"} changed`;
+function FileChangeRow({ file, projectRoot }: { file: FileChangeEntry; projectRoot?: string }) {
+  const [open, setOpen] = useState(false);
   const kindIcon: Record<FileChangeKind, string> = { create: "+", update: "~", delete: "-" };
   const kindClass: Record<FileChangeKind, string> = {
     create: "text-green-500",
     update: "text-yellow-500",
     delete: "text-red-500",
   };
+  const combinedDiff = file.diffs.length > 0 ? file.diffs.join("\n") : undefined;
+  const hasDiff = !!combinedDiff;
+
+  return (
+    <Collapsible open={open && hasDiff} onOpenChange={hasDiff ? setOpen : undefined}>
+      <CollapsibleTrigger disabled={!hasDiff} className={cn("flex items-center gap-2 w-full text-left text-[11px] font-mono", hasDiff && "hover:text-foreground")}>
+        {hasDiff ? (
+          open ? <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" /> : <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+        ) : (
+          <span className="w-3 shrink-0" />
+        )}
+        <span className={cn("w-3 text-center shrink-0", kindClass[file.kind])}>{kindIcon[file.kind]}</span>
+        <span className="break-all text-muted-foreground flex-1 min-w-0" title={file.path}>
+          {toRelativePath(file.path, projectRoot)}
+        </span>
+        {combinedDiff && <DiffStats diff={combinedDiff} />}
+      </CollapsibleTrigger>
+      {hasDiff && (
+        <CollapsibleContent>
+          <div className="mt-1 mb-0.5">
+            <DiffPreview diff={combinedDiff!} />
+          </div>
+        </CollapsibleContent>
+      )}
+    </Collapsible>
+  );
+}
+
+function FileChangesSummary({ files, projectRoot }: { files: FileChangeEntry[]; projectRoot?: string }) {
+  const [expanded, setExpanded] = useState(true);
+  if (files.length === 0) return null;
+
+  const summary = `${files.length} file${files.length === 1 ? "" : "s"} changed`;
 
   return (
     <Collapsible open={expanded} onOpenChange={setExpanded} className="mt-2 rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
@@ -999,14 +1075,9 @@ function FileChangesSummary({ files, projectRoot }: { files: FileChangeEntry[]; 
         <span className="font-medium">{summary}</span>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="px-3 pb-2 space-y-0.5 border-t border-border/30 pt-2">
+        <div className="px-3 pb-2 space-y-1 border-t border-border/30 pt-2">
           {files.map((f, i) => (
-            <div key={i} className="flex items-center gap-2 text-[11px] font-mono">
-              <span className={cn("w-3 text-center shrink-0", kindClass[f.kind])}>{kindIcon[f.kind]}</span>
-              <span className="break-all text-muted-foreground" title={f.path}>
-                {toRelativePath(f.path, projectRoot)}
-              </span>
-            </div>
+            <FileChangeRow key={i} file={f} projectRoot={projectRoot} />
           ))}
         </div>
       </CollapsibleContent>
