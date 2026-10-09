@@ -65,6 +65,15 @@ function resultText(result: any) {
 }
 
 export default async function (pi: ExtensionAPI) {
+	const managedToolNames = new Set<string>();
+	// Resuming/forking a Pi session restores its historical active tool set,
+	// which can exclude MCP tools newly registered for this turn (e.g.
+	// /browser). Reconcile before each prompt, after transcript restoration.
+	// Preserve other extensions' choices; only activate tools we loaded here.
+	pi.on("before_agent_start", () => {
+		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...managedToolNames])]);
+	});
+
 	for (const spec of specs) {
 		try {
 			const connection = await connect(spec);
@@ -83,6 +92,7 @@ export default async function (pi: ExtensionAPI) {
 						return { content: [{ type: "text", text: resultText(result) }], details: {}, isError: (result as any)?.isError === true };
 					},
 				}));
+				managedToolNames.add(`mcp__${spec.key}__${tool.name}`);
 			}
 			} while (cursor);
 		} catch (error) { console.error(`[nexbox-pi] failed to load MCP ${spec.key}:`, error); }

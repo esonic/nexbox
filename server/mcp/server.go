@@ -428,9 +428,8 @@ func (s *Server) registerTools() {
 	enableBrowserControlTool := gomcp.NewTool("enable_browser_control",
 		gomcp.WithDescription(
 			"Enable Chrome browser control for the current session. "+
-				"Call this tool when you need to perform end-to-end browser testing, "+
-				"UI verification, or any task that requires controlling a real browser. "+
-				"After calling this tool, the Chrome DevTools MCP tools will be available in the next message."),
+				"Call this tool only when browser control is needed and mcp__chrome__ tools are absent from your current tool list. "+
+				"Newly enabled tools become available in the next message if they are absent from the current turn."),
 	)
 
 	// --- Cross-session messaging ---
@@ -1070,16 +1069,39 @@ func (s *Server) handleEnableBrowserControl(ctx context.Context, request gomcp.C
 		return errorResult("browser control is not available on this server"), nil
 	}
 
+	alreadyEnabled := false
+	if s.store != nil {
+		sess, err := s.store.GetSession(sessionID)
+		if err != nil {
+			return errorResult(fmt.Sprintf("failed to read browser control state: %v", err)), nil
+		}
+		if sess != nil {
+			for _, feature := range strings.Split(sess.Features, ",") {
+				if strings.TrimSpace(feature) == "chrome_devtools" {
+					alreadyEnabled = true
+					break
+				}
+			}
+		}
+	}
+
 	_, _, err := s.chromeEnabler.EnableChrome(sessionID)
 	if err != nil {
 		return errorResult(fmt.Sprintf("failed to enable browser control: %v", err)), nil
 	}
 
 	log.Printf("[mcp] enable_browser_control: enabled chrome_devtools for session %s", sessionID)
+	if alreadyEnabled {
+		return textResult(
+			"Browser control is already enabled for this session. " +
+				"Use the mcp__chrome__ tools in your current tool list to continue the user's task now. " +
+				"Only if those tools are absent from your current tool list, explain that they will be available in the next message.",
+		), nil
+	}
 	return textResult(
 		"Browser control has been enabled for this session. " +
-			"The Chrome DevTools MCP tools will be available starting from the next message.\n\n" +
-			"Please inform the user and ask them to send a new message to start the browser testing task.",
+			"If mcp__chrome__ tools are already in your current tool list, use them to continue the user's task now. " +
+			"Otherwise, inform the user that the Chrome DevTools MCP tools will be available starting from the next message.",
 	), nil
 }
 

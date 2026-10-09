@@ -324,3 +324,20 @@ func TestPiAgentRPCIntegrationInterject(t *testing.T) {
 		t.Fatal("interjected Pi turn did not settle")
 	}
 }
+
+func TestPiAgentMCPToolsReactivatedBeforePrompt(t *testing.T) {
+	// A resumed Pi transcript restores its previous active loadout after the
+	// extension factory registers tools. Reconcile at the prompt boundary so
+	// newly configured MCPs are available in the same turn, including forks.
+	source := string(piNexboxExtension)
+	for _, want := range []string{
+		`const managedToolNames = new Set<string>();`,
+		`pi.on("before_agent_start", () => {`,
+		`pi.setActiveTools([...new Set([...pi.getActiveTools(), ...managedToolNames])]);`,
+		"managedToolNames.add(`mcp__${spec.key}__${tool.name}`);",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("Pi MCP tools must be reactivated after transcript restoration: missing %q", want)
+		}
+	}
+}
