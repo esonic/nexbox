@@ -184,7 +184,7 @@ func cmdResetPassword(s *store.SQLiteStore, args []string) int {
 // dispatcher for `help` / `-h` / `--help`.
 func printUsage() {
 	out := os.Stderr
-	fmt.Fprintf(out, `nexbox — local-only multi-user agent platform
+	fmt.Fprintf(out, `NexBox — a browser workspace for coding agents
 
 Usage:
   nexbox [flags]                 start the HTTP server
@@ -209,9 +209,9 @@ For subcommands, the data directory comes from NEXBOX_DATA_DIR if set,
 otherwise the binary's own directory. (--data-dir is a server-only flag.)
 
 Examples:
-  nexbox add-user alice s3cret
+  nexbox add-user local "$NEXBOX_PASSWORD"
   nexbox list-users
-  NEXBOX_DATA_DIR=/var/lib/nexbox nexbox add-user bob hunter2
+  NEXBOX_DATA_DIR=/var/lib/nexbox nexbox list-users
   nexbox --port 9040 --listen 0.0.0.0
 
 `)

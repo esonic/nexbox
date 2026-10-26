@@ -32,6 +32,8 @@ server/webdist/*
 Thumbs.db
 
 # Data
+/data/
+/dist/
 *.db
 *.db-journal
 *.db-shm

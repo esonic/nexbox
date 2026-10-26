@@ -26,7 +26,7 @@ import (
 	"github.com/rs/cors"
 )
 
-// Version is injected at build time via -ldflags "-X main.Version=<timestamp>".
+// Version is injected at build time via -ldflags "-X main.Version=<version>".
 // Stays "dev" for local development builds.
 var Version = "dev"
 
@@ -96,25 +96,12 @@ func main() {
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	listen := flag.String("listen", "127.0.0.1", "Listen address")
 	port := flag.Int("port", 9040, "Server port")
-	dataDir := flag.String("data-dir", "", "Data directory (default: binary's directory)")
+	dataDir := flag.String("data-dir", defaultDataDir(), "Data directory (NEXBOX_DATA_DIR or binary's directory)")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(Version)
 		return
-	}
-
-	// Default data directory
-	if *dataDir == "" {
-		execPath, err := os.Executable()
-		if err == nil {
-			execPath, _ = filepath.EvalSymlinks(execPath)
-		}
-		if err == nil {
-			*dataDir = filepath.Dir(execPath)
-		} else {
-			*dataDir = "."
-		}
 	}
 
 	// Set up rolling file logger.

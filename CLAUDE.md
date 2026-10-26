@@ -1,61 +1,56 @@
 # NexBox
 
-AI 协作平台:用户通过 Web UI 驱动多种编码 Agent(Claude / Codex)在隔离工作区中执行任务,支持多会话、工作流编排、文件编辑、Git diff、终端、MCP 工具与 Marketplace。
+NexBox is a browser workspace for coding agents, running locally or on a user's
+own server. It serves a React frontend from one Go executable and stores data
+in SQLite. It is intended for individuals and trusted users; agent processes
+and terminals run under the service's system account.
 
-## 技术栈
+## Build and run
 
-**前端 (`web/`)**
-- React 19 + TypeScript + Vite 7
-- Tailwind CSS + Radix UI(`shadcn/ui` 风格组件)
-- React Router 7、Zustand(状态)、TanStack Query(数据)
-- Monaco Editor(代码编辑)、xterm.js(终端)、ReactFlow + dagre(工作流可视化)
-- react-markdown + rehype/remark + highlight.js(消息渲染)
-
-**后端 (`server/`)**
-- Go,单二进制,内嵌前端静态资源(`webdist`)
-- HTTP REST API + WebSocket(`/ws`,实时推送 agent 事件)
-- SQLite 持久化(`store/`)
-- 通过 CLI 子进程对接 Claude / Codex agent
-- 内置 MCP server 与 Chrome DevTools MCP 集成
-
-**辅助**
-- `build.sh`:构建脚本
-
-## 核心功能
-
-- 多 Agent 会话:并行运行 Claude / Codex,流式输出消息、思考、工具调用
-- 文件浏览/编辑:Monaco 编辑器、文件 diff 查看与提交
-- 终端:每个会话可附加交互式 shell
-- 工作流(Workflow):DAG 编排多个 agent 步骤
-- 项目 / Marketplace:管理项目与可复用的 MCP、技能、插件
-- 调度器:定时触发会话或工作流
-- Web 分享:将 HTML 产物对外公开访问
-
-## 目录结构
-
-```
-nexbox/
-├── web/                     # 前端 SPA
-│   ├── src/
-│   │   ├── App.tsx          # 路由入口
-│   │   ├── pages/           # 顶层页面(SessionWorkspace、Projects、Workflows、Marketplace、Login...)
-│   │   ├── components/      # chat / files / diff / workflow / layout / ui
-│   │   ├── stores/          # Zustand stores(app、layout、fileBrowser)
-│   │   ├── hooks/           # useChatSession、useIsMobile 等
-│   │   └── lib/             # api、ws、工具
-│   └── vite.config.ts       # /api、/ws 代理到 :9040
-│
-├── server/                  # Go 后端
-│   ├── main.go              # 入口、CORS、路由装配
-│   ├── api/                 # HTTP handlers(chat / files / git / workflows / marketplace / scheduler...)
-│   ├── agent/               # Claude / Codex agent 适配与会话
-│   ├── workflow/            # DAG 引擎与执行器
-│   ├── store/               # SQLite 数据层
-│   ├── mcp/                 # 内置 MCP server + Chrome 集成
-│   ├── ws/                  # WebSocket hub
-│   ├── tools/、config/      # 工具与配置
-│   └── webdist/             # 内嵌前端构建产物
-│
-├── build.sh
+```bash
+./build.sh                  # npm ci, frontend build, Go build -> dist/nexbox
+./dist/nexbox --help        # server flags and local account commands
+./dist/nexbox               # localhost:9040
 ```
 
+See README.md for prerequisites and first-account creation. NEXBOX_DATA_DIR must
+be identical for account commands and the server. Its default is the executable's
+directory. Runtime needs neither build tools nor shell wrappers; users can copy
+the executable to another machine with the same operating system and architecture.
+Agent CLIs and their configuration must be available on that machine.
+
+## Development
+
+- Backend: `cd server && go run .`; use NEXBOX_DATA_DIR for an explicit dev data directory.
+- Frontend: `cd web && npm run dev`; proxies /api and /ws to localhost:9040.
+- Set PORT for the Vite proxy when the backend uses another port.
+- Backend tests: `cd server && go test ./...`; full tests need Chrome/Chromium.
+- Frontend checks: `cd web && npm test` and `npm run build`.
+- ESLint has existing violations. Check affected files and avoid introducing new ones.
+
+## Structure
+
+- web/src/components: chat, files, Git, terminal, projects, and shared UI.
+- web/src/hooks and stores: frontend state and interaction coordination.
+- server/api: HTTP/WebSocket handlers and session dispatch.
+- server/agent: Claude Code, Codex, Pi, Kimi Code, ZeroClaw, and Crush adapters.
+- server/store: SQLite schema, migrations, and data access.
+- server/gitrepo: repository discovery and scoped Git operations.
+- server/mcp: built-in MCP and per-session browser tools.
+- server/workflow: workflow execution.
+- docs: maintained usage, deployment, architecture, and development documentation.
+
+## Conventions
+
+Keep CLI protocol differences inside agent adapters. Use declared capabilities
+for fork, interjection, model switching, and browser support. Do not infer these
+from an agent's display name. Preserve the distinction between NexBox session
+IDs and native agent session IDs.
+
+Forks share the parent's current workspace, including uncommitted files. They
+do not restore files to the selected historical turn. Shared worktrees must stay
+on disk while any retained session or active workflow references them.
+
+Keep runtime data and generated assets out of Git. server/webdist/.gitkeep is
+the only tracked embedded-frontend file. Do not reintroduce private deployment
+paths, obsolete hosting plans, or configuration options absent from the runtime.

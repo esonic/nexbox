@@ -1,7 +1,7 @@
 {
   "name": "NexBox",
   "short_name": "NexBox",
-  "description": "AI Platform",
+  "description": "A browser workspace for coding agents",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
