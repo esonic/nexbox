@@ -11,11 +11,12 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import {
   Play, Square, Loader2, CheckCircle2, XCircle, Clock, Timer, ArrowRight,
-  ChevronDown, ChevronRight, User, Pencil,
+  ChevronDown, ChevronRight, User, Pencil, GitBranch,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { nodeTypes } from './WorkflowEditor';
+import { WorkflowEnvInputDialog, collectWorkflowEnvVars, createEmptyWorkflowEnv } from './WorkflowEnvDialog';
 import { workflowApi, Workflow, WorkflowExecution, WorkflowNodeLog, WorkflowSchedule } from '@/lib/workflowApi';
 import { globalWS } from '@/lib/ws';
 
@@ -211,6 +212,57 @@ function ScheduleSection({ workflow, onSaved }: { workflow: Workflow; onSaved: (
   );
 }
 
+// ----- Worktree mode toggle -----
+function WorktreeSection({ workflow, onSaved }: { workflow: Workflow; onSaved: (wf: Workflow) => void }) {
+  const [saving, setSaving] = useState(false);
+  const enabled = workflow.worktree_mode === 'worktree';
+
+  const toggle = async () => {
+    if (saving) return;
+    const next: 'local' | 'worktree' = enabled ? 'local' : 'worktree';
+    setSaving(true);
+    try {
+      const updated = await workflowApi.update(workflow.id, { worktree_mode: next });
+      onSaved(updated);
+      toast.success(next === 'worktree' ? 'Each run will use a new worktree' : 'New worktree disabled');
+    } catch (err: any) {
+      toast.error('Failed to update worktree mode: ' + err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="flex items-center gap-1.5"
+      title={
+        enabled
+          ? 'Each run gets its own git worktree/branch. Multiple runs can execute in parallel.'
+          : 'Runs share the project repo. Only one run at a time.'
+      }
+    >
+      <GitBranch className={`w-3 h-3 shrink-0 ${enabled ? 'text-primary' : 'text-muted-foreground/50'}`} />
+      <span className={`text-[11px] flex-1 truncate ${enabled ? 'text-foreground' : 'text-muted-foreground'}`}>
+        New worktree
+      </span>
+      <button
+        onClick={toggle}
+        disabled={saving}
+        className={`shrink-0 relative inline-flex h-3.5 w-7 items-center rounded-full transition-colors ${
+          enabled ? 'bg-primary/80' : 'bg-muted-foreground/20'
+        } ${saving ? 'opacity-50' : ''}`}
+        title={enabled ? 'Disable new-worktree mode' : 'Enable new-worktree mode'}
+      >
+        <span
+          className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${
+            enabled ? 'translate-x-3.5' : 'translate-x-0.5'
+          }`}
+        />
+      </button>
+    </div>
+  );
+}
+
 // ----- Readonly canvas -----
 function ReadonlyCanvas({ execution, nodeLogs, onNodeClick, selectedNodeId }: {
   execution: WorkflowExecution;
@@ -396,6 +448,9 @@ function WorkflowRunsViewInner({ workflow, onWorkflowChange, onEdit }: WorkflowR
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [executing, setExecuting] = useState(false);
+  const [envDialogOpen, setEnvDialogOpen] = useState(false);
+  const [envPrompts, setEnvPrompts] = useState<string[]>([]);
+  const [envValues, setEnvValues] = useState<Record<string, string>>({});
 
   const loadExecutions = useCallback(async () => {
     try {
@@ -492,14 +547,10 @@ function WorkflowRunsViewInner({ workflow, onWorkflowChange, onEdit }: WorkflowR
     }
   }, []);
 
-  const handleRunNow = async () => {
-    if (executions.some((e) => e.status === 'running')) {
-      toast.error('Workflow is already running');
-      return;
-    }
+  const startExecution = async (env?: Record<string, string>) => {
     setExecuting(true);
     try {
-      const exec = await workflowApi.execute(workflow.id);
+      const exec = await workflowApi.execute(workflow.id, env ? { env } : undefined);
       toast.success('Workflow started');
       setExecutions((prev) => [exec, ...prev]);
       selectExecution(exec);
@@ -510,11 +561,30 @@ function WorkflowRunsViewInner({ workflow, onWorkflowChange, onEdit }: WorkflowR
     }
   };
 
-  const handleStop = async () => {
-    const running = executions.find((e) => e.status === 'running');
-    if (!running) return;
+  const handleRunNow = async () => {
+    // Worktree mode allows multiple concurrent runs; for local mode, block.
+    if (workflow.worktree_mode !== 'worktree' && executions.some((e) => e.status === 'running')) {
+      toast.error('Workflow is already running');
+      return;
+    }
+    const names = collectWorkflowEnvVars(workflow.definition);
+    if (names.length > 0) {
+      setEnvPrompts(names);
+      setEnvValues(createEmptyWorkflowEnv(names));
+      setEnvDialogOpen(true);
+      return;
+    }
+    await startExecution();
+  };
+
+  const handleEnvDialogRun = async () => {
+    setEnvDialogOpen(false);
+    await startExecution(envValues);
+  };
+
+  const handleStopExecution = async (execId: string) => {
     try {
-      await workflowApi.cancelExecution(running.id);
+      await workflowApi.cancelExecution(execId);
       toast.success('Execution stopped');
     } catch (err: any) {
       toast.error('Failed to stop: ' + err.message);
@@ -528,6 +598,15 @@ function WorkflowRunsViewInner({ workflow, onWorkflowChange, onEdit }: WorkflowR
   };
 
   return (
+    <>
+    <WorkflowEnvInputDialog
+      open={envDialogOpen}
+      onOpenChange={setEnvDialogOpen}
+      names={envPrompts}
+      values={envValues}
+      onChange={setEnvValues}
+      onSubmit={handleEnvDialogRun}
+    />
     <div className="flex h-full min-h-0">
       {/* Left panel */}
       <div className="w-[240px] shrink-0 border-r border-border/20 flex flex-col">
@@ -536,26 +615,32 @@ function WorkflowRunsViewInner({ workflow, onWorkflowChange, onEdit }: WorkflowR
           <ScheduleSection workflow={workflow} onSaved={(wf) => onWorkflowChange?.(wf)} />
         </div>
 
-        {/* Run Now / Stop */}
+        {/* Worktree mode */}
         <div className="px-3 py-2 border-b border-border/20">
-          {executions.some((e) => e.status === 'running') ? (
-            <button
-              onClick={handleStop}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium bg-red-600 text-white hover:bg-red-700 transition-colors"
-            >
-              <Square className="w-3.5 h-3.5 fill-current" />
-              Stop
-            </button>
-          ) : (
-            <button
-              onClick={handleRunNow}
-              disabled={executing}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 transition-colors"
-            >
-              {executing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-              {executing ? 'Starting...' : 'Run Now'}
-            </button>
-          )}
+          <WorktreeSection workflow={workflow} onSaved={(wf) => onWorkflowChange?.(wf)} />
+        </div>
+
+        {/* New Run */}
+        <div className="px-3 py-2 border-b border-border/20">
+          {(() => {
+            const isWorktree = workflow.worktree_mode === 'worktree';
+            const anyRunning = executions.some((e) => e.status === 'running');
+            // Worktree mode allows parallel runs, so the button is always
+            // enabled. Local mode disables the button while a run is active —
+            // the per-run Stop button in the history list handles cancellation.
+            const disabled = executing || (!isWorktree && anyRunning);
+            return (
+              <button
+                onClick={handleRunNow}
+                disabled={disabled}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium bg-emerald-600 text-white hover:bg-emerald-700 disabled:bg-muted-foreground/20 disabled:text-muted-foreground/60 disabled:cursor-not-allowed transition-colors"
+                title={!isWorktree && anyRunning ? 'A run is already in progress. Stop it from the history below, or enable "New worktree" to allow parallel runs.' : undefined}
+              >
+                {executing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                {executing ? 'Starting...' : 'New Run'}
+              </button>
+            );
+          })()}
         </div>
 
         {/* Execution history */}
@@ -571,27 +656,39 @@ function WorkflowRunsViewInner({ workflow, onWorkflowChange, onEdit }: WorkflowR
             <div className="px-3 py-4 text-[11px] text-muted-foreground/50 text-center">No runs yet</div>
           ) : (
             <div className="space-y-px">
-              {executions.map((exec) => (
-                <button
-                  key={exec.id}
-                  onClick={() => selectExecution(exec)}
-                  className={`w-full text-left flex items-center gap-2 px-3 py-1.5 transition-colors ${
-                    selectedExec?.id === exec.id
-                      ? 'bg-accent/60'
-                      : 'hover:bg-accent/30'
-                  }`}
-                >
-                  {statusIcon(exec.status, true)}
-                  <div className="flex-1 min-w-0 flex items-center justify-between gap-1">
-                    <span className="text-[11px] text-foreground/80 tabular-nums truncate">
-                      {(() => { const d = new Date(exec.created_at); return `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; })()}
-                    </span>
-                    {exec.duration_ms && (
-                      <span className="shrink-0 text-[10px] text-muted-foreground/60 tabular-nums">{fmtDuration(exec.duration_ms)}</span>
-                    )}
+              {executions.map((exec) => {
+                const isRunning = exec.status === 'running';
+                return (
+                  <div
+                    key={exec.id}
+                    onClick={() => selectExecution(exec)}
+                    className={`group w-full cursor-pointer flex items-center gap-2 px-3 py-1.5 transition-colors ${
+                      selectedExec?.id === exec.id
+                        ? 'bg-accent/60'
+                        : 'hover:bg-accent/30'
+                    }`}
+                  >
+                    {statusIcon(exec.status, true)}
+                    <div className="flex-1 min-w-0 flex items-center justify-between gap-1">
+                      <span className="text-[11px] text-foreground/80 tabular-nums truncate">
+                        {(() => { const d = new Date(exec.created_at); return `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; })()}
+                      </span>
+                      {isRunning ? (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleStopExecution(exec.id); }}
+                          className="shrink-0 flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-600/90 text-white hover:bg-red-700 transition-colors"
+                          title="Stop this run"
+                        >
+                          <Square className="w-2.5 h-2.5 fill-current" />
+                          Stop
+                        </button>
+                      ) : exec.duration_ms ? (
+                        <span className="shrink-0 text-[10px] text-muted-foreground/60 tabular-nums">{fmtDuration(exec.duration_ms)}</span>
+                      ) : null}
+                    </div>
                   </div>
-                </button>
-              ))}
+                );
+              })}
               {hasMore && (
                 <div className="flex justify-center py-2 border-t border-border/20">
                   <button
@@ -686,6 +783,7 @@ function WorkflowRunsViewInner({ workflow, onWorkflowChange, onEdit }: WorkflowR
         )}
       </div>
     </div>
+    </>
   );
 }
 

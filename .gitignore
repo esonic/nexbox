@@ -32,6 +32,8 @@ server/webdist/*
 Thumbs.db
 
 # Data
+/data/
+/dist/
 *.db
 *.db-journal
 *.db-shm
@@ -45,3 +47,4 @@ server/plugins/plugins.json
 server/config.json
 server/chrome/
 temp
+online

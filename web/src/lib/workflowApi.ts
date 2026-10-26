@@ -75,6 +75,11 @@ export interface Workflow {
   created_at: string;
   updated_at: string;
   schedule?: string;    // JSON-encoded WorkflowSchedule, empty = no schedule
+  // worktree_mode controls per-run isolation. "local" (default) runs in the
+  // project's repo. "worktree" creates a fresh git worktree per run; all
+  // sessions in that run share it, and parallel runs of the same workflow
+  // are allowed (each gets its own worktree/branch).
+  worktree_mode?: 'local' | 'worktree';
   is_running?: boolean; // computed by server, not stored in DB
 }
 
@@ -92,6 +97,7 @@ export interface WorkflowExecution {
   duration_ms?: number;
   triggered_by: string;
   created_at: string;
+  worktree_path?: string; // populated when the workflow's worktree_mode is "worktree"
 }
 
 export interface WorkflowNodeLog {
@@ -132,7 +138,7 @@ export const workflowApi = {
     request(`/workflows/${id}`),
 
   // Update a workflow
-  update: (id: string, data: Partial<{ name: string; description: string; definition: WorkflowDefinition; status: string; schedule: string }>): Promise<Workflow> =>
+  update: (id: string, data: Partial<{ name: string; description: string; definition: WorkflowDefinition; status: string; schedule: string; worktree_mode: 'local' | 'worktree' }>): Promise<Workflow> =>
     request(`/workflows/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -143,8 +149,11 @@ export const workflowApi = {
   delete: (id: string): Promise<void> =>
     request(`/workflows/${id}`, { method: 'DELETE' }),
 
-  // Execute a workflow (async — returns immediately with execution record)
-  execute: (id: string, opts?: { task_ids?: string[]; user_context?: string }): Promise<WorkflowExecution> =>
+  // Execute a workflow (async — returns immediately with execution record).
+  // `env` is a map of user-supplied variables referenced as {{env_<name>}} in
+  // node prompts. Reserved name `prev_node_output` is auto-populated and
+  // cannot be shadowed.
+  execute: (id: string, opts?: { env?: Record<string, string> }): Promise<WorkflowExecution> =>
     request(`/workflows/${id}/execute`, {
       method: 'POST',
       body: JSON.stringify(opts || {}),

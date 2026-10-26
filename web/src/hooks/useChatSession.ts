@@ -7,22 +7,50 @@ import { useAppStore } from "@/stores/app";
 import {
   parseAskQuestionInput,
 } from "@/components/chat/QuestionCard";
-import {
-  parseTodoOutput,
-  parseTodoInput,
-} from "@/components/chat/ToolCallCard";
+import { TODO_TOOLS } from "@/components/chat/ToolCallCard";
+import { foldTasks, activeTaskLabel, allTasksDone, type TaskCall } from "@/lib/taskFold";
 import type { AttachedImage } from "@/components/chat/ChatInput";
 import { uuid } from "@/lib/utils";
-import type { Session, Task, ChatEvent, ChatMessage as ChatMessageType } from "@/types";
+import type { Session, Task, ChatEvent, ChatMessage as ChatMessageType, ModelInfo, AgentCapabilities } from "@/types";
 import type { PickedAsset, PickedWorkflow, RichQueuedMessage } from "@/stores/app";
 
 export type { QueuedMessage } from "@/lib/api";
 export type { RichQueuedMessage } from "@/stores/app";
 
+const LAST_MODEL_KEY_PREFIX = "nexbox-last-model:";
+const LAST_EFFORT_KEY_PREFIX = "nexbox-last-effort:";
+
+// Effort is stored per (agent, model) because supported_efforts varies by model
+// (e.g. Claude Opus accepts "xhigh"/"max", Sonnet may not).
+function lastEffortKey(agent: string, model: string) {
+  return `${LAST_EFFORT_KEY_PREFIX}${agent}:${model}`;
+}
+
+function fallbackModelForAgent(agent: string, models: string[]) {
+  if (models.length === 0) return "";
+  // Crush owns a short, user-configured catalog. On the very first use, pick
+  // its last configured entry; after that the common last-used-model setting
+  // below takes precedence just like Codex and Claude.
+  return agent === "crush" ? models[models.length - 1] : models[0];
+}
+
+// Stable empty-array constants so Zustand selectors don't trigger re-renders
+// when a session key is missing (undefined ?? EMPTY gives a stable reference).
+const EMPTY_MESSAGES: ChatMessageType[] = [];
+const EMPTY_TASKS: Task[] = [];
+const EMPTY_ASSETS: PickedAsset[] = [];
+const EMPTY_WORKFLOWS: PickedWorkflow[] = [];
+const EMPTY_COMMENTS: RichQueuedMessage["pickedComments"] = [];
+const EMPTY_RICH_QUEUE: RichQueuedMessage[] = [];
+
 /** Serialize inline comments into a compact text block for the AI. */
 function serializeComments(comments: RichQueuedMessage["pickedComments"]): string {
   return comments
-    .map((c) => `- ${c.filePath}:${c.lineNumber}: ${c.text}`)
+    .map((c) => {
+      const repository = c.repositoryDisplayPath ? `[repo: ${c.repositoryDisplayPath}] ` : "";
+      const workspace = c.workspacePath ? ` (workspace: ${c.workspacePath})` : "";
+      return `- ${repository}${c.filePath}:${c.lineNumber}${workspace}: ${c.text}`;
+    })
     .join("\n");
 }
 
@@ -56,17 +84,71 @@ function sendRichQueuedMessageDirect(sid: string, msg: RichQueuedMessage) {
   gs.addChatMessage(sid, { id: uuid(), session_id: sid, role: "user", parts, metadata: {}, created_at: now });
   gs.addChatMessage(sid, { id: uuid(), session_id: sid, role: "assistant", parts: [], metadata: {}, created_at: now, isStreaming: true });
 
-  globalWS.send(sid, finalMessage, parts, imageFilenames.length > 0 ? imageFilenames : undefined);
+  globalWS.send(sid, finalMessage, parts, imageFilenames.length > 0 ? imageFilenames : undefined, msg.features);
   gs.setStreamingSession(sid, true);
 }
 
-function buildSessionTitle(message: string): string {
-  const cleaned = message.replace(/\s+/g, " ").trim();
-  if (!cleaned) return "New Session";
-  return (cleaned.split(/[.!?。！？\n]/)[0]?.trim() || cleaned).slice(0, 48) || "New Session";
+/**
+ * Inject a rich queued message into the CURRENTLY streaming turn (interjection /
+ * "send now"). Unlike sendRichQueuedMessageDirect this does NOT create a new
+ * streaming assistant message or flip the streaming flag — the turn is already
+ * live and the response folds into the existing assistant message. The user
+ * bubble is added optimistically; the backend persists it for reloads.
+ */
+function sendRichInterjectDirect(sid: string, msg: RichQueuedMessage) {
+  const gs = useAppStore.getState();
+
+  const parts: ChatMessageType["parts"] = [];
+  if (msg.images) {
+    for (const img of msg.images) {
+      parts.push({ type: "image", url: img.url, filename: img.filename });
+    }
+  }
+
+  let finalMessage = msg.text;
+  if (msg.pickedComments.length > 0) {
+    const commentBlock = serializeComments(msg.pickedComments);
+    finalMessage = msg.text
+      ? `${msg.text}\n\n[Code Comments]\n${commentBlock}`
+      : `[Code Comments]\n${commentBlock}`;
+  }
+
+  if (finalMessage) parts.push({ type: "text", content: finalMessage });
+  for (const t of msg.pickedTasks) parts.push({ type: "task_ref", taskId: t.id, task: t });
+  for (const a of msg.pickedAssets) parts.push({ type: "asset_ref", assetId: a.id, title: a.title, assetType: a.assetType });
+  for (const w of msg.pickedWorkflows) parts.push({ type: "workflow_ref", workflowId: w.id, name: w.name });
+
+  const imageFilenames = msg.images?.map((i) => i.filename).filter((f): f is string => !!f) ?? [];
+
+  const userMsg: ChatMessageType = { id: uuid(), session_id: sid, role: "user", parts, metadata: { interjected: true }, created_at: new Date().toISOString() };
+  // Insert the interjection BEFORE the still-streaming assistant message so it
+  // stays the last message — all streaming updates target the last assistant
+  // message (see updateLastAssistant), so the response (which addresses both the
+  // original and interjected messages) keeps flowing into the one bubble. This
+  // also reads naturally: [user] [interjection] [assistant response].
+  const msgs = gs.chatMessages[sid] || [];
+  const last = msgs[msgs.length - 1];
+  if (last && last.role === "assistant" && last.isStreaming) {
+    gs.setChatMessages(sid, [...msgs.slice(0, -1), userMsg, last]);
+  } else {
+    gs.addChatMessage(sid, userMsg);
+  }
+  globalWS.interject(sid, finalMessage, parts, imageFilenames.length > 0 ? imageFilenames : undefined, msg.features);
 }
 
-/** Auto-rename session with a title derived from the first user message (if still default-named). */
+// WF[xxxxx] prefix written by the workflow orchestrator. We preserve it
+// when checking for "default" names so workflow sessions also receive an
+// auto-generated title — the backend re-applies the prefix on save.
+const WF_PREFIX_RE = /^WF\[[A-Fa-f0-9]+\]\s*/;
+
+/**
+ * Kick off backend auto-title generation for the first user message.
+ *
+ * Skips when the user has manually named the session (anything that isn't the
+ * placeholder name or a WF-prefixed orchestrator name). The backend pins
+ * Claude+Haiku and handles the WF prefix server-side; we just push the raw
+ * first message and update local store when the response lands.
+ */
 function autoRenameSession(
   sessionId: string,
   sessionName: string,
@@ -74,23 +156,34 @@ function autoRenameSession(
   pickedTasks: Task[],
   pickedAssets: PickedAsset[],
 ) {
-  const name = (sessionName || "").trim();
-  const isDefault = !name || name === "New Session" || /^Session\s+\d+$/i.test(name);
-  if (!isDefault) return;
-  const title = buildSessionTitle(
-    firstText || pickedTasks[0]?.title || pickedAssets[0]?.title || "New Session",
-  );
-  sessionsApi.update(sessionId, { name: title })
-    .then(() => {
+  const raw = (sessionName || "").trim();
+  const hasWFPrefix = WF_PREFIX_RE.test(raw);
+  const withoutPrefix = raw.replace(WF_PREFIX_RE, "").trim();
+  // WF-prefixed sessions always trigger — backend keeps the prefix and only
+  // replaces the workflow/node label after it. Non-WF sessions trigger only
+  // when still on the placeholder name; never overwrite a user-edited title.
+  const shouldRename = hasWFPrefix || !withoutPrefix || withoutPrefix === "New Session" || /^Session\s+\d+$/i.test(withoutPrefix);
+  if (!shouldRename) return;
+
+  const message = (firstText || pickedTasks[0]?.title || pickedAssets[0]?.title || "").trim();
+  if (!message) return;
+
+  sessionsApi.autoTitle(sessionId, message)
+    .then((updated) => {
       const { sessions, setSessions } = useAppStore.getState();
-      setSessions(sessions.map((s) => (s.id === sessionId ? { ...s, name: title } : s)));
+      setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
     })
-    .catch((err) => console.error("[autoRename] Failed to rename session:", err));
+    .catch((err) => console.error("[autoRename] Failed to generate session title:", err));
 }
 
 interface UseChatSessionOptions {
   session: Session;
 }
+
+// Stable fallback while the capabilities map hasn't loaded (or the agent is
+// unknown) — a module-level constant keeps the object identity stable across
+// renders.
+const NO_CAPABILITIES: AgentCapabilities = { fork: false, interject: false, model_switch_mode: "current_session" };
 
 /**
  * useChatSession — Encapsulates all WebSocket, streaming, and message state
@@ -103,47 +196,52 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   const [hasMore, setHasMore] = useState(false);
   const [serverAgent, setServerAgent] = useState<string>("");
   const [availableAgents, setAvailableAgents] = useState<string[]>([]);
+  const [agentCapabilities, setAgentCapabilities] = useState<Record<string, AgentCapabilities>>({});
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [availableModelInfos, setAvailableModelInfos] = useState<ModelInfo[]>([]);
+  // Which agent the currently held available models belong to. Used to guard
+  // against the race where `agentName` updates instantly but the async fetch
+  // of the new agent's model list hasn't landed yet — in that window we must
+  // not write an old-agent model into the new session.
+  const [modelsAgent, setModelsAgent] = useState<string>("");
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
 
   const agentName = session.agent || serverAgent;
+  const capabilities = agentCapabilities[agentName] || NO_CAPABILITIES;
+  const modelName = session.model || fallbackModelForAgent(agentName, availableModels);
   const sessionId = session.id;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
-  const {
-    chatMessages,
-    setChatMessages,
-    addChatMessage,
-    finishStreaming,
-    streamingSessions,
-    setStreamingSession,
-    pickedTasks: allPickedTasks,
-    addPickedTask: storeAddPickedTask,
-    removePickedTask: storeRemovePickedTask,
-    clearPickedTasks,
-    pickedAssets: allPickedAssets,
-    addPickedAsset: storeAddPickedAsset,
-    removePickedAsset: storeRemovePickedAsset,
-    clearPickedAssets,
-    pickedWorkflows: allPickedWorkflows,
-    addPickedWorkflow: storeAddPickedWorkflow,
-    removePickedWorkflow: storeRemovePickedWorkflow,
-    clearPickedWorkflows,
-    pickedComments: allPickedComments,
-    clearPickedComments,
-    clientQueue: allClientQueue,
-    enqueueRichMessage,
-    dequeueRichMessage,
-    updateRichQueuedText,
-  } = useAppStore();
+  // Use fine-grained selectors to avoid re-renders from unrelated store changes.
+  // IMPORTANT: selectors must return the stored reference directly (not `|| []`)
+  // because `|| []` creates a new array each render, defeating Zustand's Object.is check.
+  const messages = useAppStore((s) => s.chatMessages[sessionId]) ?? EMPTY_MESSAGES;
+  const isStreaming = useAppStore((s) => !!s.streamingSessions[sessionId]);
+  const pickedTasks = useAppStore((s) => s.pickedTasks[sessionId]) ?? EMPTY_TASKS;
+  const pickedAssets = useAppStore((s) => s.pickedAssets[sessionId]) ?? EMPTY_ASSETS;
+  const pickedWorkflows = useAppStore((s) => s.pickedWorkflows[sessionId]) ?? EMPTY_WORKFLOWS;
+  const pickedComments = useAppStore((s) => s.pickedComments[sessionId]) ?? EMPTY_COMMENTS;
+  const richQueue = useAppStore((s) => s.clientQueue[sessionId]) ?? EMPTY_RICH_QUEUE;
 
-  const isStreaming = !!streamingSessions[sessionId];
-  const messages = chatMessages[sessionId] || [];
-  const pickedTasks = allPickedTasks[sessionId] || [];
-  const pickedAssets = allPickedAssets[sessionId] || [];
-  const pickedWorkflows = allPickedWorkflows[sessionId] || [];
-  const pickedComments = allPickedComments[sessionId] || [];
-  const richQueue = allClientQueue[sessionId] || [];
+  // Action selectors (stable references — these never cause re-renders)
+  const setChatMessages = useAppStore((s) => s.setChatMessages);
+  const addChatMessage = useAppStore((s) => s.addChatMessage);
+  const setStreamingSession = useAppStore((s) => s.setStreamingSession);
+  const storeAddPickedTask = useAppStore((s) => s.addPickedTask);
+  const storeRemovePickedTask = useAppStore((s) => s.removePickedTask);
+  const clearPickedTasks = useAppStore((s) => s.clearPickedTasks);
+  const storeAddPickedAsset = useAppStore((s) => s.addPickedAsset);
+  const storeRemovePickedAsset = useAppStore((s) => s.removePickedAsset);
+  const clearPickedAssets = useAppStore((s) => s.clearPickedAssets);
+  const storeAddPickedWorkflow = useAppStore((s) => s.addPickedWorkflow);
+  const storeRemovePickedWorkflow = useAppStore((s) => s.removePickedWorkflow);
+  const clearPickedWorkflows = useAppStore((s) => s.clearPickedWorkflows);
+  const clearPickedComments = useAppStore((s) => s.clearPickedComments);
+  const enqueueRichMessage = useAppStore((s) => s.enqueueRichMessage);
+  const dequeueRichMessage = useAppStore((s) => s.dequeueRichMessage);
+  const updateRichQueuedText = useAppStore((s) => s.updateRichQueuedText);
+
   const sessionHasMessages = messages.length > 0;
 
   // Fetch queue from server
@@ -159,7 +257,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     refreshQueue(sessionId);
   }, [sessionId, refreshQueue]);
 
-  // Detect pending ask_question (MCP structured questions)
+  // Detect pending ask_question
   const pendingQuestion = useMemo(() => {
     if (isStreaming) return null;
     const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
@@ -173,79 +271,208 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     return parseAskQuestionInput(askToolPart.input);
   }, [messages, isStreaming]);
 
-  // Detect pending todos (TodoWrite tool) — only during streaming.
-  // Cleared automatically when streaming ends, so it never gets stuck.
+  // Track pending interactive tool calls (AskUserQuestion from Claude CLI).
+  // These arrive as user_input_request events DURING streaming. State lives in
+  // the store keyed by session ID, so a popup in one session never clobbers
+  // another's, and it survives switching away from and back to a session.
+  const pendingUserInput = useAppStore((s) => s.pendingUserInputs[sessionId]) ?? null;
+  const setPendingUserInput = useAppStore((s) => s.setPendingUserInput);
+
+  // Reconstruct the live task list from the current turn's task tool calls —
+  // only during streaming, so it clears automatically when the turn ends.
+  //
+  // Newer Claude Code emits granular TaskCreate/TaskUpdate/TaskList calls
+  // (instead of a single TodoWrite snapshot), so the list state is spread across
+  // many calls and several assistant messages. We collect every task tool call
+  // since the last user message and fold them back into one list. See taskFold.ts.
   const pendingTodo = useMemo(() => {
     if (!isStreaming) return null;
+    type ToolUsePart = Extract<ChatMessageType["parts"][number], { type: "tool_use" }>;
+    type ToolResultPart = Extract<ChatMessageType["parts"][number], { type: "tool_result" }>;
 
-    const TODO_TOOLS_SET = new Set(["TodoWrite", "UpdateTodos", "ReadTodos", "updateTodosToolCall", "readTodosToolCall", "todoWriteToolCall"]);
-
-    // Walk backwards through messages until we hit a user message
+    // Walk back to the start of the current turn (last user message).
+    let start = messages.length;
     for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
-      if (msg.role === "user") break; // stop at user turn boundary
-
-      if (msg.role !== "assistant") continue;
-
-      const todoCalls = msg.parts.filter(
-        (p) => p.type === "tool_use" && TODO_TOOLS_SET.has((p as any).toolName)
-      );
-      if (todoCalls.length === 0) continue;
-
-      const lastTodoCall = todoCalls[todoCalls.length - 1];
-      if (lastTodoCall.type !== "tool_use") continue;
-
-      // Prefer input over output: parseTodoOutput only works when the server
-      // returns {success:{todos:[...]}}; if it fails we fall back to the input
-      // which is always available and has the full list.
-      const result = msg.parts.find(
-        (p) => p.type === "tool_result" && (p as any).toolCallId === lastTodoCall.toolCallId
-      );
-
-      const outputTodos = result ? parseTodoOutput((result as any).output) : [];
-      const todos = outputTodos.length > 0 ? outputTodos : parseTodoInput(lastTodoCall.input);
-
-      if (todos.length === 0) continue;
-
-      const isPending = msg.isStreaming || lastTodoCall.state === "streaming" || lastTodoCall.state === "running";
-
-      // All tasks done/cancelled — mission complete, close the panel
-      const allDone = todos.every(
-        (t) => t.status === "completed" || t.status === "TODO_STATUS_COMPLETED" ||
-               t.status === "cancelled" || t.status === "TODO_STATUS_CANCELLED"
-      );
-      if (allDone) return null;
-
-      return { todos, isPending };
+      if (messages[i].role === "user") break;
+      start = i;
     }
 
-    return null;
-  }, [messages]);
+    // Map tool_use_id → output text across the whole turn (results may land in a
+    // later assistant message than the originating tool_use).
+    const outputs = new Map<string, string>();
+    for (let i = start; i < messages.length; i++) {
+      for (const p of messages[i].parts) {
+        if (p.type === "tool_result") {
+          outputs.set((p as ToolResultPart).toolCallId, (p as ToolResultPart).output ?? "");
+        }
+      }
+    }
 
-  // Track pending interactive tool calls (AskUserQuestion from Claude CLI).
-  // These arrive as user_input_request events DURING streaming.
-  const [pendingUserInput, setPendingUserInput] = useState<{
-    toolUseId: string;
-    toolName: string;
-    input: string;
-  } | null>(null);
+    // Collect task tool calls in chronological order.
+    const calls: TaskCall[] = [];
+    for (let i = start; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg.role !== "assistant") continue;
+      for (const p of msg.parts) {
+        if (p.type === "tool_use" && TODO_TOOLS.has((p as ToolUsePart).toolName)) {
+          const tu = p as ToolUsePart;
+          calls.push({ toolName: tu.toolName, input: tu.input, output: outputs.get(tu.toolCallId) });
+        }
+      }
+    }
+    if (calls.length === 0) return null;
 
-  // Fetch server default agent and available agents
+    const todos = foldTasks(calls);
+    if (todos.length === 0 || allTasksDone(todos)) return null;
+
+    return { todos, isPending: true, title: activeTaskLabel(todos) };
+  }, [messages, isStreaming]);
+
+  // Fetch server default agent and available agents. Fork/interject gating
+  // depends entirely on the capabilities map (and, for legacy sessions with
+  // an empty agent column, on serverAgent), and this hook mounts once for
+  // the app's lifetime — a swallowed failure would silently disable those
+  // controls everywhere until a full reload. Retry each request
+  // independently with capped backoff until it succeeds.
   useEffect(() => {
-    serverApi.info().then((info) => setServerAgent(info.agent)).catch(() => {});
-    serverApi.availableAgents().then((data) => setAvailableAgents(data.agents || [])).catch(() => {});
+    let cancelled = false;
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const retry = (attempt: number, fn: (attempt: number) => void) => {
+      if (cancelled) return;
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        fn(attempt);
+      }, Math.min(15000, 1000 * 2 ** Math.min(attempt, 4)));
+      timers.add(timer);
+    };
+    const loadInfo = (attempt: number) => {
+      serverApi.info().then((info) => {
+        if (!cancelled) setServerAgent(info.agent);
+      }).catch(() => retry(attempt + 1, loadInfo));
+    };
+    const loadAgents = (attempt: number) => {
+      serverApi.availableAgents().then((data) => {
+        if (cancelled) return;
+        setAvailableAgents(data.agents || []);
+        setAgentCapabilities(data.capabilities || {});
+      }).catch(() => retry(attempt + 1, loadAgents));
+    };
+    loadInfo(0);
+    loadAgents(0);
+    return () => {
+      cancelled = true;
+      timers.forEach(clearTimeout);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!agentName) {
+      setAvailableModels([]);
+      setAvailableModelInfos([]);
+      setModelsAgent("");
+      return;
+    }
+    // Clear immediately so effects that depend on the list don't act on
+    // stale data while the new agent's list is being fetched.
+    setAvailableModels([]);
+    setAvailableModelInfos([]);
+    setModelsAgent("");
+    let cancelled = false;
+    // Catalog-capable backends emit label/description + supported_efforts directly.
+    // No client-side massaging — an empty list also covers backends such as
+    // ZeroClaw whose model is configured outside Nexbox.
+    serverApi.availableModels(agentName).then((data) => {
+      if (cancelled) return;
+      setAvailableModels(data.models || []);
+      setAvailableModelInfos(data.models_info || []);
+      setModelsAgent(agentName);
+    }).catch(() => {
+      if (cancelled) return;
+      setAvailableModels([]);
+      setAvailableModelInfos([]);
+      setModelsAgent(agentName);
+    });
+    return () => { cancelled = true; };
+  }, [agentName]);
+
+  // When a session has no model set, apply the last-used model for this agent.
+  // Guarded on `modelsAgent === agentName` so we never write an old-agent
+  // default into a freshly switched session.
+  useEffect(() => {
+    if (!agentName || modelsAgent !== agentName) return;
+    if (availableModels.length === 0 || session.model) return;
+    let defaultModel = fallbackModelForAgent(agentName, availableModels);
+    try {
+      const stored = localStorage.getItem(LAST_MODEL_KEY_PREFIX + agentName);
+      if (stored && availableModels.includes(stored)) defaultModel = stored;
+    } catch { /* ignore */ }
+    sessionsApi.update(session.id, { model: defaultModel }).then((updated) => {
+      const { sessions, setSessions } = useAppStore.getState();
+      setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
+    }).catch(() => {});
+  }, [agentName, modelsAgent, availableModels, session.model, session.id]);
+
+  // Apply the model's default effort when the session is missing one, or
+  // clear the stored effort if the current model doesn't accept it. Models
+  // that don't support effort at all (empty supported_efforts) drop the
+  // effort back to the empty string. Guarded on `modelsAgent === agentName`
+  // so we don't validate a Claude effort against a Codex model list (or
+  // vice-versa) during an agent switch.
+  useEffect(() => {
+    if (!session.model || availableModelInfos.length === 0) return;
+    if (modelsAgent !== agentName) return;
+    const info = availableModelInfos.find((m) => m.id === session.model);
+    if (!info) return;
+    const efforts = info.supported_efforts || [];
+    let target: string;
+    if (efforts.length === 0) {
+      target = "";
+    } else if (session.effort && efforts.includes(session.effort)) {
+      return; // already valid
+    } else {
+      let stored = "";
+      try { stored = localStorage.getItem(lastEffortKey(agentName, session.model)) || ""; } catch { /* ignore */ }
+      target = (stored && efforts.includes(stored)) ? stored : (info.default_effort || efforts[0] || "");
+    }
+    if (target === (session.effort || "")) return;
+    sessionsApi.update(session.id, { effort: target }).then((updated) => {
+      const { sessions, setSessions } = useAppStore.getState();
+      setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
+    }).catch(() => {});
+  }, [session.id, session.model, session.effort, availableModelInfos, modelsAgent, agentName]);
 
   // Load persisted chat history (initial load with pagination)
   useEffect(() => {
     if (!sessionId) return;
-    if (chatMessages[sessionId]?.length) return;
+    if (useAppStore.getState().chatMessages[sessionId]?.length) return;
 
     let cancelled = false;
+    let reconcileTimer: ReturnType<typeof setTimeout> | undefined;
     setLoadingHistory(true);
 
-    messagesApi.list(sessionId, 20).then(({ messages: persisted, active, has_more }) => {
+    messagesApi.list(sessionId, 20).then(({ messages: persisted, active, has_more, pending_input }) => {
       if (cancelled) return;
+      const liveMessages = useAppStore.getState().chatMessages[sessionId] || [];
+      // A WS delta may create the assistant bubble before this initial history
+      // request resolves. In that one-bubble case, retain the live deltas and
+      // splice the persisted history in front instead of discarding the fetch.
+      const joinedRunningTurn = liveMessages.length === 1 && liveMessages[0].role === "assistant";
+      if (liveMessages.length > 0 && !joinedRunningTurn) {
+        setHasMore(has_more || false);
+        return;
+      }
+
+      // Restore an in-flight interactive request (e.g. AskUserQuestion) that
+      // was pending when the page reloaded. The user_input_request WS event is
+      // never replayed, so without this the question dialog would be lost and
+      // the still-blocked agent turn could not be answered.
+      if (pending_input?.toolUseId) {
+        useAppStore.getState().setPendingUserInput(sessionId, {
+          toolUseId: pending_input.toolUseId,
+          toolName: pending_input.toolName,
+          input: pending_input.input || "",
+        });
+      }
       const mapped: ChatMessageType[] = (persisted || [])
         .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))
         .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
@@ -259,6 +486,25 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       }
       if (totalDuration > 0) {
         useAppStore.getState().setSessionDuration(sessionId, totalDuration);
+      }
+
+      if (joinedRunningTurn) {
+        // Exclude only the persisted assistant row for the active turn; the
+        // live bubble already contains the newest deltas for that response.
+        // The placeholder can still have zero parts and therefore be absent
+        // from `mapped`; removing mapped's last assistant by position would
+        // then incorrectly delete the previous completed reply.
+        const activeAssistantId = [...(persisted || [])]
+          .reverse()
+          .find((m) => m.role === "assistant")?.id;
+        const history = activeAssistantId
+          ? mapped.filter((m) => m.id !== activeAssistantId)
+          : mapped;
+        if (history.length > 0) {
+          setChatMessages(sessionId, [...history, liveMessages[0]]);
+        }
+        setHasMore(has_more || false);
+        return;
       }
 
       if (active) {
@@ -279,6 +525,36 @@ export function useChatSession({ session }: UseChatSessionOptions) {
           });
         }
         setStreamingSession(sessionId, true);
+
+        // Fresh-load recovery for a lost `done`. A brand-new WebSocket may
+        // subscribe *after* the server emitted this turn's `done` (the hub
+        // broadcasts live and never replays). Unlike a disconnect→reconnect,
+        // a fresh page load never runs the recovery in the connection effect
+        // below, so the last assistant message would stay stuck
+        // isStreaming=true forever — which also hides the fork button even
+        // though its fork checkpoint is already persisted. Once the socket has had
+        // time to subscribe, re-check the server's active state; if the turn
+        // already finished, finalize from the DB snapshot (which carries the
+        // persisted metadata) instead of waiting for another manual refresh.
+        reconcileTimer = setTimeout(() => {
+          if (cancelled) return;
+          if (!useAppStore.getState().streamingSessions[sessionId]) return; // a live `done` resolved it
+          messagesApi.list(sessionId, 20).then(({ messages: recovered, active: stillActive, has_more: more }) => {
+            if (cancelled || stillActive) return; // genuinely still running: live events will arrive
+            const gs = useAppStore.getState();
+            if (!gs.streamingSessions[sessionId]) return;
+            const refreshed: ChatMessageType[] = (recovered || [])
+              .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))
+              .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
+            gs.setStreamingSession(sessionId, false);
+            if (refreshed.length > 0) {
+              gs.setChatMessages(sessionId, refreshed);
+              setHasMore(more || false);
+            } else {
+              gs.finishStreaming(sessionId);
+            }
+          }).catch(() => {});
+        }, 1500);
       }
 
       if (mapped.length > 0) {
@@ -291,17 +567,24 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       if (!cancelled) setLoadingHistory(false);
     });
 
-    return () => { cancelled = true; };
+    return () => { cancelled = true; if (reconcileTimer) clearTimeout(reconcileTimer); };
   }, [sessionId]);
 
   // WS connection state + reconnect recovery
   // seenDisconnect tracks whether we actually experienced a disconnection.
   // onConnection() fires immediately on registration even when WS is already connected,
   // and we must not treat that initial fire as a reconnection (it would reset streaming state).
-  // Track the currently-running Agent/Task tool so sub-tool events can be nested inside it
-  const activeAgentToolIdRef = useRef<string | null>(null);
+  // nestedToolIdsRef tracks which tool_use_ids belong to a sub-agent so
+  // their tool_input_delta / tool_result events can be routed to the
+  // nested-tool helpers. Populated at tool_start from parent_tool_id and
+  // drained on tool_result.
   const nestedToolIdsRef = useRef<Set<string>>(new Set());
-
+  // Sessions whose next text_delta must start a fresh text part. Set when a
+  // sub-agent (nested) tool event arrives: nested tools don't add a top-level
+  // part, so without this the main-agent text on either side of the sub-agent's
+  // run would merge into one block (the server keeps every tool_use top-level,
+  // which is why a reload shows the correct split). Drained on the next text_delta.
+  const textBreakRef = useRef<Set<string>>(new Set());
   const seenDisconnectRef = useRef(false);
   useEffect(() => {
     seenDisconnectRef.current = false;
@@ -390,15 +673,26 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         }
         break;
       case "text_delta":
-        if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, event.content); }
+        if (event.content) {
+          ensureStreaming();
+          const startNewPart = textBreakRef.current.delete(sid);
+          gs().appendTextDelta(sid, event.content, startNewPart);
+        }
         break;
       case "tool_start":
         if (event.tool && event.tool_id) {
           ensureStreaming();
-          if (activeAgentToolIdRef.current) {
-            // Nested sub-tool: add inside the agent card instead of as a sibling
+          if (event.parent_tool_id) {
+            // Sub-agent call: nest under the parent Task tool identified
+            // by parent_tool_id. This works correctly even when several
+            // sub-agents run in parallel, because each event carries its
+            // own parent reference rather than relying on a shared
+            // "currently active agent" pointer.
             nestedToolIdsRef.current.add(event.tool_id);
-            gs().addNestedToolStart(sid, activeAgentToolIdRef.current, event.tool_id, event.tool, event.input || "");
+            // Nested tools add no top-level part, so break the text run to keep
+            // main-agent text before/after the sub-agent from merging.
+            textBreakRef.current.add(sid);
+            gs().addNestedToolStart(sid, event.parent_tool_id, event.tool_id, event.tool, event.input || "");
           } else {
             gs().addToolStart(sid, event.tool_id, event.tool, event.input);
           }
@@ -413,16 +707,25 @@ export function useChatSession({ session }: UseChatSessionOptions) {
           }
         }
         break;
+      case "tool_input_replace":
+        if (event.tool_id && event.input !== undefined) {
+          const isNested = !!event.parent_tool_id || nestedToolIdsRef.current.has(event.tool_id);
+          if (isNested) {
+            gs().replaceNestedToolInput(sid, event.tool_id, event.input);
+          } else {
+            gs().replaceToolInput(sid, event.tool_id, event.input);
+          }
+        }
+        break;
       case "tool_result":
         if (event.tool_id) {
-          if (nestedToolIdsRef.current.has(event.tool_id)) {
-            gs().addNestedToolResult(sid, event.tool_id, event.output || "", event.is_error);
+          const isNested = !!event.parent_tool_id || nestedToolIdsRef.current.has(event.tool_id);
+          if (isNested) {
+            gs().addNestedToolResult(sid, event.tool_id, event.output || "", event.is_error, event.diff);
+            textBreakRef.current.add(sid);
+            nestedToolIdsRef.current.delete(event.tool_id);
           } else {
-            gs().addToolResult(sid, event.tool_id, event.output || "", event.is_error);
-            if (event.tool_id === activeAgentToolIdRef.current) {
-              activeAgentToolIdRef.current = null;
-              nestedToolIdsRef.current.clear();
-            }
+            gs().addToolResult(sid, event.tool_id, event.output || "", event.is_error, event.diff);
           }
         }
         break;
@@ -431,7 +734,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         break;
       case "user_input_request":
         if (event.tool_id && event.tool) {
-          setPendingUserInput({
+          gs().setPendingUserInput(sid, {
             toolUseId: event.tool_id,
             toolName: event.tool,
             input: event.input || "",
@@ -444,10 +747,24 @@ export function useChatSession({ session }: UseChatSessionOptions) {
           gs().addWidgetPart(sid, event.widget_title || "", event.widget_code, event.loading_messages);
         }
         break;
+      case "context_usage":
+        if (event.context_usage) {
+          gs().setSessionContextUsage(sid, event.context_usage);
+        }
+        break;
+      case "session_info":
+        // Currently surfaced only as a debug log; could be used to
+        // display the CLI-resolved model slug, cwd, etc. in the UI.
+        break;
       case "done":
-        setPendingUserInput(null);
+        gs().setPendingUserInput(sid, null);
         gs().setStreamingSession(sid, false);
-        gs().finishStreaming(sid, event.stats || undefined);
+        gs().finishStreaming(
+          sid,
+          event.stats || undefined,
+          event.message_id,
+          event.agent_checkpoint,
+        );
         if (event.stats?.duration_ms) {
           gs().addSessionDuration(sid, event.stats.duration_ms);
         }
@@ -463,10 +780,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         }
         break;
       case "error":
-        setPendingUserInput(null);
-        if (event.message?.startsWith("disk_quota_exceeded:")) {
-          toast.error("Disk quota exceeded", { description: event.message.replace("disk_quota_exceeded: ", "") });
-        }
+        gs().setPendingUserInput(sid, null);
         if (event.message) { ensureStreaming(); gs().appendTextDelta(sid, `\n\n**Error:** ${event.message}`); }
         gs().setStreamingSession(sid, false);
         gs().finishStreaming(sid);
@@ -474,27 +788,40 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         break;
       case "subtask_start": {
         ensureStreaming();
-        // Find the last running tool_use — that's the Agent card to nest sub-tools into
-        const msgs = gs().chatMessages[sid] || [];
-        const lastMsg = msgs[msgs.length - 1];
-        if (lastMsg?.role === "assistant") {
-          for (let i = lastMsg.parts.length - 1; i >= 0; i--) {
-            const p = lastMsg.parts[i];
-            if (p.type === "tool_use" && (p.state === "running" || p.state === "streaming")) {
-              activeAgentToolIdRef.current = p.toolCallId;
-              break;
-            }
-          }
-        }
-        if (event.content) gs().setAgentToolSummary(sid, event.content);
+        // Claude task_id identifies the background job, while tool_id is the
+        // Agent/Task tool_use_id that owns the card. Codex currently uses the
+        // same value for both; prefer the explicit tool id for either backend.
+        const agentId = event.tool_id || event.task_id;
+        if (event.content) gs().setAgentToolSummary(sid, event.content, agentId);
         break;
       }
       case "subtask_progress":
-        // Ignore: real tool_start events carry the same info with proper toolName/input
+        // Dynamic Workflow tool: the server pushes the full merged snapshot
+        // (workflow_progress) keyed by the Workflow tool_use_id (tool_id);
+        // attach it to that card. Non-workflow Task sub-agents carry no
+        // snapshot — ignore them, since their nested tool calls already stream
+        // as tool_start events with parent_tool_id.
+        if (event.workflow_progress && event.tool_id) {
+          ensureStreaming();
+          gs().setWorkflowProgress(sid, event.tool_id, event.workflow_progress);
+        }
         break;
       case "subtask_done":
-        activeAgentToolIdRef.current = null;
-        nestedToolIdsRef.current.clear();
+        if (event.workflow_progress && event.tool_id) {
+          // Workflow finished: persist the final snapshot on the card.
+          ensureStreaming();
+          gs().setWorkflowProgress(sid, event.tool_id, event.workflow_progress);
+        } else {
+          // Regular Task sub-agent finished. Its Agent tool_result returned
+          // immediately at launch (kept "running" on purpose), so this is the
+          // signal that truly completes the card and carries the child result;
+          // finishStreaming is the turn-end backstop if this event never arrives.
+          const agentId = event.tool_id || event.task_id;
+          if (agentId) {
+            ensureStreaming();
+            gs().completeAgentTool(sid, agentId, event.content || "", event.is_error);
+          }
+        }
         break;
       case "system":
         if (event.content) { ensureStreaming(); gs().appendTextDelta(sid, `\n\n_[System: ${event.content}]_\n\n`); }
@@ -550,6 +877,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       const richMsg: RichQueuedMessage = {
         id: uuid(),
         text: trimmed,
+        features,
         images: imageData && imageData.length > 0 ? imageData : undefined,
         pickedTasks: [...pickedTasks],
         pickedAssets: [...pickedAssets],
@@ -600,9 +928,17 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     addChatMessage(sessionId, { id: uuid(), session_id: sessionId, role: "user", parts, metadata: {}, created_at: now });
     addChatMessage(sessionId, { id: uuid(), session_id: sessionId, role: "assistant", parts: [], metadata: {}, created_at: now, isStreaming: true });
 
-    globalWS.send(sessionId, finalMessage, parts, imageFilenames.length > 0 ? imageFilenames : undefined, features);
+    // A hidden ("scratch") session gets promoted server-side (is_hidden=0)
+    // when the user's first message is persisted, and the server then
+    // broadcasts a session change that triggers a loadSessions refetch in
+    // AppSidebar — that's what drives the session into the sidebar list.
+    // We deliberately don't flip is_hidden locally here: if the WS send
+    // ever fails silently, the server never promotes, and a subsequent
+    // loadSessions would see a non-hidden local session that's missing
+    // from the server response and drop it from the merge — taking the
+    // user's active session with it.
 
-    for (const t of pickedTasks) tasksApi.incrementRefCount(t.id).catch(() => {});
+    globalWS.send(sessionId, finalMessage, parts, imageFilenames.length > 0 ? imageFilenames : undefined, features);
 
     clearPickedTasks(sessionId);
     clearPickedAssets(sessionId);
@@ -613,18 +949,15 @@ export function useChatSession({ session }: UseChatSessionOptions) {
 
   const handleStop = useCallback(() => {
     globalWS.stop(sessionId);
-    setPendingUserInput(null);
-    // Do NOT immediately finishStreaming here — let the backend's "done" event do it.
-    // The backend suppresses intermediate events after cancel, then sends a final
-    // "done" with token stats. Calling finishStreaming early causes the message to
-    // split into two bubbles (ensureStreaming creates a new one for late events).
+    setPendingUserInput(sessionId, null);
+    // Do NOT immediately finishStreaming here — let backend final events settle state.
     window.dispatchEvent(new Event('workflow-stop'));
-  }, [sessionId]);
+  }, [sessionId, setPendingUserInput]);
 
-  const sendToolResponse = useCallback((toolUseId: string, response: string) => {
-    globalWS.sendToolResponse(sessionId, toolUseId, response);
-    setPendingUserInput(null);
-  }, [sessionId]);
+  const sendToolResponse = useCallback((toolUseId: string, response: string, skip = false) => {
+    globalWS.sendToolResponse(sessionId, toolUseId, response, skip);
+    setPendingUserInput(sessionId, null);
+  }, [sessionId, setPendingUserInput]);
 
   const sendQueuedNow = useCallback(async (queuedId: string) => {
     try {
@@ -651,12 +984,18 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   }, []);
 
   const sendRichQueuedNow = useCallback((msgId: string) => {
-    if (isStreaming) return; // stay in queue while streaming
-    const item = (allClientQueue[sessionId] || []).find((m) => m.id === msgId);
+    const item = (useAppStore.getState().clientQueue[sessionId] || []).find((m: RichQueuedMessage) => m.id === msgId);
     if (!item) return;
+    if (isStreaming) {
+      if (!capabilities.interject) return;
+      dequeueRichMessage(sessionId, msgId);
+      sendRichInterjectDirect(sessionId, item);
+      return;
+    }
+    // Idle: send immediately as a normal message.
     dequeueRichMessage(sessionId, msgId);
     sendRichQueuedMessageDirect(sessionId, item);
-  }, [sessionId, isStreaming, allClientQueue, dequeueRichMessage]);
+  }, [sessionId, isStreaming, capabilities.interject, dequeueRichMessage]);
 
   const removeRichQueued = useCallback((msgId: string) => {
     dequeueRichMessage(sessionId, msgId);
@@ -669,7 +1008,10 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   const handleChangeAgent = useCallback(async (newAgent: string) => {
     if (sessionHasMessages) return;
     try {
-      const updated = await sessionsApi.update(session.id, { agent: newAgent });
+      // Clear both model and effort: each agent has a different effort vocabulary
+      // (e.g. Claude accepts "max", Codex doesn't). The auto-apply effects pick
+      // fresh defaults once the new agent's model list is loaded.
+      const updated = await sessionsApi.update(session.id, { agent: newAgent, model: "", effort: "" });
       const { sessions, setSessions } = useAppStore.getState();
       setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
     } catch (e) {
@@ -679,15 +1021,44 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   }, [session.id, sessionHasMessages]);
 
   const handleChangeModel = useCallback(async (newModel: string) => {
+    if (sessionHasMessages && capabilities.model_switch_mode === "new_session_only") return;
     try {
-      const updated = await sessionsApi.update(session.id, { model: newModel });
+      // When switching models, re-align effort with what the new model accepts.
+      const info = availableModelInfos.find((m) => m.id === newModel);
+      const update: { model: string; effort?: string } = { model: newModel };
+      if (info) {
+        const efforts = info.supported_efforts || [];
+        if (efforts.length === 0) {
+          update.effort = ""; // new model doesn't support effort at all
+        } else if (!session.effort || !efforts.includes(session.effort)) {
+          let stored = "";
+          try { stored = localStorage.getItem(lastEffortKey(agentName, newModel)) || ""; } catch { /* ignore */ }
+          update.effort = (stored && efforts.includes(stored)) ? stored : (info.default_effort || efforts[0] || "");
+        }
+      }
+      const updated = await sessionsApi.update(session.id, update);
+      try { localStorage.setItem(LAST_MODEL_KEY_PREFIX + agentName, newModel); } catch { /* ignore */ }
       const { sessions, setSessions } = useAppStore.getState();
       setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
     } catch (e) {
       console.error("Failed to update session model:", e);
       toast.error("Failed to change model", { description: String(e) });
     }
-  }, [session.id]);
+  }, [session.id, session.effort, agentName, availableModelInfos, sessionHasMessages, capabilities.model_switch_mode]);
+
+  const handleChangeEffort = useCallback(async (newEffort: string) => {
+    try {
+      const updated = await sessionsApi.update(session.id, { effort: newEffort });
+      if (session.model && newEffort) {
+        try { localStorage.setItem(lastEffortKey(agentName, session.model), newEffort); } catch { /* ignore */ }
+      }
+      const { sessions, setSessions } = useAppStore.getState();
+      setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
+    } catch (e) {
+      console.error("Failed to update session effort:", e);
+      toast.error("Failed to change effort", { description: String(e) });
+    }
+  }, [session.id, session.model, agentName]);
 
   const addPickedTask = useCallback((task: Task) => {
     storeAddPickedTask(sessionId, task);
@@ -724,8 +1095,8 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       const { messages: olderMessages, has_more } = await messagesApi.list(sessionId, 20, oldestMessage.id);
       if (olderMessages && olderMessages.length > 0) {
         const mapped: ChatMessageType[] = olderMessages
-          .filter((m) => m.role === "user" || (m.role === "assistant" && m.parts.length > 0))
-          .map((m) => ({ ...m, isStreaming: false }));
+          .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))
+          .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
 
         // Prepend older messages to existing ones
         const currentMessages = useAppStore.getState().chatMessages[sessionId] || [];
@@ -760,13 +1131,10 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       } catch {
         storeAddPickedTask(sessionId, {
           id: detail.id,
-          parent_id: "",
           title: detail.title,
           description: "",
           status: (detail.status as Task["status"]) || "open",
           priority: "medium",
-          ref_count: 0,
-          comment_count: 0,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         });
@@ -788,8 +1156,12 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     pendingUserInput,
     sendToolResponse,
     agentName,
-    modelName: session.model || "",
+    capabilities,
+    modelName,
+    effort: session.effort || "",
     availableAgents,
+    availableModels,
+    availableModelInfos,
     pickedTasks,
     pickedAssets,
     pickedWorkflows,
@@ -801,6 +1173,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     handleStop,
     handleChangeAgent,
     handleChangeModel,
+    handleChangeEffort,
     sendQueuedNow,
     removeQueued,
     editQueued,

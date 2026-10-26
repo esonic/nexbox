@@ -1,5 +1,4 @@
 import type { ChatEvent, MessagePart } from "../types";
-import { getToken } from "@/lib/api";
 
 const WS_BASE = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
 
@@ -28,15 +27,27 @@ class GlobalWebSocket {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = 1000;
   private static readonly MAX_RECONNECT_DELAY = 30000;
+  // Grace period before surfacing a disconnect to the UI. Brief drops on
+  // weak networks reconnect within ~1–2s, so debouncing here prevents the
+  // chat input from flapping between connected/disconnected states.
+  private static readonly DISCONNECT_GRACE_MS = 4000;
 
   private handlers = new Map<string, Set<EventHandler>>(); // sessionId -> handler set
   private globalHandlers = new Set<GlobalEventHandler>(); // non-session events (connect module)
+  private unroutedHandlers = new Set<(sessionId: string) => void>(); // session events nobody is subscribed to
 
   private connectionHandlers = new Set<ConnectionHandler>();
   private _connected = false;
+  // _announcedConnected is the last value handed out to subscribers. We use
+  // it to suppress flapping: while waiting out the disconnect grace window
+  // we keep reporting "connected" so the UI stays interactive.
+  private _announcedConnected = false;
+  private pendingDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   get connected(): boolean {
-    return this._connected;
+    // External callers see the announced (debounced) state, matching what
+    // their connection handler will eventually fire.
+    return this._announcedConnected;
   }
 
   connect(): void {
@@ -47,8 +58,7 @@ class GlobalWebSocket {
       return;
     }
 
-    const token = getToken();
-    const wsUrl = token ? `${WS_BASE}/ws?token=${encodeURIComponent(token)}` : `${WS_BASE}/ws`;
+    const wsUrl = `${WS_BASE}/ws`;
     const ws = new WebSocket(wsUrl);
     this.ws = ws;
 
@@ -56,7 +66,12 @@ class GlobalWebSocket {
       if (import.meta.env.DEV) console.log("[ws] Connected");
       this._connected = true;
       this.reconnectDelay = 1000;
-      this.notifyConnection(true);
+      // Cancel any pending disconnect — we recovered inside the grace window.
+      if (this.pendingDisconnectTimer) {
+        clearTimeout(this.pendingDisconnectTimer);
+        this.pendingDisconnectTimer = null;
+      }
+      this.announceConnection(true);
     };
 
     ws.onmessage = (event) => {
@@ -68,11 +83,15 @@ class GlobalWebSocket {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       if (import.meta.env.DEV) console.log("[ws] Disconnected");
       this._connected = false;
       this.ws = null;
-      this.notifyConnection(false);
+      if (event.code === 1008 && event.reason === "Authentication mode changed") {
+        window.location.reload();
+        return;
+      }
+      this.scheduleDisconnectAnnouncement();
       this.scheduleReconnect();
     };
 
@@ -86,11 +105,16 @@ class GlobalWebSocket {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.pendingDisconnectTimer) {
+      clearTimeout(this.pendingDisconnectTimer);
+      this.pendingDisconnectTimer = null;
+    }
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
     this._connected = false;
+    this.announceConnection(false);
   }
 
   /**
@@ -115,10 +139,38 @@ class GlobalWebSocket {
     };
   }
 
+  /**
+   * Register a callback for session events that had no subscriber. A client
+   * only subscribes to the session it is viewing, so any turn running elsewhere
+   * lands here instead.
+   */
+  subscribeUnrouted(handler: (sessionId: string) => void): () => void {
+    this.unroutedHandlers.add(handler);
+    return () => {
+      this.unroutedHandlers.delete(handler);
+    };
+  }
+
   /** Send a user message for a session, optionally with structured parts, image filenames, and features. */
   send(sessionId: string, message: string, parts?: MessagePart[], images?: string[], features?: string[]): void {
     this.rawSend({
       type: "user_message",
+      session_id: sessionId,
+      content: message,
+      ...(parts && parts.length > 0 ? { parts } : {}),
+      ...(images && images.length > 0 ? { images } : {}),
+      ...(features && features.length > 0 ? { features } : {}),
+    });
+  }
+
+  /**
+   * Inject a queue-jumping message into a session's running turn ("interjection").
+   * Capable agents fold it into the current turn; unsupported/idle sessions
+   * fall back to ordinary queue/send.
+   */
+  interject(sessionId: string, message: string, parts?: MessagePart[], images?: string[], features?: string[]): void {
+    this.rawSend({
+      type: "interject",
       session_id: sessionId,
       content: message,
       ...(parts && parts.length > 0 ? { parts } : {}),
@@ -132,13 +184,18 @@ class GlobalWebSocket {
     this.rawSend({ type: "stop", session_id: sessionId });
   }
 
-  /** Send a tool response for an interactive tool call (e.g., AskUserQuestion). */
-  sendToolResponse(sessionId: string, toolUseId: string, response: string): void {
+  /**
+   * Send a tool response for an interactive tool call (e.g., AskUserQuestion).
+   * Pass skip=true to decline the question: the server fails the tool (same as
+   * the input timeout) instead of treating the text as an answer.
+   */
+  sendToolResponse(sessionId: string, toolUseId: string, response: string, skip = false): void {
     this.rawSend({
       type: "tool_response",
       session_id: sessionId,
       tool_use_id: toolUseId,
       tool_response: response,
+      skip,
     });
   }
 
@@ -155,7 +212,7 @@ class GlobalWebSocket {
 
   onConnection(handler: ConnectionHandler): () => void {
     this.connectionHandlers.add(handler);
-    handler(this._connected);
+    handler(this._announcedConnected);
     return () => {
       this.connectionHandlers.delete(handler);
     };
@@ -173,10 +230,17 @@ class GlobalWebSocket {
     }
 
     const set = this.handlers.get(sid);
-    if (set) {
+    if (set && set.size > 0) {
       for (const handler of set) {
         handler(tagged as ChatEvent);
       }
+      return;
+    }
+
+    // The server broadcasts live and never replays. Notify cache owners when a
+    // session moved on while nobody was listening to it.
+    for (const handler of this.unroutedHandlers) {
+      handler(sid);
     }
   }
 
@@ -193,10 +257,27 @@ class GlobalWebSocket {
     );
   }
 
-  private notifyConnection(connected: boolean): void {
+  private announceConnection(connected: boolean): void {
+    if (this._announcedConnected === connected) return;
+    this._announcedConnected = connected;
     for (const handler of this.connectionHandlers) {
       handler(connected);
     }
+  }
+
+  // scheduleDisconnectAnnouncement debounces transient drops. We only tell
+  // subscribers we're disconnected if the socket fails to come back within
+  // DISCONNECT_GRACE_MS — long enough to swallow the typical 1–2s blip but
+  // short enough that a genuinely dead connection still updates the UI.
+  private scheduleDisconnectAnnouncement(): void {
+    if (!this._announcedConnected) return; // already showing disconnected
+    if (this.pendingDisconnectTimer) return;
+    this.pendingDisconnectTimer = setTimeout(() => {
+      this.pendingDisconnectTimer = null;
+      if (!this._connected) {
+        this.announceConnection(false);
+      }
+    }, GlobalWebSocket.DISCONNECT_GRACE_MS);
   }
 
   private rawSend(data: unknown): void {

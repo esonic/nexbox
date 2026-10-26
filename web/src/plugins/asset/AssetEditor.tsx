@@ -54,6 +54,7 @@ export function AssetEditor({ assetId, onClose, onSaved, initialMode, initialLin
   const [newCommentText, setNewCommentText] = useState("");
   const [generalComment, setGeneralComment] = useState("");
   const [posting, setPosting] = useState(false);
+
   useEffect(() => {
     loadAsset();
     loadVersions();
@@ -326,7 +327,7 @@ export function AssetEditor({ assetId, onClose, onSaved, initialMode, initialLin
           </div>
         ) : (
           <h1
-            className="text-2xl font-bold cursor-pointer hover:text-primary/80 group flex items-center gap-2"
+            className="text-2xl font-bold flex items-center gap-2 cursor-pointer hover:text-primary/80 group"
             onClick={() => { setEditingTitle(true); setEditTitle(asset.title); }}
           >
             {asset.title}
@@ -387,9 +388,9 @@ export function AssetEditor({ assetId, onClose, onSaved, initialMode, initialLin
           />
         ) : mode === "preview" ? (
           <MarkdownRenderer
-            content={content || "*No content yet*"}
-            className="rounded-md border p-3 markdown-content"
-          />
+              content={content || "*No content yet*"}
+              className="rounded-md border p-3 markdown-content"
+            />
         ) : mode === "review" ? (
           <div className="border rounded-md overflow-hidden">
             <div className="font-mono text-sm">
@@ -623,6 +624,7 @@ export function AssetEditor({ assetId, onClose, onSaved, initialMode, initialLin
         </div>
       )}
       </div>
+
     </div>
   );
 }

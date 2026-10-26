@@ -72,3 +72,12 @@ export function highlightCode(content: string, lang: string): string {
     return "";
   }
 }
+
+// Resolve a fenced-code language token (e.g. "ts", "sh", "typescript") to a
+// registry key understood by ensureLangRegistered/highlightCode, or undefined
+// when we don't bundle a grammar for it (caller renders plain text).
+export function resolveLang(token: string): string | undefined {
+  const t = token.toLowerCase();
+  if (t in LANG_IMPORTS) return t;
+  return EXT_TO_LANG[t];
+}

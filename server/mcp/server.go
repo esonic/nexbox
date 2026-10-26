@@ -8,12 +8,42 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/esonic/nexbox/store"
 	gomcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"gitlab.okg.com/sre_ai/boxnex/store"
 )
+
+// TerminalWriter abstracts writing commands to a session's terminal.
+type TerminalWriter interface {
+	// WriteCommand sends a command to the terminal for the given session.
+	WriteCommand(sessionID, command string) error
+	// WaitReady blocks until a terminal for the session is active or the context expires.
+	WaitReady(ctx context.Context, sessionID string) error
+}
+
+// ConfigGetter abstracts reading local config values.
+type ConfigGetter interface {
+	ProjectIDs() []string
+	// GitRepoPath returns the local git repo path for a project (by remote ID).
+	// Returns empty string if not found.
+	GitRepoPath(projectID string) string
+}
+
+// MCP tool categories that can be toggled in Settings. Categories are opt-in.
+const MCPToolCategoryTaskManagement = "task_management"
+
+var mcpToolCategories = map[string]string{
+	"create_task": MCPToolCategoryTaskManagement,
+	"get_task":    MCPToolCategoryTaskManagement,
+	"list_tasks":  MCPToolCategoryTaskManagement,
+	"update_task": MCPToolCategoryTaskManagement,
+}
+
+// CategoryChecker reports whether a configurable tool category is enabled.
+type CategoryChecker func(category string) bool
 
 // ChangeNotifier is called when MCP tools modify data (assets, tasks, etc.)
 // so the main server can broadcast updates to connected browsers.
@@ -26,51 +56,58 @@ type SessionOrchestrator interface {
 	OrchestrateSendMessage(sessionID, message string) error
 	OrchestrateQueueMessage(sessionID, message string) error
 	OrchestrateWaitDone(ctx context.Context, sessionID string) (output string, err error)
+	OrchestrateResolveSession(fromSessionID, ref string) (id, name string, err error)
+	OrchestrateSendAndWait(ctx context.Context, fromSessionID, targetSessionID, message string) (string, error)
+	// OrchestrateCreateSiblingSession creates a new session in the calling
+	// session's project. With empty agentName and model it uses the caller's
+	// agent, model and effort; otherwise the given agent/model are used. An
+	// empty name is derived from firstMessage.
+	OrchestrateCreateSiblingSession(fromSessionID, name, firstMessage, agentName, model string) (id, sessionName string, err error)
 }
 
-// WorkflowExecutor provides the unified Execute entry point for workflow execution.
-type WorkflowExecutor interface {
-	ExecuteWorkflow(workflowID, projectID, userContext, triggeredBy string, taskIDs []string) (executionID string, err error)
+// ChromeEnabler allows the MCP server to enable per-session browser control.
+type ChromeEnabler interface {
+	// EnableChrome adds chrome_devtools to the session's features and starts
+	// the Chrome MCP server for that session. Returns the Chrome MCP URL and
+	// tool names on success.
+	EnableChrome(sessionID string) (mcpURL string, toolNames []string, err error)
 }
 
-// boxnexSessionKey carries the BoxNex session ID through MCP HTTP requests.
-type boxnexSessionKey struct{}
+// nexboxSessionKey is the context key used to carry the nexbox session ID
+// through MCP HTTP requests.
+type nexboxSessionKey struct{}
 
-// boxnexProjectKey carries the project ID bound to the session making the request.
-// Populated by the HTTP middleware when ?session= is present; empty for direct clients.
-type boxnexProjectKey struct{}
-
-// Server wraps the mcp-go MCP server with BoxNex-specific tools
+// Server wraps the mcp-go MCP server with NexBox-specific tools
 type Server struct {
-	mcpServer        *server.MCPServer
-	httpServer       *server.StreamableHTTPServer
-	store            store.Store
-	addr             string
-	actualAddr       string
-	listener         net.Listener
-	httpSrv          *http.Server
-	toolNames        []string
-	alwaysOnToolNames []string
-	changeNotifier   ChangeNotifier
-	orchestrator     SessionOrchestrator
-	workflowExecutor WorkflowExecutor
-	userFeatures     int64 // bitmask controlling which tool groups are registered
+	mcpServer       *server.MCPServer
+	httpServer      *server.StreamableHTTPServer
+	store           store.Store
+	addr            string
+	actualAddr      string
+	listener        net.Listener
+	httpSrv         *http.Server
+	toolNames       []string
+	terminalMgr     TerminalWriter
+	configGetter    ConfigGetter
+	categoryEnabled CategoryChecker
+	changeNotifier  ChangeNotifier
+	orchestrator    SessionOrchestrator
+	chromeEnabler   ChromeEnabler
 }
 
-// NewServer creates a new MCP server with asset management tools.
-// userFeatures controls which tool groups are registered (0 = all).
-func NewServer(s store.Store, addr string, userFeatures int64) *Server {
+// NewServer creates a new MCP server with asset management tools
+func NewServer(s store.Store, addr string) *Server {
 	srv := &Server{
-		store:        s,
-		addr:         addr,
-		userFeatures: userFeatures,
+		store: s,
+		addr:  addr,
 	}
 
 	// Create MCP server
 	srv.mcpServer = server.NewMCPServer(
-		"BoxNex",
+		"Nexbox Asset Manager",
 		"1.0.0",
 		server.WithToolCapabilities(true),
+		server.WithToolFilter(srv.filterTools),
 		server.WithRecovery(),
 	)
 
@@ -102,18 +139,12 @@ func (s *Server) Serve() error {
 		return fmt.Errorf("mcp: call Listen() before Serve()")
 	}
 	mux := http.NewServeMux()
-	// Wrap the MCP handler to inject the boxnex session ID (passed via ?session=
+	// Wrap the MCP handler to inject the nexbox session ID (passed via ?session=
 	// query param by the agent) into the request context so tool handlers can
 	// access it without requiring the AI to pass it explicitly.
 	mux.Handle("/mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if sid := r.URL.Query().Get("session"); sid != "" {
-			ctx := context.WithValue(r.Context(), boxnexSessionKey{}, sid)
-			// Bind the session's project to the context so tool handlers can
-			// enforce per-project isolation without trusting the AI's arguments.
-			if sess, err := s.store.GetSession(sid); err == nil && sess != nil && sess.ProjectID != "" {
-				ctx = context.WithValue(ctx, boxnexProjectKey{}, sess.ProjectID)
-			}
-			r = r.WithContext(ctx)
+			r = r.WithContext(context.WithValue(r.Context(), nexboxSessionKey{}, sid))
 		}
 		s.httpServer.ServeHTTP(w, r)
 	}))
@@ -137,6 +168,46 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// SetTerminalManager sets the terminal manager for the run_in_terminal tool.
+func (s *Server) SetTerminalManager(tm TerminalWriter) {
+	s.terminalMgr = tm
+}
+
+// SetConfigGetter sets the config getter for reading local settings (e.g. GitLab token).
+func (s *Server) SetConfigGetter(cg ConfigGetter) {
+	s.configGetter = cg
+}
+
+// SetCategoryChecker installs the callback that decides whether a configurable
+// tool category is exposed. With no checker, configurable tools are hidden.
+func (s *Server) SetCategoryChecker(fn CategoryChecker) {
+	s.categoryEnabled = fn
+}
+
+// NotifyToolListChanged tells connected MCP clients to refresh their tool list
+// after a category setting changes.
+func (s *Server) NotifyToolListChanged() {
+	s.mcpServer.SendNotificationToAllClients(gomcp.MethodNotificationToolsListChanged, nil)
+}
+
+func (s *Server) toolEnabled(name string) bool {
+	category, configurable := mcpToolCategories[name]
+	if !configurable {
+		return true
+	}
+	return s.categoryEnabled != nil && s.categoryEnabled(category)
+}
+
+func (s *Server) filterTools(_ context.Context, tools []gomcp.Tool) []gomcp.Tool {
+	filtered := make([]gomcp.Tool, 0, len(tools))
+	for _, tool := range tools {
+		if s.toolEnabled(tool.Name) {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
+}
+
 // SetChangeNotifier sets the callback for broadcasting data changes to browsers.
 func (s *Server) SetChangeNotifier(fn ChangeNotifier) {
 	s.changeNotifier = fn
@@ -147,16 +218,16 @@ func (s *Server) SetSessionOrchestrator(orch SessionOrchestrator) {
 	s.orchestrator = orch
 }
 
-// SetWorkflowExecutor sets the workflow executor for the execute_workflow tool.
-func (s *Server) SetWorkflowExecutor(exec WorkflowExecutor) {
-	s.workflowExecutor = exec
-}
-
 // SetStore updates the store used by MCP tool handlers.
 // Called when cloud mode is activated or deactivated so that asset/task/project
 // tools use the correct (remote or local) store without requiring a restart.
 func (s *Server) SetStore(st store.Store) {
 	s.store = st
+}
+
+// SetChromeEnabler sets the chrome enabler for the enable_browser_control tool.
+func (s *Server) SetChromeEnabler(ce ChromeEnabler) {
+	s.chromeEnabler = ce
 }
 
 func (s *Server) notifyChange(entityType, entityID, action string) {
@@ -181,15 +252,11 @@ func (s *Server) URL() string {
 		host = "127.0.0.1" + host
 	} else if strings.HasPrefix(host, "0.0.0.0:") {
 		host = "127.0.0.1" + host[len("0.0.0.0"):]
-	} else if strings.HasPrefix(host, "[::]:") {
-		host = "127.0.0.1" + host[len("[::]"):]
-	} else if strings.HasPrefix(host, "[::1]:") {
-		host = "127.0.0.1" + host[len("[::1]"):]
 	}
 	return fmt.Sprintf("http://%s/mcp", host)
 }
 
-// ToolNames returns the registered tool names with the "mcp__boxnex__" prefix,
+// ToolNames returns the registered tool names with the "mcp__nexbox__" prefix,
 // suitable for passing directly to Claude's allowed_tools list.
 func (s *Server) ToolNames() []string {
 	out := make([]string, len(s.toolNames))
@@ -197,82 +264,104 @@ func (s *Server) ToolNames() []string {
 	return out
 }
 
-// AlwaysOnToolNames returns tool names that must always be included in
-// allowed_tools regardless of user feature flags.
-func (s *Server) AlwaysOnToolNames() []string {
-	out := make([]string, len(s.alwaysOnToolNames))
-	copy(out, s.alwaysOnToolNames)
-	return out
-}
-
 func (s *Server) registerTools() {
-	// save_asset: Create or update an asset in a project
-	saveAssetTool := gomcp.NewTool("save_asset",
+	// save_asset: Create or update an asset in a project (disabled)
+	/*
+		saveAssetTool := gomcp.NewTool("save_asset",
+			gomcp.WithDescription(
+				"Save a document/asset to the Nexbox platform. "+
+					"If an asset with the same title already exists in the project, "+
+					"a new version is created. Otherwise, a new asset is created. "+
+					"Use this tool whenever you produce a document such as a requirement doc, "+
+					"design doc, test case, or any written artifact that should be persisted."),
+			gomcp.WithString("project_id",
+				gomcp.Required(),
+				gomcp.Description("The project ID to save the asset to"),
+			),
+			gomcp.WithString("type",
+				gomcp.Required(),
+				gomcp.Description("Asset type: requirement_doc, design_doc, code_change, unit_test, or test_case"),
+			),
+			gomcp.WithString("title",
+				gomcp.Required(),
+				gomcp.Description("Title of the asset"),
+			),
+			gomcp.WithString("content",
+				gomcp.Required(),
+				gomcp.Description("Full content of the asset (Markdown supported)"),
+			),
+		)
+	*/
+
+	// get_asset_content: Retrieve the latest content of an asset by ID (disabled)
+	/*
+		getAssetContentTool := gomcp.NewTool("get_asset_content",
+			gomcp.WithDescription(
+				"Retrieve the latest content of a specific asset by its ID. "+
+					"Use this when you need to read or reference an existing document."),
+			gomcp.WithString("asset_id",
+				gomcp.Required(),
+				gomcp.Description("The asset ID"),
+			),
+		)
+	*/
+
+	// list_assets: List assets in a project (top 20, most recent first) (disabled)
+	/*
+		listAssetsTool := gomcp.NewTool("list_assets",
+			gomcp.WithDescription(
+				"List assets/documents in a project. "+
+					"Returns top 20 assets sorted by most recently updated. "+
+					"Returns asset metadata (id, type, title, version, status) without content."),
+			gomcp.WithString("project_id",
+				gomcp.Required(),
+				gomcp.Description("The project ID"),
+			),
+		)
+	*/
+
+	// list_asset_comments: List all review comments for an asset (disabled)
+	/*
+		listAssetCommentsTool := gomcp.NewTool("list_asset_comments",
+			gomcp.WithDescription(
+				"List all review comments for a specific asset. "+
+					"Review comments may include line numbers for inline comments or be general comments. "+
+					"Use this tool to see user feedback on a document and address their concerns."),
+			gomcp.WithString("asset_id",
+				gomcp.Required(),
+				gomcp.Description("The asset ID to get comments for"),
+			),
+		)
+	*/
+
+	// ask_question: Present questions to the user and wait for their response
+	askQuestionTool := gomcp.NewTool("ask_question",
 		gomcp.WithDescription(
-			"Save a document/asset to the platform. "+
-				"If an asset with the same title already exists in the project, "+
-				"a new version is created. Otherwise, a new asset is created. "+
-				"Use this tool whenever you produce a document such as a requirement doc, "+
-				"design doc, test case, or any written artifact that should be persisted."),
-		gomcp.WithString("project_id",
-			gomcp.Required(),
-			gomcp.Description("The project ID to save the asset to"),
-		),
-		gomcp.WithString("type",
-			gomcp.Required(),
-			gomcp.Description("Asset type: requirement_doc, design_doc, code_change, unit_test, or test_case"),
-		),
+			"Present one or more multiple-choice questions to the user via an interactive UI. "+
+				"Use this tool when you need clarification or user decisions before proceeding. "+
+				"IMPORTANT: After calling this tool, you MUST stop and wait for the user's response "+
+				"in the next message. Do NOT continue working until you receive the answers."),
 		gomcp.WithString("title",
-			gomcp.Required(),
-			gomcp.Description("Title of the asset"),
+			gomcp.Description("Optional title for the question form"),
 		),
-		gomcp.WithString("content",
+		gomcp.WithString("questions",
 			gomcp.Required(),
-			gomcp.Description("Full content of the asset (Markdown supported)"),
-		),
-	)
-
-	// get_asset_content: Retrieve the latest content of an asset by ID
-	getAssetContentTool := gomcp.NewTool("get_asset_content",
-		gomcp.WithDescription(
-			"Retrieve the latest content of a specific asset by its ID. "+
-				"Use this when you need to read or reference an existing document."),
-		gomcp.WithString("asset_id",
-			gomcp.Required(),
-			gomcp.Description("The asset ID"),
-		),
-	)
-
-	// list_assets: List assets in a project (top 20, most recent first)
-	listAssetsTool := gomcp.NewTool("list_assets",
-		gomcp.WithDescription(
-			"List assets/documents in a project. "+
-				"Returns top 20 assets sorted by most recently updated. "+
-				"Returns asset metadata (id, type, title, version, status) without content."),
-		gomcp.WithString("project_id",
-			gomcp.Required(),
-			gomcp.Description("The project ID"),
-		),
-	)
-
-	// list_asset_comments: List all review comments for an asset
-	listAssetCommentsTool := gomcp.NewTool("list_asset_comments",
-		gomcp.WithDescription(
-			"List all review comments for a specific asset. "+
-				"Review comments may include line numbers for inline comments or be general comments. "+
-				"Use this tool to see user feedback on a document and address their concerns."),
-		gomcp.WithString("asset_id",
-			gomcp.Required(),
-			gomcp.Description("The asset ID to get comments for"),
+			gomcp.Description(
+				"JSON array of question objects. Each question has: "+
+					"id (string, unique identifier), "+
+					"prompt (string, the question text), "+
+					"options (array of {id, label} with at least 2 items), "+
+					"allow_multiple (boolean, optional, default false for single-select). "+
+					"Example: [{\"id\":\"q1\",\"prompt\":\"Which approach?\",\"options\":[{\"id\":\"a\",\"label\":\"Option A\"},{\"id\":\"b\",\"label\":\"Option B\"}]}]"),
 		),
 	)
 
 	// create_task: Create a new task
 	createTaskTool := gomcp.NewTool("create_task",
 		gomcp.WithDescription(
-			"Create a new task (like a Jira ticket). "+
+			"Create a new task (like a Jira ticket) in Nexbox. "+
 				"Use this when the user asks to create a task, track a piece of work. "+
-				"If you know the current project_id (from context), pass it; otherwise omit it."),
+				"If you know the current project_id (from Nexbox context), pass it; otherwise omit it."),
 		gomcp.WithString("project_id",
 			gomcp.Description("Optional project ID to associate the task with"),
 		),
@@ -309,11 +398,11 @@ func (s *Server) registerTools() {
 	// list_tasks: List tasks (top 20, most recent first)
 	listTasksTool := gomcp.NewTool("list_tasks",
 		gomcp.WithDescription(
-			"List tasks. Returns top 20 tasks sorted by most recently updated. "+
+			"List tasks in Nexbox. Returns top 20 tasks sorted by most recently updated. "+
 				"Returns task metadata (id, title, status, priority, assignee). "+
 				"Use this to see existing tasks or find tasks to reference."),
 		gomcp.WithString("status",
-			gomcp.Description("Optional status filter: open, in_progress, done, closed"),
+			gomcp.Description("Optional status filter: open, closed"),
 		),
 		gomcp.WithString("project_id",
 			gomcp.Description("Optional project ID to filter tasks belonging to a specific project"),
@@ -335,7 +424,7 @@ func (s *Server) registerTools() {
 			gomcp.Description("New description for the task (Markdown supported)"),
 		),
 		gomcp.WithString("status",
-			gomcp.Description("New status: open, in_progress, done, or closed"),
+			gomcp.Description("New status: open or closed"),
 		),
 		gomcp.WithString("priority",
 			gomcp.Description("New priority: low, medium, high, or critical"),
@@ -345,17 +434,26 @@ func (s *Server) registerTools() {
 		),
 	)
 
-	// addAlwaysOnTool registers a tool that is always included in allowed_tools,
-	// regardless of user feature flags. Use for tools that every session needs.
-	addAlwaysOnTool := func(tool gomcp.Tool, handler server.ToolHandlerFunc) {
-		name := tool.Name
-		s.mcpServer.AddTool(tool, handler)
-		s.alwaysOnToolNames = append(s.alwaysOnToolNames, "mcp__boxnex__"+name)
-	}
+	// run_in_terminal (disabled)
+	/*
+		runInTerminalTool := gomcp.NewTool("run_in_terminal",
+			gomcp.WithDescription(
+				"Send a command to the integrated terminal for execution. "+
+					"The command is sent asynchronously — like pasting it into the terminal. "+
+					"Output is NOT captured; the user will see the output in their terminal panel."),
+			gomcp.WithString("command",
+				gomcp.Required(),
+				gomcp.Description("The shell command to execute in the terminal"),
+			),
+		)
+	*/
 
 	addTool := func(tool gomcp.Tool, handler server.ToolHandlerFunc) {
 		name := tool.Name
 		wrapped := func(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+			if !s.toolEnabled(name) {
+				return errorResult(fmt.Sprintf("%s MCP tools are disabled in Settings", mcpToolCategories[name])), nil
+			}
 			args := req.GetArguments()
 			if len(args) > 0 {
 				sanitized := make(map[string]interface{}, len(args))
@@ -375,48 +473,49 @@ func (s *Server) registerTools() {
 			return handler(ctx, req)
 		}
 		s.mcpServer.AddTool(tool, wrapped)
-		s.toolNames = append(s.toolNames, "mcp__boxnex__"+name)
+		s.toolNames = append(s.toolNames, "mcp__nexbox__"+name)
 	}
 
-	// --- Workflow tools ---
+	// --- Browser control tool ---
 
-	listWorkflowsTool := gomcp.NewTool("list_workflows",
+	enableBrowserControlTool := gomcp.NewTool("enable_browser_control",
 		gomcp.WithDescription(
-			"List workflows in a project. Returns workflow metadata (id, name, status, node/edge counts)."),
-		gomcp.WithString("project_id",
-			gomcp.Required(),
-			gomcp.Description("The project ID"),
-		),
+			"Enable Chrome browser control for the current session. "+
+				"Call this tool only when browser control is needed and mcp__chrome__ tools are absent from your current tool list. "+
+				"If the Chrome tools are already available, use them directly. Newly enabled tools become available in the next message if they are absent from the current turn."),
 	)
 
-	getWorkflowTool := gomcp.NewTool("get_workflow",
-		gomcp.WithDescription(
-			"Get full details of a workflow including its definition (nodes and edges). "+
-				"Use this to understand the workflow structure before making modifications."),
-		gomcp.WithString("workflow_id",
-			gomcp.Required(),
-			gomcp.Description("The workflow ID"),
-		),
-	)
+	// --- Cross-session messaging ---
 
-	executeWorkflowTool := gomcp.NewTool("execute_workflow",
+	sendToSessionTool := gomcp.NewTool("send_to_session",
 		gomcp.WithDescription(
-			"Execute a workflow by triggering its server-side state machine. "+
-				"Each AI node in the workflow will create a new agent session and execute its prompt with full task context. "+
-				"Multiple tasks can be submitted to a single workflow execution — pass ALL task IDs together. "+
-				"Use this after reading tasks and workflow to start the automated development pipeline."),
-		gomcp.WithString("workflow_id",
+			"Send a message to the AI in ANOTHER NexBox session and wait for its answer.\n"+
+				"The message appears in that session exactly as if its user had typed it. This tool "+
+				"blocks until that session's AI finishes replying and returns its final visible answer. "+
+				"Use the short NexBox ID badge beside the session title or the full session UUID; "+
+				"do not guess an ID. If session_id is omitted, a NEW session is created in the current "+
+				"project (same agent and model as this session unless overridden) and the message is sent there; "+
+				"use this to delegate a self-contained sub-task to a fresh agent. The new session's ID is included "+
+				"in the result so you can follow up with it as session_id. If the target is busy, the message waits "+
+				"until its current turn finishes."),
+		gomcp.WithString("session_id",
+			gomcp.Description("Optional. Target session's full UUID or short NexBox ID badge. Omit to create a new session in the current project and send the message there."),
+		),
+		gomcp.WithString("new_session_title",
+			gomcp.Description("Optional. Title for the new session created when session_id is omitted. Ignored when session_id is set; defaults to a title derived from the message."),
+		),
+		gomcp.WithString("agent",
+			gomcp.Description("Optional. Agent (backend) for the new session created when session_id is omitted, e.g. claude, codex. "+
+				"Omit to use this session's agent. Ignored when session_id is set. An unknown name returns an error listing the available agents."),
+		),
+		gomcp.WithString("model",
+			gomcp.Description("Optional. Model for the new session created when session_id is omitted. "+
+				"Omit to use this session's model (or the chosen agent's default model if agent is set to a different agent). "+
+				"Ignored when session_id is set. An unavailable model returns an error listing the available models."),
+		),
+		gomcp.WithString("message",
 			gomcp.Required(),
-			gomcp.Description("The workflow ID to execute"),
-		),
-		gomcp.WithString("task_ids",
-			gomcp.Description("Comma-separated task IDs to inject as context into workflow node prompts (e.g. 'id1,id2,id3')"),
-		),
-		gomcp.WithString("project_id",
-			gomcp.Description("Project ID for creating new sessions"),
-		),
-		gomcp.WithString("user_context",
-			gomcp.Description("Additional user context or instructions to prepend to the first node's prompt"),
+			gomcp.Description("Self-contained message delivered verbatim to the other session."),
 		),
 	)
 
@@ -460,71 +559,48 @@ func (s *Server) registerTools() {
 		),
 	)
 
-	// Helper: check if a feature is enabled (0 means all features).
-	has := func(bit int64) bool {
-		return s.userFeatures == 0 || (s.userFeatures&bit) != 0
-	}
-
-	if has(store.FeatureAsset) {
-		addTool(saveAssetTool, s.handleSaveAsset)
-		addTool(getAssetContentTool, s.handleGetAssetContent)
-		addTool(listAssetsTool, s.handleListAssets)
-		addTool(listAssetCommentsTool, s.handleListAssetComments)
-	}
-	if has(store.FeatureTask) {
-		addTool(createTaskTool, s.handleCreateTask)
-		addTool(getTaskTool, s.handleGetTask)
-		addTool(listTasksTool, s.handleListTasks)
-		addTool(updateTaskTool, s.handleUpdateTask)
-	}
-	if has(store.FeatureWorkflow) {
-		addTool(listWorkflowsTool, s.handleListWorkflows)
-		addTool(getWorkflowTool, s.handleGetWorkflow)
-		addTool(executeWorkflowTool, s.handleExecuteWorkflow)
-	}
-	addAlwaysOnTool(visualizeReadMeTool, s.handleVisualizeReadMe)
-	addAlwaysOnTool(visualizeShowWidgetTool, s.handleVisualizeShowWidget)
-}
-
-// resolveProject returns the project ID to use for a tool call.
-// When called from an agent session (boxnexProjectKey is in context), the
-// session's project is returned regardless of the arg — agents cannot access
-// another project's data by passing a different project_id.
-// For direct (non-agent) MCP clients the arg is used as-is.
-func resolveProject(ctx context.Context, argProjectID string) (string, error) {
-	if pid, _ := ctx.Value(boxnexProjectKey{}).(string); pid != "" {
-		return pid, nil
-	}
-	if argProjectID == "" {
-		return "", fmt.Errorf("project_id is required")
-	}
-	return argProjectID, nil
-}
-
-// enforceProjectOwnership returns an error when the calling session's project
-// does not match the object's project. No-ops for direct (non-agent) callers.
-func enforceProjectOwnership(ctx context.Context, objectProjectID string) error {
-	pid, _ := ctx.Value(boxnexProjectKey{}).(string)
-	if pid != "" && pid != objectProjectID {
-		return fmt.Errorf("not found") // deliberately vague — don't leak other projects
-	}
-	return nil
+	// addTool(saveAssetTool, s.handleSaveAsset) // disabled
+	// addTool(getAssetContentTool, s.handleGetAssetContent) // disabled
+	// addTool(listAssetsTool, s.handleListAssets) // disabled
+	// addTool(listAssetCommentsTool, s.handleListAssetComments) // disabled
+	addTool(askQuestionTool, s.handleAskQuestion)
+	addTool(createTaskTool, s.handleCreateTask)
+	addTool(getTaskTool, s.handleGetTask)
+	addTool(listTasksTool, s.handleListTasks)
+	addTool(updateTaskTool, s.handleUpdateTask)
+	// addTool(runInTerminalTool, s.handleRunInTerminal) // disabled
+	addTool(enableBrowserControlTool, s.handleEnableBrowserControl)
+	addTool(sendToSessionTool, s.handleSendToSession)
+	addTool(visualizeReadMeTool, s.handleVisualizeReadMe)
+	addTool(visualizeShowWidgetTool, s.handleVisualizeShowWidget)
 }
 
 func (s *Server) handleSaveAsset(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := request.GetArguments()
 
-	argProjectID, _ := args["project_id"].(string)
+	projectID, _ := args["project_id"].(string)
 	assetType, _ := args["type"].(string)
 	title, _ := args["title"].(string)
 	content, _ := args["content"].(string)
 
-	projectID, err := resolveProject(ctx, argProjectID)
-	if err != nil {
-		return errorResult(err.Error()), nil
+	if projectID == "" || title == "" || content == "" {
+		return errorResult("project_id, title, and content are required"), nil
 	}
-	if title == "" || content == "" {
-		return errorResult("title and content are required"), nil
+
+	if s.configGetter != nil {
+		ids := s.configGetter.ProjectIDs()
+		if len(ids) > 0 {
+			found := false
+			for _, id := range ids {
+				if id == projectID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return errorResult(fmt.Sprintf("project_id %q not found", projectID)), nil
+			}
+		}
 	}
 
 	// Validate asset type
@@ -584,14 +660,6 @@ func (s *Server) handleGetAssetContent(ctx context.Context, request gomcp.CallTo
 		return errorResult("asset_id is required"), nil
 	}
 
-	// Verify ownership in agent mode before returning content.
-	if pid, _ := ctx.Value(boxnexProjectKey{}).(string); pid != "" {
-		asset, err := s.store.GetAsset(assetID)
-		if err != nil || asset == nil || asset.ProjectID != pid {
-			return errorResult(fmt.Sprintf("asset %s not found", assetID)), nil
-		}
-	}
-
 	content, err := s.store.GetLatestAssetContent(assetID)
 	if err != nil {
 		return errorResult(fmt.Sprintf("failed to get content: %v", err)), nil
@@ -606,10 +674,9 @@ func (s *Server) handleGetAssetContent(ctx context.Context, request gomcp.CallTo
 func (s *Server) handleListAssets(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := request.GetArguments()
 
-	argProjectID, _ := args["project_id"].(string)
-	projectID, err := resolveProject(ctx, argProjectID)
-	if err != nil {
-		return errorResult(err.Error()), nil
+	projectID, _ := args["project_id"].(string)
+	if projectID == "" {
+		return errorResult("project_id is required"), nil
 	}
 
 	assets, err := s.store.ListAssets(projectID, 20, 0, "")
@@ -660,14 +727,6 @@ func (s *Server) handleListAssetComments(ctx context.Context, request gomcp.Call
 		return errorResult("asset_id is required"), nil
 	}
 
-	// Verify ownership in agent mode.
-	if pid, _ := ctx.Value(boxnexProjectKey{}).(string); pid != "" {
-		asset, err := s.store.GetAsset(assetID)
-		if err != nil || asset == nil || asset.ProjectID != pid {
-			return errorResult(fmt.Sprintf("asset %s not found", assetID)), nil
-		}
-	}
-
 	comments, err := s.store.ListReviewComments(assetID)
 	if err != nil {
 		return errorResult(fmt.Sprintf("database error: %v", err)), nil
@@ -707,11 +766,80 @@ func (s *Server) handleListAssetComments(ctx context.Context, request gomcp.Call
 	return textResult(string(data)), nil
 }
 
+// Question/option structures for validation
+type questionOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+type questionDef struct {
+	ID            string           `json:"id"`
+	Prompt        string           `json:"prompt"`
+	Options       []questionOption `json:"options"`
+	AllowMultiple bool             `json:"allow_multiple"`
+}
+
+func (s *Server) handleAskQuestion(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	args := request.GetArguments()
+
+	questionsJSON, _ := args["questions"].(string)
+	if questionsJSON == "" {
+		return errorResult("questions parameter is required"), nil
+	}
+
+	// Validate the questions JSON
+	var questions []questionDef
+	if err := json.Unmarshal([]byte(questionsJSON), &questions); err != nil {
+		return errorResult(fmt.Sprintf("invalid questions JSON: %v", err)), nil
+	}
+
+	if len(questions) == 0 {
+		return errorResult("questions array must contain at least one question"), nil
+	}
+
+	for i, q := range questions {
+		if q.ID == "" {
+			return errorResult(fmt.Sprintf("question[%d]: id is required", i)), nil
+		}
+		if q.Prompt == "" {
+			return errorResult(fmt.Sprintf("question[%d]: prompt is required", i)), nil
+		}
+		if len(q.Options) < 2 {
+			return errorResult(fmt.Sprintf("question[%d]: at least 2 options are required", i)), nil
+		}
+		for j, opt := range q.Options {
+			if opt.ID == "" || opt.Label == "" {
+				return errorResult(fmt.Sprintf("question[%d].options[%d]: both id and label are required", i, j)), nil
+			}
+		}
+	}
+
+	title, _ := args["title"].(string)
+
+	// Build a summary for the tool result
+	var sb strings.Builder
+	sb.WriteString("Questions have been presented to the user.\n")
+	if title != "" {
+		sb.WriteString(fmt.Sprintf("Title: %s\n", title))
+	}
+	sb.WriteString(fmt.Sprintf("Number of questions: %d\n", len(questions)))
+	for _, q := range questions {
+		sb.WriteString(fmt.Sprintf("- [%s] %s (%d options", q.ID, q.Prompt, len(q.Options)))
+		if q.AllowMultiple {
+			sb.WriteString(", multi-select")
+		}
+		sb.WriteString(")\n")
+	}
+	sb.WriteString("\nSTOP HERE. Wait for the user's response in the next message before continuing.")
+
+	log.Printf("[mcp] ask_question: presented %d questions to user", len(questions))
+	return textResult(sb.String()), nil
+}
+
 func (s *Server) handleCreateTask(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := request.GetArguments()
 
-	argProjectID, _ := args["project_id"].(string)
-	projectID, _ := resolveProject(ctx, argProjectID) // project is optional for tasks
+	projectID, _ := args["project_id"].(string)
 	title, _ := args["title"].(string)
 	description, _ := args["description"].(string)
 	priority, _ := args["priority"].(string)
@@ -729,6 +857,17 @@ func (s *Server) handleCreateTask(ctx context.Context, request gomcp.CallToolReq
 	validPriorities := map[string]bool{"low": true, "medium": true, "high": true, "critical": true}
 	if !validPriorities[priority] {
 		return errorResult(fmt.Sprintf("invalid priority %q; must be one of: low, medium, high, critical", priority)), nil
+	}
+
+	// Local store — validate parent hierarchy (max 1 level)
+	if parentID != "" {
+		parent, err := s.store.GetTask(parentID)
+		if err != nil || parent == nil {
+			return errorResult("parent task not found"), nil
+		}
+		if parent.ParentID != "" {
+			return errorResult("cannot create sub-task under another sub-task (max 1 level)"), nil
+		}
 	}
 
 	task, err := s.store.CreateTask(store.CreateTaskRequest{
@@ -778,9 +917,6 @@ func (s *Server) handleGetTask(ctx context.Context, request gomcp.CallToolReques
 	if task == nil {
 		return errorResult(fmt.Sprintf("task %s not found", taskID)), nil
 	}
-	if err := enforceProjectOwnership(ctx, task.ProjectID); err != nil {
-		return errorResult(fmt.Sprintf("task %s not found", taskID)), nil
-	}
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("ID: %s\n", task.ID))
@@ -822,17 +958,6 @@ func (s *Server) handleGetTask(ctx context.Context, request gomcp.CallToolReques
 		}
 	}
 
-	linkedAssets, err := s.store.ListTaskAssets(taskID)
-	if err != nil {
-		log.Printf("[mcp] get_task: failed to list linked assets for %s: %v", taskID, err)
-	} else if len(linkedAssets) > 0 {
-		sb.WriteString(fmt.Sprintf("\nLinked Assets (%d):\n", len(linkedAssets)))
-		for _, a := range linkedAssets {
-			sb.WriteString(fmt.Sprintf("  - [%s] %s (type: %s, version: %d, status: %s)\n",
-				a.ID, a.Title, a.Type, a.CurrentVersion, a.Status))
-		}
-	}
-
 	log.Printf("[mcp] get_task: returned task %q (id=%s)", task.Title, task.ID)
 	return textResult(sb.String()), nil
 }
@@ -853,9 +978,9 @@ func (s *Server) handleUpdateTask(ctx context.Context, request gomcp.CallToolReq
 		req.Description = &desc
 	}
 	if status, ok := args["status"].(string); ok && status != "" {
-		validStatuses := map[string]bool{"open": true, "in_progress": true, "done": true, "closed": true}
+		validStatuses := map[string]bool{"open": true, "closed": true}
 		if !validStatuses[status] {
-			return errorResult(fmt.Sprintf("invalid status %q; must be one of: open, in_progress, done, closed", status)), nil
+			return errorResult(fmt.Sprintf("invalid status %q; must be one of: open, closed", status)), nil
 		}
 		req.Status = &status
 	}
@@ -868,14 +993,6 @@ func (s *Server) handleUpdateTask(ctx context.Context, request gomcp.CallToolReq
 	}
 	if assignee, ok := args["assignee"].(string); ok && assignee != "" {
 		req.Assigner = &assignee
-	}
-
-	// Verify ownership before mutating.
-	if pid, _ := ctx.Value(boxnexProjectKey{}).(string); pid != "" {
-		existing, err := s.store.GetTask(taskID)
-		if err != nil || existing == nil || existing.ProjectID != pid {
-			return errorResult(fmt.Sprintf("task %s not found", taskID)), nil
-		}
 	}
 
 	task, err := s.store.UpdateTask(taskID, req)
@@ -903,10 +1020,7 @@ func (s *Server) handleUpdateTask(ctx context.Context, request gomcp.CallToolReq
 func (s *Server) handleListTasks(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := request.GetArguments()
 	statusFilter, _ := args["status"].(string)
-	argProjectID, _ := args["project_id"].(string)
-
-	// In agent mode the session project overrides the arg; in direct mode use arg.
-	projectID, _ := resolveProject(ctx, argProjectID)
+	projectID, _ := args["project_id"].(string)
 
 	var projectIDs []string
 	if projectID != "" {
@@ -975,168 +1089,204 @@ func (s *Server) handleListTasks(ctx context.Context, request gomcp.CallToolRequ
 	return textResult(string(data)), nil
 }
 
-// ---------------------------------------------------------------------------
-// Workflow handlers
-// ---------------------------------------------------------------------------
-
-func (s *Server) handleListWorkflows(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+func (s *Server) handleRunInTerminal(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := request.GetArguments()
-	argProjectID, _ := args["project_id"].(string)
-	projectID, err := resolveProject(ctx, argProjectID)
-	if err != nil {
-		return errorResult(err.Error()), nil
+	command, _ := args["command"].(string)
+	if command == "" {
+		return errorResult("command is required"), nil
 	}
 
-	workflows, err := s.store.ListWorkflows(projectID)
-	if err != nil {
-		return errorResult(fmt.Sprintf("failed to list workflows: %v", err)), nil
+	if s.terminalMgr == nil {
+		return errorResult("no open terminal found"), nil
 	}
 
-	if len(workflows) == 0 {
-		return textResult("No workflows found in this project."), nil
+	// Get the session ID from context (injected via ?session= query param).
+	sessionID, _ := ctx.Value(nexboxSessionKey{}).(string)
+
+	// Notify the frontend to open this session's terminal panel.
+	if s.changeNotifier != nil {
+		s.changeNotifier("terminal", sessionID, "open")
 	}
 
-	type wfInfo struct {
-		ID          string `json:"id"`
-		Name        string `json:"name"`
-		Description string `json:"description,omitempty"`
-		Status      string `json:"status"`
-		Version     int    `json:"version"`
-		NodeCount   int    `json:"node_count"`
-		EdgeCount   int    `json:"edge_count"`
-		UpdatedAt   string `json:"updated_at"`
-	}
-
-	items := make([]wfInfo, 0, len(workflows))
-	for _, wf := range workflows {
-		nc, ec := 0, 0
-		var def store.WorkflowDefinition
-		if err := json.Unmarshal(wf.Definition, &def); err == nil {
-			nc = len(def.Nodes)
-			ec = len(def.Edges)
+	if err := s.terminalMgr.WriteCommand(sessionID, command); err != nil {
+		// No active PTY yet — wait for the frontend to connect.
+		waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if waitErr := s.terminalMgr.WaitReady(waitCtx, sessionID); waitErr != nil {
+			log.Printf("[mcp] run_in_terminal: timed out waiting for terminal: %v", waitErr)
+			return errorResult("timed out waiting for terminal to open"), nil
 		}
-		items = append(items, wfInfo{
-			ID:          wf.ID,
-			Name:        wf.Name,
-			Description: wf.Description,
-			Status:      wf.Status,
-			Version:     wf.Version,
-			NodeCount:   nc,
-			EdgeCount:   ec,
-			UpdatedAt:   wf.UpdatedAt.Format(time.RFC3339),
-		})
+		if err = s.terminalMgr.WriteCommand(sessionID, command); err != nil {
+			log.Printf("[mcp] run_in_terminal error: %v", err)
+			return errorResult(err.Error()), nil
+		}
 	}
 
-	data, _ := json.MarshalIndent(items, "", "  ")
-	return textResult(string(data)), nil
+	log.Printf("[mcp] run_in_terminal: sent command %q", command)
+	return textResult(fmt.Sprintf("Command sent to terminal: %s", command)), nil
 }
 
-func (s *Server) handleGetWorkflow(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	args := request.GetArguments()
-	workflowID, _ := args["workflow_id"].(string)
-	if workflowID == "" {
-		return errorResult("workflow_id is required"), nil
+func (s *Server) handleEnableBrowserControl(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	sessionID, _ := ctx.Value(nexboxSessionKey{}).(string)
+	if sessionID == "" {
+		return errorResult("session ID not found in request context; ensure the agent is configured correctly"), nil
 	}
 
-	wf, err := s.store.GetWorkflow(workflowID)
-	if err != nil {
-		return errorResult(fmt.Sprintf("failed to get workflow: %v", err)), nil
-	}
-	if wf == nil {
-		return errorResult(fmt.Sprintf("workflow %s not found", workflowID)), nil
-	}
-	if err := enforceProjectOwnership(ctx, wf.ProjectID); err != nil {
-		return errorResult(fmt.Sprintf("workflow %s not found", workflowID)), nil
+	if s.chromeEnabler == nil {
+		return errorResult("browser control is not available on this server"), nil
 	}
 
-	type fullWorkflow struct {
-		ID          string          `json:"id"`
-		Name        string          `json:"name"`
-		Description string          `json:"description"`
-		Status      string          `json:"status"`
-		Version     int             `json:"version"`
-		Definition  json.RawMessage `json:"definition"`
-		CreatedBy   string          `json:"created_by,omitempty"`
-		CreatedAt   string          `json:"created_at"`
-		UpdatedAt   string          `json:"updated_at"`
-	}
-
-	out := fullWorkflow{
-		ID:          wf.ID,
-		Name:        wf.Name,
-		Description: wf.Description,
-		Status:      wf.Status,
-		Version:     wf.Version,
-		Definition:  wf.Definition,
-		CreatedBy:   wf.CreatedBy,
-		CreatedAt:   wf.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:   wf.UpdatedAt.Format(time.RFC3339),
-	}
-
-	data, _ := json.MarshalIndent(out, "", "  ")
-	log.Printf("[mcp] get_workflow: returned %q (id=%s)", wf.Name, wf.ID)
-	return textResult(string(data)), nil
-}
-
-// ---------------------------------------------------------------------------
-// Workflow execution handler
-// ---------------------------------------------------------------------------
-
-func (s *Server) handleExecuteWorkflow(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	if s.workflowExecutor == nil {
-		return errorResult("workflow execution not available (executor not configured)"), nil
-	}
-
-	args := request.GetArguments()
-	workflowID, _ := args["workflow_id"].(string)
-	taskIDsRaw, _ := args["task_ids"].(string)
-	argProjectID, _ := args["project_id"].(string)
-	userContext, _ := args["user_context"].(string)
-
-	if workflowID == "" {
-		return errorResult("workflow_id is required"), nil
-	}
-
-	// Fetch the workflow first so we can validate ownership and get projectID.
-	wf, err := s.store.GetWorkflow(workflowID)
-	if err != nil || wf == nil {
-		return errorResult(fmt.Sprintf("workflow %s not found", workflowID)), nil
-	}
-	if err := enforceProjectOwnership(ctx, wf.ProjectID); err != nil {
-		return errorResult(fmt.Sprintf("workflow %s not found", workflowID)), nil
-	}
-
-	// In agent mode the project comes from the session; otherwise use the arg or the workflow's own project.
-	projectID := wf.ProjectID
-	if pid, _ := ctx.Value(boxnexProjectKey{}).(string); pid != "" {
-		projectID = pid
-	} else if argProjectID != "" {
-		projectID = argProjectID
-	}
-
-	var taskIDs []string
-	if taskIDsRaw != "" {
-		for _, id := range strings.Split(taskIDsRaw, ",") {
-			id = strings.TrimSpace(id)
-			if id != "" {
-				taskIDs = append(taskIDs, id)
+	alreadyEnabled := false
+	if s.store != nil {
+		sess, err := s.store.GetSession(sessionID)
+		if err != nil {
+			return errorResult(fmt.Sprintf("failed to read browser control state: %v", err)), nil
+		}
+		if sess != nil {
+			for _, feature := range strings.Split(sess.Features, ",") {
+				if strings.TrimSpace(feature) == "chrome_devtools" {
+					alreadyEnabled = true
+					break
+				}
 			}
 		}
 	}
 
-	execID, err := s.workflowExecutor.ExecuteWorkflow(workflowID, projectID, userContext, "mcp", taskIDs)
+	_, _, err := s.chromeEnabler.EnableChrome(sessionID)
 	if err != nil {
-		return errorResult(fmt.Sprintf("failed to start workflow: %v", err)), nil
+		return errorResult(fmt.Sprintf("failed to enable browser control: %v", err)), nil
 	}
 
-	log.Printf("[mcp] execute_workflow: triggered %s (exec=%s, tasks=%d)", workflowID, execID, len(taskIDs))
+	log.Printf("[mcp] enable_browser_control: enabled chrome_devtools for session %s", sessionID)
+	if alreadyEnabled {
+		return textResult(
+			"Browser control is already enabled for this session. " +
+				"Use the mcp__chrome__ tools in your current tool list to continue the user's task now. " +
+				"Only if those tools are absent from your current tool list, explain that they will be available in the next message.",
+		), nil
+	}
+	return textResult(
+		"Browser control has been enabled for this session. " +
+			"If mcp__chrome__ tools are already in your current tool list, use them to continue the user's task now. " +
+			"Otherwise, inform the user that the Chrome DevTools MCP tools will be available starting from the next message.",
+	), nil
+}
 
-	return textResult(fmt.Sprintf(
-		"Workflow execution started (execution_id: %s, tasks: %d). "+
-			"Each AI node will run in a new session visible in the sidebar. "+
-			"This call returns immediately — do not wait for completion.",
-		execID, len(taskIDs),
-	)), nil
+// mcpKeepAliveInterval keeps long blocking streamable-HTTP calls below client
+// header and idle timeouts.
+const mcpKeepAliveInterval = 20 * time.Second
+
+// keepCallAlive upgrades a blocking MCP response to an SSE stream and sends
+// periodic progress notifications until the handler returns.
+func keepCallAlive(ctx context.Context, request gomcp.CallToolRequest, label string) (stop func()) {
+	srv := server.ServerFromContext(ctx)
+	if srv == nil {
+		return func() {}
+	}
+	var token gomcp.ProgressToken
+	if request.Params.Meta != nil {
+		token = request.Params.Meta.ProgressToken
+	}
+
+	done := make(chan struct{})
+	go func() {
+		started := time.Now()
+		ticker := time.NewTicker(mcpKeepAliveInterval)
+		defer ticker.Stop()
+
+		for progress := 0; ; progress++ {
+			params := map[string]any{
+				"progress": progress,
+				"message":  fmt.Sprintf("%s (%s)", label, time.Since(started).Round(time.Second)),
+			}
+			if token != nil {
+				params["progressToken"] = token
+			}
+			if err := srv.SendNotificationToClient(ctx, "notifications/progress", params); err != nil {
+				log.Printf("[mcp] keep-alive notification failed: %v", err)
+				return
+			}
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
+}
+
+// handleSendToSession delivers a normal turn into another session and blocks
+// until that session's agent has produced its final visible answer.
+func (s *Server) handleSendToSession(ctx context.Context, request gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	if s.orchestrator == nil {
+		return errorResult("cross-session messaging is not available on this server"), nil
+	}
+
+	args := request.GetArguments()
+	ref, _ := args["session_id"].(string)
+	message, _ := args["message"].(string)
+	newTitle, _ := args["new_session_title"].(string)
+	agentName, _ := args["agent"].(string)
+	model, _ := args["model"].(string)
+	if strings.TrimSpace(message) == "" {
+		return errorResult("message is required"), nil
+	}
+
+	fromSessionID, _ := ctx.Value(nexboxSessionKey{}).(string)
+	if fromSessionID == "" {
+		return errorResult("calling session ID is missing from the MCP request"), nil
+	}
+	var (
+		targetID, targetName string
+		created              bool
+		err                  error
+	)
+	if strings.TrimSpace(ref) == "" {
+		targetID, targetName, err = s.orchestrator.OrchestrateCreateSiblingSession(fromSessionID, newTitle, message, agentName, model)
+		if err != nil {
+			return errorResult(fmt.Sprintf("failed to create a new session: %v", err)), nil
+		}
+		created = true
+		log.Printf("[mcp] send_to_session: %s created new session %s (%s)", fromSessionID, targetID, targetName)
+	} else {
+		targetID, targetName, err = s.orchestrator.OrchestrateResolveSession(fromSessionID, ref)
+		if err != nil {
+			return errorResult(err.Error()), nil
+		}
+	}
+	if targetName == "" {
+		targetName = "Untitled"
+	}
+
+	log.Printf("[mcp] send_to_session: %s → %s (%s), %d bytes", fromSessionID, targetID, targetName, len(message))
+	stopKeepAlive := keepCallAlive(ctx, request, fmt.Sprintf("waiting for session %q to reply", targetName))
+	defer stopKeepAlive()
+
+	reply, err := s.orchestrator.OrchestrateSendAndWait(ctx, fromSessionID, targetID, message)
+	if err != nil {
+		log.Printf("[mcp] send_to_session: %s → %s failed: %v", fromSessionID, targetID, err)
+		return errorResult(fmt.Sprintf("%srelay to session %q (%s) failed: %v", createdNote(created, targetName, targetID), targetName, targetID, err)), nil
+	}
+	log.Printf("[mcp] send_to_session: %s → %s answered (%d bytes)", fromSessionID, targetID, len(reply))
+	note := createdNote(created, targetName, targetID)
+	if reply == "" {
+		return textResult(fmt.Sprintf("%sSession %q (%s) finished the turn but produced no text reply.", note, targetName, targetID)), nil
+	}
+	return textResult(fmt.Sprintf("%sReply from session %q (%s):\n\n%s", note, targetName, targetID, reply)), nil
+}
+
+// createdNote prefixes send_to_session results with the ID of a session the
+// tool just created, so the caller can follow up in it via session_id.
+func createdNote(created bool, name, id string) string {
+	if !created {
+		return ""
+	}
+	return fmt.Sprintf("Created new session %q (%s); pass session_id=%q to continue in it.\n\n", name, id, id)
 }
 
 // Helper to create a text result

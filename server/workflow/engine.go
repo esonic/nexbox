@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/looplab/fsm"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"github.com/esonic/nexbox/store"
 )
 
 // Engine is the workflow execution engine

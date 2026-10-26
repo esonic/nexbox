@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import { AppSidebar } from "@/components/layout/AppSidebar";
@@ -10,10 +10,8 @@ import { WorkflowsPage } from "@/pages/WorkflowsPage";
 import { WorkflowEditorPage } from "@/pages/WorkflowEditorPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { MarketplacePage } from "@/pages/MarketplacePage";
-import { UpdateBanner } from "@/components/ui/UpdateBanner";
-import LoginModal from "@/components/ui/LoginModal";
-import { serverApi, authCloudApi, getToken, clearToken } from "@/lib/api";
-import { useAppStore } from "@/stores/app";
+import { LoginPage } from "@/pages/LoginPage";
+import { authApi } from "@/lib/api";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -24,63 +22,11 @@ const queryClient = new QueryClient({
   },
 });
 
-function AppLayout() {
-  const [mode, setMode] = useState<string | null>(null);
-  const { setCurrentUser } = useAppStore();
+type AuthState = "checking" | "local" | "authed" | "unauthed";
 
-  useEffect(() => {
-    async function init() {
-      try {
-        const info = await serverApi.info();
-        if (info.mode === "needs_login") {
-          const token = getToken();
-          if (token) {
-            try {
-              const user = await authCloudApi.me(); // validates token
-              setCurrentUser(user);
-              setMode("local");        // token valid, show app
-              return;
-            } catch {
-              clearToken();            // token invalid/expired
-            }
-          }
-          setMode("needs_login");
-          return;
-        }
-        // Local mode: fetch user context (features, role) from /auth/me.
-        try {
-          const user = await authCloudApi.me();
-          setCurrentUser(user);
-        } catch { /* features default to 0 */ }
-        setMode(info.mode);
-      } catch {
-        setMode("local");
-      }
-    }
-    init();
-
-    const handleLogout = () => { setCurrentUser(null); setMode("needs_login"); };
-    window.addEventListener("boxnex:logout", handleLogout);
-    return () => window.removeEventListener("boxnex:logout", handleLogout);
-  }, []);
-
-  if (mode === null) {
-    return <div className="flex h-screen items-center justify-center" />;
-  }
-
-  if (mode === "needs_login") {
-    return <LoginModal onSuccess={async () => {
-      try {
-        const user = await authCloudApi.me();
-        setCurrentUser(user);
-      } catch {}
-      setMode("local");
-    }} />;
-  }
-
+function MainLayout() {
   return (
-    <div className="flex h-screen overflow-hidden">
-      <UpdateBanner />
+    <div className="flex h-full overflow-hidden">
       <AppSidebar />
       <main className="flex-1 overflow-hidden">
         <Routes>
@@ -97,11 +43,48 @@ function AppLayout() {
   );
 }
 
+function AppRoutes() {
+  const [auth, setAuth] = useState<AuthState>("checking");
+  const location = useLocation();
+
+  useEffect(() => {
+    let cancelled = false;
+    // Account-free instances enter the workspace directly. Otherwise check
+    // the existing login cookie; a 401 here means the login page is needed.
+    authApi.me()
+      .then((status) => { if (!cancelled) setAuth(status.auth_required ? "authed" : "local"); })
+      .catch(() => { if (!cancelled) setAuth("unauthed"); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (auth === "checking") {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        Loading...
+      </div>
+    );
+  }
+
+  return (
+    <Routes>
+      <Route path="/login" element={auth === "local" ? <Navigate to="/" replace /> : <LoginPage onAuthed={() => setAuth("authed")} />} />
+      <Route
+        path="/*"
+        element={
+          auth === "authed" || auth === "local"
+            ? <MainLayout />
+            : <Navigate to={`/login?from=${encodeURIComponent(location.pathname + location.search)}`} replace />
+        }
+      />
+    </Routes>
+  );
+}
+
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <AppLayout />
+        <AppRoutes />
         <Toaster position="top-center" richColors />
       </BrowserRouter>
     </QueryClientProvider>

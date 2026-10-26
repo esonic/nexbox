@@ -14,13 +14,10 @@ export {
 } from "./task-config";
 export {
   StatusOpen,
-  StatusInProgress,
   StatusDone,
-  StatusClosed,
   PriorityLow,
   PriorityMedium,
   PriorityHigh,
-  PriorityCritical,
   STATUS_ICONS,
   PRIORITY_ICONS,
 } from "./task-icons";

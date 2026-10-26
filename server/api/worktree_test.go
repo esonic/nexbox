@@ -9,35 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/golang-jwt/jwt/v5"
-	"gitlab.okg.com/sre_ai/boxnex/config"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/config"
+	"github.com/esonic/nexbox/store"
 )
 
-const testJWTSecret = "boxnex-test-secret"
-
-// makeTestJWT creates a signed JWT token for use in tests.
-func makeTestJWT(t *testing.T) string {
-	t.Helper()
-	claims := jwtClaims{
-		UserID:   "test-user-id",
-		Username: "testuser",
-		Role:     "admin",
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-		},
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := token.SignedString([]byte(testJWTSecret))
-	if err != nil {
-		t.Fatalf("sign JWT: %v", err)
-	}
-	return signed
-}
-
-// newWorktreeServer creates a minimal Server backed by an in-memory SQLite store.
+// newWorktreeServer creates a minimal Server backed by an in-memory SQLite store
+// with auth pre-seeded for HTTP-level tests.
 func newWorktreeServer(t *testing.T) *Server {
 	t.Helper()
 	db, err := store.New(t.TempDir())
@@ -45,37 +24,37 @@ func newWorktreeServer(t *testing.T) *Server {
 		t.Fatalf("store.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	cfgMgr, err := config.NewManager(filepath.Join(t.TempDir(), "config.json"))
-	if err != nil {
-		t.Fatalf("config.NewManager: %v", err)
-	}
-	if err := cfgMgr.Update(func(cfg *config.Config) {
-		cfg.JWTSecret = testJWTSecret
-	}); err != nil {
-		t.Fatalf("config.Update: %v", err)
-	}
-	return &Server{
-		Store:   store.NewSQLiteStore(db.DB),
+	s := &Server{
+		Store:   store.NewSQLiteStore(db),
+		Auth:    NewAuthenticator(),
 		Hub:     NewChatHub(),
 		DataDir: t.TempDir(),
-		Config:  cfgMgr,
 	}
+	if _, err := s.Store.CreateUser("tester", "ignored"); err != nil {
+		t.Fatalf("create test user: %v", err)
+	}
+	return s
 }
 
-// createTestSession creates a project and a session bound to it, returning the session ID.
-// SetWorktreeMode requires the session to be bound to a project.
+// testAuthCookie issues a JWT for the seeded test user and returns it as an
+// http.Cookie that can be attached to a httptest request.
+func testAuthCookie(t *testing.T, s *Server) *http.Cookie {
+	t.Helper()
+	u, err := s.Store.GetUserByUsername("tester")
+	if err != nil {
+		t.Fatalf("get test user: %v", err)
+	}
+	tok, err := s.Auth.issue(u)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	return &http.Cookie{Name: authCookieName, Value: tok}
+}
+
+// createTestSession inserts a session and returns its ID.
 func createTestSession(t *testing.T, s *Server, name string) string {
 	t.Helper()
-	repoDir := t.TempDir()
-	// Init a bare git repo so worktree operations have a valid repo root.
-	if out, err2 := exec.Command("git", "init", repoDir).CombinedOutput(); err2 != nil {
-		t.Fatalf("git init: %v: %s", err2, out)
-	}
-	proj, err := s.Store.CreateProject(store.CreateProjectRequest{Name: name + "-proj", GitRepoPath: repoDir})
-	if err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-	sess, err := s.Store.CreateSession(store.CreateSessionRequest{Name: name, ProjectID: proj.ID})
+	sess, err := s.Store.CreateSession(store.CreateSessionRequest{Name: name})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -83,6 +62,7 @@ func createTestSession(t *testing.T, s *Server, name string) string {
 }
 
 // doRequest performs a request against the Chi router and returns the response.
+// Requests are auto-authenticated with the seeded test user.
 func doRequest(t *testing.T, s *Server, method, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer
@@ -93,7 +73,7 @@ func doRequest(t *testing.T, s *Server, method, path string, body interface{}) *
 	}
 	req := httptest.NewRequest(method, path, &buf)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+makeTestJWT(t))
+	req.AddCookie(testAuthCookie(t, s))
 	rr := httptest.NewRecorder()
 	NewRouter(s).ServeHTTP(rr, req)
 	return rr
@@ -105,7 +85,33 @@ func doRequest(t *testing.T, s *Server, method, path string, body interface{}) *
 
 func TestSetWorktreeMode_Success(t *testing.T) {
 	s := newWorktreeServer(t)
-	id := createTestSession(t, s, "wt-mode-ok")
+
+	// Create a temporary git repository so the handler's git validation passes.
+	gitDir := t.TempDir()
+	cmd := exec.Command("git", "init")
+	cmd.Dir = gitDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+
+	// Create a project pointing to the git repo.
+	proj, err := s.Store.CreateProject(store.CreateProjectRequest{
+		Name:        "wt-proj",
+		GitRepoPath: gitDir,
+	})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Create a session bound to that project.
+	sess, err := s.Store.CreateSession(store.CreateSessionRequest{
+		Name:      "wt-mode-ok",
+		ProjectID: proj.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	id := sess.ID
 
 	rr := doRequest(t, s, http.MethodPut,
 		"/api/sessions/"+id+"/worktree-mode",
@@ -114,12 +120,12 @@ func TestSetWorktreeMode_Success(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body)
 	}
-	var sess store.Session
-	if err := json.NewDecoder(rr.Body).Decode(&sess); err != nil {
+	var respSess store.Session
+	if err := json.NewDecoder(rr.Body).Decode(&respSess); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if sess.WorktreeMode != "worktree" {
-		t.Errorf("WorktreeMode = %q, want %q", sess.WorktreeMode, "worktree")
+	if respSess.WorktreeMode != "worktree" {
+		t.Errorf("WorktreeMode = %q, want %q", respSess.WorktreeMode, "worktree")
 	}
 
 	// Verify persisted in DB
@@ -197,12 +203,108 @@ func TestSetWorktreeMode_InvalidJSON(t *testing.T) {
 		"/api/sessions/"+id+"/worktree-mode",
 		bytes.NewBufferString("not json"))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+makeTestJWT(t))
+	req.AddCookie(testAuthCookie(t, s))
 	rr := httptest.NewRecorder()
 	NewRouter(s).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestDispatchBusyDoesNotCreateFirstWorktree(t *testing.T) {
+	s := newWorktreeServer(t)
+	s.SessionManager = agent.NewSessionManager()
+
+	repository := t.TempDir()
+	wtInitRepo(t, repository)
+	wtCommitFile(t, repository, "tracked.txt", "initial\n")
+	project, err := s.Store.CreateProject(store.CreateProjectRequest{
+		Name:        "busy-worktree",
+		GitRepoPath: repository,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := s.Store.CreateSession(store.CreateSessionRequest{
+		Name:      "busy-worktree",
+		ProjectID: project.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Store.UpdateSessionWorktree(session.ID, "worktree", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Model the winning concurrent request. A second dispatch must observe the
+	// claim before it performs any first-turn worktree side effects.
+	s.SessionManager.SetActive(session.ID, true)
+	outcome, err := s.dispatchUserMessage(session.ID, "second", nil, nil, nil, dispatchOpts{noQueue: true})
+	if err != nil {
+		t.Fatalf("dispatchUserMessage: %v", err)
+	}
+	if outcome != dispatchBusy {
+		t.Fatalf("dispatch outcome = %v, want dispatchBusy", outcome)
+	}
+
+	persisted, err := s.Store.GetSession(session.ID)
+	if err != nil || persisted == nil {
+		t.Fatalf("load session: %v", err)
+	}
+	if persisted.WorktreeMode != "worktree" || persisted.WorktreePath != "" {
+		t.Fatalf("busy dispatch mutated worktree state: mode=%q path=%q", persisted.WorktreeMode, persisted.WorktreePath)
+	}
+	shortID := session.ID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	if _, err := os.Stat(filepath.Join(s.DataDir, "worktrees", shortID)); !os.IsNotExist(err) {
+		t.Fatalf("busy dispatch created a worktree: %v", err)
+	}
+}
+
+func TestDispatchBusyPersistsMessageFeatures(t *testing.T) {
+	s := newWorktreeServer(t)
+	s.SessionManager = agent.NewSessionManager()
+	cfg, err := config.NewManager(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("config.NewManager: %v", err)
+	}
+	s.Config = cfg
+
+	project, err := s.Store.CreateProject(store.CreateProjectRequest{
+		Name:        "busy-features",
+		GitRepoPath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := s.Store.CreateSession(store.CreateSessionRequest{
+		Name:      "busy-features",
+		ProjectID: project.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.SessionManager.SetActive(session.ID, true)
+	outcome, err := s.dispatchUserMessage(
+		session.ID, "use the browser", nil, nil, []string{"chrome_devtools"}, dispatchOpts{noQueue: true},
+	)
+	if err != nil {
+		t.Fatalf("dispatchUserMessage: %v", err)
+	}
+	if outcome != dispatchBusy {
+		t.Fatalf("dispatch outcome = %v, want dispatchBusy", outcome)
+	}
+
+	persisted, err := s.Store.GetSession(session.ID)
+	if err != nil || persisted == nil {
+		t.Fatalf("load session: %v", err)
+	}
+	if persisted.Features != "chrome_devtools" {
+		t.Fatalf("persisted features = %q, want chrome_devtools", persisted.Features)
 	}
 }
 
@@ -282,6 +384,11 @@ func TestGetWorktreeStatus_CleanWorktree(t *testing.T) {
 	}
 	mustGit(repoDir, "add", ".")
 	mustGit(repoDir, "commit", "-m", "init")
+	// Publish the base commit. The session branch itself has no upstream.
+	remoteDir := filepath.Join(base, "remote.git")
+	mustGit(base, "init", "--bare", remoteDir)
+	mustGit(repoDir, "remote", "add", "origin", remoteDir)
+	mustGit(repoDir, "push", "origin", "HEAD:refs/heads/main")
 
 	// Create the worktree on a new branch
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
@@ -369,4 +476,29 @@ func TestRemoveWorktree_NonExistent(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when removing non-existent worktree")
 	}
+}
+
+func wtGit(t *testing.T, root string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+}
+
+func wtInitRepo(t *testing.T, root string) {
+	t.Helper()
+	wtGit(t, root, "init", "-q")
+	wtGit(t, root, "config", "user.email", "test@example.com")
+	wtGit(t, root, "config", "user.name", "NexBox Test")
+}
+
+func wtCommitFile(t *testing.T, root, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, path), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wtGit(t, root, "add", "--", path)
+	wtGit(t, root, "commit", "-q", "-m", "initial")
 }

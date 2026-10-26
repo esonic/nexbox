@@ -4,10 +4,15 @@ import { Plus, Play, Edit, Trash2, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { workflowApi, Workflow } from '@/lib/workflowApi';
 import { useAppStore } from '@/stores/app';
+import { WorkflowEnvInputDialog, collectWorkflowEnvVars, createEmptyWorkflowEnv } from '@/components/workflow/WorkflowEnvDialog';
 
 export function WorkflowsPage() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [executingId, setExecutingId] = useState<string | null>(null);
+  const [envDialogWorkflow, setEnvDialogWorkflow] = useState<Workflow | null>(null);
+  const [envPrompts, setEnvPrompts] = useState<string[]>([]);
+  const [envValues, setEnvValues] = useState<Record<string, string>>({});
   const navigate = useNavigate();
   const currentProject = useAppStore((state) => state.currentProject);
 
@@ -52,13 +57,34 @@ export function WorkflowsPage() {
     }
   };
 
-  const handleExecute = async (id: string) => {
+  const startExecution = async (workflow: Workflow, env?: Record<string, string>) => {
+    setExecutingId(workflow.id);
     try {
-      const execution = await workflowApi.execute(id);
+      const execution = await workflowApi.execute(workflow.id, env ? { env } : undefined);
       toast.success(`Workflow started! Status: ${execution.status}`);
     } catch (error: any) {
       toast.error('Failed to execute: ' + error.message);
+    } finally {
+      setExecutingId(null);
     }
+  };
+
+  const handleExecute = async (workflow: Workflow) => {
+    const names = collectWorkflowEnvVars(workflow.definition);
+    if (names.length > 0) {
+      setEnvDialogWorkflow(workflow);
+      setEnvPrompts(names);
+      setEnvValues(createEmptyWorkflowEnv(names));
+      return;
+    }
+    await startExecution(workflow);
+  };
+
+  const handleEnvDialogRun = async () => {
+    const workflow = envDialogWorkflow;
+    if (!workflow) return;
+    setEnvDialogWorkflow(null);
+    await startExecution(workflow, envValues);
   };
 
   if (!currentProject) {
@@ -71,6 +97,16 @@ export function WorkflowsPage() {
 
   return (
     <div className="h-full flex flex-col">
+      <WorkflowEnvInputDialog
+        open={!!envDialogWorkflow}
+        onOpenChange={(open) => {
+          if (!open) setEnvDialogWorkflow(null);
+        }}
+        names={envPrompts}
+        values={envValues}
+        onChange={setEnvValues}
+        onSubmit={handleEnvDialogRun}
+      />
       {/* Header */}
       <div className="border-b bg-card p-4 flex items-center justify-between">
         <div>
@@ -164,11 +200,12 @@ export function WorkflowsPage() {
 
                 <div className="flex gap-2">
                   <button
-                    onClick={() => handleExecute(workflow.id)}
-                    className="flex-1 px-3 py-2 bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400 rounded hover:bg-green-100 dark:hover:bg-green-900/30 flex items-center justify-center gap-2 text-sm font-medium"
+                    onClick={() => handleExecute(workflow)}
+                    disabled={executingId !== null}
+                    className="flex-1 px-3 py-2 bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400 rounded hover:bg-green-100 dark:hover:bg-green-900/30 flex items-center justify-center gap-2 text-sm font-medium disabled:opacity-50"
                   >
-                    <Play className="w-4 h-4" />
-                    Run
+                    {executingId === workflow.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                    {executingId === workflow.id ? 'Starting...' : 'Run'}
                   </button>
                   <button
                     onClick={() => handleEdit(workflow.id)}

@@ -1,63 +1,139 @@
-import { useTranslation } from "react-i18next";
-import { ChevronDown, LogOut } from "lucide-react";
-import { authCloudApi, clearToken } from "@/lib/api";
-import { useAppStore } from "@/stores/app";
-import { Button } from "@/components/ui/button";
-
-const LANG_OPTIONS = [
-  { value: "zh", label: "中文" },
-  { value: "en", label: "English" },
-];
+import { useState, useEffect } from "react";
+import { toast } from "sonner";
+import { serverApi, authApi } from "@/lib/api";
+import { ChevronDown, LogOut, Loader2, User as UserIcon } from "lucide-react";
+import { usePreferences, CHAT_FONT_SIZE_LABELS, type ChatFontSize } from "@/stores/preferences";
+import { agentLabel } from "@/lib/agents";
 
 export function GeneralSettings() {
-  const { t, i18n } = useTranslation();
-  const { currentUser } = useAppStore();
+  const [agents, setAgents] = useState<string[]>([]);
+  const [defaultAgent, setDefaultAgent] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  async function handleLogout() {
-    try { await authCloudApi.logout(); } catch {}
-    clearToken();
-    window.location.reload();
-  }
+  const chatFontSize = usePreferences((s) => s.chatFontSize);
+  const setChatFontSize = usePreferences((s) => s.setChatFontSize);
+
+  const [chromeHeadless, setChromeHeadless] = useState(true);
+  const [suggestNextActions, setSuggestNextActions] = useState(true);
+  const [taskTools, setTaskTools] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [currentUser, setCurrentUser] = useState<string>("");
+
+  useEffect(() => {
+    serverApi.availableAgents()
+      .then((data) => {
+        setAgents(data.agents || []);
+        setDefaultAgent(data.default || "");
+      })
+      .catch((e) => console.error("Failed to load agents:", e));
+
+    serverApi.getSettings()
+      .then((data) => {
+        setChromeHeadless(!!data.chrome_headless);
+        setSuggestNextActions(data.suggest_next_actions !== false);
+        setTaskTools(!!data.mcp_tools?.task_management);
+      })
+      .catch((e) => console.error("Failed to load settings:", e));
+
+    authApi.me()
+      .then((data) => setCurrentUser(data.auth_required ? data.username : ""))
+      .catch(() => { /* ignore — boot guard already covered the unauth case */ });
+  }, []);
+
+  const handleChromeHeadlessChange = async (next: boolean) => {
+    if (next === chromeHeadless || saving) return;
+    const prev = chromeHeadless;
+    setChromeHeadless(next);
+    setSaving(true);
+    try {
+      await serverApi.updateSettings({ chrome_headless: next });
+    } catch (e) {
+      setChromeHeadless(prev);
+      console.error("Failed to update chrome headless:", e);
+      toast.error("Failed to update setting", { description: String(e) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleTaskToolsChange = async (next: boolean) => {
+    if (next === taskTools || saving) return;
+    const prev = taskTools;
+    setTaskTools(next);
+    setSaving(true);
+    try {
+      await serverApi.updateSettings({ mcp_tools: { task_management: next } });
+    } catch (e) {
+      setTaskTools(prev);
+      console.error("Failed to update MCP tools:", e);
+      toast.error("Failed to update setting", { description: String(e) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSuggestNextActionsChange = async (next: boolean) => {
+    if (next === suggestNextActions || saving) return;
+    const prev = suggestNextActions;
+    setSuggestNextActions(next);
+    setSaving(true);
+    try {
+      await serverApi.updateSettings({ suggest_next_actions: next });
+    } catch (e) {
+      setSuggestNextActions(prev);
+      console.error("Failed to update next-actions setting:", e);
+      toast.error("Failed to update setting", { description: String(e) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleAgentChange = async (agentId: string) => {
+    if (agentId === defaultAgent || saving) return;
+    setSaving(true);
+    try {
+      const res = await serverApi.setDefaultAgent(agentId);
+      setDefaultAgent(res.default);
+    } catch (e) {
+      console.error("Failed to set default agent:", e);
+      toast.error("Failed to set default agent", { description: String(e) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    if (signingOut) return;
+    setSigningOut(true);
+    try {
+      await authApi.logout();
+    } catch (e) {
+      console.error("Failed to sign out:", e);
+      // Still bounce to /login on failure — the cookie may already be cleared.
+    } finally {
+      window.location.assign("/login");
+    }
+  };
 
   return (
     <section className="space-y-4">
-      {/* User Account */}
-      {currentUser && (
-        <div className="rounded-lg border bg-card">
-          <div className="flex items-center justify-between px-4 py-3">
-            <div>
-              <div className="text-sm font-medium">{t("settings.user")}</div>
-              <div className="text-xs text-muted-foreground mt-0.5">{currentUser.email}</div>
-            </div>
-            <Button
-              onClick={handleLogout}
-              variant="outline"
-              size="sm"
-              className="gap-2 text-destructive hover:text-destructive"
-            >
-              <LogOut className="h-4 w-4" />
-              <span>{t("sidebar.logout")}</span>
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {/* Language */}
+      {/* Default Agent */}
       <div className="rounded-lg border bg-card">
         <div className="flex items-center justify-between px-4 py-3">
           <div>
-            <div className="text-sm font-medium">{t("settings.language")}</div>
-            <div className="text-xs text-muted-foreground mt-0.5">{t("settings.language_desc")}</div>
+            <div className="text-sm font-medium">Default Agent</div>
+            <div className="text-xs text-muted-foreground mt-0.5">New sessions will use this agent</div>
           </div>
           <div className="relative">
             <select
-              value={i18n.language}
-              onChange={(e) => i18n.changeLanguage(e.target.value)}
-              className="appearance-none bg-background border rounded-md px-3 py-1.5 pr-8 text-sm font-medium cursor-pointer hover:bg-accent/50 transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1"
+              value={defaultAgent}
+              onChange={(e) => handleAgentChange(e.target.value)}
+              disabled={saving || agents.length === 0}
+              className="appearance-none bg-background border rounded-md px-3 py-1.5 pr-8 text-sm font-medium cursor-pointer hover:bg-accent/50 transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {LANG_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
+              {agents.map((id) => (
+                <option key={id} value={id}>
+                  {agentLabel(id)}
                 </option>
               ))}
             </select>
@@ -65,6 +141,125 @@ export function GeneralSettings() {
           </div>
         </div>
       </div>
+
+      {/* Chat Font Size */}
+      <div className="rounded-lg border bg-card">
+        <div className="flex items-center justify-between px-4 py-3">
+          <div>
+            <div className="text-sm font-medium">Chat Font Size</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Font size for messages sent and received in the chat area</div>
+          </div>
+          <div className="flex items-center gap-1 bg-muted rounded-md p-0.5">
+            {(["sm", "md", "lg", "xl"] as ChatFontSize[]).map((size) => (
+              <button
+                key={size}
+                onClick={() => setChatFontSize(size)}
+                className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                  chatFontSize === size
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {CHAT_FONT_SIZE_LABELS[size]}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Chrome Headless Mode (E2E Browser Testing) */}
+      <div className="rounded-lg border bg-card">
+        <div className="flex items-center justify-between px-4 py-3">
+          <div>
+            <div className="text-sm font-medium">Chrome Headless Mode</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              Run E2E browser tests without a visible window.
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={chromeHeadless}
+            disabled={saving}
+            onClick={() => handleChromeHeadlessChange(!chromeHeadless)}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${chromeHeadless ? "bg-primary" : "bg-input"}`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-background shadow ring-0 transition-transform ${chromeHeadless ? "translate-x-5" : "translate-x-0"}`}
+            />
+          </button>
+        </div>
+      </div>
+
+      {/* Built-in MCP tool categories (opt-in) */}
+      <div className="rounded-lg border bg-card">
+        <div className="flex items-center justify-between px-4 py-3">
+          <div>
+            <div className="text-sm font-medium">Task Management Tools</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              Expose the create_task, get_task, list_tasks and update_task MCP tools to AI agents.
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={taskTools}
+            disabled={saving}
+            onClick={() => handleTaskToolsChange(!taskTools)}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${taskTools ? "bg-primary" : "bg-input"}`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-background shadow ring-0 transition-transform ${taskTools ? "translate-x-5" : "translate-x-0"}`}
+            />
+          </button>
+        </div>
+      </div>
+
+      {/* Suggested Next Actions */}
+      <div className="rounded-lg border bg-card">
+        <div className="flex items-center justify-between px-4 py-3">
+          <div>
+            <div className="text-sm font-medium">Suggest Next Actions</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              After each reply, the assistant suggests a few next steps, shown as quick-reply buttons.
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={suggestNextActions}
+            disabled={saving}
+            onClick={() => handleSuggestNextActionsChange(!suggestNextActions)}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${suggestNextActions ? "bg-primary" : "bg-input"}`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-background shadow ring-0 transition-transform ${suggestNextActions ? "translate-x-5" : "translate-x-0"}`}
+            />
+          </button>
+        </div>
+      </div>
+
+      {/* Account — signed-in user + sign out */}
+      {currentUser && <div className="flex items-center justify-between pt-4 border-t">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="flex items-center justify-center h-7 w-7 rounded-full bg-muted text-muted-foreground shrink-0">
+            <UserIcon className="h-3.5 w-3.5" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[11px] text-muted-foreground/70 uppercase tracking-wide">Signed in as</div>
+            <div className="text-sm font-medium truncate">{currentUser || "…"}</div>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={handleSignOut}
+          disabled={signingOut}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {signingOut ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <LogOut className="h-3.5 w-3.5" />}
+          Sign out
+        </button>
+      </div>}
     </section>
   );
 }

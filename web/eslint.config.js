@@ -6,7 +6,9 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // Vendored third-party code (border-beam, MIT) — kept close to upstream so it
+  // can be re-synced; not held to our lint rules.
+  globalIgnores(['dist', 'src/components/ui/border-beam/**']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

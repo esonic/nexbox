@@ -14,6 +14,7 @@ type ProjectInfo struct {
 	ID          string
 	Name        string
 	Description string
+	GitRepoPath string
 }
 
 // TaskRef holds task data needed for agent context.
@@ -33,32 +34,42 @@ type AssetRef struct {
 	Status string
 }
 
-// WorkflowRef holds workflow data needed for agent context.
-type WorkflowRef struct {
-	ID        string
-	Name      string
-	Status    string
-	NodeCount int
-	EdgeCount int
-}
-
 // MindmapRef holds mindmap data needed for agent context.
 type MindmapRef struct {
 	Title string
 }
+
+// NextActionsInstruction asks the model to end every reply with a small,
+// machine-parseable block listing 2-3 things the user might do next. The UI
+// parses the <next-actions> block out of the reply and renders the items as
+// quick-reply buttons (clicking one fills the composer). Kept terse so it costs
+// few tokens and the model reliably emits the exact tag format.
+const NextActionsInstruction = `[Next-Actions Suggestions]
+
+End EVERY reply with this block, at the very end of the message:
+
+<next-actions>
+- <what the user might type next, in their voice — imperative, not a question>
+- <a 2nd item, a different angle>
+- <an optional 3rd item>
+</next-actions>
+
+0~3 items. Match the user's language. Plain dash-prefixed lines only.`
 
 // BuildStaticContext constructs the fixed part of the prompt.
 // This is only sent once when creating a new session.
 func BuildStaticContext(project ProjectInfo, sessionID string) string {
 	var sb strings.Builder
 
-	sb.WriteString("You are working within the BoxNex AI platform.\n\n")
+	sb.WriteString("[Platform Context]\n")
+	sb.WriteString("You are working within the Nexbox AI platform.\n\n")
 
 	sb.WriteString(fmt.Sprintf("Project: %s\n", project.Name))
 	if project.Description != "" {
 		sb.WriteString(fmt.Sprintf("Project Description: %s\n", project.Description))
 	}
 	sb.WriteString(fmt.Sprintf("Project ID: %s\n", project.ID))
+	sb.WriteString(fmt.Sprintf("Working Directory: %s\n", project.GitRepoPath))
 
 	return sb.String()
 }
@@ -67,18 +78,18 @@ func BuildStaticContext(project ProjectInfo, sessionID string) string {
 // This is sent with every message to reflect current session references.
 // When project is non-nil, a compact reminder of key project params is included
 // so the model never loses track of project_id or working directory.
-func BuildDynamicContext(project *ProjectInfo, refTasks []TaskRef, refAssets []AssetRef, refWorkflows []WorkflowRef) string {
-	if project == nil && len(refTasks) == 0 && len(refAssets) == 0 && len(refWorkflows) == 0 {
+func BuildDynamicContext(project *ProjectInfo, refTasks []TaskRef, refAssets []AssetRef) string {
+	if project == nil && len(refTasks) == 0 && len(refAssets) == 0 {
 		return ""
 	}
 
 	var sb strings.Builder
 
 	if project != nil {
-		sb.WriteString(fmt.Sprintf("[Project: %s | ID: %s]\n", project.Name, project.ID))
+		sb.WriteString(fmt.Sprintf("[Project: %s | ID: %s | Dir: %s]\n", project.Name, project.ID, project.GitRepoPath))
 	}
 
-	if len(refTasks) == 0 && len(refAssets) == 0 && len(refWorkflows) == 0 {
+	if len(refTasks) == 0 && len(refAssets) == 0 {
 		return sb.String()
 	}
 
@@ -103,35 +114,6 @@ func BuildDynamicContext(project *ProjectInfo, refTasks []TaskRef, refAssets []A
 		sb.WriteString("\n")
 	}
 
-	if len(refWorkflows) > 0 {
-		if len(refTasks) > 0 {
-			sb.WriteString("Referenced workflow for execution:\n")
-			for _, w := range refWorkflows {
-				sb.WriteString(fmt.Sprintf("- [ID: %s] %s (%d nodes, %d edges)\n", w.ID, w.Name, w.NodeCount, w.EdgeCount))
-			}
-
-			var taskIDList []string
-			for _, t := range refTasks {
-				taskIDList = append(taskIDList, t.ID)
-			}
-			allIDs := strings.Join(taskIDList, ",")
-
-			sb.WriteString("\nWorkflow Execution Instructions:\n")
-			sb.WriteString(fmt.Sprintf("All %d tasks above should be executed together in a SINGLE workflow run.\n", len(refTasks)))
-			sb.WriteString("1. Call execute_workflow with:\n")
-			sb.WriteString("   - workflow_id: the workflow ID above\n")
-			sb.WriteString(fmt.Sprintf("   - task_ids: \"%s\" (ALL task IDs, comma-separated)\n", allIDs))
-			sb.WriteString("   - project_id: the current project ID\n")
-			sb.WriteString("Do NOT call execute_workflow once per task. Pass all task IDs in a single call.\n")
-		} else {
-			sb.WriteString("Currently editing workflow:\n")
-			for _, w := range refWorkflows {
-				sb.WriteString(fmt.Sprintf("- [ID: %s] %s (status: %s, %d nodes, %d edges)\n", w.ID, w.Name, w.Status, w.NodeCount, w.EdgeCount))
-			}
-			sb.WriteString("Use get_workflow / update_workflow MCP tools to read or modify workflow definitions.\n")
-		}
-	}
-
 	return sb.String()
 }
 
@@ -139,7 +121,16 @@ func BuildDynamicContext(project *ProjectInfo, refTasks []TaskRef, refAssets []A
 // For new sessions: staticContext + dynamicContext + message
 // For resumed sessions: dynamicContext + message
 // If images are provided, they are referenced as file paths for agents to read.
+//
+// When the message begins with a slash command (e.g. "/review"), we bypass
+// context/image wrapping so the underlying CLI (Claude/Codex) sees the command
+// as the raw first character and can route it through its own slash-command
+// handler instead of treating the Nexbox context preamble as plain text.
 func BuildPrompt(staticContext, dynamicContext, message string, isNewSession bool, images []string) string {
+	if isSlashCommand(message) {
+		return message
+	}
+
 	var parts []string
 
 	if isNewSession && staticContext != "" {
@@ -151,7 +142,7 @@ func BuildPrompt(staticContext, dynamicContext, message string, isNewSession boo
 	if len(images) > 0 {
 		var sb strings.Builder
 		sb.WriteString("[Attached Images]\n")
-		sb.WriteString("The user attached following image(s). Use the Read tool to view them.\n")
+		sb.WriteString("The user has attached the following image(s) for analysis. Use the Read tool to view them.\n")
 		for i, img := range images {
 			sb.WriteString(fmt.Sprintf("  Image %d: %s\n", i+1, img))
 		}
@@ -161,3 +152,37 @@ func BuildPrompt(staticContext, dynamicContext, message string, isNewSession boo
 
 	return strings.Join(parts, "\n")
 }
+
+// BuildInterjectPrompt frames a mid-turn interjection so the model understands
+// it arrived while it was already working. It mirrors the Claude Code TUI's
+// wrapper (the stream-json interface itself adds none): finish the current task,
+// then address the new message.
+func BuildInterjectPrompt(message string, images []string) string {
+	var sb strings.Builder
+	sb.WriteString("The user sent a new message while you were working:\n\n")
+	if len(images) > 0 {
+		sb.WriteString("[Attached Images]\n")
+		sb.WriteString("The user has attached the following image(s) for analysis. Use the Read tool to view them.\n")
+		for i, img := range images {
+			sb.WriteString(fmt.Sprintf("  Image %d: %s\n", i+1, img))
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString(message)
+	sb.WriteString("\n\nIMPORTANT: After completing your current task, address the message above.")
+	return sb.String()
+}
+
+// isSlashCommand reports whether the message is a bare slash command that
+// should be forwarded to the agent CLI verbatim. It returns true when the
+// first non-whitespace character is '/' and the second character is a letter
+// (so absolute paths like "/home/..." are not misinterpreted).
+func isSlashCommand(message string) bool {
+	trimmed := strings.TrimLeft(message, " \t\r\n")
+	if len(trimmed) < 2 || trimmed[0] != '/' {
+		return false
+	}
+	c := trimmed[1]
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+}
+

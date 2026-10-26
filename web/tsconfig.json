@@ -16,7 +16,6 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
     "preserveSymlinks": true,
-    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
     }

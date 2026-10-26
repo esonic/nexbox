@@ -9,8 +9,8 @@ export const SIDEBAR_WIDTH_MAX = 480;
 export const PANEL_WIDTH_MIN = 480;
 export const PANEL_WIDTH_MAX = 1500;
 
+export const FILE_TREE_WIDTH_MIN = 140;
+export const FILE_TREE_WIDTH_MAX = 600;
+
 export const TERMINAL_HEIGHT_MIN = 120;
 export const TERMINAL_HEIGHT_MAX = 600;
-
-export const INPUT_HEIGHT_MIN = 100;
-export const INPUT_HEIGHT_MAX = 500;

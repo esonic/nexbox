@@ -2,37 +2,51 @@ package chrome
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
+	"github.com/chromedp/chromedp/kb"
 	gomcp "github.com/mark3labs/mcp-go/mcp"
 )
 
-// ---------- take_snapshot ----------
+const toolScriptComment = "/** source: BeeHub 用户授权的浏览器操作; summary: 执行浏览器工具的页面交互或检查 **/\n"
+
+// Keep the tab's first Run on its long-lived context. Only subsequent actions
+// use a cancellable context, so a tool timeout cannot destroy the tab's event loop.
+func (s *Server) toolPageContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	pageCtx, err := s.getPageCtx(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	merged, cancel := operationContext(pageCtx, ctx)
+	return merged, cancel, nil
+}
 
 func (s *Server) handleTakeSnapshot(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	pageCtx, err := s.getPageCtx()
+	pageCtx, cancel, err := s.toolPageContext(ctx)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-
+	defer cancel()
 	text, err := s.snapshot.TakeSnapshot(pageCtx)
 	if err != nil {
 		return errResult(fmt.Sprintf("snapshot failed: %v", err)), nil
 	}
-
-	args := req.GetArguments()
-	if fp, _ := args["filePath"].(string); fp != "" {
+	if fp, _ := req.GetArguments()["filePath"].(string); fp != "" {
 		if err := os.WriteFile(fp, []byte(text), 0644); err != nil {
 			return errResult(fmt.Sprintf("write snapshot file: %v", err)), nil
 		}
@@ -41,55 +55,98 @@ func (s *Server) handleTakeSnapshot(ctx context.Context, req gomcp.CallToolReque
 	return txtResult(text), nil
 }
 
-// ---------- navigate_page ----------
-
 func (s *Server) handleNavigatePage(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := req.GetArguments()
 	navType, _ := args["type"].(string)
 	if navType == "" {
 		navType = "url"
 	}
-
-	pageCtx, err := s.getPageCtx()
-	if err != nil {
-		return errResult(err.Error()), nil
-	}
-
+	var action chromedp.Action
 	switch navType {
 	case "url":
 		url, _ := args["url"].(string)
 		if url == "" {
 			return errResult("url is required when type is 'url'"), nil
 		}
-		if err := chromedp.Run(pageCtx, chromedp.Navigate(url)); err != nil {
-			return errResult(fmt.Sprintf("navigate to %s: %v", url, err)), nil
-		}
-		return txtResult(fmt.Sprintf("Navigated to %s", url)), nil
-
+		action = chromedp.Navigate(url)
 	case "back":
-		if err := chromedp.Run(pageCtx, chromedp.NavigateBack()); err != nil {
-			return errResult(fmt.Sprintf("navigate back: %v", err)), nil
-		}
-		return txtResult("Navigated back"), nil
-
+		action = chromedp.ActionFunc(func(ctx context.Context) error { return navigateHistory(ctx, -1) })
 	case "forward":
-		if err := chromedp.Run(pageCtx, chromedp.NavigateForward()); err != nil {
-			return errResult(fmt.Sprintf("navigate forward: %v", err)), nil
-		}
-		return txtResult("Navigated forward"), nil
-
+		action = chromedp.ActionFunc(func(ctx context.Context) error { return navigateHistory(ctx, 1) })
 	case "reload":
-		if err := chromedp.Run(pageCtx, chromedp.Reload()); err != nil {
-			return errResult(fmt.Sprintf("reload: %v", err)), nil
-		}
-		return txtResult("Page reloaded"), nil
-
+		action = chromedp.Reload()
 	default:
 		return errResult(fmt.Sprintf("unknown navigation type: %s", navType)), nil
 	}
+	pageCtx, cancel, err := s.toolPageContext(ctx)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	defer cancel()
+	s.snapshot.Reset()
+	if err := chromedp.Run(pageCtx, action); err != nil {
+		return errResult(fmt.Sprintf("navigate %s: %v", navType, err)), nil
+	}
+	return s.pageInfo(pageCtx)
 }
 
-// ---------- click ----------
+// Chrome's back/forward cache restores a page without the usual load events.
+// Wait for a frame navigation instead of relying solely on a load lifecycle event.
+func navigateHistory(ctx context.Context, delta int64) error {
+	current, entries, err := page.GetNavigationHistory().Do(ctx)
+	if err != nil {
+		return err
+	}
+	next := current + delta
+	if next < 0 || next >= int64(len(entries)) {
+		return fmt.Errorf("no history entry in that direction")
+	}
+	tree, err := page.GetFrameTree().Do(ctx)
+	if err != nil {
+		return err
+	}
+	eventCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	navigated := make(chan struct{}, 1)
+	chromedp.ListenTarget(eventCtx, func(ev any) {
+		match := false
+		switch e := ev.(type) {
+		case *page.EventFrameNavigated:
+			match = e.Frame.ID == tree.Frame.ID
+		case *page.EventNavigatedWithinDocument:
+			match = e.FrameID == tree.Frame.ID
+		}
+		if match {
+			select {
+			case navigated <- struct{}{}:
+			default:
+			}
+		}
+	})
+	if err := page.NavigateToHistoryEntry(entries[next].ID).Do(ctx); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-navigated:
+	}
+	for {
+		var ready bool
+		err := chromedp.Evaluate(toolScriptComment+`document.readyState !== 'loading'`, &ready).Do(ctx)
+		if err == nil && ready {
+			return nil
+		}
+		if err != nil && !strings.Contains(err.Error(), "Cannot find context") && !strings.Contains(err.Error(), "Execution context was destroyed") {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
 
 func (s *Server) handleClick(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := req.GetArguments()
@@ -97,104 +154,102 @@ func (s *Server) handleClick(ctx context.Context, req gomcp.CallToolRequest) (*g
 	if uid == "" {
 		return errResult("uid is required"), nil
 	}
-	dblClick, _ := args["dblClick"].(bool)
-
-	pageCtx, err := s.getPageCtx()
+	dbl, _ := args["dblClick"].(bool)
+	pageCtx, cancel, err := s.toolPageContext(ctx)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-
+	defer cancel()
 	x, y, err := s.snapshot.ElementCenter(pageCtx, uid)
 	if err != nil {
 		return errResult(fmt.Sprintf("resolve element %s: %v", uid, err)), nil
 	}
-
-	clickCount := 1
-	if dblClick {
-		clickCount = 2
+	actions := []chromedp.Action{input.DispatchMouseEvent(input.MouseMoved, x, y), chromedp.MouseClickXY(x, y)}
+	if dbl {
+		actions = append(actions, chromedp.MouseClickXY(x, y, chromedp.ClickCount(2)))
 	}
-
-	if err := chromedp.Run(pageCtx, chromedp.ActionFunc(func(ctx context.Context) error {
-		if err := input.DispatchMouseEvent(input.MouseMoved, x, y).Do(ctx); err != nil {
-			return err
-		}
-		if err := input.DispatchMouseEvent(input.MousePressed, x, y).
-			WithButton(input.Left).WithClickCount(int64(clickCount)).Do(ctx); err != nil {
-			return err
-		}
-		return input.DispatchMouseEvent(input.MouseReleased, x, y).
-			WithButton(input.Left).WithClickCount(int64(clickCount)).Do(ctx)
-	})); err != nil {
+	if err := chromedp.Run(pageCtx, actions...); err != nil {
 		return errResult(fmt.Sprintf("click %s: %v", uid, err)), nil
 	}
-
-	time.Sleep(300 * time.Millisecond)
-	action := "Clicked"
-	if dblClick {
-		action = "Double-clicked"
-	}
-	return txtResult(fmt.Sprintf("%s element uid=%s", action, uid)), nil
+	return txtResult(fmt.Sprintf("Clicked element uid=%s (double=%t). Take a fresh snapshot to inspect the result.", uid, dbl)), nil
 }
-
-// ---------- fill ----------
 
 func (s *Server) handleFill(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := req.GetArguments()
 	uid, _ := args["uid"].(string)
-	value, _ := args["value"].(string)
-	if uid == "" {
-		return errResult("uid is required"), nil
+	value, ok := args["value"].(string)
+	if uid == "" || !ok {
+		return errResult("uid and string value are required"), nil
 	}
-
-	pageCtx, err := s.getPageCtx()
+	pageCtx, cancel, err := s.toolPageContext(ctx)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-
+	defer cancel()
 	objID, err := s.snapshot.ResolveNodeObject(pageCtx, uid)
 	if err != nil {
-		return errResult(fmt.Sprintf("resolve element: %v", err)), nil
+		return errResult(err.Error()), nil
 	}
-
-	if err := chromedp.Run(pageCtx, chromedp.ActionFunc(func(ctx context.Context) error {
-		valueJSON, _ := json.Marshal(value)
-		_, _, err := runtime.CallFunctionOn(fmt.Sprintf(`function(){
-			this.scrollIntoView({block:"center"});
-			this.focus();
-			this.value=%s;
-			this.dispatchEvent(new Event('input',{bubbles:true}));
-			this.dispatchEvent(new Event('change',{bubbles:true}));
-		}`, string(valueJSON))).WithObjectID(objID).Do(ctx)
-		return err
-	})); err != nil {
+	// Use the native prototype setter so framework-controlled inputs receive
+	// a real value change instead of updating only their internal value tracker.
+	// Wrap the value: this cdproto version omits a primitive empty-string
+	// CallArgument value, turning it into JavaScript undefined.
+	fn := toolScriptComment + `function({value}) {
+  const win = this.ownerDocument.defaultView;
+  if (!this.isConnected || this.matches(':disabled') || this.readOnly) throw new Error('Element is detached, disabled or readonly');
+  this.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
+  this.focus();
+  if (this.tagName === 'SELECT') {
+   if (![...this.options].some(o => o.value === value && !o.disabled && !o.parentElement.disabled)) throw new Error('No enabled option with value ' + value);
+   Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype,'value').set.call(this,value);
+  } else if (this.tagName === 'INPUT' || this.tagName === 'TEXTAREA') {
+   if (this.tagName === 'INPUT' && ['file','checkbox','radio','button','submit','reset','image','hidden'].includes(this.type)) throw new Error('Use click for toggles/buttons or upload_file for files');
+   const proto = this.tagName === 'INPUT' ? win.HTMLInputElement.prototype : win.HTMLTextAreaElement.prototype;
+   Object.getOwnPropertyDescriptor(proto,'value').set.call(this,value);
+   if (this.value !== value) throw new Error('Input rejected or normalized the supplied value: ' + this.value);
+  } else if (this.isContentEditable) {
+   this.textContent = value;
+  } else { throw new Error('Element is not editable'); }
+  this.dispatchEvent(new win.Event('input',{bubbles:true,composed:true}));
+  this.dispatchEvent(new win.Event('change',{bubbles:true}));
+ }`
+	if err := chromedp.Run(pageCtx, chromedp.CallFunctionOn(fn, nil, func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams { return p.WithObjectID(objID) }, map[string]string{"value": value})); err != nil {
 		return errResult(fmt.Sprintf("fill %s: %v", uid, err)), nil
 	}
-	return txtResult(fmt.Sprintf("Filled element uid=%s with %q", uid, value)), nil
+	return txtResult(fmt.Sprintf("Filled element uid=%s", uid)), nil
 }
 
-// ---------- type_text ----------
-
 func (s *Server) handleTypeText(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	args := req.GetArguments()
-	text, _ := args["text"].(string)
+	text, _ := req.GetArguments()["text"].(string)
 	if text == "" {
 		return errResult("text is required"), nil
 	}
-
-	pageCtx, err := s.getPageCtx()
+	pageCtx, cancel, err := s.toolPageContext(ctx)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-
+	defer cancel()
+	var editable bool
+	if err := chromedp.Run(pageCtx, chromedp.Evaluate(toolScriptComment+`(() => {
+      let el=document.activeElement;
+      while(el && el.shadowRoot && el.shadowRoot.activeElement) el=el.shadowRoot.activeElement;
+      return !!el && !el.disabled && !el.readOnly && (el.isContentEditable || el.tagName==='TEXTAREA' || (el.tagName==='INPUT' && !['file','checkbox','radio','button','submit','reset','image','hidden'].includes(el.type)));
+    })()`, &editable)); err != nil {
+		return errResult(err.Error()), nil
+	}
+	if !editable {
+		return errResult("No editable element is focused; click or fill an editable element first"), nil
+	}
 	if err := chromedp.Run(pageCtx, chromedp.ActionFunc(func(ctx context.Context) error {
 		for _, ch := range text {
-			keyStr := string(ch)
-			if err := input.DispatchKeyEvent(input.KeyDown).
-				WithKey(keyStr).WithText(keyStr).Do(ctx); err != nil {
-				return err
+			// kb uses some Unicode code points as private representations of
+			// special keys (e.g. U+0105 is Control). Literal non-ASCII text
+			// must use native text insertion instead of that key encoder.
+			var action chromedp.Action = input.InsertText(string(ch))
+			if (ch >= ' ' && ch <= '~') || ch == '\n' || ch == '\r' {
+				action = chromedp.KeyEvent(string(ch))
 			}
-			if err := input.DispatchKeyEvent(input.KeyUp).
-				WithKey(keyStr).Do(ctx); err != nil {
+			if err := action.Do(ctx); err != nil {
 				return err
 			}
 		}
@@ -202,261 +257,256 @@ func (s *Server) handleTypeText(ctx context.Context, req gomcp.CallToolRequest) 
 	})); err != nil {
 		return errResult(fmt.Sprintf("type_text: %v", err)), nil
 	}
-
-	submitKey, _ := args["submitKey"].(string)
-	if submitKey != "" {
-		if err := dispatchKey(pageCtx, submitKey); err != nil {
-			return errResult(fmt.Sprintf("submit key %q: %v", submitKey, err)), nil
+	if key, _ := req.GetArguments()["submitKey"].(string); key != "" {
+		if err := dispatchKey(pageCtx, key); err != nil {
+			return errResult(fmt.Sprintf("submit key: %v", err)), nil
 		}
 	}
-	return txtResult(fmt.Sprintf("Typed %d characters", len(text))), nil
+	return txtResult(fmt.Sprintf("Typed %d characters", utf8.RuneCountInString(text))), nil
 }
 
-// ---------- press_key ----------
-
 func (s *Server) handlePressKey(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	args := req.GetArguments()
-	key, _ := args["key"].(string)
+	key, _ := req.GetArguments()["key"].(string)
 	if key == "" {
 		return errResult("key is required"), nil
 	}
-
-	pageCtx, err := s.getPageCtx()
+	pageCtx, cancel, err := s.toolPageContext(ctx)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-
+	defer cancel()
 	if err := dispatchKey(pageCtx, key); err != nil {
-		return errResult(fmt.Sprintf("press_key %q: %v", key, err)), nil
+		return errResult(fmt.Sprintf("press_key: %v", err)), nil
 	}
-	return txtResult(fmt.Sprintf("Pressed key: %s", key)), nil
+	return txtResult("Pressed key: " + key), nil
 }
 
-// ---------- hover ----------
-
 func (s *Server) handleHover(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	args := req.GetArguments()
-	uid, _ := args["uid"].(string)
+	uid, _ := req.GetArguments()["uid"].(string)
 	if uid == "" {
 		return errResult("uid is required"), nil
 	}
-
-	pageCtx, err := s.getPageCtx()
+	pageCtx, cancel, err := s.toolPageContext(ctx)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-
-	x, y, err := s.snapshot.ElementCenter(pageCtx, uid)
+	defer cancel()
+	x, y, err := s.snapshot.ElementCenter(pageCtx, uid, true)
 	if err != nil {
 		return errResult(fmt.Sprintf("resolve element: %v", err)), nil
 	}
-
-	if err := chromedp.Run(pageCtx, chromedp.ActionFunc(func(ctx context.Context) error {
-		return input.DispatchMouseEvent(input.MouseMoved, x, y).Do(ctx)
-	})); err != nil {
+	if err := chromedp.Run(pageCtx, input.DispatchMouseEvent(input.MouseMoved, x, y)); err != nil {
 		return errResult(fmt.Sprintf("hover: %v", err)), nil
 	}
-	return txtResult(fmt.Sprintf("Hovered over element uid=%s", uid)), nil
+	return txtResult("Hovered over element uid=" + uid), nil
 }
-
-// ---------- take_screenshot ----------
 
 func (s *Server) handleTakeScreenshot(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := req.GetArguments()
-	fullPage, _ := args["fullPage"].(bool)
+	full, _ := args["fullPage"].(bool)
 	uid, _ := args["uid"].(string)
-	filePath, _ := args["filePath"].(string)
-
-	pageCtx, err := s.getPageCtx()
+	fp, _ := args["filePath"].(string)
+	if full && uid != "" {
+		return errResult("uid and fullPage are mutually exclusive"), nil
+	}
+	pageCtx, cancel, err := s.toolPageContext(ctx)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-
-	if filePath == "" {
+	defer cancel()
+	if fp == "" {
 		if err := os.MkdirAll(s.screenshotDir, 0755); err != nil {
-			return errResult(fmt.Sprintf("create screenshot dir: %v", err)), nil
+			return errResult(err.Error()), nil
 		}
-		filePath = filepath.Join(s.screenshotDir,
-			fmt.Sprintf("screenshot_%d.png", time.Now().UnixMilli()))
+		// Unique names also avoid overwrites between concurrent sessions.
+		f, err := os.CreateTemp(s.screenshotDir, "screenshot_*.png")
+		if err != nil {
+			return errResult(err.Error()), nil
+		}
+		fp = f.Name()
+		f.Close()
 	}
-
 	var buf []byte
 	if uid != "" {
-		objID, err := s.snapshot.ResolveNodeObject(pageCtx, uid)
+		obj, err := s.snapshot.ResolveNodeObject(pageCtx, uid)
 		if err != nil {
-			return errResult(fmt.Sprintf("resolve element: %v", err)), nil
+			return errResult(err.Error()), nil
 		}
-		if err := chromedp.Run(pageCtx, chromedp.ActionFunc(func(ctx context.Context) error {
-			res, _, err := runtime.CallFunctionOn(`function(){
-				this.scrollIntoView({block:"center",inline:"center"});
-				var r=this.getBoundingClientRect();
-				return {x:r.x,y:r.y,width:r.width,height:r.height};
-			}`).WithObjectID(objID).WithReturnByValue(true).Do(ctx)
-			if err != nil {
-				return err
-			}
-			var clip struct{ X, Y, Width, Height float64 }
-			if err := parseJSON(res.Value, &clip); err != nil {
-				return err
-			}
-			data, err := page.CaptureScreenshot().
-				WithFormat(page.CaptureScreenshotFormatPng).
-				WithClip(&page.Viewport{
-					X: clip.X, Y: clip.Y,
-					Width: clip.Width, Height: clip.Height,
-					Scale: 1,
-				}).Do(ctx)
-			if err != nil {
-				return err
-			}
-			buf = data
-			return nil
-		})); err != nil {
+		var clip struct{ X, Y, Width, Height float64 }
+		err = chromedp.Run(pageCtx, chromedp.CallFunctionOn(toolScriptComment+`function(){
+   this.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
+   const r=this.getBoundingClientRect();
+   if(r.width<=0 || r.height<=0) throw new Error('Element has no visible bounds');
+   return {x:r.x+window.scrollX,y:r.y+window.scrollY,width:r.width,height:r.height};
+  }`, &clip, func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams { return p.WithObjectID(obj) }), chromedp.ActionFunc(func(ctx context.Context) error {
+			var err error
+			buf, err = page.CaptureScreenshot().WithFormat(page.CaptureScreenshotFormatPng).WithCaptureBeyondViewport(true).WithClip(&page.Viewport{X: clip.X, Y: clip.Y, Width: clip.Width, Height: clip.Height, Scale: 1}).Do(ctx)
+			return err
+		}))
+		if err != nil {
 			return errResult(fmt.Sprintf("screenshot element: %v", err)), nil
 		}
-	} else if fullPage {
-		if err := chromedp.Run(pageCtx, chromedp.FullScreenshot(&buf, 90)); err != nil {
-			return errResult(fmt.Sprintf("full screenshot: %v", err)), nil
-		}
+	} else if full {
+		err = chromedp.Run(pageCtx, chromedp.FullScreenshot(&buf, 100))
 	} else {
-		if err := chromedp.Run(pageCtx, chromedp.CaptureScreenshot(&buf)); err != nil {
-			return errResult(fmt.Sprintf("screenshot: %v", err)), nil
-		}
+		err = chromedp.Run(pageCtx, chromedp.CaptureScreenshot(&buf))
 	}
-
-	if err := os.WriteFile(filePath, buf, 0644); err != nil {
+	if err != nil {
+		return errResult(fmt.Sprintf("screenshot: %v", err)), nil
+	}
+	if err := os.WriteFile(fp, buf, 0644); err != nil {
 		return errResult(fmt.Sprintf("save screenshot: %v", err)), nil
 	}
-	return txtResult(fmt.Sprintf("Screenshot saved to %s (%d bytes)", filePath, len(buf))), nil
+	return txtResult(fmt.Sprintf("Screenshot saved to %s (%d bytes)", fp, len(buf))), nil
 }
-
-// ---------- evaluate_script ----------
 
 func (s *Server) handleEvaluateScript(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	args := req.GetArguments()
 	fn, _ := args["function"].(string)
-	if fn == "" {
+	if strings.TrimSpace(fn) == "" {
 		return errResult("function is required"), nil
 	}
-
-	pageCtx, err := s.getPageCtx()
-	if err != nil {
-		return errResult(err.Error()), nil
-	}
-
 	var uidArgs []struct {
 		UID string `json:"uid"`
 	}
-	if rawArgs, ok := args["args"]; ok {
-		b, _ := json.Marshal(rawArgs)
-		_ = json.Unmarshal(b, &uidArgs)
+	if raw, ok := args["args"]; ok {
+		b, err := json.Marshal(raw)
+		if err != nil {
+			return errResult("invalid args"), nil
+		}
+		if err := json.Unmarshal(b, &uidArgs); err != nil || string(b) == "null" {
+			return errResult("args must be an array of {uid: string}"), nil
+		}
+		for _, a := range uidArgs {
+			if a.UID == "" {
+				return errResult("each arg requires a non-empty uid"), nil
+			}
+		}
 	}
-
-	var resultJSON string
-	if err := chromedp.Run(pageCtx, chromedp.ActionFunc(func(ctx context.Context) error {
-		if len(uidArgs) == 0 {
-			res, _, err := runtime.Evaluate(fn + "()").
-				WithAwaitPromise(true).
-				WithReturnByValue(true).Do(ctx)
+	pageCtx, cancel, err := s.toolPageContext(ctx)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	defer cancel()
+	// CallFunctionOn has no CDP execution-timeout option. Interrupt evaluation
+	// on cancellation, and finish that recovery before allowing the next tool
+	// to execute, so a timed-out busy loop cannot wedge the renderer or kill a
+	// subsequent script.
+	recovered := make(chan struct{})
+	stopRecovery := context.AfterFunc(ctx, func() {
+		defer close(recovered)
+		recoveryCtx, recoveryCancel := context.WithTimeout(context.WithoutCancel(pageCtx), time.Second)
+		defer recoveryCancel()
+		_ = chromedp.Run(recoveryCtx, runtime.TerminateExecution())
+	})
+	defer func() {
+		if !stopRecovery() {
+			<-recovered
+		}
+	}()
+	var result *runtime.RemoteObject
+	if len(uidArgs) == 0 {
+		err = chromedp.Run(pageCtx, chromedp.Evaluate(toolScriptComment+"("+fn+"\n)()", &result, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+			p = p.WithAwaitPromise(true).WithReturnByValue(true).WithUserGesture(true)
+			if deadline, ok := ctx.Deadline(); ok {
+				p = p.WithTimeout(runtime.TimeDelta(time.Until(deadline).Milliseconds()))
+			}
+			return p
+		}))
+	} else {
+		callArgs := make([]*runtime.CallArgument, 0, len(uidArgs))
+		for _, a := range uidArgs {
+			obj, resolveErr := s.snapshot.ResolveNodeObject(pageCtx, a.UID)
+			if resolveErr != nil {
+				return errResult(resolveErr.Error()), nil
+			}
+			callArgs = append(callArgs, &runtime.CallArgument{ObjectID: obj})
+		}
+		// Execute in the argument element's realm (also supports same-origin frames).
+		err = chromedp.Run(pageCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+			var exp *runtime.ExceptionDetails
+			var err error
+			result, exp, err = runtime.CallFunctionOn(toolScriptComment + fn).WithObjectID(callArgs[0].ObjectID).WithArguments(callArgs).WithAwaitPromise(true).WithReturnByValue(true).WithUserGesture(true).Do(ctx)
 			if err != nil {
 				return err
 			}
-			resultJSON = string(res.Value)
-			return nil
-		}
-
-		callArgs := make([]*runtime.CallArgument, 0, len(uidArgs))
-		for _, ua := range uidArgs {
-			objID, err := s.snapshot.ResolveNodeObject(pageCtx, ua.UID)
-			if err != nil {
-				return fmt.Errorf("resolve arg uid %s: %w", ua.UID, err)
+			if exp != nil {
+				return exp
 			}
-			callArgs = append(callArgs, &runtime.CallArgument{ObjectID: objID})
-		}
-
-		windowObj, _, err := runtime.Evaluate("window").Do(ctx)
-		if err != nil {
-			return err
-		}
-		res, _, err := runtime.CallFunctionOn(fn).
-			WithObjectID(windowObj.ObjectID).
-			WithArguments(callArgs).
-			WithAwaitPromise(true).
-			WithReturnByValue(true).Do(ctx)
-		if err != nil {
-			return err
-		}
-		resultJSON = string(res.Value)
-		return nil
-	})); err != nil {
+			return nil
+		}))
+	}
+	if err != nil {
 		return errResult(fmt.Sprintf("evaluate: %v", err)), nil
 	}
-
-	return txtResult(fmt.Sprintf("```json\n%s\n```", resultJSON)), nil
+	if result == nil {
+		return errResult("evaluate returned no result"), nil
+	}
+	if result.Type == runtime.TypeUndefined {
+		return txtResult("undefined"), nil
+	}
+	if result.UnserializableValue != "" {
+		return txtResult(fmt.Sprintf("JavaScript %s: %s", result.Type, result.UnserializableValue)), nil
+	}
+	if result.Type == runtime.TypeFunction || result.Type == runtime.TypeSymbol || result.Subtype == "node" || !json.Valid(result.Value) {
+		return errResult(fmt.Sprintf("result of type %s is not JSON-serializable; return plain data", result.Type)), nil
+	}
+	return txtResult(fmt.Sprintf("```json\n%s\n```", result.Value)), nil
 }
 
-// ---------- wait_for ----------
-
 func (s *Server) handleWaitFor(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	args := req.GetArguments()
 	var texts []string
-	if raw, ok := args["text"]; ok {
-		b, _ := json.Marshal(raw)
-		_ = json.Unmarshal(b, &texts)
+	b, _ := json.Marshal(req.GetArguments()["text"])
+	if err := json.Unmarshal(b, &texts); err != nil || len(texts) == 0 {
+		return errResult("text must be a non-empty array of strings"), nil
 	}
-	if len(texts) == 0 {
-		return errResult("text array is required"), nil
+	for _, t := range texts {
+		if t == "" {
+			return errResult("text entries must not be empty"), nil
+		}
 	}
-
-	timeoutMs := 30000.0
-	if v, ok := args["timeout"].(float64); ok && v > 0 {
-		timeoutMs = v
-	}
-
-	pageCtx, err := s.getPageCtx()
+	pageCtx, cancel, err := s.toolPageContext(ctx)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-
-	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	var foundText string
+	defer cancel()
+	textJSON, _ := json.Marshal(texts)
+	var found string
+	expression := toolScriptComment + `(() => {
+        const body=document.body;if(!body) return '';
+        const texts=` + string(textJSON) + `;return texts.find(text=>body.innerText.includes(text)) || '';
+    })()`
 	for {
-		var body string
-		if err := chromedp.Run(pageCtx, chromedp.TextContent("body", &body, chromedp.ByQuery)); err == nil {
-			for _, t := range texts {
-				if strings.Contains(body, t) {
-					foundText = t
-					break
-				}
-			}
+		if err := chromedp.Run(pageCtx, chromedp.Evaluate(expression, &found)); err != nil {
+			return errResult(fmt.Sprintf("wait_for: %v", err)), nil
 		}
-		if foundText != "" {
+		if found != "" {
 			break
 		}
-		if time.Now().After(deadline) {
-			return errResult(fmt.Sprintf("timeout after %dms waiting for text: %v", int(timeoutMs), texts)), nil
+		select {
+		case <-pageCtx.Done():
+			return errResult(fmt.Sprintf("wait_for: %v", pageCtx.Err())), nil
+		case <-time.After(100 * time.Millisecond):
 		}
-		<-ticker.C
 	}
-
-	snap, _ := s.snapshot.TakeSnapshot(pageCtx)
-	return txtResult(fmt.Sprintf("Found text %q on page.\n\nPage snapshot:\n%s", foundText, snap)), nil
+	snap, err := s.snapshot.TakeSnapshot(pageCtx)
+	if err != nil {
+		return errResult(fmt.Sprintf("text found but snapshot failed: %v", err)), nil
+	}
+	return txtResult(fmt.Sprintf("Found text %q on page.\n\nPage snapshot:\n%s", found, snap)), nil
 }
 
-// ---------- list_pages ----------
-
 func (s *Server) handleListPages(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return errResult(err.Error()), nil
+	}
 	if err := s.ensureBrowser(); err != nil {
 		return errResult(err.Error()), nil
 	}
-	pages, current, err := s.browser.ListPages()
+	pages, current, err := s.browser.ListPages(ctx)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-
 	var sb strings.Builder
 	sb.WriteString("Open pages:\n")
 	for _, p := range pages {
@@ -464,185 +514,221 @@ func (s *Server) handleListPages(ctx context.Context, req gomcp.CallToolRequest)
 		if p.ID == current {
 			marker = "▶ "
 		}
-		sb.WriteString(fmt.Sprintf("%sid=%d  %s  %s\n", marker, p.ID, p.URL, p.Title))
+		fmt.Fprintf(&sb, "%sid=%d  %s  %s\n", marker, p.ID, p.URL, p.Title)
 	}
 	return txtResult(sb.String()), nil
 }
 
-// ---------- select_page ----------
+func pageIDArg(req gomcp.CallToolRequest) (int, error) {
+	b, _ := json.Marshal(req.GetArguments()["pageId"])
+	var id float64
+	if err := json.Unmarshal(b, &id); err != nil || id < 1 || math.Trunc(id) != id || id > float64(1<<31-1) {
+		return 0, fmt.Errorf("pageId must be a positive integer")
+	}
+	return int(id), nil
+}
 
 func (s *Server) handleSelectPage(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	id, err := pageIDArg(req)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
 	if err := s.ensureBrowser(); err != nil {
 		return errResult(err.Error()), nil
 	}
-	args := req.GetArguments()
-	pageID, ok := args["pageId"].(float64)
-	if !ok {
-		return errResult("pageId is required"), nil
-	}
-	if err := s.browser.SelectPage(int(pageID)); err != nil {
+	if _, _, err := s.browser.ListPages(ctx); err != nil {
 		return errResult(err.Error()), nil
 	}
-	return txtResult(fmt.Sprintf("Switched to page %d", int(pageID))), nil
+	if err := s.browser.SelectPage(id); err != nil {
+		return errResult(err.Error()), nil
+	}
+	s.snapshot.Reset()
+	return txtResult(fmt.Sprintf("Switched to page %d; take_snapshot to get fresh element UIDs", id)), nil
 }
-
-// ---------- new_page ----------
 
 func (s *Server) handleNewPage(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	if err := s.ensureBrowser(); err != nil {
 		return errResult(err.Error()), nil
 	}
-	args := req.GetArguments()
-	url, _ := args["url"].(string)
-	pi, err := s.browser.NewPage(url)
+	url, _ := req.GetArguments()["url"].(string)
+	pi, err := s.browser.NewPageContext(ctx, url)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-	return txtResult(fmt.Sprintf("Created new page id=%d, navigated to %s", pi.ID, pi.URL)), nil
+	s.snapshot.Reset()
+	return txtResult(fmt.Sprintf("Created and selected page id=%d, URL=%s", pi.ID, pi.URL)), nil
 }
 
-// ---------- get_page_info ----------
-
-func (s *Server) handleGetPageInfo(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	pageCtx, err := s.getPageCtx()
+func (s *Server) handleClosePage(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	id, err := pageIDArg(req)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	if err := s.ensureBrowser(); err != nil {
+		return errResult(err.Error()), nil
+	}
+	if err := s.browser.ClosePage(id, ctx); err != nil {
+		return errResult(err.Error()), nil
+	}
+	s.snapshot.Reset()
+	return txtResult(fmt.Sprintf("Closed page %d", id)), nil
+}
+
+func (s *Server) handleGetPageInfo(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	pageCtx, cancel, err := s.toolPageContext(ctx)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	defer cancel()
+	return s.pageInfo(pageCtx)
+}
+
+func (s *Server) pageInfo(ctx context.Context) (*gomcp.CallToolResult, error) {
+	if dialog := s.browser.CurrentDialog(); dialog != nil {
+		return txtResult(fmt.Sprintf("Open %s dialog: %s\nUse handle_dialog to accept or dismiss it.", dialog.Type, dialog.Message)), nil
+	}
 	var url, title string
-	if err := chromedp.Run(pageCtx,
-		chromedp.Location(&url),
-		chromedp.Title(&title),
-	); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Location(&url), chromedp.Title(&title)); err != nil {
 		return errResult(fmt.Sprintf("get page info: %v", err)), nil
 	}
 	return txtResult(fmt.Sprintf("URL: %s\nTitle: %s", url, title)), nil
 }
 
-// ---------- helpers ----------
-
-func dispatchKey(pageCtx context.Context, combo string) error {
-	return chromedp.Run(pageCtx, chromedp.ActionFunc(func(ctx context.Context) error {
-		parts := strings.Split(combo, "+")
-		key := parts[len(parts)-1]
-		modifiers := parts[:len(parts)-1]
-
-		var mod int64
-		for _, m := range modifiers {
-			switch strings.ToLower(m) {
-			case "control", "ctrl":
-				mod |= 1 << 1
-			case "shift":
-				mod |= 1 << 3
-			case "alt":
-				mod |= 1
-			case "meta", "command", "cmd":
-				mod |= 1 << 2
-			}
+func (s *Server) handleUploadFile(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	uid, _ := req.GetArguments()["uid"].(string)
+	var files []string
+	b, _ := json.Marshal(req.GetArguments()["files"])
+	if uid == "" || json.Unmarshal(b, &files) != nil || string(b) == "null" {
+		return errResult("uid and files array are required"), nil
+	}
+	for _, f := range files {
+		if !filepath.IsAbs(f) {
+			return errResult("file paths must be absolute on the Chrome host"), nil
 		}
-
-		for _, m := range modifiers {
-			if err := input.DispatchKeyEvent(input.KeyDown).WithKey(normalizeKeyName(m)).Do(ctx); err != nil {
-				return err
-			}
+	}
+	pageCtx, cancel, err := s.toolPageContext(ctx)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	defer cancel()
+	obj, err := s.snapshot.ResolveNodeObject(pageCtx, uid)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	err = chromedp.Run(pageCtx, chromedp.CallFunctionOn(toolScriptComment+`function(count){
+  if(this.tagName!=='INPUT'||this.type!=='file'||this.matches(':disabled')) throw new Error('Element is not an enabled file input');
+  if(count>1&&!this.multiple) throw new Error('File input does not allow multiple files');
+        if(count===0){
+            this.value='';
+            const win=this.ownerDocument.defaultView;
+            this.dispatchEvent(new win.Event('input',{bubbles:true}));
+            this.dispatchEvent(new win.Event('change',{bubbles:true}));
+        }
+ }`, nil, func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams { return p.WithObjectID(obj) }, len(files)), chromedp.ActionFunc(func(ctx context.Context) error {
+		if len(files) == 0 {
+			return nil
 		}
-		if err := input.DispatchKeyEvent(input.KeyDown).
-			WithKey(normalizeKeyName(key)).WithModifiers(input.Modifier(mod)).Do(ctx); err != nil {
-			return err
-		}
-		if err := input.DispatchKeyEvent(input.KeyUp).
-			WithKey(normalizeKeyName(key)).WithModifiers(input.Modifier(mod)).Do(ctx); err != nil {
-			return err
-		}
-		for i := len(modifiers) - 1; i >= 0; i-- {
-			if err := input.DispatchKeyEvent(input.KeyUp).WithKey(normalizeKeyName(modifiers[i])).Do(ctx); err != nil {
-				return err
-			}
-		}
-		return nil
+		return dom.SetFileInputFiles(files).WithObjectID(obj).Do(ctx)
 	}))
+	if err != nil {
+		return errResult(fmt.Sprintf("upload_file: %v", err)), nil
+	}
+	return txtResult(fmt.Sprintf("Selected %d file(s) for uid=%s", len(files), uid)), nil
+}
+
+func (s *Server) handleDialog(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	action, _ := req.GetArguments()["action"].(string)
+	if action != "accept" && action != "dismiss" {
+		return errResult("action must be accept or dismiss"), nil
+	}
+	text, _ := req.GetArguments()["promptText"].(string)
+	if err := s.browser.HandleDialog(ctx, action == "accept", text); err != nil {
+		return errResult(fmt.Sprintf("handle_dialog: %v", err)), nil
+	}
+	return txtResult("Dialog " + action + "ed"), nil
+}
+
+func dispatchKey(ctx context.Context, combo string) error {
+	parts := strings.Split(combo, "+")
+	key := normalizeKeyName(parts[len(parts)-1])
+	modifiers := parts[:len(parts)-1]
+	if strings.HasSuffix(combo, "+") {
+		key = "+"
+		prefix := strings.TrimSuffix(strings.TrimSuffix(combo, "+"), "+")
+		modifiers = nil
+		if prefix != "" {
+			modifiers = strings.Split(prefix, "+")
+		}
+	}
+	var mods []input.Modifier
+	for _, m := range modifiers {
+		switch strings.ToLower(m) {
+		case "ctrl", "control":
+			mods = append(mods, input.ModifierCtrl)
+		case "shift":
+			mods = append(mods, input.ModifierShift)
+		case "alt":
+			mods = append(mods, input.ModifierAlt)
+		case "meta", "cmd", "command":
+			mods = append(mods, input.ModifierMeta)
+		default:
+			return fmt.Errorf("unsupported modifier %q", m)
+		}
+	}
+	named := map[string]string{"Enter": kb.Enter, "Tab": kb.Tab, "Escape": kb.Escape, "Backspace": kb.Backspace, "Delete": kb.Delete, "ArrowUp": kb.ArrowUp, "ArrowDown": kb.ArrowDown, "ArrowLeft": kb.ArrowLeft, "ArrowRight": kb.ArrowRight, "Home": kb.Home, "End": kb.End, "PageUp": kb.PageUp, "PageDown": kb.PageDown}
+	for i, r := range []string{kb.F1, kb.F2, kb.F3, kb.F4, kb.F5, kb.F6, kb.F7, kb.F8, kb.F9, kb.F10, kb.F11, kb.F12} {
+		named[fmt.Sprintf("F%d", i+1)] = r
+	}
+	if r, ok := named[key]; ok {
+		key = r
+	} else if utf8.RuneCountInString(key) != 1 {
+		return fmt.Errorf("unsupported key %q", key)
+	}
+	if len(mods) > 0 {
+		shift := false
+		for _, m := range mods {
+			if m == input.ModifierShift {
+				shift = true
+			}
+		}
+		if shift {
+			shifted := map[string]string{"1": "!", "2": "@", "3": "#", "4": "$", "5": "%", "6": "^", "7": "&", "8": "*", "9": "(", "0": ")", "-": "_", "=": "+", "[": "{", "]": "}", ";": ":", "'": "\"", ",": "<", ".": ">", "/": "?", "`": "~", "\\": "|"}
+			if v, ok := shifted[key]; ok {
+				key = v
+			} else {
+				key = strings.ToUpper(key)
+			}
+		} else {
+			key = strings.ToLower(key)
+		}
+	}
+	return chromedp.Run(ctx, chromedp.KeyEvent(key, chromedp.KeyModifiers(mods...)))
 }
 
 func normalizeKeyName(name string) string {
+	for _, key := range []string{"Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"} {
+		if strings.EqualFold(name, key) {
+			return key
+		}
+	}
 	switch strings.ToLower(name) {
-	case "enter", "return":
+	case "return":
 		return "Enter"
-	case "tab":
-		return "Tab"
-	case "escape", "esc":
+	case "esc":
 		return "Escape"
-	case "backspace":
-		return "Backspace"
-	case "delete":
-		return "Delete"
 	case "space":
 		return " "
-	case "arrowup", "up":
+	case "up":
 		return "ArrowUp"
-	case "arrowdown", "down":
+	case "down":
 		return "ArrowDown"
-	case "arrowleft", "left":
+	case "left":
 		return "ArrowLeft"
-	case "arrowright", "right":
+	case "right":
 		return "ArrowRight"
-	case "control", "ctrl":
-		return "Control"
-	case "shift":
-		return "Shift"
-	case "alt":
-		return "Alt"
-	case "meta", "command", "cmd":
-		return "Meta"
-	case "home":
-		return "Home"
-	case "end":
-		return "End"
-	case "pageup":
-		return "PageUp"
-	case "pagedown":
-		return "PageDown"
-	default:
-		if len(name) == 1 {
-			return name
-		}
-		return name
 	}
+	return name
 }
 
-func parseJSON(data []byte, v interface{}) error {
-	return json.Unmarshal(data, v)
-}
-
-func txtResult(text string) *gomcp.CallToolResult {
-	return &gomcp.CallToolResult{
-		Content: []gomcp.Content{
-			gomcp.TextContent{Type: "text", Text: text},
-		},
-	}
-}
-
-func errResult(msg string) *gomcp.CallToolResult {
-	return &gomcp.CallToolResult{
-		Content: []gomcp.Content{
-			gomcp.TextContent{Type: "text", Text: "Error: " + msg},
-		},
-		IsError: true,
-	}
-}
-
-// imageResult returns an MCP result with a base64-encoded image.
-// Unused for now (we save to file), but kept for future use.
-func imageResult(data []byte, mimeType string) *gomcp.CallToolResult {
-	return &gomcp.CallToolResult{
-		Content: []gomcp.Content{
-			gomcp.ImageContent{
-				Type:     "image",
-				MIMEType: mimeType,
-				Data:     base64.StdEncoding.EncodeToString(data),
-			},
-		},
-	}
-}
-
-// Keep compiler happy
-var _ = imageResult
-var _ = log.Printf
+func txtResult(text string) *gomcp.CallToolResult { return gomcp.NewToolResultText(text) }
+func errResult(msg string) *gomcp.CallToolResult  { return gomcp.NewToolResultError(msg) }

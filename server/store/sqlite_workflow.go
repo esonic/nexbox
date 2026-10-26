@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,8 +14,8 @@ func (s *SQLiteStore) CreateWorkflow(projectID, name, description, createdBy str
 	now := time.Now()
 
 	_, err := s.db.Exec(`
-		INSERT INTO workflows (id, namespace_id, project_id, name, description, definition, version, status, created_by, created_at, updated_at)
-		VALUES (?, 'local', ?, ?, ?, ?, 1, 'draft', ?, ?, ?)
+		INSERT INTO workflows (id, namespace_id, project_id, name, description, definition, version, status, created_by, created_at, updated_at, worktree_mode)
+		VALUES (?, 'local', ?, ?, ?, ?, 1, 'draft', ?, ?, ?, 'local')
 	`, id, projectID, name, description, string(definition), createdBy, now, now)
 	if err != nil {
 		return nil, err
@@ -29,10 +30,10 @@ func (s *SQLiteStore) GetWorkflow(id string) (*Workflow, error) {
 	var defStr string
 
 	err := s.db.QueryRow(`
-		SELECT id, project_id, name, description, definition, version, status, created_by, created_at, updated_at
+		SELECT id, project_id, name, description, definition, version, status, created_by, created_at, updated_at, worktree_mode
 		FROM workflows
 		WHERE id = ?
-	`, id).Scan(&w.ID, &w.ProjectID, &w.Name, &w.Description, &defStr, &w.Version, &w.Status, &w.CreatedBy, &w.CreatedAt, &w.UpdatedAt)
+	`, id).Scan(&w.ID, &w.ProjectID, &w.Name, &w.Description, &defStr, &w.Version, &w.Status, &w.CreatedBy, &w.CreatedAt, &w.UpdatedAt, &w.WorktreeMode)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -42,13 +43,18 @@ func (s *SQLiteStore) GetWorkflow(id string) (*Workflow, error) {
 	}
 
 	w.Definition = []byte(defStr)
+	w.Schedule = s.GetLocalSchedule(id)
 	return &w, nil
 }
 
 // ListWorkflows lists workflows for a project
 func (s *SQLiteStore) ListWorkflows(projectID string) ([]Workflow, error) {
+	// Fetch all local schedules first; opening rows below holds the single
+	// SQLite connection, so a nested query would self-deadlock.
+	schedules := s.GetAllLocalSchedules()
+
 	rows, err := s.db.Query(`
-		SELECT id, project_id, name, description, definition, version, status, created_by, created_at, updated_at
+		SELECT id, project_id, name, description, definition, version, status, created_by, created_at, updated_at, worktree_mode
 		FROM workflows
 		WHERE project_id = ?
 		ORDER BY updated_at DESC
@@ -62,10 +68,11 @@ func (s *SQLiteStore) ListWorkflows(projectID string) ([]Workflow, error) {
 	for rows.Next() {
 		var w Workflow
 		var defStr string
-		if err := rows.Scan(&w.ID, &w.ProjectID, &w.Name, &w.Description, &defStr, &w.Version, &w.Status, &w.CreatedBy, &w.CreatedAt, &w.UpdatedAt); err != nil {
+		if err := rows.Scan(&w.ID, &w.ProjectID, &w.Name, &w.Description, &defStr, &w.Version, &w.Status, &w.CreatedBy, &w.CreatedAt, &w.UpdatedAt, &w.WorktreeMode); err != nil {
 			return nil, err
 		}
 		w.Definition = []byte(defStr)
+		w.Schedule = schedules[w.ID].Schedule
 		workflows = append(workflows, w)
 	}
 
@@ -81,7 +88,7 @@ func (s *SQLiteStore) ListAllWorkflows() ([]Workflow, error) {
 	schedules := s.GetAllLocalSchedules()
 
 	rows, err := s.db.Query(`
-		SELECT id, project_id, name, description, definition, version, status, created_by, created_at, updated_at
+		SELECT id, project_id, name, description, definition, version, status, created_by, created_at, updated_at, worktree_mode
 		FROM workflows
 		ORDER BY updated_at DESC
 	`)
@@ -93,11 +100,13 @@ func (s *SQLiteStore) ListAllWorkflows() ([]Workflow, error) {
 	for rows.Next() {
 		var w Workflow
 		var defStr string
-		if err := rows.Scan(&w.ID, &w.ProjectID, &w.Name, &w.Description, &defStr, &w.Version, &w.Status, &w.CreatedBy, &w.CreatedAt, &w.UpdatedAt); err != nil {
+		if err := rows.Scan(&w.ID, &w.ProjectID, &w.Name, &w.Description, &defStr, &w.Version, &w.Status, &w.CreatedBy, &w.CreatedAt, &w.UpdatedAt, &w.WorktreeMode); err != nil {
 			return nil, err
 		}
 		w.Definition = []byte(defStr)
-		w.Schedule = schedules[w.ID]
+		entry := schedules[w.ID]
+		w.Schedule = entry.Schedule
+		w.ScheduleUpdatedAt = entry.UpdatedAt
 		workflows = append(workflows, w)
 	}
 
@@ -148,6 +157,14 @@ func (s *SQLiteStore) UpdateWorkflow(id string, req UpdateWorkflowRequest) (*Wor
 		query += `, status = ?`
 		args = append(args, *req.Status)
 	}
+	if req.WorktreeMode != nil {
+		mode := *req.WorktreeMode
+		if mode != "local" && mode != "worktree" {
+			return nil, NewValidationError("worktree_mode must be 'local' or 'worktree'")
+		}
+		query += `, worktree_mode = ?`
+		args = append(args, mode)
+	}
 	query += ` WHERE id = ?`
 	args = append(args, id)
 
@@ -158,13 +175,21 @@ func (s *SQLiteStore) UpdateWorkflow(id string, req UpdateWorkflowRequest) (*Wor
 	return s.GetWorkflow(id)
 }
 
+// LocalScheduleEntry holds a workflow's locally-stored schedule and the time
+// it was last saved. UpdatedAt lets the scheduler avoid firing a freshly-saved
+// schedule retroactively for a slot earlier today.
+type LocalScheduleEntry struct {
+	Schedule  string
+	UpdatedAt time.Time
+}
+
 // SetLocalSchedule upserts a schedule string for a workflow in the local workflow_schedules table.
 // Used in cloud mode to persist schedule locally without syncing to remote.
 func (s *SQLiteStore) SetLocalSchedule(id, schedule string) error {
 	_, err := s.db.Exec(`
-		INSERT INTO workflow_schedules (workflow_id, schedule) VALUES (?, ?)
-		ON CONFLICT(workflow_id) DO UPDATE SET schedule = excluded.schedule
-	`, id, schedule)
+		INSERT INTO workflow_schedules (workflow_id, schedule, updated_at) VALUES (?, ?, ?)
+		ON CONFLICT(workflow_id) DO UPDATE SET schedule = excluded.schedule, updated_at = excluded.updated_at
+	`, id, schedule, time.Now().Unix())
 	return err
 }
 
@@ -175,20 +200,69 @@ func (s *SQLiteStore) GetLocalSchedule(id string) string {
 	return schedule
 }
 
-// GetAllLocalSchedules returns a map of workflow_id → schedule for all workflows
-// that have a non-empty local schedule. Used to overlay schedules on remote workflows.
-func (s *SQLiteStore) GetAllLocalSchedules() map[string]string {
-	rows, err := s.db.Query(`SELECT workflow_id, schedule FROM workflow_schedules WHERE schedule != ''`)
+// GetAllLocalSchedules returns a map of workflow_id → schedule entry for all
+// workflows that have a non-empty local schedule. Used to overlay schedules on
+// remote workflows.
+func (s *SQLiteStore) GetAllLocalSchedules() map[string]LocalScheduleEntry {
+	rows, err := s.db.Query(`SELECT workflow_id, schedule, updated_at FROM workflow_schedules WHERE schedule != ''`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	result := make(map[string]LocalScheduleEntry)
+	for rows.Next() {
+		var wfID, schedule string
+		var updatedAt int64
+		if err := rows.Scan(&wfID, &schedule, &updatedAt); err == nil {
+			result[wfID] = LocalScheduleEntry{
+				Schedule:  schedule,
+				UpdatedAt: time.Unix(updatedAt, 0),
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[store] iterate local schedules: %v", err)
+	}
+	return result
+}
+
+// SetLocalWorktreeMode upserts the worktree_mode for a workflow into the local
+// override table. mode must be "local" or "worktree" (caller validates).
+// Stored locally so worktree_mode never travels to a cloud server that may
+// not understand the field.
+func (s *SQLiteStore) SetLocalWorktreeMode(id, mode string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO workflow_worktree_modes (workflow_id, mode) VALUES (?, ?)
+		ON CONFLICT(workflow_id) DO UPDATE SET mode = excluded.mode
+	`, id, mode)
+	return err
+}
+
+// GetLocalWorktreeMode returns the locally-stored worktree_mode for a workflow,
+// or "" if none has been set.
+func (s *SQLiteStore) GetLocalWorktreeMode(id string) string {
+	var mode string
+	_ = s.db.QueryRow(`SELECT mode FROM workflow_worktree_modes WHERE workflow_id = ?`, id).Scan(&mode)
+	return mode
+}
+
+// GetAllLocalWorktreeModes returns a map of workflow_id → mode for all
+// workflows that have a non-default worktree mode set.
+func (s *SQLiteStore) GetAllLocalWorktreeModes() map[string]string {
+	rows, err := s.db.Query(`SELECT workflow_id, mode FROM workflow_worktree_modes`)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
 	result := make(map[string]string)
 	for rows.Next() {
-		var wfID, schedule string
-		if err := rows.Scan(&wfID, &schedule); err == nil {
-			result[wfID] = schedule
+		var wfID, mode string
+		if err := rows.Scan(&wfID, &mode); err == nil {
+			result[wfID] = mode
 		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[store] iterate local worktree modes: %v", err)
 	}
 	return result
 }
@@ -245,13 +319,13 @@ func (s *SQLiteStore) GetExecution(id string) (*WorkflowExecution, error) {
 
 	err := s.db.QueryRow(`
 		SELECT id, workflow_id, workflow_version, definition_snapshot, status, triggered_by, user_context,
-		       error, started_at, completed_at, duration_ms, created_at
+		       error, started_at, completed_at, duration_ms, created_at, worktree_path
 		FROM wf_executions
 		WHERE id = ?
 	`, id).Scan(
 		&e.ID, &e.WorkflowID, &e.WorkflowVersion, &e.DefinitionSnapshot,
 		&e.Status, &e.TriggeredBy, &e.UserContext,
-		&e.Error, &e.StartedAt, &e.CompletedAt, &e.DurationMs, &e.CreatedAt,
+		&e.Error, &e.StartedAt, &e.CompletedAt, &e.DurationMs, &e.CreatedAt, &e.WorktreePath,
 	)
 
 	if err == sql.ErrNoRows {
@@ -275,7 +349,7 @@ func (s *SQLiteStore) ListExecutions(workflowID string, limit int, offset int) (
 
 	rows, err := s.db.Query(`
 		SELECT id, workflow_id, workflow_version, definition_snapshot, status, triggered_by, user_context,
-		       error, started_at, completed_at, duration_ms, created_at
+		       error, started_at, completed_at, duration_ms, created_at, worktree_path
 		FROM wf_executions
 		WHERE workflow_id = ?
 		ORDER BY created_at DESC
@@ -292,7 +366,7 @@ func (s *SQLiteStore) ListExecutions(workflowID string, limit int, offset int) (
 		if err := rows.Scan(
 			&e.ID, &e.WorkflowID, &e.WorkflowVersion, &e.DefinitionSnapshot,
 			&e.Status, &e.TriggeredBy, &e.UserContext,
-			&e.Error, &e.StartedAt, &e.CompletedAt, &e.DurationMs, &e.CreatedAt,
+			&e.Error, &e.StartedAt, &e.CompletedAt, &e.DurationMs, &e.CreatedAt, &e.WorktreePath,
 		); err != nil {
 			return nil, err
 		}
@@ -300,6 +374,13 @@ func (s *SQLiteStore) ListExecutions(workflowID string, limit int, offset int) (
 	}
 
 	return executions, rows.Err()
+}
+
+// UpdateExecutionWorktreePath records the on-disk worktree path created for a
+// workflow run. Called once per execution after `git worktree add` succeeds.
+func (s *SQLiteStore) UpdateExecutionWorktreePath(id, path string) error {
+	_, err := s.db.Exec(`UPDATE wf_executions SET worktree_path = ? WHERE id = ?`, path, id)
+	return err
 }
 
 // UpdateExecutionStatus transitions execution status.

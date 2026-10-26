@@ -2,8 +2,10 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +18,11 @@ import (
 	"syscall"
 	"time"
 )
+
+// errCodexRequestNotSent marks a Request failure that happened before the
+// request reached the app-server's stdin. Callers can use it to distinguish
+// "definitely not delivered" from "outcome unknown" (any post-write failure).
+var errCodexRequestNotSent = errors.New("codex request not sent")
 
 // codexRPCError is a JSON-RPC method failure from codex app-server.
 type codexRPCError struct {
@@ -217,6 +224,14 @@ func (c *CodexAppServerClient) Initialize(ctx context.Context, clientName, clien
 
 // Request sends a JSON-RPC request and waits for the matching response.
 func (c *CodexAppServerClient) Request(ctx context.Context, method string, params interface{}, out interface{}) error {
+	// An already-cancelled context must not reach the wire at all: callers
+	// (e.g. the steer path) rely on errCodexRequestNotSent to know the
+	// request definitely wasn't delivered. Cancellation that lands between
+	// this check and the write is still reported as a plain ctx error after
+	// the write, i.e. outcome unknown.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %s: %v", errCodexRequestNotSent, method, err)
+	}
 	id := atomic.AddInt64(&c.nextRequestID, 1)
 	idKey := strconv.FormatInt(id, 10)
 
@@ -234,7 +249,7 @@ func (c *CodexAppServerClient) Request(ctx context.Context, method string, param
 		c.pendingMu.Lock()
 		delete(c.pending, idKey)
 		c.pendingMu.Unlock()
-		return fmt.Errorf("write request %s: %w", method, err)
+		return fmt.Errorf("%w: write request %s: %v", errCodexRequestNotSent, method, err)
 	}
 
 	if c.Verbose {
@@ -327,12 +342,20 @@ func (c *CodexAppServerClient) Stderr() string {
 }
 
 func (c *CodexAppServerClient) readLoop(stdout io.Reader) {
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 1024*1024), 20*1024*1024) // 20MB per line
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	// Codex speaks newline-delimited JSON, but thread/resume responses can
+	// contain the restored turns and therefore grow well beyond Scanner's
+	// maximum token size. Read complete lines without an artificial cap so a
+	// large persisted thread does not permanently strand the session.
+	reader := bufio.NewReaderSize(stdout, 1024*1024)
+	var loopErr error
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
+			if readErr != nil {
+				loopErr = readErr
+				break
+			}
 			continue
 		}
 
@@ -368,12 +391,16 @@ func (c *CodexAppServerClient) readLoop(stdout io.Reader) {
 				log.Printf("[codex-cli] <- unknown envelope: %s", string(line))
 			}
 		}
-	}
 
-	if err := scanner.Err(); err != nil {
-		c.readErr = fmt.Errorf("read codex stdout: %w", err)
-	} else {
+		if readErr != nil {
+			loopErr = readErr
+			break
+		}
+	}
+	if errors.Is(loopErr, io.EOF) {
 		c.readErr = io.EOF
+	} else {
+		c.readErr = fmt.Errorf("read codex stdout: %w", loopErr)
 	}
 
 	c.pendingMu.Lock()

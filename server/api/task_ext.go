@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"regexp"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -35,7 +34,8 @@ func (s *Server) CreateTaskComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "body is required")
 		return
 	}
-	author := s.currentUser()
+
+	author := s.currentUser(r)
 	comment, err := s.Store.CreateTaskComment(taskID, req, author)
 	if writeStoreError(w, err, "CreateTaskComment", "failed to create comment") {
 		return
@@ -103,8 +103,6 @@ func (s *Server) ListLabels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, labels)
 }
 
-var labelNameRegexp = regexp.MustCompile(`^[a-zA-Z0-9_-]{2,10}$`)
-
 func (s *Server) CreateLabel(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectId")
 	var req CreateLabelRequest
@@ -112,8 +110,8 @@ func (s *Server) CreateLabel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if !labelNameRegexp.MatchString(req.Name) {
-		writeError(w, http.StatusBadRequest, "label name must be 2-10 chars of [a-zA-Z0-9_-]")
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "label name is required")
 		return
 	}
 	label, err := s.Store.CreateLabel(projectID, req)
@@ -166,7 +164,7 @@ func (s *Server) RemoveLabelFromTask(w http.ResponseWriter, r *http.Request) {
 func (s *Server) GetReactions(w http.ResponseWriter, r *http.Request) {
 	targetType := chi.URLParam(r, "targetType")
 	targetID := chi.URLParam(r, "targetId")
-	user := s.currentUser()
+	user := s.currentUser(r)
 	summary, err := s.Store.GetReactionSummary(targetType, targetID, user)
 	if writeStoreError(w, err, "GetReactions", "failed to get reactions") {
 		return
@@ -187,7 +185,7 @@ func (s *Server) AddReaction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "emoji is required")
 		return
 	}
-	author := s.currentUser()
+	author := s.currentUser(r)
 	err := s.Store.AddReaction(targetType, targetID, author, body.Emoji)
 	if writeStoreError(w, err, "AddReaction", "failed to add reaction") {
 		return
@@ -203,7 +201,7 @@ func (s *Server) RemoveReaction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "emoji query param is required")
 		return
 	}
-	author := s.currentUser()
+	author := s.currentUser(r)
 	err := s.Store.RemoveReaction(targetType, targetID, author, emoji)
 	if writeStoreError(w, err, "RemoveReaction", "failed to remove reaction") {
 		return
@@ -211,10 +209,3 @@ func (s *Server) RemoveReaction(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-func (s *Server) currentUser() string {
-	return "local"
-}

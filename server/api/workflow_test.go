@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.okg.com/sre_ai/boxnex/agent"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ func newSchedulerServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { db.Close() })
 	return &Server{
-		Store: store.NewSQLiteStore(db.DB),
+		Store: store.NewSQLiteStore(db),
 		Hub:   NewChatHub(),
 	}
 }
@@ -183,7 +183,7 @@ func TestBuildLevels_Diamond(t *testing.T) {
 func TestFilterAINodes(t *testing.T) {
 	nodes := []store.WorkflowNode{
 		makeAINode("ai-prompt", "do stuff"),
-		makeAINode("ai-empty", ""),    // empty prompt → excluded
+		makeAINode("ai-empty", ""), // empty prompt → excluded
 		makeNode("human1", "human"),
 		makeNode("start1", "start"),
 	}
@@ -210,9 +210,9 @@ func TestFilterPassNodes(t *testing.T) {
 	// pass-through: start nodes, ai nodes with no prompt
 	nodes := []store.WorkflowNode{
 		makeAINode("ai-with-prompt", "do stuff"), // excluded: ai + prompt
-		makeAINode("ai-no-prompt", ""),            // included: ai without prompt
-		makeNode("human1", "human"),               // excluded: human
-		makeNode("start1", "start"),               // included: start
+		makeAINode("ai-no-prompt", ""),           // included: ai without prompt
+		makeNode("human1", "human"),              // excluded: human
+		makeNode("start1", "start"),              // included: start
 	}
 	got := filterPassNodes(nodes)
 	if len(got) != 2 {
@@ -256,77 +256,82 @@ func TestTruncateStr(t *testing.T) {
 // buildNodePrompt
 // ---------------------------------------------------------------------------
 
-func TestBuildNodePrompt_PromptOnly(t *testing.T) {
+func TestBuildNodePrompt_NoTokens(t *testing.T) {
 	node := makeAINode("n1", "Do the thing")
-	out := buildNodePrompt(node, "Do the thing", "", nil, nil, map[string][]string{}, map[string]string{}, false, nil)
+	out := buildNodePrompt(node, "Do the thing", nil, map[string][]string{}, nil, nil, nil)
 	if out != "Do the thing" {
 		t.Errorf("want %q, got %q", "Do the thing", out)
 	}
 }
 
-func TestBuildNodePrompt_InjectUserContext(t *testing.T) {
-	node := makeAINode("n1", "Do the thing")
-	out := buildNodePrompt(node, "Do the thing", "user context here", nil, nil,
-		map[string][]string{"n1": {}}, map[string]string{"n1": "n1"}, true, nil)
-	if !strings.Contains(out, "[User Context]") {
-		t.Error("expected [User Context] section when injectContext=true")
-	}
-	if !strings.Contains(out, "user context here") {
-		t.Error("expected user context content")
-	}
-	if !strings.Contains(out, "Do the thing") {
-		t.Error("expected original prompt")
+func TestBuildNodePrompt_EnvVarSubstitution(t *testing.T) {
+	node := makeAINode("n1", "Analyze {{env_target}} for {{env_goal}}")
+	env := map[string]string{"target": "api/users", "goal": "perf issues"}
+	out := buildNodePrompt(node, "Analyze {{env_target}} for {{env_goal}}", nil, map[string][]string{"n1": {}}, nil, env, nil)
+	if out != "Analyze api/users for perf issues" {
+		t.Errorf("unexpected substitution: %q", out)
 	}
 }
 
-func TestBuildNodePrompt_NoContextWhenFlagFalse(t *testing.T) {
-	node := makeAINode("n1", "Do the thing")
-	out := buildNodePrompt(node, "Do the thing", "user context here", nil, nil,
-		map[string][]string{"n1": {}}, map[string]string{"n1": "n1"}, false, nil)
-	if strings.Contains(out, "[User Context]") {
-		t.Error("should not inject [User Context] when injectContext=false")
+func TestBuildNodePrompt_UnknownEnvBecomesEmpty(t *testing.T) {
+	node := makeAINode("n1", "Got [{{env_missing}}] here")
+	out := buildNodePrompt(node, "Got [{{env_missing}}] here", nil, map[string][]string{"n1": {}}, nil, nil, nil)
+	if out != "Got [] here" {
+		t.Errorf("unknown env token should expand to empty, got %q", out)
 	}
 }
 
-func TestBuildNodePrompt_UpstreamOutput(t *testing.T) {
-	node := makeAINode("n2", "Next step")
+func TestBuildNodePrompt_PrevNodeOutput(t *testing.T) {
+	node := makeAINode("n2", "Continue from: {{env_prev_node_output}}")
 	parentMap := map[string][]string{"n2": {"n1"}}
-	nodeLabels := map[string]string{"n1": "Step One", "n2": "Step Two"}
 	nodeOutputs := map[string]string{"n1": "output from step one"}
-	out := buildNodePrompt(node, "Next step", "", nil, nodeOutputs, parentMap, nodeLabels, false, nil)
+	nodeLabels := map[string]string{"n1": "Step One"}
+	out := buildNodePrompt(node, "Continue from: {{env_prev_node_output}}", nodeOutputs, parentMap, nodeLabels, nil, nil)
 	if !strings.Contains(out, "output from step one") {
-		t.Error("expected upstream output injected into prompt")
+		t.Errorf("expected prev_node_output injected, got %q", out)
 	}
-	if !strings.Contains(out, "Step One") {
-		t.Error("expected upstream node label in prompt")
-	}
-	if !strings.Contains(out, "[Context from previous steps]") {
-		t.Error("expected [Context from previous steps] header")
+	if !strings.Contains(out, "## Step One") {
+		t.Errorf("expected upstream node label, got %q", out)
 	}
 }
 
-func TestBuildNodePrompt_UpstreamOutputSkippedWhenNil(t *testing.T) {
-	// When nodeOutputs is nil (serial chain reuse), upstream context is not injected.
-	node := makeAINode("n2", "Next step")
-	out := buildNodePrompt(node, "Next step", "", nil, nil,
-		map[string][]string{"n2": {"n1"}}, map[string]string{"n1": "Step One"}, false, nil)
-	if strings.Contains(out, "[Context from previous steps]") {
-		t.Error("should not inject upstream context when nodeOutputs is nil")
+func TestBuildNodePrompt_PrevNodeOutputMultipleParents(t *testing.T) {
+	node := makeAINode("n3", "All: {{env_prev_node_output}}")
+	parentMap := map[string][]string{"n3": {"n1", "n2"}}
+	nodeOutputs := map[string]string{"n1": "first", "n2": "second"}
+	nodeLabels := map[string]string{"n1": "First Node", "n2": "Second Node"}
+	out := buildNodePrompt(node, "All: {{env_prev_node_output}}", nodeOutputs, parentMap, nodeLabels, nil, nil)
+	if !strings.Contains(out, "first") || !strings.Contains(out, "second") {
+		t.Errorf("expected both parents' outputs, got %q", out)
+	}
+	if !strings.Contains(out, "## First Node") || !strings.Contains(out, "## Second Node") {
+		t.Errorf("expected parent labels, got %q", out)
+	}
+	if !strings.Contains(out, "---") {
+		t.Errorf("expected separator between parent outputs, got %q", out)
 	}
 }
 
-func TestBuildNodePrompt_TaskContext(t *testing.T) {
-	node := makeAINode("n1", "Handle task")
-	tasks := []store.Task{
-		{ID: "t1", Title: "Fix bug", Status: "open", Priority: "high"},
+func TestBuildNodePrompt_PrevNodeOutputEmptyWhenNoParents(t *testing.T) {
+	node := makeAINode("n1", "Prefix: {{env_prev_node_output}} suffix")
+	out := buildNodePrompt(node, "Prefix: {{env_prev_node_output}} suffix", nil, map[string][]string{"n1": {}}, nil, nil, nil)
+	if out != "Prefix:  suffix" {
+		t.Errorf("expected empty prev_node_output, got %q", out)
 	}
-	out := buildNodePrompt(node, "Handle task", "", tasks, nil,
-		map[string][]string{"n1": {}}, map[string]string{"n1": "n1"}, true, nil)
-	if !strings.Contains(out, "[Task Context]") {
-		t.Error("expected [Task Context] header")
+}
+
+func TestBuildNodePrompt_PrevNodeOutputReserved(t *testing.T) {
+	// prev_node_output is reserved; a user-supplied env value cannot shadow it.
+	node := makeAINode("n2", "X: {{env_prev_node_output}}")
+	parentMap := map[string][]string{"n2": {"n1"}}
+	nodeOutputs := map[string]string{"n1": "real upstream"}
+	env := map[string]string{"prev_node_output": "FAKE"}
+	out := buildNodePrompt(node, "X: {{env_prev_node_output}}", nodeOutputs, parentMap, nil, env, nil)
+	if !strings.Contains(out, "real upstream") {
+		t.Errorf("expected real upstream to win over user-supplied value, got %q", out)
 	}
-	if !strings.Contains(out, "Fix bug") {
-		t.Error("expected task title in prompt")
+	if strings.Contains(out, "FAKE") {
+		t.Errorf("user-supplied prev_node_output should not have leaked through, got %q", out)
 	}
 }
 
@@ -517,7 +522,7 @@ func TestIsDue_Interval_NeverRun(t *testing.T) {
 	s := newSchedulerServer(t)
 	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 4}
 	// No executions exist → always due
-	if !s.isDue("wf-never", sched, time.Now()) {
+	if !s.isDue("wf-never", sched, time.Time{}, time.Now()) {
 		t.Error("workflow that never ran should be due")
 	}
 }
@@ -527,7 +532,7 @@ func TestIsDue_Interval_JustCompleted(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 4}
 	completedExec(t, s, "wf-recent")
 	// Checking immediately (< 4h since completion) → not due
-	if s.isDue("wf-recent", sched, time.Now()) {
+	if s.isDue("wf-recent", sched, time.Time{}, time.Now()) {
 		t.Error("workflow that just completed should not be due yet")
 	}
 }
@@ -537,7 +542,7 @@ func TestIsDue_Interval_OverduePastInterval(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 2}
 	completedExec(t, s, "wf-overdue")
 	// Simulate checking 3 hours later → should be due (3h elapsed, interval=2h)
-	if !s.isDue("wf-overdue", sched, time.Now().Add(3*time.Hour)) {
+	if !s.isDue("wf-overdue", sched, time.Time{}, time.Now().Add(3*time.Hour)) {
 		t.Error("workflow should be due after interval has elapsed")
 	}
 }
@@ -547,7 +552,7 @@ func TestIsDue_Interval_NotYetElapsed(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 8}
 	completedExec(t, s, "wf-not-yet")
 	// Only 1 hour has passed; interval is 8h → not due
-	if s.isDue("wf-not-yet", sched, time.Now().Add(1*time.Hour)) {
+	if s.isDue("wf-not-yet", sched, time.Time{}, time.Now().Add(1*time.Hour)) {
 		t.Error("workflow should not be due before interval has elapsed")
 	}
 }
@@ -558,7 +563,7 @@ func TestIsDue_Interval_StillRunning(t *testing.T) {
 	// Create an execution that hasn't been completed yet (completed_at is nil).
 	runningExec(t, s, "wf-running")
 	// completed_at is nil → isDue returns false to avoid duplicate run
-	if s.isDue("wf-running", sched, time.Now().Add(2*time.Hour)) {
+	if s.isDue("wf-running", sched, time.Time{}, time.Now().Add(2*time.Hour)) {
 		t.Error("workflow with no completed_at (still running) should not be due")
 	}
 }
@@ -569,7 +574,7 @@ func TestIsDue_Interval_ClampMin(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 0}
 	completedExec(t, s, "wf-clamp-min")
 	// Checking 90 minutes later: 90min >= 1h → due
-	if !s.isDue("wf-clamp-min", sched, time.Now().Add(90*time.Minute)) {
+	if !s.isDue("wf-clamp-min", sched, time.Time{}, time.Now().Add(90*time.Minute)) {
 		t.Error("interval clamped to 1h: should be due after 90 minutes")
 	}
 }
@@ -580,11 +585,11 @@ func TestIsDue_Interval_ClampMax(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 100}
 	completedExec(t, s, "wf-clamp-max")
 	// 23 hours is not enough even though user set 100h (clamped to 24h)
-	if s.isDue("wf-clamp-max", sched, time.Now().Add(23*time.Hour)) {
+	if s.isDue("wf-clamp-max", sched, time.Time{}, time.Now().Add(23*time.Hour)) {
 		t.Error("interval clamped to 24h: should not be due after only 23h")
 	}
 	// 25 hours is past the 24h cap → due
-	if !s.isDue("wf-clamp-max", sched, time.Now().Add(25*time.Hour)) {
+	if !s.isDue("wf-clamp-max", sched, time.Time{}, time.Now().Add(25*time.Hour)) {
 		t.Error("interval clamped to 24h: should be due after 25h")
 	}
 }
@@ -595,7 +600,7 @@ func TestIsDue_Weekly_WrongDay(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "weekly", Days: []int{3}, Hour: 9, Minute: 0}
 	// Construct a now that is Monday at 10am
 	now := nextWeekdayAt(1, 10, 0) // Monday
-	if s.isDue("wf-wrong-day", sched, now) {
+	if s.isDue("wf-wrong-day", sched, time.Time{}, now) {
 		t.Error("should not be due on a day not in the schedule")
 	}
 }
@@ -606,7 +611,7 @@ func TestIsDue_Weekly_RightDayBeforeTime(t *testing.T) {
 	sched := store.WorkflowSchedule{Type: "weekly", Days: []int{1}, Hour: 14, Minute: 0}
 	// It is Monday but only 10am → before scheduled time
 	now := nextWeekdayAt(1, 10, 0)
-	if s.isDue("wf-before-time", sched, now) {
+	if s.isDue("wf-before-time", sched, time.Time{}, now) {
 		t.Error("should not be due before scheduled time on the correct day")
 	}
 }
@@ -616,7 +621,7 @@ func TestIsDue_Weekly_NeverRun_RightDayAndTime(t *testing.T) {
 	// Schedule on Monday at 9:00; it is Monday at 9:05 and never ran
 	sched := store.WorkflowSchedule{Type: "weekly", Days: []int{1}, Hour: 9, Minute: 0}
 	now := nextWeekdayAt(1, 9, 5)
-	if !s.isDue("wf-weekly-new", sched, now) {
+	if !s.isDue("wf-weekly-new", sched, time.Time{}, now) {
 		t.Error("should be due when it never ran on the correct day past the scheduled time")
 	}
 }
@@ -640,7 +645,7 @@ func TestIsDue_Weekly_AlreadyRanToday(t *testing.T) {
 	sched.Hour = 0
 	sched.Minute = 0
 	now = today.Add(2 * time.Hour) // 2 hours later today
-	if s.isDue("wf-weekly-done", sched, now) {
+	if s.isDue("wf-weekly-done", sched, time.Time{}, now) {
 		t.Error("should not be due when already ran today")
 	}
 }
@@ -659,8 +664,69 @@ func TestIsDue_Weekly_RanYesterday_DueToday(t *testing.T) {
 	}
 	// Simulate 'now' being tomorrow at 00:01 → should be due
 	tomorrow := today.Add(24 * time.Hour)
-	if !s.isDue("wf-weekly-yesterday", sched, tomorrow) {
+	if !s.isDue("wf-weekly-yesterday", sched, time.Time{}, tomorrow) {
 		t.Error("should be due when last run was yesterday (tomorrow is a new day)")
+	}
+}
+
+// Regression: saving a weekly schedule for today AFTER the scheduled hour
+// must not fire today — the slot already passed when the schedule was set.
+func TestIsDue_Weekly_NeverRun_ScheduleSavedAfterSlot(t *testing.T) {
+	s := newSchedulerServer(t)
+	today := time.Now()
+	sched := store.WorkflowSchedule{
+		Type:   "weekly",
+		Days:   []int{int(today.Weekday())},
+		Hour:   today.Hour() - 1, // one hour ago
+		Minute: 0,
+	}
+	if sched.Hour < 0 {
+		// If the test runs in the first hour of the day, use minutes ago instead.
+		sched.Hour = today.Hour()
+		sched.Minute = 0
+		// today.Minute may be 0; ensure a positive offset so the slot is in the past
+		if today.Minute() == 0 {
+			t.Skip("cannot construct a same-day past slot at exactly HH:00")
+		}
+	}
+	// Schedule was saved just now — after today's scheduled slot.
+	scheduleUpdatedAt := today
+	if s.isDue("wf-weekly-saved-late", sched, scheduleUpdatedAt, today) {
+		t.Error("weekly schedule saved after today's slot must not fire today")
+	}
+}
+
+// Companion: if the schedule was saved BEFORE today's slot, firing is expected.
+func TestIsDue_Weekly_NeverRun_ScheduleSavedBeforeSlot(t *testing.T) {
+	s := newSchedulerServer(t)
+	today := time.Now()
+	if today.Hour() < 1 {
+		t.Skip("need at least one hour of headroom to construct a past slot")
+	}
+	sched := store.WorkflowSchedule{
+		Type:   "weekly",
+		Days:   []int{int(today.Weekday())},
+		Hour:   today.Hour() - 1,
+		Minute: 0,
+	}
+	// Schedule saved a week ago — well before today's slot.
+	scheduleUpdatedAt := today.AddDate(0, 0, -7)
+	if !s.isDue("wf-weekly-saved-early", sched, scheduleUpdatedAt, today) {
+		t.Error("weekly schedule saved before today's slot should fire today")
+	}
+}
+
+// Regression: saving an interval schedule must not fire within the same minute.
+func TestIsDue_Interval_NeverRun_JustSaved(t *testing.T) {
+	s := newSchedulerServer(t)
+	sched := store.WorkflowSchedule{Type: "interval", IntervalHours: 4}
+	now := time.Now()
+	if s.isDue("wf-interval-just-saved", sched, now, now) {
+		t.Error("interval schedule just saved should not fire immediately")
+	}
+	// But after the interval elapses, it should fire.
+	if !s.isDue("wf-interval-just-saved", sched, now, now.Add(5*time.Hour)) {
+		t.Error("interval schedule should fire once its interval has elapsed since save")
 	}
 }
 
@@ -668,7 +734,7 @@ func TestIsDue_Weekly_EmptyDays(t *testing.T) {
 	s := newSchedulerServer(t)
 	sched := store.WorkflowSchedule{Type: "weekly", Days: []int{}, Hour: 9, Minute: 0}
 	// Empty days → never fires
-	if s.isDue("wf-empty-days", sched, time.Now()) {
+	if s.isDue("wf-empty-days", sched, time.Time{}, time.Now()) {
 		t.Error("weekly schedule with no days should never be due")
 	}
 }
@@ -680,7 +746,7 @@ func TestIsDue_Weekly_EmptyDays(t *testing.T) {
 func TestIsDue_UnknownType(t *testing.T) {
 	s := newSchedulerServer(t)
 	sched := store.WorkflowSchedule{Type: "hourly"} // not a real type
-	if s.isDue("wf-unknown", sched, time.Now()) {
+	if s.isDue("wf-unknown", sched, time.Time{}, time.Now()) {
 		t.Error("unknown schedule type should return false")
 	}
 }
@@ -836,6 +902,27 @@ func TestBuildHookPrompt_OutputBeforePrompt(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// substituteEnvVars (shared by node prompts and hook prompts)
+// ---------------------------------------------------------------------------
+
+func TestSubstituteEnvVars_BasicAndUnknown(t *testing.T) {
+	env := map[string]string{"target": "api/users"}
+	got := substituteEnvVars("hit {{env_target}} via {{env_missing}}", env)
+	if got != "hit api/users via " {
+		t.Errorf("unexpected: %q", got)
+	}
+}
+
+func TestSubstituteEnvVars_NoPrevNodeOutputForHooks(t *testing.T) {
+	// Hook prompts pass req.Env directly without prev_node_output, so the
+	// token must expand to empty even though it'd normally be reserved.
+	got := substituteEnvVars("before [{{env_prev_node_output}}] after", map[string]string{})
+	if got != "before [] after" {
+		t.Errorf("expected empty expansion for hook context, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Hook: runEphemeralAgent
 // ---------------------------------------------------------------------------
 
@@ -844,6 +931,8 @@ type mockAgent struct {
 	response string
 	err      error
 }
+
+func (m *mockAgent) Capabilities() agent.Capabilities { return agent.Capabilities{} }
 
 func (m *mockAgent) SendMessage(_ context.Context, _ agent.Request, cb agent.EventCallback) (agent.Result, error) {
 	if m.err != nil {
@@ -934,11 +1023,12 @@ func TestRunEphemeralAgent_FallsBackToDefault(t *testing.T) {
 // blockingAgent blocks until its context is cancelled.
 type blockingAgent struct{}
 
+func (b *blockingAgent) Capabilities() agent.Capabilities { return agent.Capabilities{} }
+
 func (b *blockingAgent) SendMessage(ctx context.Context, _ agent.Request, _ agent.EventCallback) (agent.Result, error) {
 	<-ctx.Done()
 	return agent.Result{}, ctx.Err()
 }
-
 
 // ---------------------------------------------------------------------------
 // Hook: hookResult JSON parsing

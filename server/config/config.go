@@ -8,50 +8,38 @@ import (
 	"sync"
 )
 
-// Config holds all local-only configuration persisted to ~/.boxnex/config.json.
-type Config struct {
-	DefaultAgent string           `json:"default_agent"`
-	Token        string           `json:"token,omitempty"`
-	GitLabToken  string           `json:"gitlab_token,omitempty"`
-	DisableCloud bool             `json:"disable_cloud"`
-	Projects     []ProjectMapping `json:"projects,omitempty"`
-
-	// Cloud server settings (used when running as a multi-tenant cloud service)
-	StoreType string `json:"store_type,omitempty"` // "sqlite" (default) | "mysql"
-	MySQLDSN  string `json:"mysql_dsn,omitempty"`  // e.g. "user:pass@tcp(host:3306)/dbname?parseTime=true"
-
-	JWTSecret  string `json:"jwt_secret,omitempty"`   // required for cloud mode
-	JWTExpDays int    `json:"jwt_exp_days,omitempty"` // token expiry in days, default 7
-
-	// Email — used for sending verification codes via Resend (resend.com)
-	ResendAPIKey string `json:"resend_api_key,omitempty"` // e.g. "re_xxxx"
-	ResendFrom   string `json:"resend_from,omitempty"`    // e.g. "BoxNex <noreply@yourdomain.com>"
-
-	MarketplaceDir string `json:"marketplace_dir,omitempty"` // default "/marketplace"
-
-	// Per-user limits
-	DiskQuotaBytes int64 `json:"disk_quota_bytes,omitempty"` // default 1GB
-
-	// Billing
-	TokenPricePerMillion float64 `json:"token_price_per_million,omitempty"` // currency per 1M tokens
-
-	// Docker rootless + Sysbox container isolation
-	ContainerEnabled bool   `json:"container_enabled,omitempty"` // enable per-project Docker container isolation
-	ContainerImage   string `json:"container_image,omitempty"`   // container image (default: "boxnex-agent:latest")
-	ContainerNetwork string `json:"container_network,omitempty"` // Docker network name (default: "boxnex-net")
-
-	// Local-mode feature flags (bitmask). When nil, defaults to 0xFF (all features).
-	Features *int64 `json:"features,omitempty"`
-
-	// CORS allowed origins (e.g. ["http://localhost:5173"]). Falls back to
-	// built-in dev defaults when empty.
-	CORSOrigins []string `json:"cors_origins,omitempty"`
+// MCPToolsConfig controls which groups of built-in MCP tools are exposed to
+// AI agents. Every category is opt-in: a missing value means disabled.
+type MCPToolsConfig struct {
+	TaskManagement *bool `json:"task_management,omitempty"`
 }
 
-// ProjectMapping links a remote project to a local Git repository path.
-type ProjectMapping struct {
-	RemoteID    string `json:"remote_id"`
-	GitRepoPath string `json:"git_repo_path"`
+// TaskManagementEnabled reports whether the task tools are exposed.
+func (c MCPToolsConfig) TaskManagementEnabled() bool {
+	return c.TaskManagement != nil && *c.TaskManagement
+}
+
+// Config holds all configuration persisted to <data-dir>/config.json.
+type Config struct {
+	DefaultAgent   string `json:"default_agent"`
+	ChromeHeadless bool   `json:"chrome_headless"`
+	// MCPTools toggles groups of built-in MCP tools. All are opt-in.
+	MCPTools MCPToolsConfig `json:"mcp_tools"`
+	// SuggestNextActions controls whether new sessions get a system-prompt
+	// instruction asking the model to end each reply with a <next-actions> block
+	// (rendered as quick-reply buttons). Pointer so "absent" defaults to ON —
+	// nil means enabled; only an explicit false disables it.
+	SuggestNextActions *bool `json:"suggest_next_actions,omitempty"`
+	// PromptTemplates are global (not per-project) reusable prompts.
+	PromptTemplates []PromptTemplate `json:"prompt_templates,omitempty"`
+}
+
+// PromptTemplate is a reusable, user-defined prompt that can be picked in the
+// chat composer. Name is unique among templates; content is plain text and is
+// inserted verbatim.
+type PromptTemplate struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
 }
 
 // Manager provides thread-safe load/save operations for Config.
@@ -73,7 +61,7 @@ func NewManager(path string) (*Manager, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			m.cfg = Config{DefaultAgent: "claude"}
+			m.cfg = Config{DefaultAgent: "claude", ChromeHeadless: true}
 			return m, m.save()
 		}
 		return nil, fmt.Errorf("read config: %w", err)
@@ -112,10 +100,7 @@ func (m *Manager) save() error {
 	}
 	data = append(data, '\n')
 
-	tmp, err := os.OpenFile(
-		filepath.Join(filepath.Dir(m.path), ".config-tmp.json"),
-		os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600,
-	)
+	tmp, err := os.CreateTemp(filepath.Dir(m.path), ".config-*.json")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -132,7 +117,5 @@ func (m *Manager) save() error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename config: %w", err)
 	}
-	// Ensure restrictive permissions even if file already existed before this run.
-	_ = os.Chmod(m.path, 0600)
 	return nil
 }

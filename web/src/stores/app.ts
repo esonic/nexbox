@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { DiffResponse, AuthUser, GitBranchResponse } from "@/lib/api";
-import type { Project, Session, ChatMessage, MessagePart, Task, AssetType, ExecutionStats } from "../types";
+import type { DiffResponse } from "@/lib/api";
+import type { Project, Session, ChatMessage, MessagePart, Task, AssetType, ExecutionStats, ContextUsage, WorkflowProgressSnapshot } from "../types";
 
 export interface PickedAsset {
   id: string;
@@ -17,7 +17,10 @@ export interface PickedWorkflow {
 
 export interface InlineComment {
   id: string;
+  repositoryId?: string;
+  repositoryDisplayPath?: string;
   filePath: string;
+  workspacePath?: string;
   lineNumber: number;
   side: "old" | "new";  // "old" for deletion lines, "new" for addition/context lines
   lineContent: string;
@@ -27,6 +30,7 @@ export interface InlineComment {
 export interface RichQueuedMessage {
   id: string;
   text: string;
+  features?: string[];
   images?: { filename: string; url: string }[];
   pickedTasks: Task[];
   pickedAssets: PickedAsset[];
@@ -54,18 +58,34 @@ interface AppState {
   addChatMessage: (sessionId: string, message: ChatMessage) => void;
 
   // Fine-grained streaming updates
-  appendTextDelta: (sessionId: string, text: string) => void;
+  appendTextDelta: (sessionId: string, text: string, startNewPart?: boolean) => void;
   addToolStart: (sessionId: string, toolCallId: string, toolName: string, input?: string) => void;
   updateToolInput: (sessionId: string, toolCallId: string, inputDelta: string) => void;
-  addToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
+  // Replaces a tool_use's Input outright (vs. updateToolInput's append-only
+  // delta), for backends whose authoritative payload can arrive/change after
+  // the initial tool_start (e.g. Codex FileChange diffs at item/completed).
+  replaceToolInput: (sessionId: string, toolCallId: string, input: string) => void;
+  addToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean, diff?: string) => void;
+  // Mark an Agent/Task tool_use complete once its sub-agent truly finishes (its
+  // own tool_result returns immediately at launch, so it can't complete the card).
+  completeAgentTool: (sessionId: string, toolCallId: string, output?: string, isError?: boolean) => void;
   appendThinkingDelta: (sessionId: string, text: string) => void;
-  setAgentToolSummary: (sessionId: string, summary: string) => void;
+  setAgentToolSummary: (sessionId: string, summary: string, toolCallId?: string) => void;
+  setWorkflowProgress: (sessionId: string, toolCallId: string, snapshot: WorkflowProgressSnapshot) => void;
   addNestedToolStart: (sessionId: string, agentToolCallId: string, toolCallId: string, toolName: string, input: string) => void;
   updateNestedToolInput: (sessionId: string, toolCallId: string, inputDelta: string) => void;
-  addNestedToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean) => void;
+  // Replace-in-place counterpart to updateNestedToolInput's append-only
+  // delta — see replaceToolInput's doc comment for why this exists.
+  replaceNestedToolInput: (sessionId: string, toolCallId: string, input: string) => void;
+  addNestedToolResult: (sessionId: string, toolCallId: string, output: string, isError?: boolean, diff?: string) => void;
   addWidgetPart: (sessionId: string, title: string, widgetCode: string, loadingMessages?: string[]) => void;
 
-  finishStreaming: (sessionId: string, stats?: ExecutionStats) => void;
+  finishStreaming: (
+    sessionId: string,
+    stats?: ExecutionStats,
+    messageId?: string,
+    agentCheckpoint?: string,
+  ) => void;
   clearChatMessages: (sessionId: string) => void;
 
   // Per-session streaming state (global, survives tab switches)
@@ -74,10 +94,28 @@ interface AppState {
   setStreamingSession: (sessionId: string, active: boolean) => void;
   initStreamingSessions: (activeIds: string[]) => void;
 
+  // Per-session unread state (client-only, persisted to localStorage). A
+  // session becomes unread when a round finishes while the user isn't viewing
+  // it (blue dot in the sidebar); it clears when the user opens it. Users can
+  // also force-mark a read session unread via the row's right-click menu.
+  unreadSessions: Record<string, boolean>;
+  markSessionUnread: (sessionId: string) => void;
+  markSessionRead: (sessionId: string) => void;
+
+  // Pending interactive tool request per session (AskUserQuestion from Claude CLI).
+  // Keyed by session ID so concurrent sessions don't clobber each other's popup,
+  // and so switching away and back to a session re-shows its pending question.
+  pendingUserInputs: Record<string, { toolUseId: string; toolName: string; input: string } | null>;
+  setPendingUserInput: (sessionId: string, value: { toolUseId: string; toolName: string; input: string } | null) => void;
+
   // Accumulated session duration (ms), keyed by session ID
   sessionTotalDuration: Record<string, number>;
   addSessionDuration: (sessionId: string, ms: number) => void;
   setSessionDuration: (sessionId: string, ms: number) => void;
+
+  // Live context-window usage, keyed by session ID
+  sessionContextUsage: Record<string, ContextUsage>;
+  setSessionContextUsage: (sessionId: string, usage: ContextUsage) => void;
 
   // Picked tasks (for sending to chat)
   pickedTasks: Record<string, Task[]>;
@@ -117,22 +155,35 @@ interface AppState {
   gitDiffStats: DiffResponse | null;
   setGitDiffStats: (stats: DiffResponse | null) => void;
 
-  // Git branch data (shared, polled by SessionWorkspace)
-  gitBranchData: GitBranchResponse | null;
-  setGitBranchData: (data: GitBranchResponse | null) => void;
-
   // Marketplace update badge (packages with newer version available)
   marketplaceUpdateCount: number;
   setMarketplaceUpdateCount: (count: number) => void;
+}
 
-  // Authenticated user (JWT cloud mode)
-  currentUser: AuthUser | null;
-  setCurrentUser: (user: AuthUser | null) => void;
-
-  // Token balance
-  balanceTokens: number;
-  balanceCny: number;
-  setBalance: (tokens: number, cny: number) => void;
+// `session-updated` fires whenever ANY session finishes a turn, and every
+// listener re-fetches the full sessions/projects list. The API hands back
+// freshly-deserialized objects each time, so a naive `set({ sessions })` churns
+// the identity of every row and cascades a re-render through anything derived
+// from one — most visibly the Git panel, which would tear down and rebuild
+// (losing a half-typed commit message) because an unrelated session finished.
+//
+// Reconcile instead: keep the previous object for every entry whose content is
+// unchanged, and keep the array itself when nothing moved. A session finishing
+// then only invalidates that one session's object. Deep-comparing the list runs
+// once per turn end, which is far cheaper than the render cascade it prevents.
+function reconcileById<T extends { id: string }>(prev: T[], next: T[]): T[] {
+  const previousById = new Map(prev.map((item) => [item.id, item]));
+  let changed = prev.length !== next.length;
+  const merged = next.map((item, index) => {
+    const previous = previousById.get(item.id);
+    if (previous && JSON.stringify(previous) === JSON.stringify(item)) {
+      if (prev[index] !== previous) changed = true; // same content, new position
+      return previous;
+    }
+    changed = true;
+    return item;
+  });
+  return changed ? merged : prev;
 }
 
 /** Replace a session's message array. Reduces boilerplate around chatMessages spread. */
@@ -180,14 +231,16 @@ export const useAppStore = create<AppState>()(
   activeSessionId: null,
   sessions: [],
   projects: [],
-  setCurrentProject: (project) => set({ currentProject: project }),
-  setCurrentSession: (session) => set({ currentSession: session }),
+  setCurrentProject: (project) =>
+    set((s) => (s.currentProject === project ? {} : { currentProject: project })),
+  setCurrentSession: (session) =>
+    set((s) => (s.currentSession === session ? {} : { currentSession: session })),
   setActiveSessionId: (id) => {
     console.log('[Store] setActiveSessionId:', id);
     set({ activeSessionId: id });
   },
-  setSessions: (sessions) => set({ sessions }),
-  setProjects: (projects) => set({ projects }),
+  setSessions: (sessions) => set((s) => ({ sessions: reconcileById(s.sessions, sessions) })),
+  setProjects: (projects) => set((s) => ({ projects: reconcileById(s.projects, projects) })),
 
   chatMessages: {},
   setChatMessages: (sessionId, messages) =>
@@ -195,11 +248,17 @@ export const useAppStore = create<AppState>()(
   addChatMessage: (sessionId, message) =>
     set((state) => patchMessages(state, sessionId, (msgs) => [...msgs, message])),
 
-  appendTextDelta: (sessionId, text) =>
+  // startNewPart forces a fresh text part even when the last part is already
+  // text. Needed because sub-agent (nested) tool calls don't create a top-level
+  // part — without this, main-agent text before and after a sub-agent's activity
+  // would merge into one part, dropping the visual break the server persists
+  // (the server keeps every tool_use top-level). See the nested-tool handling in
+  // useChatSession's processEvent.
+  appendTextDelta: (sessionId, text, startNewPart) =>
     set((state) =>
       updateLastAssistant(state, sessionId, (parts) => {
         const last = parts[parts.length - 1];
-        if (last && last.type === "text") {
+        if (last && last.type === "text" && !startNewPart) {
           parts[parts.length - 1] = { ...last, content: last.content + text };
         } else {
           parts.push({ type: "text", content: text });
@@ -229,22 +288,122 @@ export const useAppStore = create<AppState>()(
       ),
     ),
 
-  addToolResult: (sessionId, toolCallId, output, isError) =>
+  replaceToolInput: (sessionId, toolCallId, input) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) =>
+        patchToolUse(parts, toolCallId, (p) => ({ ...p, input })),
+      ),
+    ),
+
+  addToolResult: (sessionId, toolCallId, output, isError, diff) =>
     set((state) =>
       updateLastAssistant(state, sessionId, (parts) => {
-        patchToolUse(parts, toolCallId, (p) => ({ ...p, state: isError ? "error" : "complete" }));
-        parts.push({ type: "tool_result", toolCallId, output, isError });
+        patchToolUse(parts, toolCallId, (p) => {
+          // Agent/Task tool_result returns immediately: the sub-agent is launched
+          // in the background and keeps streaming nested tool calls afterward. So
+          // a *successful* result must NOT flip the card to complete — doing so
+          // collapses it and hides the nested calls still to come (that was the
+          // "sub-agent card finishes the instant it appears" bug). Keep it running
+          // until the sub-agent truly finishes (completeAgentTool on subtask_done,
+          // or finishStreaming as the turn-end backstop). Errors are terminal.
+          const isAgent = p.toolName === "Agent" || p.toolName === "Task";
+          if (isAgent && !isError) return p;
+          return { ...p, state: isError ? "error" : "complete" };
+        });
+        parts.push({ type: "tool_result", toolCallId, output, isError, diff });
         return parts;
       }),
     ),
 
-  setAgentToolSummary: (sessionId, summary) =>
+  completeAgentTool: (sessionId, toolCallId, output = "", isError = false) =>
     set((state) =>
       updateLastAssistant(state, sessionId, (parts) => {
+        patchToolUse(parts, toolCallId, (p) => ({
+          ...p,
+          state: isError ? "error" : "complete",
+          nestedTools: p.nestedTools?.map((n) =>
+            n.state === "running" || n.state === "streaming" ? { ...n, state: "complete" as const } : n,
+          ),
+        }));
+
+        // Claude may already have inserted an immediate "agent launched"
+        // receipt. Replace it with the terminal child response; Codex reaches
+        // this path without a prior result, so add one when non-empty.
+        let foundResult = false;
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const p = parts[i];
+          if (p.type === "tool_result" && p.toolCallId === toolCallId) {
+            parts[i] = { ...p, output, isError };
+            foundResult = true;
+            break;
+          }
+        }
+        if (!foundResult && (output !== "" || isError)) {
+          const toolUseIndex = parts.findIndex((p) => p.type === "tool_use" && p.toolCallId === toolCallId);
+          const result = { type: "tool_result" as const, toolCallId, output, isError };
+          if (toolUseIndex >= 0) {
+            // Keep the result adjacent to the Agent card so completed turns
+            // still pair them when work and main-agent text interleave.
+            parts.splice(toolUseIndex + 1, 0, result);
+          } else {
+            parts.push(result);
+          }
+        }
+        return parts;
+      }),
+    ),
+
+  appendThinkingDelta: (sessionId, text) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) => {
+        const last = parts[parts.length - 1];
+        if (last && last.type === "thinking") {
+          parts[parts.length - 1] = { ...last, content: last.content + text };
+        } else {
+          parts.push({ type: "thinking", content: text });
+        }
+        return parts;
+      })
+    ),
+
+  setAgentToolSummary: (sessionId, summary, toolCallId) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) => {
+        // Prefer matching by explicit toolCallId so parallel sub-agents
+        // each get their own summary. Fall back to the last running
+        // tool_use only when no id was supplied (legacy path).
+        if (toolCallId) {
+          for (let i = parts.length - 1; i >= 0; i--) {
+            const p = parts[i];
+            if (p.type === "tool_use" && p.toolCallId === toolCallId) {
+              parts[i] = { ...p, summary };
+              return parts;
+            }
+          }
+        }
         for (let i = parts.length - 1; i >= 0; i--) {
           const p = parts[i];
           if (p.type === "tool_use" && (p.state === "running" || p.state === "streaming")) {
             parts[i] = { ...p, summary };
+            break;
+          }
+        }
+        return parts;
+      })
+    ),
+
+  setWorkflowProgress: (sessionId, toolCallId, snapshot) =>
+    set((state) =>
+      updateLastAssistant(state, sessionId, (parts) => {
+        // Attach the server-merged workflow snapshot to the matching Workflow
+        // tool_use part (by tool_use_id). The server already merged the deltas
+        // into a full snapshot, so we just replace. Matching works even after
+        // the immediate tool_result flipped the card to "complete" — the
+        // progress tree lives on the part regardless of that state.
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const p = parts[i];
+          if (p.type === "tool_use" && p.toolCallId === toolCallId) {
+            parts[i] = { ...p, workflowProgress: snapshot };
             break;
           }
         }
@@ -281,7 +440,7 @@ export const useAppStore = create<AppState>()(
       }),
     ),
 
-  addNestedToolResult: (sessionId, toolCallId, output, isError) =>
+  replaceNestedToolInput: (sessionId, toolCallId, input) =>
     set((state) =>
       updateLastAssistant(state, sessionId, (parts) => {
         for (let i = parts.length - 1; i >= 0; i--) {
@@ -290,7 +449,7 @@ export const useAppStore = create<AppState>()(
             const nIdx = p.nestedTools.findIndex((n) => n.toolCallId === toolCallId);
             if (nIdx >= 0) {
               const updated = [...p.nestedTools];
-              updated[nIdx] = { ...updated[nIdx], state: isError ? "error" as const : "complete" as const, result: { output, isError } };
+              updated[nIdx] = { ...updated[nIdx], input };
               parts[i] = { ...p, nestedTools: updated };
               break;
             }
@@ -300,17 +459,27 @@ export const useAppStore = create<AppState>()(
       }),
     ),
 
-  appendThinkingDelta: (sessionId, text) =>
+  addNestedToolResult: (sessionId, toolCallId, output, isError, diff) =>
     set((state) =>
       updateLastAssistant(state, sessionId, (parts) => {
-        const last = parts[parts.length - 1];
-        if (last && last.type === "thinking") {
-          parts[parts.length - 1] = { ...last, content: last.content + text };
-        } else {
-          parts.push({ type: "thinking", content: text });
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const p = parts[i];
+          if (p.type === "tool_use" && p.nestedTools) {
+            const nIdx = p.nestedTools.findIndex((n) => n.toolCallId === toolCallId);
+            if (nIdx >= 0) {
+              const updated = [...p.nestedTools];
+              updated[nIdx] = {
+                ...updated[nIdx],
+                state: isError ? "error" as const : "complete" as const,
+                result: { output, isError, diff },
+              };
+              parts[i] = { ...p, nestedTools: updated };
+              break;
+            }
+          }
         }
         return parts;
-      })
+      }),
     ),
 
   addWidgetPart: (sessionId, title, widgetCode, loadingMessages) =>
@@ -321,7 +490,7 @@ export const useAppStore = create<AppState>()(
       }),
     ),
 
-  finishStreaming: (sessionId, stats?) =>
+  finishStreaming: (sessionId, stats?, messageId?, agentCheckpoint?) =>
     set((state) => {
       const msgs = state.chatMessages[sessionId] || [];
       const lastMsg = msgs[msgs.length - 1];
@@ -335,15 +504,23 @@ export const useAppStore = create<AppState>()(
           }
           return p;
         });
-        // Merge execution stats into the message metadata
-        const updatedMetadata = stats
+        // Merge execution stats and the opaque fork checkpoint. The durable
+        // server message id is stored as serverId (not written over `id`) so
+        // the React key stays stable and the message subtree isn't remounted
+        // at turn end.
+        const updatedMetadata = stats || agentCheckpoint
           ? {
               ...lastMsg.metadata,
-              durationMs: stats.duration_ms,
-              inputTokens: stats.input_tokens,
-              outputTokens: stats.output_tokens,
-              totalCostUsd: stats.total_cost_usd,
-              toolCalls: stats.tool_calls,
+              ...(stats ? {
+                durationMs: stats.duration_ms,
+                inputTokens: stats.input_tokens,
+                outputTokens: stats.output_tokens,
+                cacheReadInputTokens: stats.cache_read_input_tokens,
+                cacheCreationInputTokens: stats.cache_creation_input_tokens,
+                totalCostUsd: stats.total_cost_usd,
+                toolCalls: stats.tool_calls,
+              } : {}),
+              ...(agentCheckpoint ? { agentCheckpoint } : {}),
             }
           : lastMsg.metadata;
         return {
@@ -351,7 +528,13 @@ export const useAppStore = create<AppState>()(
             ...state.chatMessages,
             [sessionId]: [
               ...msgs.slice(0, -1),
-              { ...lastMsg, parts: finalParts, isStreaming: false, metadata: updatedMetadata },
+              {
+                ...lastMsg,
+                ...(messageId ? { serverId: messageId } : {}),
+                parts: finalParts,
+                isStreaming: false,
+                metadata: updatedMetadata,
+              },
             ],
           },
         };
@@ -360,17 +543,31 @@ export const useAppStore = create<AppState>()(
     }),
 
   clearChatMessages: (sessionId) =>
-    set((state) => patchMessages(state, sessionId, () => [])),
+    set((state) => ({
+      ...patchMessages(state, sessionId, () => []),
+      pendingUserInputs: { ...state.pendingUserInputs, [sessionId]: null },
+    })),
 
   streamingSessions: {},
   streamingStartedAt: {} as Record<string, number>,
   setStreamingSession: (sessionId, active) =>
-    set((state) => ({
-      streamingSessions: { ...state.streamingSessions, [sessionId]: active },
-      streamingStartedAt: active
-        ? { ...state.streamingStartedAt, [sessionId]: Date.now() }
-        : state.streamingStartedAt,
-    })),
+    set((state) => {
+      // A round just finished (true → false) for a session the user isn't
+      // currently viewing → flag it unread so the sidebar shows a blue dot.
+      const finishedInBackground =
+        state.streamingSessions[sessionId] === true &&
+        !active &&
+        sessionId !== state.activeSessionId;
+      return {
+        streamingSessions: { ...state.streamingSessions, [sessionId]: active },
+        streamingStartedAt: active
+          ? { ...state.streamingStartedAt, [sessionId]: Date.now() }
+          : state.streamingStartedAt,
+        unreadSessions: finishedInBackground
+          ? { ...state.unreadSessions, [sessionId]: true }
+          : state.unreadSessions,
+      };
+    }),
   initStreamingSessions: (activeIds) =>
     set((state) => {
       // Server is the source of truth for active sessions.
@@ -388,8 +585,36 @@ export const useAppStore = create<AppState>()(
           }
         }
       }
-      return { streamingSessions: map };
+      // Background sessions that were streaming and are now considered finished
+      // (dropped from the reseeded map) just completed a round out of view →
+      // mark them unread. The one being viewed is never flagged.
+      const unread = { ...state.unreadSessions };
+      for (const [id, active] of Object.entries(state.streamingSessions)) {
+        if (active && !map[id] && id !== state.activeSessionId) {
+          unread[id] = true;
+        }
+      }
+      return { streamingSessions: map, unreadSessions: unread };
     }),
+
+  unreadSessions: {},
+  markSessionUnread: (sessionId) =>
+    set((state) => ({
+      unreadSessions: { ...state.unreadSessions, [sessionId]: true },
+    })),
+  markSessionRead: (sessionId) =>
+    set((state) => {
+      if (!state.unreadSessions[sessionId]) return state;
+      const next = { ...state.unreadSessions };
+      delete next[sessionId];
+      return { unreadSessions: next };
+    }),
+
+  pendingUserInputs: {},
+  setPendingUserInput: (sessionId, value) =>
+    set((state) => ({
+      pendingUserInputs: { ...state.pendingUserInputs, [sessionId]: value },
+    })),
 
   sessionTotalDuration: {},
   addSessionDuration: (sessionId, ms) =>
@@ -404,6 +629,15 @@ export const useAppStore = create<AppState>()(
       sessionTotalDuration: {
         ...state.sessionTotalDuration,
         [sessionId]: ms,
+      },
+    })),
+
+  sessionContextUsage: {},
+  setSessionContextUsage: (sessionId, usage) =>
+    set((state) => ({
+      sessionContextUsage: {
+        ...state.sessionContextUsage,
+        [sessionId]: usage,
       },
     })),
 
@@ -539,26 +773,26 @@ export const useAppStore = create<AppState>()(
   setConnectStatus: (status) => set({ connectStatus: status }),
 
   gitDiffStats: null,
-  setGitDiffStats: (stats) => set({ gitDiffStats: stats }),
-
-  gitBranchData: null,
-  setGitBranchData: (data) => set({ gitBranchData: data }),
+  // Keep the same reference when the new stats are byte-for-byte identical so the
+  // 10s diff-stats poll doesn't re-render every subscriber (and re-derive the
+  // whole DiffView file list) when nothing actually changed on disk.
+  setGitDiffStats: (stats) =>
+    set((s) =>
+      s.gitDiffStats && stats && JSON.stringify(s.gitDiffStats) === JSON.stringify(stats)
+        ? {}
+        : { gitDiffStats: stats },
+    ),
 
   marketplaceUpdateCount: 0,
   setMarketplaceUpdateCount: (count) => set({ marketplaceUpdateCount: count }),
-
-  currentUser: null,
-  setCurrentUser: (user) => set({ currentUser: user }),
-
-  balanceTokens: 0,
-  balanceCny: 0,
-  setBalance: (tokens, cny) => set({ balanceTokens: tokens, balanceCny: cny }),
 }),
     {
-      name: "boxnex-app",
-      // Persist activeSessionId to remember which session was last selected
+      name: "nexbox-app",
+      // Persist activeSessionId to remember which session was last selected,
+      // and per-session unread flags (client-only) so blue dots survive reload.
       partialize: (state) => ({
         activeSessionId: state.activeSessionId,
+        unreadSessions: state.unreadSessions,
       }),
       onRehydrateStorage: () => (state) => {
         console.log('[Store] Rehydrated from localStorage:', state?.activeSessionId);

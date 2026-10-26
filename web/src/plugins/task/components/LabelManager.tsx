@@ -1,12 +1,10 @@
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
-import { Plus, Trash2, X, Check } from "lucide-react";
+import { Plus, X, Check } from "lucide-react";
 import { labelsApi } from "@/lib/api";
 import type { TaskLabel } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-
-const LABEL_NAME_RE = /^[a-zA-Z0-9_-]{2,10}$/;
 
 interface LabelManagerProps {
   projectId: string;
@@ -35,8 +33,8 @@ export function LabelManager({ projectId, onClose }: LabelManagerProps) {
 
   const handleCreate = async () => {
     const trimmed = name.trim();
-    if (!LABEL_NAME_RE.test(trimmed)) {
-      setNameError("2-10 chars, letters/digits/dash/underscore only");
+    if (!trimmed) {
+      setNameError("Label name is required");
       return;
     }
     setNameError("");
@@ -48,16 +46,6 @@ export function LabelManager({ projectId, onClose }: LabelManagerProps) {
     } catch (e) {
       console.error("Failed to create label:", e);
       toast.error("Failed to create label", { description: String(e) });
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    try {
-      await labelsApi.delete(projectId, id);
-      loadLabels();
-    } catch (e) {
-      console.error("Failed to delete label:", e);
-      toast.error("Failed to delete label", { description: String(e) });
     }
   };
 
@@ -80,15 +68,9 @@ export function LabelManager({ projectId, onClose }: LabelManagerProps) {
             labels.map((label) => (
               <div
                 key={label.id}
-                className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-muted/50 group"
+                className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-muted/50"
               >
                 <span className="text-sm flex-1 truncate">{label.name}</span>
-                <button
-                  onClick={() => handleDelete(label.id)}
-                  className="hidden group-hover:block p-1 rounded hover:bg-destructive/20 text-destructive"
-                >
-                  <Trash2 className="h-3 w-3" />
-                </button>
               </div>
             ))
           )}
@@ -98,7 +80,7 @@ export function LabelManager({ projectId, onClose }: LabelManagerProps) {
               <Input
                 value={name}
                 onChange={(e) => { setName(e.target.value); setNameError(""); }}
-                placeholder="Label name (e.g. bug, feature)"
+                placeholder="Label name (e.g. bug, priority::high)"
                 className="h-8 text-sm"
                 autoFocus
                 onKeyDown={(e) => {
@@ -109,9 +91,6 @@ export function LabelManager({ projectId, onClose }: LabelManagerProps) {
               {nameError && (
                 <p className="text-xs text-destructive">{nameError}</p>
               )}
-              <p className="text-[11px] text-muted-foreground">
-                Letters, digits, dash, underscore only. 2-10 characters.
-              </p>
               <div className="flex justify-end gap-1.5">
                 <Button size="sm" variant="ghost" onClick={() => { setShowCreate(false); setName(""); }}>Cancel</Button>
                 <Button size="sm" onClick={handleCreate} disabled={!name.trim()}>

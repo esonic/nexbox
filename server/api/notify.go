@@ -64,7 +64,9 @@ func notificationDetail(text, recipient, taskID, assetID, commentID, commentPrev
 	return string(b)
 }
 
-// sendNotification is a no-op placeholder (notifications were a cloud-only feature).
+// sendNotification used to push a notification change to the remote store in
+// cloud mode. In local-only mode there is nowhere to push to, so this is a
+// no-op. Kept as a stub so callers do not need to change.
 func (s *Server) sendNotification(projectID, entityID, summary, text, recipient, taskID, assetID, commentID, commentPreview string, lineNumber *int) error {
 	return nil
 }

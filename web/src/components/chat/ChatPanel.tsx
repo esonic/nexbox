@@ -1,56 +1,89 @@
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useRef, useEffect, useState, useCallback, memo, useMemo } from "react";
 import { Circle, Clock, Wrench, MessageSquare, Loader2, ArrowDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ChatMessage } from "@/components/chat/ChatMessage";
+import { ChatMessage, CopyButton, ForkButton, extractPlainText, stripAllNextActions } from "@/components/chat/ChatMessage";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ChatInput } from "@/components/chat/ChatInput";
+import type { WorktreeSelectorProps } from "@/components/chat/WorktreeSelector";
 import { useChatSession } from "@/hooks/useChatSession";
-import { diffApi, sessionsApi } from "@/lib/api";
+import { gitApi, sessionsApi } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
-import { formatDuration } from "@/lib/format";
+import { UNASSIGNED_PROJECT } from "@/lib/constants";
+import { formatDuration, formatMessageTime } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import type { Session, Project, ChatMessage as ChatMessageType } from "@/types";
 
-function MessageStats({ message }: { message: ChatMessageType }) {
-  if (message.role !== "assistant" || message.isStreaming) return null;
-  if (message.metadata?.durationMs == null || message.metadata.durationMs <= 0) return null;
+const MessageFooter = memo(function MessageFooter({ message, canFork }: { message: ChatMessageType; canFork: boolean }) {
+  // Suggestions are rendered as chips and should not be included when copying.
+  const plainText = useMemo(() => stripAllNextActions(extractPlainText(message.parts)), [message.parts]);
 
+  if (message.isStreaming || message.role === "system") return null;
+
+  const isUser = message.role === "user";
   const { metadata, parts } = message;
-  const toolCallCount = metadata.toolCalls ?? parts.filter((p) => p.type === "tool_use").length;
-  const totalTokens = (metadata.inputTokens || 0) + (metadata.outputTokens || 0);
+  const showStats = !isUser && metadata?.durationMs != null && metadata.durationMs > 0;
+  const toolCallCount = showStats ? (metadata.toolCalls ?? parts.filter((p) => p.type === "tool_use").length) : 0;
+  const totalTokens = showStats ? (metadata.inputTokens || 0) + (metadata.outputTokens || 0) : 0;
+  const timestamp = formatMessageTime(message.created_at);
+
+  if (!showStats && !plainText && !timestamp) return null;
 
   return (
-    <div className="flex items-center gap-3 px-3 py-1 mt-1 ml-12 rounded-md text-[11px] text-muted-foreground/60">
-      <span className="inline-flex items-center gap-1">
-        <Circle className="h-2 w-2 fill-green-500/50 text-green-500/50" />
-        Completed
-      </span>
-      <span className="inline-flex items-center gap-1">
-        <Clock className="h-3 w-3" />
-        {formatDuration(metadata.durationMs!)}
-      </span>
-      {toolCallCount > 0 && (
-        <span className="inline-flex items-center gap-1">
-          <Wrench className="h-3 w-3" />
-          {toolCallCount} tool calls
-        </span>
+    <div
+      className={cn(
+        "flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 mt-1 text-[11px] text-muted-foreground/60 min-w-0",
+        isUser && "justify-end",
       )}
-      {totalTokens > 0 && (
-        <span className="inline-flex items-center gap-1">
-          <MessageSquare className="h-3 w-3" />
-          {totalTokens.toLocaleString()} tokens
-        </span>
+    >
+      {showStats && (
+        <>
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
+            <Circle className="h-2 w-2 fill-green-500/50 text-green-500/50" />
+            Completed
+          </span>
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
+            <Clock className="h-3 w-3" />
+            {formatDuration(metadata.durationMs!)}
+          </span>
+          {toolCallCount > 0 && (
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
+              <Wrench className="h-3 w-3" />
+              {toolCallCount} tool calls
+            </span>
+          )}
+          {totalTokens > 0 && (
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
+              <MessageSquare className="h-3 w-3" />
+              {totalTokens.toLocaleString()} tokens
+            </span>
+          )}
+          {metadata.totalCostUsd ? (
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
+              $
+              {metadata.totalCostUsd < 0.01
+                ? metadata.totalCostUsd.toFixed(4)
+                : metadata.totalCostUsd.toFixed(2)}
+            </span>
+          ) : null}
+        </>
       )}
+      <div className="ml-auto flex items-center gap-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity shrink-0">
+        {timestamp && <span className="tabular-nums">{timestamp}</span>}
+        {plainText && <CopyButton text={plainText} />}
+        <ForkButton message={message} supported={canFork} />
+      </div>
     </div>
   );
-}
+});
 
 interface ChatPanelProps {
   session: Session;
   project: Project | null;
+  worktree?: WorktreeSelectorProps;
   onMessageSent?: () => void;
 }
 
-export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
+export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -69,8 +102,12 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
     pendingUserInput,
     sendToolResponse,
     agentName,
+    capabilities,
     modelName,
+    effort,
     availableAgents,
+    availableModels,
+    availableModelInfos,
     pickedTasks,
     pickedAssets,
     pickedWorkflows,
@@ -82,17 +119,15 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
     handleStop,
     handleChangeAgent,
     handleChangeModel,
+    handleChangeEffort,
     sendQueuedNow,
     removeQueued,
     editQueued,
     sendRichQueuedNow,
     removeRichQueued,
     editRichQueued,
-    addPickedTask,
     removePickedTask,
-    addPickedAsset,
     removePickedAsset,
-    addPickedWorkflow,
     removePickedWorkflow,
     clearPickedComments,
     loadMoreMessages,
@@ -169,24 +204,51 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
   const projectId = project?.id;
   const projectGitRepo = project?.git_repo_path;
   const worktreeSessionId = session.worktree_mode === "worktree" ? session.id : undefined;
+  const diffStatsRequestRef = useRef(0);
 
-  const fetchDiffStats = useCallback(async () => {
+  const fetchWorkspaceGitSummary = useCallback(async () => {
     if (!projectGitRepo || !projectId) return;
+    const request = ++diffStatsRequestRef.current;
     try {
-      const data = await diffApi.stats(projectId, worktreeSessionId);
-      setGitDiffStats(data);
+      const data = await gitApi.workspaceStatus(projectId, worktreeSessionId);
+      if (request !== diffStatsRequestRef.current) return;
+      setGitDiffStats({
+        files: [],
+        total_files: data.summary.total_files,
+        insertions: data.summary.insertions,
+        deletions: data.summary.deletions,
+        stats_included: data.summary.stats_included,
+        repository_count: data.summary.repository_count,
+      });
     } catch {
       // silently ignore polling errors
     }
   }, [projectId, projectGitRepo, worktreeSessionId, setGitDiffStats]);
 
-  // Polling is handled by SessionWorkspace (panel-aware interval).
-  // Here we only trigger a refresh when streaming stops (agent may have changed files).
+  useEffect(() => {
+    const requestRef = diffStatsRequestRef;
+    requestRef.current++;
+    setGitDiffStats(null);
+    if (!hasGitRepo) return;
+    fetchWorkspaceGitSummary();
+    // Skip the poll while the tab is hidden; refresh once when it comes back.
+    const poll = () => { if (!document.hidden) fetchWorkspaceGitSummary(); };
+    const interval = setInterval(poll, 10_000);
+    document.addEventListener("visibilitychange", poll);
+    return () => {
+      requestRef.current++;
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", poll);
+    };
+  }, [hasGitRepo, fetchWorkspaceGitSummary, setGitDiffStats]);
+
+  // Refresh the cheap workspace summary when streaming stops (the selected
+  // Git panel owns repository-scoped line statistics).
   const prevStreaming = useRef(isStreaming);
   useEffect(() => {
     if (prevStreaming.current && !isStreaming) {
       if (hasGitRepo) {
-        const timer = setTimeout(fetchDiffStats, 2000);
+        const timer = setTimeout(fetchWorkspaceGitSummary, 2000);
         return () => clearTimeout(timer);
       }
       // Refresh session to pick up worktree_path set during first message
@@ -197,7 +259,7 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
       }
     }
     prevStreaming.current = isStreaming;
-  }, [isStreaming, hasGitRepo, fetchDiffStats, session, sessions, setSessions]);
+  }, [isStreaming, hasGitRepo, fetchWorkspaceGitSummary, session, sessions, setSessions]);
 
   const handleOpenGit = useCallback(() => {
     window.dispatchEvent(new CustomEvent("open-git-panel"));
@@ -215,9 +277,9 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="flex-1 min-h-0 overflow-y-auto"
+        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden"
       >
-        <div className="flex flex-col min-w-0 gap-6 flex-1 max-w-3xl mx-auto px-4 pt-4 pb-4">
+        <div className="flex flex-col min-w-0 gap-6 flex-1 max-w-4xl mx-auto px-4 pt-4 pb-4">
           {loadingHistory ? (
             <div className="flex flex-col items-center justify-center py-20">
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -230,6 +292,11 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
                 <p className="text-muted-foreground text-lg">
                   {hasProject ? "How can I help you today?" : "Select a project to get started."}
                 </p>
+                {hasProject && project && project.name !== UNASSIGNED_PROJECT && (
+                  <p className="mt-2 text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground/50">
+                    Project · {project.name}
+                  </p>
+                )}
               </div>
             </div>
           ) : (
@@ -242,9 +309,9 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
               <div data-messages="" className="flex flex-col gap-6">
                 {messages.map((msg) => (
                   <ErrorBoundary key={msg.id}>
-                    <div>
+                    <div className="group/msg">
                       <ChatMessage message={msg} />
-                      <MessageStats message={msg} />
+                      <MessageFooter message={msg} canFork={capabilities.fork} />
                     </div>
                   </ErrorBoundary>
                 ))}
@@ -272,13 +339,18 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
       {/* Input area */}
       <ChatInput
         sessionId={session.id}
-        projectId={project?.id}
         isConnected={isConnected}
         isStreaming={isStreaming}
         agentName={agentName}
+        canInterject={capabilities.interject}
         modelName={modelName}
+        effort={effort}
         availableAgents={availableAgents}
+        availableModels={availableModels}
+        availableModelInfos={availableModelInfos}
         sessionHasMessages={sessionHasMessages}
+        canChangeModel={!sessionHasMessages || capabilities.model_switch_mode !== "new_session_only"}
+        worktree={worktree}
         pickedTasks={pickedTasks}
         pickedAssets={pickedAssets}
         pickedWorkflows={pickedWorkflows}
@@ -291,11 +363,9 @@ export function ChatPanel({ session, project, onMessageSent }: ChatPanelProps) {
         onStop={handleStop}
         onChangeAgent={handleChangeAgent}
         onChangeModel={handleChangeModel}
+        onChangeEffort={handleChangeEffort}
         onRemovePickedTask={removePickedTask}
-        onAddPickedTask={addPickedTask}
         onRemovePickedAsset={removePickedAsset}
-        onAddPickedAsset={addPickedAsset}
-        onAddPickedWorkflow={addPickedWorkflow}
         onRemovePickedWorkflow={removePickedWorkflow}
         onOpenGit={hasGitRepo ? handleOpenGit : undefined}
         queue={messageQueue}

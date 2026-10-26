@@ -1,16 +1,33 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/gitrepo"
+	chromemcp "github.com/esonic/nexbox/mcp/chrome"
 	"github.com/go-chi/chi/v5"
 )
+
+// wfPrefixRegex matches the WF[xxxxx] prefix that orchestrator.go writes onto
+// workflow-created session names (e.g. "WF[b54a0] my-workflow — node-label").
+// The trailing whitespace is captured so the prefix can be re-applied verbatim
+// in front of an auto-generated title.
+var wfPrefixRegex = regexp.MustCompile(`^WF\[[A-Fa-f0-9]+\]\s*`)
+
+// sessionNNNRegex matches the "Session 12" placeholder name assigned at
+// creation time when the caller doesn't supply one.
+var sessionNNNRegex = regexp.MustCompile(`^Session\s+\d+$`)
 
 // ListSessions returns all sessions.
 func (s *Server) ListSessions(w http.ResponseWriter, r *http.Request) {
@@ -22,24 +39,12 @@ func (s *Server) ListSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = []Session{}
 	}
 
-	// Filter by owner unless admin
-	if GetUserRole(r) != "admin" {
-		userID := GetUserID(r)
-		filtered := sessions[:0]
-		for _, sess := range sessions {
-			if sess.UserID == userID {
-				filtered = append(filtered, sess)
-			}
-		}
-		sessions = filtered
-	}
-
 	allActiveIDs := s.Hub.ActiveSessionIDs()
 	sessionIDSet := make(map[string]bool, len(sessions))
 	for _, sess := range sessions {
 		sessionIDSet[sess.ID] = true
 	}
-	var activeIDs []string
+	activeIDs := make([]string, 0)
 	for _, id := range allActiveIDs {
 		if sessionIDSet[id] {
 			activeIDs = append(activeIDs, id)
@@ -52,46 +57,12 @@ func (s *Server) ListSessions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-const maxActiveSessionsPerProject = 20
-
-// countActiveSessionsForUser counts non-deleted sessions for a user in a given project.
-func (s *Server) countActiveSessionsForUser(userID, projectID string) (int, error) {
-	sessions, err := s.Store.ListSessions()
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	for _, sess := range sessions {
-		if sess.UserID == userID && sess.ProjectID == projectID {
-			count++
-		}
-	}
-	return count, nil
-}
-
 // CreateSession creates a new session.
 func (s *Server) CreateSession(w http.ResponseWriter, r *http.Request) {
 	var req CreateSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
-	}
-
-	// Set owner from authenticated user
-	req.UserID = GetUserID(r)
-
-	// Enforce session limit per project
-	if req.ProjectID != "" {
-		count, err := s.countActiveSessionsForUser(req.UserID, req.ProjectID)
-		if err != nil {
-			log.Printf("[sessions] Failed to count sessions: %v", err)
-			writeError(w, http.StatusInternalServerError, "failed to check session limit")
-			return
-		}
-		if count >= maxActiveSessionsPerProject {
-			writeError(w, http.StatusConflict, "session limit reached: maximum "+strconv.Itoa(maxActiveSessionsPerProject)+" active sessions per project")
-			return
-		}
 	}
 
 	// If no agent specified, use the persisted default from settings
@@ -106,6 +77,10 @@ func (s *Server) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.MarketplaceStats != nil {
+		s.MarketplaceStats.RecordSession()
+	}
+
 	writeJSON(w, http.StatusCreated, sess)
 }
 
@@ -118,10 +93,6 @@ func (s *Server) GetSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if sess == nil {
 		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if GetUserRole(r) != "admin" && sess.UserID != GetUserID(r) {
-		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
 	// Fill in default agent if empty
@@ -139,19 +110,42 @@ func (s *Server) UpdateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	// Ownership check
-	if GetUserRole(r) != "admin" {
+	if req.ChromeBrowserURL != nil {
+		url := strings.TrimSpace(*req.ChromeBrowserURL)
+		if err := chromemcp.ValidateBrowserURL(url); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		req.ChromeBrowserURL = &url
+		if s.SessionManager != nil && !s.SessionManager.TrySetActive(id) {
+			writeError(w, http.StatusConflict, "wait for the current turn to finish before changing the Chrome connection")
+			return
+		}
+		if s.SessionManager != nil {
+			defer s.SessionManager.SetActive(id, false)
+		}
+	}
+	if req.Model != nil {
 		existing, err := s.Store.GetSession(id)
-		if writeStoreError(w, err, "UpdateSession/GetSession", "failed to get session") {
+		if writeStoreError(w, err, "GetSession", "failed to load session") {
 			return
 		}
 		if existing == nil {
 			writeError(w, http.StatusNotFound, "session not found")
 			return
 		}
-		if existing.UserID != GetUserID(r) {
-			writeError(w, http.StatusForbidden, "access denied")
-			return
+		if *req.Model != existing.Model {
+			backend, _ := s.ResolveAgent(existing)
+			if backend != nil && backend.Capabilities().ModelSwitchMode == agent.ModelSwitchNewSessionOnly {
+				messages, err := s.Store.ListMessages(id)
+				if writeStoreError(w, err, "ListMessages", "failed to check session messages") {
+					return
+				}
+				if existing.AgentSessionID != "" || len(messages) > 0 {
+					writeError(w, http.StatusBadRequest, "this agent only allows choosing a model before the conversation starts")
+					return
+				}
+			}
 		}
 	}
 	sess, err := s.Store.UpdateSession(id, req)
@@ -162,7 +156,228 @@ func (s *Server) UpdateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	if req.ChromeBrowserURL != nil && s.ChromeManager != nil {
+		s.ChromeManager.Remove(id)
+	}
 	writeJSON(w, http.StatusOK, sess)
+}
+
+// AutoTitleSessionRequest is the JSON body for POST /api/sessions/{id}/auto-title.
+type AutoTitleSessionRequest struct {
+	// Message is the user's first message text. Used as the sole input to the
+	// LLM title generation; refs/attachments are intentionally ignored to keep
+	// the prompt short and cheap.
+	Message string `json:"message"`
+}
+
+// AutoTitleSession generates a short, semantic title for a session based on
+// the user's first message and writes it back. Workflow-created sessions whose
+// names carry a WF[xxxxx] prefix keep the prefix; the LLM-generated title is
+// appended after it. Customized names (anything that is not the default
+// placeholder and not WF-prefixed) are left untouched.
+//
+// The call is best-effort: if the LLM fails or returns nothing usable, falls
+// back to the same first-sentence heuristic the frontend used to apply.
+func (s *Server) AutoTitleSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "sessionId")
+
+	var req AutoTitleSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	msg := strings.TrimSpace(req.Message)
+	if msg == "" {
+		writeError(w, http.StatusBadRequest, "message is required")
+		return
+	}
+
+	sess, err := s.Store.GetSession(id)
+	if writeStoreError(w, err, "AutoTitleSession", "failed to get session") {
+		return
+	}
+	if sess == nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	prefix, rest := splitWFPrefix(strings.TrimSpace(sess.Name))
+	if prefix == "" && !isDefaultSessionName(rest) {
+		// User has customized this title; respect it.
+		writeJSON(w, http.StatusOK, sess)
+		return
+	}
+
+	title, err := s.generateAutoTitle(r.Context(), s.sessionWorkDir(sess), msg)
+	if err != nil {
+		log.Printf("[auto-title] LLM failed (session=%s): %v; falling back to heuristic", id, err)
+		title = heuristicTitle(msg)
+	}
+	if title == "" {
+		title = heuristicTitle(msg)
+	}
+
+	newName := prefix + title
+	updated, err := s.Store.UpdateSession(id, UpdateSessionRequest{Name: &newName})
+	if writeStoreError(w, err, "AutoTitleSession", "failed to update session") {
+		return
+	}
+	if updated == nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// splitWFPrefix separates an optional "WF[xxxxx] " prefix from the rest of
+// the name. Returns ("", name) when there is no prefix.
+func splitWFPrefix(name string) (prefix, rest string) {
+	loc := wfPrefixRegex.FindStringIndex(name)
+	if loc == nil {
+		return "", name
+	}
+	return name[:loc[1]], name[loc[1]:]
+}
+
+// isDefaultSessionName reports whether `name` looks like the auto-assigned
+// placeholder ("", "New Session", "Session 12"). Anything else is assumed to
+// be user-chosen and should not be overwritten by auto-title.
+func isDefaultSessionName(name string) bool {
+	n := strings.TrimSpace(name)
+	return n == "" || n == "New Session" || sessionNNNRegex.MatchString(n)
+}
+
+// heuristicTitle mirrors the frontend's first-sentence slice. Used as a
+// fallback when the LLM call fails so the user still gets something better
+// than "New Session".
+func heuristicTitle(message string) string {
+	cleaned := strings.Join(strings.Fields(message), " ")
+	if cleaned == "" {
+		return "New Session"
+	}
+	cut := strings.IndexAny(cleaned, ".!?。！？\n")
+	if cut > 0 {
+		cleaned = cleaned[:cut]
+	}
+	cleaned = strings.TrimSpace(cleaned)
+	if cleaned == "" {
+		return "New Session"
+	}
+	return truncateRunes(cleaned, 48)
+}
+
+// truncateRunes returns s truncated to at most n runes (so it never splits a
+// multi-byte UTF-8 codepoint mid-sequence).
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
+// autoTitleModelCatalog is implemented by backends that expose their live
+// model picker. CodexAgent serves this from its startup-warmed in-memory cache;
+// when warmup failed, ListSupportedModels performs the existing on-demand
+// retry.
+type autoTitleModelCatalog interface {
+	ListSupportedModels(context.Context) ([]agent.ModelInfo, string)
+}
+
+// resolveUtilityBackend selects the lightweight model used for auto-title
+// generation from the configured default agent. Claude keeps its stable Haiku
+// alias. Codex's live picker is ordered strongest-to-weakest, so the last model
+// and its first (lowest) advertised effort are used.
+func (s *Server) resolveUtilityBackend(ctx context.Context) (agent.Agent, string, string, string, error) {
+	agentName := s.getDefaultAgent()
+	a, ok := s.Agents[agentName]
+	if !ok || a == nil {
+		return nil, agentName, "", "", fmt.Errorf("default agent %q not available", agentName)
+	}
+
+	switch agentName {
+	case "pi", "kimi":
+		// An unscoped Pi catalog can contain unrelated providers and does not
+		// necessarily include the user's default; let Pi choose its own model.
+		return a, agentName, "", "", nil
+	case "claude":
+		return a, agentName, "haiku", "", nil
+	case "codex":
+		catalog, ok := a.(autoTitleModelCatalog)
+		if !ok {
+			return nil, agentName, "", "", fmt.Errorf("codex agent does not expose a model catalog")
+		}
+		models, _ := catalog.ListSupportedModels(ctx)
+		if len(models) == 0 {
+			return nil, agentName, "", "", fmt.Errorf("codex model catalog is empty")
+		}
+		selected := models[len(models)-1]
+		if strings.TrimSpace(selected.ID) == "" {
+			return nil, agentName, "", "", fmt.Errorf("codex weakest model has an empty id")
+		}
+		effort := ""
+		if len(selected.SupportedEfforts) > 0 {
+			effort = selected.SupportedEfforts[0]
+		}
+		return a, agentName, selected.ID, effort, nil
+	default:
+		return nil, agentName, "", "", fmt.Errorf("utility generation is not supported by default agent %q", agentName)
+	}
+}
+
+// generateAutoTitle performs a one-shot request using the configured default
+// agent. Claude uses Haiku; Codex uses the weakest cached picker model at its
+// lowest advertised effort. The HTTP handler retains the existing heuristic
+// fallback for catalog, agent, or response failures.
+func (s *Server) generateAutoTitle(parentCtx context.Context, workDir, firstMessage string) (string, error) {
+	if workDir == "" {
+		workDir, _ = os.UserHomeDir()
+	}
+
+	prompt := "Summarize the following user message as a very short session title.\n\n" +
+		"Rules:\n" +
+		"- 4 to 8 words maximum\n" +
+		"- Reply in the SAME language as the user message\n" +
+		"- No punctuation, no quotes, no markdown, no emojis\n" +
+		"- Capture the core intent or topic, not pleasantries\n" +
+		"- Output ONLY the title text — no explanation, no preface\n" +
+		"- Do NOT use any tools; just respond with the title\n\n" +
+		"User message:\n" + firstMessage
+
+	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
+	defer cancel()
+
+	a, agentName, model, effort, err := s.resolveUtilityBackend(ctx)
+	if err != nil {
+		return "", err
+	}
+	log.Printf("[auto-title] agent=%s model=%s effort=%s", agentName, model, effort)
+
+	var textBuf strings.Builder
+	_, err = a.SendMessage(ctx, agent.Request{
+		ConversationID: fmt.Sprintf("auto-title-%d", time.Now().UnixNano()),
+		WorkDir:        workDir,
+		Model:          model,
+		Effort:         effort,
+		Message:        prompt,
+	}, func(event agent.StreamEvent) {
+		if event.Type == agent.EventTextDelta {
+			textBuf.WriteString(event.Content)
+		}
+	})
+	if err != nil {
+		return "", fmt.Errorf("agent: %w", err)
+	}
+
+	title := strings.TrimSpace(textBuf.String())
+	// Strip markdown fences / quotes some models add despite instructions.
+	title = strings.Trim(title, "`\"' \n\r\t")
+	// Collapse newlines — titles must be single-line.
+	title = strings.Join(strings.Fields(title), " ")
+	if title == "" {
+		return "", fmt.Errorf("agent returned empty response")
+	}
+	return truncateRunes(title, 48), nil
 }
 
 // ReorderSessions sets the display order of sessions.
@@ -183,24 +398,117 @@ func (s *Server) ReorderSessions(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// DeleteSession soft-deletes a session (moves to trash).
-func (s *Server) DeleteSession(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "sessionId")
-	// Ownership check
-	if GetUserRole(r) != "admin" {
-		existing, err := s.Store.GetSession(id)
-		if writeStoreError(w, err, "DeleteSession/GetSession", "failed to get session") {
-			return
-		}
-		if existing == nil {
-			writeError(w, http.StatusNotFound, "session not found")
-			return
-		}
-		if existing.UserID != GetUserID(r) {
-			writeError(w, http.StatusForbidden, "access denied")
+// ForkSessionRequest is the JSON body of POST /api/sessions/{sessionId}/fork.
+type ForkSessionRequest struct {
+	// MessageID is the durable Nexbox assistant message to fork through.
+	// Its agent checkpoint is resolved server-side and never interpreted here.
+	MessageID string `json:"message_id"`
+	// Name for the new session. If empty, defaults to "<parent name> (fork)".
+	Name string `json:"name,omitempty"`
+}
+
+// ForkSession creates a new session that is a fork of the session in the URL,
+// branched at the given message. Backend-specific checkpoint semantics stay
+// inside the selected agent adapter.
+//
+// On success, the new session is fully populated in the Nexbox DB (with a
+// copy of the parent's messages up to the cut point) but its
+// `agent_session_id` is empty: the actual CLI fork happens lazily on the
+// first chat turn, when chat.go sees `forked_from_session_id != ""` and
+// passes the fork flags to the agent.
+func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
+	parentID := chi.URLParam(r, "sessionId")
+	var req ForkSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.MessageID == "" {
+		writeError(w, http.StatusBadRequest, "message_id is required")
+		return
+	}
+	parent, err := s.Store.GetSession(parentID)
+	if writeStoreError(w, err, "ForkSession", "failed to load parent session") {
+		return
+	}
+	if parent == nil {
+		writeError(w, http.StatusNotFound, "parent session not found")
+		return
+	}
+	if parent.DeletedAt != nil {
+		// Forking from the trash would silently bring messages back into a
+		// fresh session, sidestepping the trash UX. Reject.
+		writeError(w, http.StatusBadRequest, "cannot fork a trashed session; restore it first")
+		return
+	}
+	if parent.WorktreeMode == "worktree" && parent.WorktreePath == "" {
+		writeError(w, http.StatusConflict, "parent session worktree is not ready")
+		return
+	}
+
+	// A named-but-unregistered agent must not silently fall through to the
+	// default backend (ResolveAgent's fallback): the parent's checkpoints
+	// belong to whatever produced them, not to today's default.
+	if parent.Agent != "" {
+		if _, registered := s.Agents[parent.Agent]; !registered {
+			writeError(w, http.StatusBadRequest, "unknown agent for parent session: "+parent.Agent)
 			return
 		}
 	}
+	backend, resolvedAgent := s.ResolveAgent(parent)
+	if backend == nil || !backend.Capabilities().Fork {
+		writeError(w, http.StatusBadRequest, "fork is not supported by this agent")
+		return
+	}
+
+	// Resolve the cut point exclusively by BeeHub identity. The opaque agent
+	// checkpoint stored with the message is passed through without inspection.
+	atMsg, err := s.Store.GetMessage(req.MessageID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load message: "+err.Error())
+		return
+	}
+	if atMsg == nil {
+		writeError(w, http.StatusNotFound, "message not found")
+		return
+	}
+	if atMsg.SessionID != parentID {
+		writeError(w, http.StatusBadRequest, "message does not belong to parent session")
+		return
+	}
+	if atMsg.Role != "assistant" {
+		writeError(w, http.StatusBadRequest, "fork must be anchored on an assistant message")
+		return
+	}
+	if atMsg.Metadata.AgentCheckpoint == "" {
+		writeError(w, http.StatusBadRequest, "message has no fork checkpoint")
+		return
+	}
+
+	// Create new session row + copy messages. Stamp the *resolved* agent on
+	// the new row: the fork was capability-gated against that backend, and an
+	// empty inherited column would let a later default-agent change hand this
+	// checkpoint to a different backend on the first turn.
+	newSess, err := s.Store.ForkSession(parentID, req.Name, atMsg.ID, atMsg.Metadata.AgentCheckpoint, resolvedAgent)
+	if err != nil {
+		log.Printf("[sessions] Fork failed (parent=%s, atMsg=%s): %v", parentID, atMsg.ID, err)
+		writeError(w, http.StatusInternalServerError, "failed to fork session: "+err.Error())
+		return
+	}
+
+	log.Printf("[sessions] Forked %s session %s from %s at message %s",
+		resolvedAgent, newSess.ID, parentID, atMsg.ID)
+
+	if s.MarketplaceStats != nil {
+		s.MarketplaceStats.RecordSession()
+	}
+
+	writeJSON(w, http.StatusCreated, newSess)
+}
+
+// DeleteSession soft-deletes a session (moves to trash).
+func (s *Server) DeleteSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "sessionId")
 	if err := s.Store.DeleteSession(id); err != nil {
 		log.Printf("[sessions] Failed to trash session %s: %v", id, err)
 		writeError(w, http.StatusInternalServerError, "failed to delete session")
@@ -219,17 +527,6 @@ func (s *Server) ListTrashedSessions(w http.ResponseWriter, r *http.Request) {
 	if sessions == nil {
 		sessions = []Session{}
 	}
-	// Filter by owner unless admin
-	if GetUserRole(r) != "admin" {
-		userID := GetUserID(r)
-		filtered := sessions[:0]
-		for _, sess := range sessions {
-			if sess.UserID == userID {
-				filtered = append(filtered, sess)
-			}
-		}
-		sessions = filtered
-	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"sessions": sessions,
 	})
@@ -238,32 +535,6 @@ func (s *Server) ListTrashedSessions(w http.ResponseWriter, r *http.Request) {
 // RestoreSession restores a session from the trash.
 func (s *Server) RestoreSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "sessionId")
-	// Ownership check + session limit check
-	existing, err := s.Store.GetSession(id)
-	if writeStoreError(w, err, "RestoreSession/GetSession", "failed to get session") {
-		return
-	}
-	if existing == nil {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if GetUserRole(r) != "admin" && existing.UserID != GetUserID(r) {
-		writeError(w, http.StatusForbidden, "access denied")
-		return
-	}
-	// Enforce session limit on restore
-	if existing.ProjectID != "" {
-		count, err := s.countActiveSessionsForUser(existing.UserID, existing.ProjectID)
-		if err != nil {
-			log.Printf("[sessions] Failed to count sessions for restore: %v", err)
-			writeError(w, http.StatusInternalServerError, "failed to check session limit")
-			return
-		}
-		if count >= maxActiveSessionsPerProject {
-			writeError(w, http.StatusConflict, "session limit reached: maximum "+strconv.Itoa(maxActiveSessionsPerProject)+" active sessions per project")
-			return
-		}
-	}
 	if err := s.Store.RestoreSession(id); err != nil {
 		log.Printf("[sessions] Failed to restore session %s: %v", id, err)
 		writeError(w, http.StatusInternalServerError, "failed to restore session")
@@ -285,7 +556,10 @@ func (s *Server) RestoreSession(w http.ResponseWriter, r *http.Request) {
 // data (session dirs + worktrees), and runs VACUUM to reclaim space.
 // Used by both the periodic 7-day cleanup goroutine and the EmptyTrash handler.
 func (s *Server) PurgeTrash(cutoff time.Time) (int, error) {
-	worktreePaths, _ := s.Store.GetExpiredSessionWorktrees(cutoff)
+	worktreePaths, err := s.Store.GetExpiredSessionWorktrees(cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("list expired session worktrees: %w", err)
+	}
 
 	ids, err := s.Store.PurgeExpiredSessions(cutoff)
 	if err != nil {
@@ -298,9 +572,52 @@ func (s *Server) PurgeTrash(cutoff time.Time) (int, error) {
 			log.Printf("[trash] Failed to remove session dir %s: %v", dir, err)
 		}
 	}
-	for _, wtPath := range worktreePaths {
-		if err := RemoveWorktree(wtPath); err != nil {
-			log.Printf("[trash] Failed to remove worktree %s: %v", wtPath, err)
+	if len(worktreePaths) > 0 {
+		// Read references after purging so active sessions, sessions still in
+		// trash, and running workflows keep their shared working directory.
+		references, err := s.Store.GetReferencedWorktreePaths()
+		if err != nil {
+			return len(ids), fmt.Errorf("check remaining worktree references: %w", err)
+		}
+		for i, path := range references {
+			canonical, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				canonical = filepath.Clean(path)
+			}
+			references[i] = canonical
+		}
+		removed := make(map[string]bool)
+		for _, wtPath := range worktreePaths {
+			root, err := gitWorktreeRoot(wtPath)
+			if err != nil {
+				log.Printf("[trash] Failed to resolve worktree %s: %v", wtPath, err)
+				continue
+			}
+			canonicalRoot, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				log.Printf("[trash] Failed to resolve worktree root %s: %v", root, err)
+				continue
+			}
+			if removed[canonicalRoot] {
+				continue
+			}
+			inUse := false
+			for _, reference := range references {
+				// Sessions can store either the worktree root or an effective
+				// project subdirectory, including paths through symlinks.
+				if gitrepo.PathWithin(canonicalRoot, reference) {
+					inUse = true
+					break
+				}
+			}
+			if inUse {
+				continue
+			}
+			if err := RemoveWorktree(root); err != nil {
+				log.Printf("[trash] Failed to remove worktree %s: %v", root, err)
+			} else {
+				removed[canonicalRoot] = true
+			}
 		}
 	}
 	if len(ids) > 0 {
@@ -351,11 +668,15 @@ func (s *Server) ListSessionMessages(w http.ResponseWriter, r *http.Request) {
 			messages = []ChatMessage{}
 		}
 		active := s.Hub.IsActive(sessionID)
-		writeJSON(w, http.StatusOK, map[string]interface{}{
+		resp := map[string]interface{}{
 			"messages": messages,
 			"has_more": hasMore,
 			"active":   active,
-		})
+		}
+		if pending, ok := getPendingUserInput(sessionID); ok {
+			resp["pending_input"] = pending
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
@@ -368,10 +689,14 @@ func (s *Server) ListSessionMessages(w http.ResponseWriter, r *http.Request) {
 		messages = []ChatMessage{}
 	}
 	active := s.Hub.IsActive(sessionID)
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"messages": messages,
 		"active":   active,
-	})
+	}
+	if pending, ok := getPendingUserInput(sessionID); ok {
+		resp["pending_input"] = pending
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // GetMessageDetails returns full message parts from the local detail cache.

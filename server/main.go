@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -15,25 +16,87 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/api"
+	"github.com/esonic/nexbox/config"
+	"github.com/esonic/nexbox/gitrepo"
+	nexmcp "github.com/esonic/nexbox/mcp"
+	chromemcp "github.com/esonic/nexbox/mcp/chrome"
+	"github.com/esonic/nexbox/store"
 	"github.com/rs/cors"
-	"gitlab.okg.com/sre_ai/boxnex/agent"
-	"gitlab.okg.com/sre_ai/boxnex/api"
-	"gitlab.okg.com/sre_ai/boxnex/config"
-	nexmcp "gitlab.okg.com/sre_ai/boxnex/mcp"
-	chromemcp "gitlab.okg.com/sre_ai/boxnex/mcp/chrome"
-	"gitlab.okg.com/sre_ai/boxnex/store"
 )
 
-// Version is injected at build time via -ldflags "-X main.Version=<timestamp>".
+// Version is injected at build time via -ldflags "-X main.Version=<version>".
 // Stays "dev" for local development builds.
 var Version = "dev"
 
+// agentCLIAvailable reports whether an agent's CLI resolves to an executable
+// on this system. Bare command names are looked up on PATH; explicit paths are
+// stat'd directly. Used at startup to skip registering optional agents (Crush,
+// ZeroClaw) whose CLI isn't installed, so they never appear in the picker.
+func agentCLIAvailable(cliPath string) bool {
+	cliPath = strings.TrimSpace(cliPath)
+	if cliPath == "" {
+		return false
+	}
+	if strings.ContainsRune(cliPath, os.PathSeparator) {
+		info, err := os.Stat(cliPath)
+		return err == nil && !info.IsDir()
+	}
+	_, err := exec.LookPath(cliPath)
+	return err == nil
+}
+
+// chromeEnablerImpl adapts ChromeManager + store to the mcp.ChromeEnabler interface.
+type chromeEnablerImpl struct {
+	manager *chromemcp.ChromeManager
+	store   store.Store
+}
+
+func (c *chromeEnablerImpl) EnableChrome(sessionID string) (string, []string, error) {
+	sess, err := c.store.GetSession(sessionID)
+	if err != nil || sess == nil {
+		return "", nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+	features := "chrome_devtools"
+	if sess.Features != "" {
+		already := false
+		for _, f := range strings.Split(sess.Features, ",") {
+			if strings.TrimSpace(f) == "chrome_devtools" {
+				already = true
+				break
+			}
+		}
+		if !already {
+			features = sess.Features + ",chrome_devtools"
+		} else {
+			features = sess.Features
+		}
+	}
+	if err := c.store.UpdateSessionFeatures(sessionID, features); err != nil {
+		return "", nil, fmt.Errorf("failed to save feature: %w", err)
+	}
+	chromeSrv := c.manager.GetOrCreate(sessionID, sess.ChromeBrowserURL)
+	if err := chromeSrv.EnsureStarted(context.Background()); err != nil {
+		return "", nil, fmt.Errorf("failed to start Chrome MCP: %w", err)
+	}
+	return chromeSrv.URL(), chromeSrv.ToolNames(), nil
+}
 
 func main() {
+	// CLI subcommands (`nexbox add-user`, `list-users`, etc.) are dispatched
+	// before flag parsing so they can take positional args without colliding
+	// with the server's --flag options. The dispatcher also handles `-h` /
+	// `--help` / `help` by printing combined usage.
+	if handled, code := runCLISubcommand(defaultDataDir()); handled {
+		os.Exit(code)
+	}
+
+	flag.Usage = printUsage
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	listen := flag.String("listen", "127.0.0.1", "Listen address")
 	port := flag.Int("port", 9040, "Server port")
-	dataDir := flag.String("data-dir", "", "Data directory (default: binary's directory)")
+	dataDir := flag.String("data-dir", defaultDataDir(), "Data directory (NEXBOX_DATA_DIR or binary's directory)")
 	flag.Parse()
 
 	if *showVersion {
@@ -41,25 +104,9 @@ func main() {
 		return
 	}
 
-	// Default data directory
-	if *dataDir == "" {
-		execPath, err := os.Executable()
-		if err == nil {
-			execPath, _ = filepath.EvalSymlinks(execPath)
-		}
-		if err == nil {
-			*dataDir = filepath.Dir(execPath)
-		} else {
-			*dataDir = "."
-		}
-	}
-
 	// Set up rolling file logger.
-	// Startup messages are written to both stdout and the log file so the
-	// operator can see them in the terminal.  All other log.* calls (runtime
-	// logs in goroutines, API handlers, etc.) go to the file only.
 	var startupLog *log.Logger
-	logFile, logErr := newRollingLog(filepath.Join(*dataDir, "logs"), "boxnex.log", 5<<20, 5)
+	logFile, logErr := newRollingLog(filepath.Join(*dataDir, "logs"), "nexbox.log", 5<<20, 5)
 	if logErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to init log file: %v; logging to stderr only\n", logErr)
 		startupLog = log.New(os.Stdout, "", log.LstdFlags)
@@ -69,65 +116,38 @@ func main() {
 		startupLog = log.New(io.MultiWriter(os.Stdout, logFile), "", log.LstdFlags)
 	}
 
-	startupLog.Printf("BoxNex starting...")
+	startupLog.Printf("Nexbox node starting...")
 	startupLog.Printf("  Data directory: %s", *dataDir)
 
-	// Detect first run before config is created
 	configPath := filepath.Join(*dataDir, "config.json")
-	_, statErr := os.Stat(configPath)
-	isFirstRun := os.IsNotExist(statErr)
-
 	cfgMgr, err := config.NewManager(configPath)
 	if err != nil {
 		startupLog.Fatalf("Failed to load config: %v", err)
 	}
 	log.Printf("  Config: %s", configPath)
 
-	// Reset any stale workflow executions left over from a previous run
-	// (done after store init below — see resetStaleExecutions call)
-
-	// Initialize store based on config.
-	cfg := cfgMgr.Get()
-	var dataStore store.Store
-	var localStore *store.SQLiteStore
-	var detailCache *store.DetailCache
-
-	if cfg.StoreType == "mysql" && cfg.MySQLDSN != "" {
-		mysqlStore, err := store.NewMySQLStore(cfg.MySQLDSN)
-		if err != nil {
-			startupLog.Fatalf("Failed to connect to MySQL: %v", err)
-		}
-		defer mysqlStore.Close()
-		dataStore = mysqlStore
-		startupLog.Printf("  Store: mysql")
-
-		// SQLite still needed for DetailCache (local message part caching).
-		db, err := store.New(*dataDir)
-		if err != nil {
-			startupLog.Fatalf("Failed to initialize local SQLite (for cache): %v", err)
-		}
-		defer db.Close()
-		detailCache = store.NewDetailCache(db.DB)
-		localStore = store.NewSQLiteStore(db.DB)
+	// Always-local sqlite store.
+	db, err := store.New(*dataDir)
+	if err != nil {
+		startupLog.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer db.Close()
+	detailCache := store.NewDetailCache(db)
+	dataStore := store.NewSQLiteStore(db)
+	log.Printf("  Store: sqlite")
+	loginRequired, err := dataStore.HasLoginUsers()
+	if err != nil {
+		startupLog.Fatalf("Failed to read authentication mode: %v", err)
+	}
+	if loginRequired {
+		startupLog.Printf("  Access: password login")
 	} else {
-		db, err := store.New(*dataDir)
-		if err != nil {
-			startupLog.Fatalf("Failed to initialize database: %v", err)
-		}
-		defer db.Close()
-		detailCache = store.NewDetailCache(db.DB)
-		localStore = store.NewSQLiteStore(db.DB)
-		dataStore = localStore
-		startupLog.Printf("  Store: sqlite")
+		startupLog.Printf("  Access: passwordless local workspace")
 	}
 
 	// Start MCP server for AI asset tools (auto-assign port with :0)
 	mcpAddr := fmt.Sprintf("%s:%d", *listen, 0)
-	var mcpFeatures int64
-	if cfg.Features != nil {
-		mcpFeatures = *cfg.Features
-	}
-	mcpServer := nexmcp.NewServer(dataStore, mcpAddr, mcpFeatures)
+	mcpServer := nexmcp.NewServer(dataStore, mcpAddr)
 	if err := mcpServer.Listen(); err != nil {
 		startupLog.Fatalf("MCP server listen failed: %v", err)
 	}
@@ -137,27 +157,88 @@ func main() {
 		}
 	}()
 
-	// Per-session Chrome DevTools MCP manager for E2E testing
+	// Created before the Chrome manager so the reaper can consult it (below).
+	sessionManager := agent.NewSessionManager()
+
+	// Per-session Chrome DevTools MCP manager. Headless is read from config on
+	// each new-session creation, so toggling the setting affects newly spawned
+	// Chrome instances without a restart.
+	// After chromeIdleTimeout the reaper frees the idle Chrome process; a
+	// session with a running turn keeps its MCP endpoint (so the live CLI can
+	// reconnect and relaunch Chrome), while one with no running turn is torn
+	// down fully and re-created lazily on the next turn.
+	const chromeIdleTimeout = 10 * time.Minute
 	chromeBaseDir := filepath.Join(*dataDir, "chrome")
-	chromeManager := chromemcp.NewChromeManager(chromeBaseDir, *listen, false)
+	chromeManager := chromemcp.NewChromeManager(chromeBaseDir, *listen, func() bool {
+		return cfgMgr.Get().ChromeHeadless
+	}, sessionManager.IsActive, chromeIdleTimeout)
 
 	// Initialize all agent backends
 	allAgents := make(map[string]agent.Agent)
 
-	// Claude
 	ca := agent.NewClaudeAgent()
 	ca.MCPServerURL = mcpServer.URL()
 	ca.MCPToolNames = mcpServer.ToolNames()
-	ca.AlwaysOnMCPToolNames = mcpServer.AlwaysOnToolNames()
 	ca.DataDir = *dataDir
+	go func() {
+		warmCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		ca.WarmupSupportedModels(warmCtx)
+	}()
 	allAgents["claude"] = ca
 
-	// Codex
 	cx := agent.NewCodexAgent()
 	cx.MCPServerURL = mcpServer.URL()
+	// Same async warmup as Claude above: pre-populate the model catalog
+	// without letting a slow `codex app-server` spawn block startup.
+	// 15s, not 5s: cold app-server initialize routinely exceeds 5s (see
+	// "model/list failed: context deadline exceeded" in past startup logs).
+	go func() {
+		warmCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cx.WarmupSupportedModels(warmCtx)
+	}()
 	allAgents["codex"] = cx
 
-	// Load default agent from config
+	// Pi owns provider configuration and session persistence itself. Nexbox
+	// starts one RPC process per turn and resumes the opaque Pi session ID.
+	piAgent := agent.NewPiAgent()
+	piAgent.MCPServerURL = mcpServer.URL()
+	allAgents["pi"] = piAgent
+
+	// ZeroClaw owns its provider/model configuration (including OpenRouter).
+	// Nexbox connects only to its ACP v1 stdio surface and inherits the server
+	// process environment, so no provider credentials are stored here. Only
+	// register it when its CLI is actually installed (checked once at startup),
+	// so the agent picker doesn't list a backend that can never run here.
+	zeroClawAgent := agent.NewZeroClawAgent()
+	if agentCLIAvailable(zeroClawAgent.CLIPath) {
+		allAgents["zeroclaw"] = zeroClawAgent
+	} else {
+		log.Printf("  ZeroClaw CLI %q not found; skipping agent", zeroClawAgent.CLIPath)
+	}
+
+	// Crush owns its own models, provider configuration, and credentials.
+	// Nexbox reads the native server's configured catalog and starts it only
+	// while reading that catalog or running a conversation. As with ZeroClaw,
+	// only register it when its CLI is installed.
+	crushAgent := agent.NewCrushAgent()
+	crushAgent.DataDir = filepath.Join(*dataDir, "crush")
+	if agentCLIAvailable(crushAgent.CLIPath) {
+		defer crushAgent.Close()
+		allAgents["crush"] = crushAgent
+	} else {
+		log.Printf("  Crush CLI %q not found; skipping agent", crushAgent.CLIPath)
+	}
+
+	kimiAgent := agent.NewKimiAgent()
+	kimiAgent.MCPServerURL = mcpServer.URL()
+	if agentCLIAvailable(kimiAgent.CLIPath) {
+		allAgents["kimi"] = kimiAgent
+	} else {
+		log.Printf("  Kimi CLI %q not found; skipping agent", kimiAgent.CLIPath)
+	}
+
 	defaultAgentName := cfgMgr.Get().DefaultAgent
 	if defaultAgentName == "" {
 		defaultAgentName = "claude"
@@ -168,73 +249,76 @@ func main() {
 		defaultAgent = allAgents[defaultAgentName]
 	}
 	log.Printf("  Default agent: %s", defaultAgentName)
-	sessionManager := agent.NewSessionManager()
 
-	// Create ChatHub for global WebSocket multiplexing
 	hub := api.NewChatHub()
+	// Resolve session → project → owner for the hub, so per-session events
+	// only fan out to the owning user's WS connections. Without this, every
+	// user's browser receives every other user's streaming text and "session
+	// complete" notifications.
+	hub.SessionOwnerLookup = func(sessionID string) int64 {
+		sess, err := dataStore.GetSession(sessionID)
+		if err != nil || sess == nil || sess.ProjectID == "" {
+			return 0
+		}
+		proj, err := dataStore.GetProject(sess.ProjectID)
+		if err != nil || proj == nil {
+			return 0
+		}
+		return proj.OwnerUserID
+	}
 
 	termMgr := api.NewTerminalManager()
+	mcpServer.SetTerminalManager(termMgr)
 
-	// Let MCP tools broadcast data changes to connected browsers
 	mcpServer.SetChangeNotifier(hub.NotifyChange)
-
-	// SessionOrchestrator is set after api.Server creation (see below)
+	mcpServer.SetCategoryChecker(func(category string) bool {
+		switch category {
+		case nexmcp.MCPToolCategoryTaskManagement:
+			return cfgMgr.Get().MCPTools.TaskManagementEnabled()
+		}
+		return false
+	})
 
 	startupLog.Printf("  Version: %s", Version)
 
-	// Create API server
 	srv := &api.Server{
-		Store:            dataStore,
-		LocalStore:       localStore,
-		Config:           cfgMgr,
-		Agent:            defaultAgent,
-		AgentName:        defaultAgentName,
-		Agents:           allAgents,
-		SessionManager:   sessionManager,
-		MCPServerURL:     mcpServer.URL(),
-		ListenPort:       *port,
-		Hub:              hub,
-		TerminalMgr:      termMgr,
-		DetailCache:      detailCache,
-		DataDir:          *dataDir,
-		Version:          Version,
-		ChromeManager:    chromeManager,
+		Store:             dataStore,
+		Config:            cfgMgr,
+		Auth:              api.NewAuthenticator(),
+		Agent:             defaultAgent,
+		AgentName:         defaultAgentName,
+		Agents:            allAgents,
+		SessionManager:    sessionManager,
+		MCPServerURL:      mcpServer.URL(),
+		Hub:               hub,
+		TerminalMgr:       termMgr,
+		DetailCache:       detailCache,
+		DataDir:           *dataDir,
+		Version:           Version,
+		ChromeManager:     chromeManager,
+		ListenPort:        *port,
+		MarketplaceStats:  api.NewMarketplaceStatsBuffer(),
+		GitRepositories:   gitrepo.NewResolver(gitrepo.DefaultOptions()),
+		OnMCPToolsChanged: mcpServer.NotifyToolListChanged,
+		WeChat:            api.NewWeChatJSSDK(os.Getenv("WECHAT_APPID"), os.Getenv("WECHAT_APPSECRET")),
+	}
+	if srv.WeChat != nil {
+		log.Printf("  WeChat JS-SDK share: enabled (appID from env)")
 	}
 
-	// Wire up Docker rootless + Sysbox container isolation if enabled.
-	if cfg.ContainerEnabled {
-		image := cfg.ContainerImage
-		if image == "" {
-			image = "boxnex-agent:latest"
-		}
-		network := cfg.ContainerNetwork
-		if network == "" {
-			network = "boxnex-net"
-		}
-		containerMgr := agent.NewContainerManager(image, network)
-		if err := containerMgr.EnsureNetwork(); err != nil {
-			log.Printf("  Warning: could not ensure Docker network %s: %v", network, err)
-		}
-		containerMgr.RecoverRunningContainers()
-		srv.ContainerMgr = containerMgr
-		ca.ContainerMgr = containerMgr
-		log.Printf("  Docker isolation enabled (image: %s, network: %s)", image, network)
-	}
+	go api.CloneOfficialMarketplaceRepos(*dataDir, dataStore)
 
-	// Wire up SessionOrchestrator so MCP execute_workflow can create sessions
 	mcpServer.SetSessionOrchestrator(srv)
-	mcpServer.SetWorkflowExecutor(srv)
+	mcpServer.SetChromeEnabler(&chromeEnablerImpl{manager: chromeManager, store: dataStore})
 
-	// Reset stale workflow executions from previous run (pending/running → failed)
-	if err := localStore.ResetStaleExecutions(); err != nil {
+	if err := dataStore.ResetStaleExecutions(); err != nil {
 		log.Printf("  Warning: failed to reset stale executions: %v", err)
 	} else {
 		log.Printf("  Stale workflow executions reset.")
 	}
 
 	// Periodic cleanup: hard-delete trashed sessions (runs hourly).
-	// TRASH_TTL_HOURS controls retention; defaults to 168h (7 days) if unset.
-	trashTTL := 24 * time.Hour
+	trashTTL := 7 * 24 * time.Hour
 	if v := os.Getenv("NEX_TRASH_TTL_HOURS"); v != "" {
 		if h, err := strconv.ParseFloat(v, 64); err == nil && h > 0 {
 			trashTTL = time.Duration(h * float64(time.Hour))
@@ -246,118 +330,59 @@ func main() {
 	trashCtx, trashCancel := context.WithCancel(context.Background())
 	defer trashCancel()
 	go func() {
-		runTrashCleanup := func() {
-			cutoff := time.Now().Add(-trashTTL)
-			if n, err := srv.PurgeTrash(cutoff); err != nil {
-				log.Printf("[trash] Failed to purge expired sessions: %v", err)
-			} else if n > 0 {
-				log.Printf("[trash] Purged %d expired sessions", n)
-			}
-
-			// Purge changes older than 7 days
-			changesCutoff := time.Now().Add(-7 * 24 * time.Hour)
-			if n, err := dataStore.PurgeOldChanges(changesCutoff); err != nil {
-				log.Printf("[cleanup] Failed to purge old changes: %v", err)
-			} else if n > 0 {
-				log.Printf("[cleanup] Purged %d changes older than 7 days", n)
-			}
-		}
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				runTrashCleanup()
+				cutoff := time.Now().Add(-trashTTL)
+				if n, err := srv.PurgeTrash(cutoff); err != nil {
+					log.Printf("[trash] Failed to purge expired sessions: %v", err)
+				} else if n > 0 {
+					log.Printf("[trash] Purged %d expired sessions", n)
+				}
 			case <-trashCtx.Done():
 				return
 			}
 		}
 	}()
 
-	// Start workflow scheduler (checks every minute for due scheduled workflows)
 	schedulerCtx, schedulerCancel := context.WithCancel(context.Background())
 	defer schedulerCancel()
 	go srv.StartWorkflowScheduler(schedulerCtx)
 
-	// Start queue poller: processes pending queue items for idle sessions every 2s.
 	queueCtx, queueCancel := context.WithCancel(context.Background())
 	defer queueCancel()
 	go srv.StartQueuePoller(queueCtx)
 
-	// Periodic message trimming: keep only the latest 100 messages per session (runs hourly).
+	// Periodic cleanup of stale message part details (keep recent 50 sessions, every hour)
 	go func() {
-		const maxMessagesPerSession = 100
-		trimMessages := func() {
+		runCleanup := func() {
 			sessions, err := dataStore.ListSessions()
 			if err != nil {
-				log.Printf("[trim] Failed to list sessions: %v", err)
+				log.Printf("[detail-cache] Failed to list sessions for cleanup: %v", err)
 				return
 			}
-			var totalDeleted int64
-			for _, sess := range sessions {
-				n, err := dataStore.TrimSessionMessages(sess.ID, maxMessagesPerSession)
-				if err != nil {
-					log.Printf("[trim] Failed to trim session %s: %v", sess.ID, err)
-					continue
+			const keepRecent = 50
+			keep := make([]string, 0, keepRecent)
+			for i, s := range sessions {
+				if i >= keepRecent {
+					break
 				}
-				totalDeleted += n
+				keep = append(keep, s.ID)
 			}
-			if totalDeleted > 0 {
-				log.Printf("[trim] Removed %d old messages across %d sessions.", totalDeleted, len(sessions))
+			if err := detailCache.Cleanup(keep); err != nil {
+				log.Printf("[detail-cache] Cleanup error: %v", err)
 			}
 		}
+
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				trimMessages()
-			case <-trashCtx.Done():
-				return
-			}
+		for range ticker.C {
+			runCleanup()
 		}
 	}()
 
-	// Idle container reaper — stop containers inactive for over 20 minutes (checks every 5 min).
-	if srv.ContainerMgr != nil {
-		go func() {
-			const idleTimeout = 20 * time.Minute
-			ticker := time.NewTicker(5 * time.Minute)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					if n := srv.ContainerMgr.StopIdleContainers(idleTimeout); n > 0 {
-						log.Printf("[container] reaped %d idle container(s)", n)
-					}
-				case <-trashCtx.Done():
-					return
-				}
-			}
-		}()
-	}
-
-	// T9.5: Periodic SQLite maintenance (WAL checkpoint + VACUUM), runs daily.
-	if localStore != nil {
-		go func() {
-			ticker := time.NewTicker(24 * time.Hour)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					if err := localStore.Maintain(); err != nil {
-						log.Printf("[sqlite] maintenance failed: %v", err)
-					} else {
-						log.Printf("[sqlite] maintenance completed (WAL checkpoint + VACUUM)")
-					}
-				case <-trashCtx.Done():
-					return
-				}
-			}
-		}()
-	}
-
-	// Create router with all API routes
 	router := api.NewRouter(srv)
 
 	// Serve embedded frontend static files as fallback (SPA support)
@@ -373,17 +398,15 @@ func main() {
 			}
 			w.Header().Set("Content-Type", "text/html")
 			fmt.Fprintf(w, `<!DOCTYPE html><html><body>
-				<h1>BoxNex API Server</h1>
+				<h1>Nexbox API Server</h1>
 				<p>Frontend not embedded. Run <code>build.sh</code> to build with embedded frontend.</p>
 				<p>API available at <a href="/api/projects">/api/projects</a></p>
 			</body></html>`)
 		}))
 	}
 
-	// CORS — allowed origins are read from config (cors_origins); falls back
-	// to built-in dev defaults when the config field is empty.
 	c := cors.New(cors.Options{
-		AllowedOrigins:   srv.CORSOrigins(),
+		AllowedOrigins:   []string{"http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Content-Type", "Authorization"},
 		AllowCredentials: true,
@@ -394,7 +417,6 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", *listen, *port)
 	httpServer := &http.Server{Addr: addr, Handler: handler}
 
-	// Graceful shutdown on SIGINT/SIGTERM
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -415,18 +437,10 @@ func main() {
 
 	log.Printf("  Listening on http://%s", addr)
 	appURL := fmt.Sprintf("http://127.0.0.1:%d", *port)
-	_ = isFirstRun
-	// if isFirstRun {
-	// 	startupLog.Printf("First run detected — opening browser at %s", appURL)
-	// 	startupLog.Printf("If the browser did not open, please visit: %s", appURL)
-	// 	go openBrowser(appURL)
-	// } else {
-	startupLog.Printf("BoxNex ready. Visit in browser: %s", appURL)
-	// }
+	startupLog.Printf("Nexbox ready. Visit in browser: %s", appURL)
 
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		startupLog.Fatalf("Listen failed: %v", err)
 	}
 	log.Printf("Server stopped.")
 }
-

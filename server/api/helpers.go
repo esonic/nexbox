@@ -1,17 +1,21 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
-	"gitlab.okg.com/sre_ai/boxnex/config"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/config"
+	"github.com/esonic/nexbox/store"
 )
 
 // getDefaultAgent reads the persisted default agent from config, falling back to in-memory value.
@@ -23,30 +27,104 @@ func (s *Server) getDefaultAgent() string {
 }
 
 // GetServerInfo returns basic server configuration info.
-// GET /api/info → {"agent": "claude", "mode": "local"|"needs_login"}
+// GET /api/info → {"agent": "claude", "mode": "local", ...}
 func (s *Server) GetServerInfo(w http.ResponseWriter, r *http.Request) {
-	cfg := s.Config.Get()
-	mode := "local"
-	if cfg.JWTSecret != "" {
-		mode = "needs_login"
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	info := map[string]interface{}{
 		"agent":   s.getDefaultAgent(),
-		"mode":    mode,
+		"mode":    "local",
 		"version": s.Version,
-	})
+	}
+	writeJSON(w, http.StatusOK, info)
 }
 
 // ListAvailableAgents returns all registered agent backends.
-// GET /api/available-agents → {"agents": ["claude","codex"], "default": "claude"}
+// GET /api/available-agents returns names plus backend-neutral capabilities.
 func (s *Server) ListAvailableAgents(w http.ResponseWriter, r *http.Request) {
 	names := make([]string, 0, len(s.Agents))
-	for name := range s.Agents {
+	capabilities := make(map[string]agent.Capabilities, len(s.Agents))
+	for name, backend := range s.Agents {
 		names = append(names, name)
+		capabilities[name] = backend.Capabilities()
 	}
+	sortAgentNames(names)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"agents":  names,
-		"default": s.getDefaultAgent(),
+		"agents":       names,
+		"default":      s.getDefaultAgent(),
+		"capabilities": capabilities,
+	})
+}
+
+// agentDisplayOrder gives known agents a stable position in the dropdown.
+// Unknown agents sort after these, alphabetically. Without this the map-backed
+// listing reordered on every request (Go map iteration is randomized).
+var agentDisplayOrder = map[string]int{
+	"claude":   0,
+	"codex":    1,
+	"cursor":   2,
+	"pi":       3,
+	"crush":    4,
+	"zeroclaw": 5,
+	"kimi":     6,
+}
+
+func sortAgentNames(names []string) {
+	sort.Slice(names, func(i, j int) bool {
+		oi, iok := agentDisplayOrder[names[i]]
+		oj, jok := agentDisplayOrder[names[j]]
+		if iok && jok {
+			return oi < oj
+		}
+		if iok != jok {
+			return iok // known agents sort before unknown ones
+		}
+		return names[i] < names[j]
+	})
+}
+
+// ListAvailableModels returns the available model catalog for an agent.
+//
+//	GET /api/available-models?agent=codex → {
+//	  "agent":       "codex",
+//	  "models":      ["gpt-5.4", ...],                           // legacy string list
+//	  "models_info": [{id, label, description, supported_efforts, default_effort, is_default, ...}, ...],
+//	  "source":      "dynamic|none"
+//	}
+//
+// Backends optionally implement agent.ModelCatalog. The catalog can come from
+// a native protocol, a CLI query, or Nexbox's own configured model list.
+func (s *Server) ListAvailableModels(w http.ResponseWriter, r *http.Request) {
+	agentName := strings.TrimSpace(r.URL.Query().Get("agent"))
+	if agentName == "" {
+		agentName = s.getDefaultAgent()
+	}
+	backend, ok := s.Agents[agentName]
+	if !ok {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent: %q", agentName))
+		return
+	}
+
+	var info []agent.ModelInfo
+	source := "none"
+
+	// Allow up to ~10s for the first-ever probe (init handshake for Claude is
+	// ~3-4s cold; subsequent calls are served from cache instantly).
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	if catalog, ok := backend.(agent.ModelCatalog); ok {
+		info, source = catalog.ListSupportedModels(ctx)
+	}
+
+	ids := make([]string, 0, len(info))
+	for _, m := range info {
+		ids = append(ids, m.ID)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"agent":       agentName,
+		"models":      ids,
+		"models_info": info,
+		"source":      source,
 	})
 }
 
@@ -98,25 +176,18 @@ func isVisibleChange(c store.Change, joined map[string]bool) bool {
 	return joined[c.ProjectID]
 }
 
-// getProjectWithLocalPath fetches a project by ID.
+// getProjectWithLocalPath fetches a project. In local-only mode the project's
+// git_repo_path is stored directly in the project row.
 func (s *Server) getProjectWithLocalPath(id string) (*store.Project, error) {
 	return s.Store.GetProject(id)
-}
-
-// isSubPath reports whether child is a sub-path of parent.
-func isSubPath(parent, child string) bool {
-	rel, err := filepath.Rel(parent, child)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Headers already sent; cannot change status code. Log the error.
+		log.Printf("[api] writeJSON encode error: %v", err)
 	}
 }
 
@@ -127,7 +198,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-// writeStoreError logs the original error and writes a generic error response.
+// writeStoreError logs the original error and writes a 500 response.
 // Returns true when an error response has been written.
 func writeStoreError(w http.ResponseWriter, err error, op, fallback string) bool {
 	if err == nil {
@@ -288,46 +359,38 @@ func (s *Server) ListChanges(w http.ResponseWriter, r *http.Request) {
 // GET /api/settings
 func (s *Server) GetSettings(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Config.Get()
-	maskedToken := ""
-	if cfg.Token != "" {
-		if len(cfg.Token) > 10 {
-			maskedToken = cfg.Token[:6] + "..." + cfg.Token[len(cfg.Token)-4:]
-		} else {
-			maskedToken = "***"
-		}
-	}
-	maskedGitLabToken := ""
-	if cfg.GitLabToken != "" {
-		if len(cfg.GitLabToken) > 10 {
-			maskedGitLabToken = cfg.GitLabToken[:6] + "..." + cfg.GitLabToken[len(cfg.GitLabToken)-4:]
-		} else {
-			maskedGitLabToken = "***"
-		}
-	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"default_agent":       s.getDefaultAgent(),
-		"has_token":           cfg.Token != "",
-		"masked_token":        maskedToken,
-		"has_gitlab_token":    cfg.GitLabToken != "",
-		"masked_gitlab_token": maskedGitLabToken,
-		"disable_cloud":       cfg.DisableCloud,
+		"default_agent":   s.getDefaultAgent(),
+		"chrome_headless": cfg.ChromeHeadless,
+		"mcp_tools": map[string]bool{
+			"task_management": cfg.MCPTools.TaskManagementEnabled(),
+		},
+		"suggest_next_actions": s.nextActionsEnabled(),
 	})
+}
+
+// nextActionsEnabled reports whether new sessions should get the next-actions
+// system-prompt instruction. Defaults to ON when the setting was never set.
+func (s *Server) nextActionsEnabled() bool {
+	v := s.Config.Get().SuggestNextActions
+	return v == nil || *v
 }
 
 // UpdateSettings updates settings.
 // PUT /api/settings
 func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DefaultAgent *string `json:"default_agent,omitempty"`
-		Token        *string `json:"token,omitempty"`
-		GitLabToken  *string `json:"gitlab_token,omitempty"`
-		DisableCloud *bool   `json:"disable_cloud,omitempty"`
+		DefaultAgent   *string `json:"default_agent,omitempty"`
+		ChromeHeadless *bool   `json:"chrome_headless,omitempty"`
+		MCPTools       *struct {
+			TaskManagement *bool `json:"task_management,omitempty"`
+		} `json:"mcp_tools,omitempty"`
+		SuggestNextActions *bool `json:"suggest_next_actions,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-
 	if req.DefaultAgent != nil {
 		if a, ok := s.Agents[*req.DefaultAgent]; ok {
 			s.Agent = a
@@ -338,24 +401,28 @@ func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	mcpToolsChanged := false
 	if err := s.Config.Update(func(cfg *config.Config) {
 		if req.DefaultAgent != nil {
 			cfg.DefaultAgent = *req.DefaultAgent
 		}
-		if req.Token != nil {
-			cfg.Token = *req.Token
+		if req.ChromeHeadless != nil {
+			cfg.ChromeHeadless = *req.ChromeHeadless
 		}
-		if req.GitLabToken != nil {
-			cfg.GitLabToken = *req.GitLabToken
+		if req.MCPTools != nil && req.MCPTools.TaskManagement != nil {
+			mcpToolsChanged = mcpToolsChanged || cfg.MCPTools.TaskManagementEnabled() != *req.MCPTools.TaskManagement
+			cfg.MCPTools.TaskManagement = req.MCPTools.TaskManagement
 		}
-		if req.DisableCloud != nil {
-			cfg.DisableCloud = *req.DisableCloud
+		if req.SuggestNextActions != nil {
+			cfg.SuggestNextActions = req.SuggestNextActions
 		}
 	}); err != nil {
 		log.Printf("[api] UpdateSettings persist error: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to persist settings")
 		return
 	}
-
+	if mcpToolsChanged && s.OnMCPToolsChanged != nil {
+		s.OnMCPToolsChanged()
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

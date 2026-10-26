@@ -20,7 +20,7 @@ import (
 // its JSONL events to the unified StreamEvent protocol.
 type CursorAgent struct {
 	CLIPath      string // Path to cursor agent CLI binary (default: "agent")
-	MCPServerURL string // Optional: URL of the BoxNex MCP server
+	MCPServerURL string // Optional: URL of the NexBox MCP server
 	Model        string // Optional model override (e.g., "sonnet-4", "gpt-5")
 	Verbose      bool   // Enable verbose logging
 }
@@ -35,6 +35,10 @@ func NewCursorAgent() *CursorAgent {
 
 // Ensure CursorAgent implements Agent at compile time.
 var _ Agent = (*CursorAgent)(nil)
+
+func (a *CursorAgent) Capabilities() Capabilities {
+	return Capabilities{}
+}
 
 // ---------------------------------------------------------------------------
 // Cursor CLI JSONL event types (from `agent --print --output-format stream-json --stream-partial-output`)
@@ -91,6 +95,9 @@ func (a *CursorAgent) SendMessage(
 	req Request,
 	cb EventCallback,
 ) (Result, error) {
+	if req.Fork != nil {
+		return Result{}, fmt.Errorf("cursor agent does not support fork")
+	}
 	// Pre-check work directory
 	if req.WorkDir != "" {
 		info, err := os.Stat(req.WorkDir)
@@ -287,8 +294,8 @@ func (a *CursorAgent) SendMessage(
 	return result, nil
 }
 
-// ensureMCPConfig merges the boxnex MCP server into the workspace's .cursor/mcp.json.
-// If the file already exists, only the "boxnex" entry is added/updated; other servers are preserved.
+// ensureMCPConfig merges the nexbox MCP server into the workspace's .cursor/mcp.json.
+// If the file already exists, only the "nexbox" entry is added/updated; other servers are preserved.
 func (a *CursorAgent) ensureMCPConfig(workDir string) error {
 	cursorDir := filepath.Join(workDir, ".cursor")
 	mcpPath := filepath.Join(cursorDir, "mcp.json")
@@ -315,8 +322,8 @@ func (a *CursorAgent) ensureMCPConfig(workDir string) error {
 		servers = make(map[string]interface{})
 	}
 
-	// Add/update only the boxnex entry
-	servers["boxnex"] = map[string]interface{}{
+	// Add/update only the nexbox entry
+	servers["nexbox"] = map[string]interface{}{
 		"url": a.MCPServerURL,
 	}
 	config["mcpServers"] = servers
@@ -329,7 +336,7 @@ func (a *CursorAgent) ensureMCPConfig(workDir string) error {
 		return fmt.Errorf("write MCP config: %w", err)
 	}
 
-	log.Printf("[cursor-agent] MCP config written to %s (boxnex entry merged)", mcpPath)
+	log.Printf("[cursor-agent] MCP config written to %s (nexbox entry merged)", mcpPath)
 	return nil
 }
 
@@ -531,7 +538,7 @@ func (a *CursorAgent) handleResult(evt cursorEvent, cb EventCallback, result *Re
 // parseToolCall extracts tool name and input from a tool_call JSON.
 // Formats:
 //   - Built-in: {"bashToolCall":{"args":{...}}}
-//   - MCP:      {"mcpToolCall":{"args":{"name":"boxnex-ask_question","args":{actual args},"providerIdentifier":"boxnex","toolName":"ask_question",...}}}
+//   - MCP:      {"mcpToolCall":{"args":{"name":"nexbox-ask_question","args":{actual args},"providerIdentifier":"nexbox","toolName":"ask_question",...}}}
 func (a *CursorAgent) parseToolCall(raw json.RawMessage) (toolName string, input string) {
 	if len(raw) == 0 {
 		return "unknown", ""
@@ -566,7 +573,7 @@ func (a *CursorAgent) parseToolCall(raw json.RawMessage) (toolName string, input
 }
 
 // parseMCPToolCallStarted extracts tool name and input from mcpToolCall inner JSON.
-// Input: {"args":{"name":"boxnex-ask_question","args":{actual},"providerIdentifier":"boxnex","toolName":"ask_question",...}}
+// Input: {"args":{"name":"nexbox-ask_question","args":{actual},"providerIdentifier":"nexbox","toolName":"ask_question",...}}
 func (a *CursorAgent) parseMCPToolCallStarted(inner json.RawMessage) (toolName string, input string) {
 	var wrapper struct {
 		Args struct {
@@ -627,7 +634,7 @@ func (a *CursorAgent) parseToolCallResult(raw json.RawMessage) (toolName string,
 }
 
 // parseMCPToolCallResult extracts tool name and result from mcpToolCall completed JSON.
-// Input: {"args":{"providerIdentifier":"boxnex","toolName":"ask_question",...},"result":{"success":{"content":[{"text":{"text":"..."}}],"isError":false}}}
+// Input: {"args":{"providerIdentifier":"nexbox","toolName":"ask_question",...},"result":{"success":{"content":[{"text":{"text":"..."}}],"isError":false}}}
 func (a *CursorAgent) parseMCPToolCallResult(inner json.RawMessage) (toolName string, output string) {
 	var wrapper struct {
 		Args struct {

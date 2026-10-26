@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { FileText, Loader2, ArrowLeft, Plus, AtSign, Trash2, Search } from "lucide-react";
+import { FileText, Loader2, Plus, AtSign, Trash2, Search } from "lucide-react";
 import { UserChip } from "@/plugins/task/components/UserPicker";
 import { assetsApi } from "@/lib/api";
 import { globalWS } from "@/lib/ws";
@@ -245,7 +245,10 @@ export function AssetPanel({ projectId }: { projectId: string }) {
           <div className="flex gap-2">
             <select
               value={formType}
-              onChange={(e) => setFormType(e.target.value as AssetType)}
+              onChange={(e) => {
+                setFormType(e.target.value as AssetType);
+                setFormContent("");
+              }}
               className="text-xs bg-background border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring"
             >
               {ASSET_TYPES.map((t) => (
@@ -253,6 +256,7 @@ export function AssetPanel({ projectId }: { projectId: string }) {
               ))}
             </select>
           </div>
+
           <textarea
             value={formContent}
             onChange={(e) => setFormContent(e.target.value)}
@@ -260,9 +264,10 @@ export function AssetPanel({ projectId }: { projectId: string }) {
             rows={6}
             className="w-full text-xs bg-transparent border rounded px-2 py-1 resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
           />
+
           <div className="flex justify-end gap-1.5">
             <button
-              onClick={() => setShowForm(false)}
+              onClick={() => { setShowForm(false); setFormContent(""); }}
               className="text-xs px-2 py-1 rounded hover:bg-accent transition-colors text-muted-foreground"
             >
               Cancel

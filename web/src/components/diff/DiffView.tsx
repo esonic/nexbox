@@ -13,48 +13,63 @@ import {
   FileCode2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { splitUnifiedDiffByFile, type ParsedDiffFile } from "@/lib/diff-parser";
+import { getFilePath, splitUnifiedDiffByFile, type ParsedDiffFile } from "@/lib/diff-parser";
 import {
   gitApi,
-  type GitStatusResponse,
   type DiffFileInfo,
+  type GitScope,
+  type GitRepository,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { DiffFileCard, getFilePath } from "./DiffFileCard";
+import { DiffFileCard } from "./DiffFileCard";
+import { DiffMinimap } from "./DiffMinimap";
 import { HistoryTab } from "./HistoryTab";
 import { BranchToolbar } from "./BranchToolbar";
 import { useAppStore } from "@/stores/app";
+import type { GitReviewSnapshot } from "@/hooks/useGitReview";
 
 interface DiffViewProps {
   diffText?: string;
   fileStats?: DiffFileInfo[];
   projectId?: string;
   sessionId?: string;
+  repository?: GitRepository;
+  isDefaultRepository?: boolean;
   onCommitted?: () => void;
+  review?: GitReviewSnapshot;
 }
 
 type FileCategory = "staged" | "unstaged" | "untracked";
 const CATEGORY_LABELS: Record<FileCategory, string> = { staged: "Staged Changes", unstaged: "Changes", untracked: "Untracked Files" };
 const CATEGORY_ORDER: FileCategory[] = ["staged", "unstaged", "untracked"];
+const LEFT_WIDTH_MIN = 200;
+const LEFT_WIDTH_MAX = 600;
 
-export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitted }: DiffViewProps) {
+export function DiffView({ diffText, fileStats, projectId, sessionId, repository, isDefaultRepository, onCommitted, review }: DiffViewProps) {
   const isLazyMode = !diffText && !!fileStats;
+  const repositoryId = repository?.id;
+  const gitScope = useMemo<GitScope | null>(() => projectId && repositoryId ? ({
+    projectId,
+    sessionId,
+    repositoryId,
+  }) : null, [projectId, sessionId, repositoryId]);
 
   const files = useMemo(() => {
     if (diffText) return splitUnifiedDiffByFile(diffText);
     if (fileStats) {
       return fileStats.map((f): ParsedDiffFile => ({
-        key: f.path,
-        oldPath: f.status === "added" ? "/dev/null" : f.path,
+        key: `${f.original_path ?? f.path}->${f.path}`,
+        oldPath: f.status === "added" ? "/dev/null" : (f.original_path ?? f.path),
         newPath: f.status === "deleted" ? "/dev/null" : f.path,
         diffText: "",
-        isBinary: false,
+        isBinary: !!f.binary,
         additions: f.insertions,
         deletions: f.deletions,
         isNewFile: f.status === "added",
         isDeletedFile: f.status === "deleted",
         fileLang: null,
+        workspacePath: f.workspace_path,
       }));
     }
     return [];
@@ -62,6 +77,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
 
   const [fileFilter, setFileFilter] = useState("");
   const [activeFile, setActiveFile] = useState<string | null>(null);
+  const [activeFileCategory, setActiveFileCategory] = useState<FileCategory>("unstaged");
   const [viewedFiles, setViewedFiles] = useState<Set<string>>(new Set());
   const [viewMode, _setViewMode] = useState<"inline" | "single">(() => {
     const saved = localStorage.getItem("diffViewMode");
@@ -78,39 +94,35 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   const [generatingMsg, setGeneratingMsg] = useState(false);
   const [discardingFile, setDiscardingFile] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"changes" | "history">("changes");
-  const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const gitStatus = review?.status;
   const fileRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
-  const [statusTick, setStatusTick] = useState(0);
-  const refreshGitStatus = useCallback(() => {
-    if (!projectId) return;
-    gitApi.status(projectId, sessionId).then(setGitStatus).catch(() => setGitStatus(null));
-  }, [projectId, sessionId]);
+  // Resizable left list. Width persisted to localStorage, clamped to a sane range.
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const [leftWidth, setLeftWidth] = useState(() => {
+    const saved = parseInt(localStorage.getItem("diffLeftWidth") || "", 10);
+    return Number.isFinite(saved) ? Math.min(LEFT_WIDTH_MAX, Math.max(LEFT_WIDTH_MIN, saved)) : 288;
+  });
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    let latest = leftWidth;
+    const onMove = (ev: MouseEvent) => {
+      const rect = splitContainerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      latest = Math.min(LEFT_WIDTH_MAX, Math.max(LEFT_WIDTH_MIN, ev.clientX - rect.left));
+      setLeftWidth(latest);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      localStorage.setItem("diffLeftWidth", String(Math.round(latest)));
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [leftWidth]);
 
-  // Build a stable key that changes whenever file content changes.
-  // In lazy mode diffText is undefined so we use fileStats metrics instead.
-  const fileStatsKey = fileStats
-    ? `${fileStats.length}:${fileStats.reduce((s, f) => s + f.insertions + f.deletions, 0)}`
-    : `text:${diffText?.length ?? 0}`;
-
-  const gitStatusKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    const key = `${projectId}:${fileStatsKey}:${statusTick}`;
-    if (!projectId || gitStatusKeyRef.current === key) return;
-    gitStatusKeyRef.current = key;
-    gitApi.status(projectId, sessionId).then(setGitStatus).catch(() => setGitStatus(null));
-  // fileStatsKey is derived from fileStats/diffText — listing it directly causes lint warning
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, sessionId, fileStatsKey, statusTick]);
-
-  const fileCategoryMap = useMemo(() => {
-    const map = new Map<string, FileCategory>();
-    if (!gitStatus) return map;
-    for (const f of gitStatus.staged) map.set(f.path, "staged");
-    for (const f of gitStatus.unstaged) if (!map.has(f.path)) map.set(f.path, "unstaged");
-    for (const f of gitStatus.untracked) map.set(f.path, "untracked");
-    return map;
-  }, [gitStatus]);
+  const fileRefreshKey = review?.fileRevision ?? 0;
 
   const filteredFiles = useMemo(() => {
     if (!fileFilter.trim()) return files;
@@ -118,15 +130,23 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
     return files.filter((f) => getFilePath(f).toLowerCase().includes(lower));
   }, [files, fileFilter]);
 
+  // A file can appear in multiple categories simultaneously (e.g. staged with additional
+  // unstaged changes). Build sets per category and push file into every matching group.
   const groupedFiles = useMemo(() => {
     const groups: Record<FileCategory, ParsedDiffFile[]> = { staged: [], unstaged: [], untracked: [] };
+    const stagedPaths = new Set(gitStatus?.staged.map((f) => f.path) ?? []);
+    const unstagedPaths = new Set(gitStatus?.unstaged.map((f) => f.path) ?? []);
+    const untrackedPaths = new Set(gitStatus?.untracked.map((f) => f.path) ?? []);
     for (const file of filteredFiles) {
       const path = getFilePath(file);
-      const cat = fileCategoryMap.get(path) ?? (file.isNewFile ? "untracked" : "unstaged");
-      groups[cat].push(file);
+      let placed = false;
+      if (stagedPaths.has(path)) { groups.staged.push(file); placed = true; }
+      if (unstagedPaths.has(path)) { groups.unstaged.push(file); placed = true; }
+      if (untrackedPaths.has(path)) { groups.untracked.push(file); placed = true; }
+      if (!placed) groups[file.isNewFile ? "untracked" : "unstaged"].push(file);
     }
     return groups;
-  }, [filteredFiles, fileCategoryMap]);
+  }, [filteredFiles, gitStatus]);
 
   const totalAdditions = files.reduce((s, f) => s + f.additions, 0);
   const totalDeletions = files.reduce((s, f) => s + f.deletions, 0);
@@ -140,22 +160,28 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
     return () => document.removeEventListener("mousedown", handleClick);
   }, [showViewMenu]);
 
-  const scrollToFile = useCallback((key: string) => {
+  const scrollToFile = useCallback((key: string, category: FileCategory = "unstaged") => {
     setActiveFile(key);
+    setActiveFileCategory(category);
     if (viewMode === "inline") {
       fileRefs.current[key]?.scrollIntoView({ behavior: "instant", block: "start" });
     }
   }, [viewMode]);
 
   const toggleViewed = useCallback((key: string) => {
-    setViewedFiles((prev) => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+    setViewedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   }, []);
 
   const handleDiscard = (filePath: string) => {
-    if (!projectId) return;
+    if (!gitScope) return;
     const doDiscard = async () => {
       setDiscardingFile(filePath);
-      try { await gitApi.discard(projectId, { file_path: filePath }, sessionId); onCommitted?.(); }
+      try { await gitApi.discard(gitScope, { file_path: filePath }); onCommitted?.(); }
       catch (e) { console.error("Failed to discard:", e); toast.error("Discard failed", { description: String(e) }); }
       finally { setDiscardingFile(null); }
     };
@@ -174,39 +200,37 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   }, [gitStatus, files]);
 
   const handleCommit = async () => {
-    if (!projectId || !commitMsg.trim() || commitFilePaths.length === 0) return;
+    if (!gitScope || !commitMsg.trim() || commitFilePaths.length === 0) return;
     setCommitting(true);
     try {
-      await gitApi.commit(projectId, { file_paths: commitFilePaths, message: commitMsg.trim() }, sessionId);
+      await gitApi.commit(gitScope, { file_paths: commitFilePaths, message: commitMsg.trim() });
       setCommitMsg("");
-      setStatusTick((t) => t + 1); // refresh gitStatus so file counts update immediately
       onCommitted?.();
     } catch (e) { console.error("Failed to commit:", e); toast.error("Commit failed", { description: String(e) }); }
     finally { setCommitting(false); }
   };
 
   const handleGenerateMessage = async () => {
-    if (!projectId || commitFilePaths.length === 0) return;
+    if (!gitScope || commitFilePaths.length === 0) return;
     setGeneratingMsg(true);
-    try { setCommitMsg((await gitApi.generateMessage(projectId, { file_paths: commitFilePaths }, sessionId)).message); }
+    try { setCommitMsg((await gitApi.generateMessage(gitScope, { file_paths: commitFilePaths })).message); }
     catch (e) { console.error("Failed to generate message:", e); toast.error("Failed to generate message", { description: String(e) }); }
     finally { setGeneratingMsg(false); }
   };
 
   const handleRefreshAll = useCallback(() => {
-    setStatusTick((t) => t + 1);
     onCommitted?.();
   }, [onCommitted]);
 
   const handleDiscardAll = (paths: string[]) => {
-    if (!projectId || paths.length === 0) return;
+    if (!gitScope || paths.length === 0) return;
     toast.warning(`Discard all changes to ${paths.length} file(s)?`, {
       duration: Infinity,
       action: {
         label: "Discard All",
         onClick: async () => {
           for (const p of paths) {
-            try { await gitApi.discard(projectId, { file_path: p }, sessionId); }
+            try { await gitApi.discard(gitScope, { file_path: p }); }
             catch (e) { console.error(`Failed to discard ${p}:`, e); }
           }
           onCommitted?.();
@@ -217,20 +241,20 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   };
 
   const handleStageFiles = async (paths: string[]) => {
-    if (!projectId || paths.length === 0) return;
+    if (!gitScope || paths.length === 0) return;
     try {
-      await gitApi.stage(projectId, { file_paths: paths }, sessionId);
-      setStatusTick((t) => t + 1);
+      await gitApi.stage(gitScope, { file_paths: paths });
+      onCommitted?.();
     } catch (e) {
       toast.error("Stage failed", { description: String(e) });
     }
   };
 
   const handleUnstageFiles = async (paths: string[]) => {
-    if (!projectId || paths.length === 0) return;
+    if (!gitScope || paths.length === 0) return;
     try {
-      await gitApi.unstage(projectId, { file_paths: paths }, sessionId);
-      setStatusTick((t) => t + 1);
+      await gitApi.unstage(gitScope, { file_paths: paths });
+      onCommitted?.();
     } catch (e) {
       toast.error("Unstage failed", { description: String(e) });
     }
@@ -251,7 +275,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
     setCurrentChangeIdx(0);
     setChangeCount(0);
     autoScrolledRef.current = false;
-  }, [activeFile]);
+  }, [activeFile, activeFileCategory]);
 
   // Auto-scroll to first change when diff content loads for a newly selected file
   useEffect(() => {
@@ -311,20 +335,22 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
   }, [viewMode, filteredFiles, activeFileIdx, changeCount, currentChangeIdx]);
 
   // Always called to satisfy hooks rules; state is self-contained
-  const history = HistoryTab({ projectId: projectId || "", sessionId, autoLoad: activeTab === "history" && !!projectId });
+  const history = HistoryTab({ scope: gitScope, repository, allowLegacyComments: isDefaultRepository, commitsSnapshot: review?.commits });
 
   const renderFileRow = (file: ParsedDiffFile, category: FileCategory) => {
     const path = getFilePath(file);
     const fileName = path.split("/").pop() || path;
     const dirPath = path.includes("/") ? path.substring(0, path.lastIndexOf("/")) : "";
     const isStaged = category === "staged";
-    const commentCount = sessionComments.filter((c) => c.filePath === path).length;
+    const commentCount = sessionComments.filter((c) =>
+      c.filePath === path && (c.repositoryId === repository?.id || (!c.repositoryId && isDefaultRepository))
+    ).length;
     return (
       <div
         key={file.key}
-        className={cn("flex items-center gap-1.5 px-2 py-1.5 cursor-pointer text-xs hover:bg-muted/80 transition-colors group",
-          activeFile === file.key && "bg-muted", viewedFiles.has(file.key) && "opacity-50")}
-        onClick={() => scrollToFile(file.key)}
+        className={cn("relative flex items-center gap-1.5 px-2 py-1.5 cursor-pointer text-xs hover:bg-muted/80 transition-colors group",
+          activeFile === file.key && activeFileCategory === category && "bg-muted", viewedFiles.has(file.key) && "opacity-50")}
+        onClick={() => scrollToFile(file.key, category)}
       >
         <span className={cn("w-1.5 h-1.5 rounded-full shrink-0",
           file.isNewFile && "bg-green-500", file.isDeletedFile && "bg-red-500",
@@ -339,7 +365,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
           </span>
         )}
         {projectId && (
-          <div className="shrink-0 opacity-0 group-hover:opacity-100 flex items-center gap-0.5 transition-opacity">
+          <div className="absolute inset-y-0 right-0 pl-6 pr-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-gradient-to-l from-muted from-60% to-transparent">
             {isStaged ? (
               <button onClick={(e) => { e.stopPropagation(); handleUnstageFiles([path]); }}
                 className="p-0.5 text-muted-foreground hover:text-orange-500 transition-colors" title="Unstage">
@@ -365,14 +391,20 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
 
   return (
     <div className="flex flex-col h-full">
-      {projectId && (
-        <BranchToolbar projectId={projectId} sessionId={sessionId} onBranchChanged={handleRefreshAll}
+      {gitScope && (
+        <BranchToolbar scope={gitScope} onBranchChanged={handleRefreshAll}
+          branchData={review?.branches}
+          aheadCount={gitStatus?.ahead}
           navLabel={activeTab === "changes" && activeFile ? navLabel : undefined}
-          onNavigate={activeTab === "changes" && activeFile && filteredFiles.length > 0 ? handleNavigate : undefined} />
+          onNavigate={activeTab === "changes" && activeFile && filteredFiles.length > 0 ? handleNavigate : undefined}
+          sidebarCollapsed={sidebarCollapsed}
+          onToggleSidebar={() => setSidebarCollapsed((v) => !v)} />
       )}
-      <div className="flex flex-1 min-h-0">
-        {/* Left sidebar */}
-        <div className="w-72 shrink-0 border-r flex flex-col">
+      <div className="flex flex-1 min-h-0" ref={splitContainerRef}>
+        {/* Left sidebar (resizable) */}
+        {!sidebarCollapsed && (
+        <>
+        <div className="shrink-0 border-r flex flex-col" style={{ width: leftWidth }}>
           <div className="flex border-b text-xs">
             {(["changes", "history"] as const).map((tab) => (
               <button key={tab} onClick={() => setActiveTab(tab)}
@@ -431,12 +463,6 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
                         <span>{CATEGORY_LABELS[cat]} ({group.length})</span>
                         {projectId && (
                           <div className="ml-auto opacity-0 group-hover/cat:opacity-100 flex items-center gap-0.5 transition-opacity">
-                            {cat !== "staged" && (
-                              <button onClick={() => handleDiscardAll(groupPaths)}
-                                className="p-0.5 hover:text-destructive transition-colors" title="Discard all">
-                                <Trash2 className="h-3 w-3" />
-                              </button>
-                            )}
                             {cat === "staged" ? (
                               <button onClick={() => handleUnstageFiles(groupPaths)}
                                 className="p-0.5 hover:text-orange-500 transition-colors" title="Unstage all">
@@ -446,6 +472,12 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
                               <button onClick={() => handleStageFiles(groupPaths)}
                                 className="p-0.5 hover:text-green-500 transition-colors" title="Stage all">
                                 <Plus className="h-3 w-3" />
+                              </button>
+                            )}
+                            {cat !== "staged" && (
+                              <button onClick={() => handleDiscardAll(groupPaths)}
+                                className="p-0.5 hover:text-destructive transition-colors" title="Discard all">
+                                <Trash2 className="h-3 w-3" />
                               </button>
                             )}
                           </div>
@@ -480,34 +512,53 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, onCommitte
           )}
         </div>
 
+        {/* Drag handle between the file list and the diff content */}
+        <div
+          className="w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors shrink-0"
+          onMouseDown={handleResizeMouseDown}
+          title="Drag to resize"
+        />
+        </>
+        )}
+
         {/* Right: Diff content */}
-        <div className="flex-1 overflow-y-auto min-w-0" ref={rightPanelRef}>
-          {activeTab === "changes" ? (
-            viewMode === "inline" ? (
-              <div className="space-y-2 p-4">
-                {filteredFiles.map((file) => (
-                  <div key={file.key} ref={(el) => { fileRefs.current[file.key] = el; }}>
-                    <DiffFileCard file={file} isViewed={viewedFiles.has(file.key)} isActive={activeFile === file.key}
-                      onToggleViewed={() => toggleViewed(file.key)} lazyLoad={isLazyMode} projectId={projectId} sessionId={sessionId} refreshKey={statusTick} />
+        <div className="flex-1 min-w-0 flex">
+          <div className="flex-1 overflow-y-auto min-w-0" ref={rightPanelRef}>
+            {activeTab === "changes" ? (
+              viewMode === "inline" ? (
+                <div className="space-y-2 p-4">
+                  {filteredFiles.map((file) => (
+                    <div key={file.key} ref={(el) => { fileRefs.current[file.key] = el; }}>
+                      <DiffFileCard file={file} isViewed={viewedFiles.has(file.key)} isActive={activeFile === file.key}
+                        onToggleViewed={toggleViewed} lazyLoad={isLazyMode} projectId={projectId} sessionId={sessionId}
+                        refreshKey={fileRefreshKey} repository={repository}
+                        allowLegacyComments={isDefaultRepository}
+                        staged={activeFile === file.key ? activeFileCategory === "staged" : undefined} />
+                    </div>
+                  ))}
+                </div>
+              ) : (() => {
+                const file = activeFile ? filteredFiles.find((f) => f.key === activeFile) : null;
+                return file ? (
+                  <div className="h-full">
+                    <DiffFileCard key={`${file.key}:${activeFileCategory}`} file={file} isViewed={viewedFiles.has(file.key)} isActive
+                      onToggleViewed={toggleViewed} lazyLoad={isLazyMode} projectId={projectId} sessionId={sessionId}
+                      defaultExpanded borderless fullFile onChangeCount={setChangeCount} refreshKey={fileRefreshKey} repository={repository}
+                      allowLegacyComments={isDefaultRepository}
+                      staged={activeFileCategory === "staged"} />
                   </div>
-                ))}
-              </div>
-            ) : (() => {
-              const file = activeFile ? filteredFiles.find((f) => f.key === activeFile) : null;
-              return file ? (
-                <div className="h-full">
-                  <DiffFileCard key={file.key} file={file} isViewed={viewedFiles.has(file.key)} isActive
-                    onToggleViewed={() => toggleViewed(file.key)} lazyLoad={isLazyMode} projectId={projectId} sessionId={sessionId}
-                    defaultExpanded borderless fullFile onChangeCount={setChangeCount} refreshKey={statusTick} />
-                </div>
-              ) : (
-                <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-                  Select a file to view its changes
-                </div>
-              );
-            })()
-          ) : (
-            history.content
+                ) : (
+                  <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
+                    Select a file to view its changes
+                  </div>
+                );
+              })()
+            ) : (
+              history.content
+            )}
+          </div>
+          {activeTab === "changes" && viewMode === "single" && activeFile && (
+            <DiffMinimap scrollRef={rightPanelRef} />
           )}
         </div>
       </div>

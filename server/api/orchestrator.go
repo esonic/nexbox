@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"gitlab.okg.com/sre_ai/boxnex/agent"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -22,9 +22,8 @@ import (
 type ExecuteWorkflowRequest struct {
 	WorkflowID  string
 	ProjectID   string
-	UserContext string
-	Tasks       []store.Task
-	TriggeredBy string // "ui" | "mcp" | "api"
+	Env         map[string]string
+	TriggeredBy string // "ui" | "api" | "scheduler"
 }
 
 type workflowRun struct {
@@ -34,6 +33,10 @@ type workflowRun struct {
 	cancel      context.CancelFunc
 	mu          sync.Mutex
 	sessionIDs  []string
+	// worktreePath, when non-empty, is the directory all sessions in this run
+	// should treat as their working directory. Populated at run start when the
+	// workflow's worktree_mode is "worktree".
+	worktreePath string
 }
 
 // hookConfig holds the parsed hook settings from a node's config.
@@ -106,11 +109,6 @@ func isWorkflowRunningByID(workflowID string) bool {
 // ---------------------------------------------------------------------------
 
 func (s *Server) Execute(req ExecuteWorkflowRequest) (*store.WorkflowExecution, error) {
-	// Fast pre-check before hitting the DB (the definitive check is under the write lock below).
-	if isWorkflowRunningByID(req.WorkflowID) {
-		return nil, fmt.Errorf("workflow is already running")
-	}
-
 	wf, err := s.Store.GetWorkflow(req.WorkflowID)
 	if err != nil {
 		return nil, fmt.Errorf("load workflow: %w", err)
@@ -131,14 +129,25 @@ func (s *Server) Execute(req ExecuteWorkflowRequest) (*store.WorkflowExecution, 
 		req.ProjectID = wf.ProjectID
 	}
 
+	// Concurrency: by default a workflow can only have one active run. When
+	// the workflow's worktree_mode is "worktree", each run lives in its own
+	// git worktree/branch so parallel runs don't fight over the working tree —
+	// we lift the restriction in that mode.
+	worktreeMode := wf.WorktreeMode == "worktree"
+	if !worktreeMode && isWorkflowRunningByID(req.WorkflowID) {
+		return nil, fmt.Errorf("workflow is already running")
+	}
+
 	// Atomically check for a concurrent run. CreateExecution is deferred until
 	// after the check so we never produce stale "failed" execution records when
 	// two callers race through the fast pre-check above.
 	activeRunsMu.Lock()
-	for _, r := range activeRuns {
-		if r.workflowID == wf.ID {
-			activeRunsMu.Unlock()
-			return nil, fmt.Errorf("workflow is already running")
+	if !worktreeMode {
+		for _, r := range activeRuns {
+			if r.workflowID == wf.ID {
+				activeRunsMu.Unlock()
+				return nil, fmt.Errorf("workflow is already running")
+			}
 		}
 	}
 
@@ -148,7 +157,6 @@ func (s *Server) Execute(req ExecuteWorkflowRequest) (*store.WorkflowExecution, 
 		WorkflowVersion:    wf.Version,
 		DefinitionSnapshot: defSnapshot,
 		TriggeredBy:        req.TriggeredBy,
-		UserContext:        req.UserContext,
 	})
 	if err != nil {
 		activeRunsMu.Unlock()
@@ -167,10 +175,10 @@ func (s *Server) Execute(req ExecuteWorkflowRequest) (*store.WorkflowExecution, 
 	activeRuns[exec.ID] = run
 	activeRunsMu.Unlock()
 
-	log.Printf("[workflow] Execute %q (exec=%s, nodes=%d, triggered_by=%s)",
-		wf.Name, exec.ID, len(def.Nodes), req.TriggeredBy)
+	log.Printf("[workflow] Execute %q (exec=%s, nodes=%d, triggered_by=%s, worktree_mode=%s)",
+		wf.Name, exec.ID, len(def.Nodes), req.TriggeredBy, wf.WorktreeMode)
 
-	go s.runWorkflow(ctx, run, wf.Name, &def, req)
+	go s.runWorkflow(ctx, run, wf.Name, wf.WorktreeMode, &def, req)
 
 	// Notify frontend: this workflow is now running
 	s.Hub.NotifyChange("workflow", wf.ID, "updated")
@@ -218,7 +226,7 @@ func (s *Server) CancelWorkflowBySession(sessionID string) {
 // Background workflow runner
 // ---------------------------------------------------------------------------
 
-func (s *Server) runWorkflow(ctx context.Context, run *workflowRun, wfName string, def *store.WorkflowDefinition, req ExecuteWorkflowRequest) {
+func (s *Server) runWorkflow(ctx context.Context, run *workflowRun, wfName, worktreeMode string, def *store.WorkflowDefinition, req ExecuteWorkflowRequest) {
 	defer func() {
 		run.cancel()
 		activeRunsMu.Lock()
@@ -229,6 +237,24 @@ func (s *Server) runWorkflow(ctx context.Context, run *workflowRun, wfName strin
 	startTime := time.Now()
 	_ = s.Store.UpdateExecutionStatus(run.executionID, "running", "", nil)
 	s.emitWorkflowProgress(run.executionID, "", "running")
+
+	// Create the run-scoped worktree before any node runs. Every session in
+	// this run will be pointed at this directory so concurrent runs of the
+	// same workflow can edit the same repo without colliding.
+	if worktreeMode == "worktree" {
+		path, err := s.createWorkflowRunWorktree(run.executionID, run.projectID)
+		if err != nil {
+			log.Printf("[workflow] Worktree create failed for exec=%s: %v", run.executionID, err)
+			s.finishExecution(run, startTime, "failed", fmt.Sprintf("worktree create failed: %v", err))
+			return
+		}
+		run.mu.Lock()
+		run.worktreePath = path
+		run.mu.Unlock()
+		if err := s.Store.UpdateExecutionWorktreePath(run.executionID, path); err != nil {
+			log.Printf("[workflow] Failed to record worktree path on execution %s: %v", run.executionID, err)
+		}
+	}
 
 	levels := buildLevels(def)
 
@@ -250,9 +276,7 @@ func (s *Server) runWorkflow(ctx context.Context, run *workflowRun, wfName strin
 	}
 
 	nodeOutputs := make(map[string]string)
-	humanGateOutputs := make(map[string]string) // continued inputs from human nodes; always injected into downstream prompts
 	var nodeOutputsMu sync.Mutex
-	firstAI := true
 	var primarySID string // reused session for serial AI chain
 
 	for _, n := range def.Nodes {
@@ -299,10 +323,10 @@ func (s *Server) runWorkflow(ctx context.Context, run *workflowRun, wfName strin
 			_ = s.Store.UpdateNodeLog(humanLog.ID, "completed", continuedInput, "", "", humanDur)
 			s.emitWorkflowProgress(run.executionID, n.ID, "completed")
 
-			// Record the continued input so downstream AI nodes can inject it into
-			// their prompts regardless of whether they reuse the serial session.
+			// Record the human's continued input as the node's output so downstream
+			// nodes can pull it in via {{env_prev_node_output}} when desired.
 			if continuedInput != "" {
-				humanGateOutputs[n.ID] = continuedInput
+				nodeOutputs[n.ID] = continuedInput
 			}
 		}
 
@@ -331,8 +355,7 @@ func (s *Server) runWorkflow(ctx context.Context, run *workflowRun, wfName strin
 
 		if len(aiNodes) == 1 {
 			node := aiNodes[0]
-			sid, output, err := s.executeAINodeOnSession(ctx, run, wfName, node, li, req, nodeLabels, parentMap, nodeOutputs, humanGateOutputs, firstAI, primarySID)
-			firstAI = false
+			sid, output, err := s.executeAINodeOnSession(ctx, run, wfName, node, li, req, nodeLabels, parentMap, nodeOutputs, primarySID)
 			if err != nil {
 				log.Printf("[workflow] Node %s failed: %v", nodeLabels[node.ID], err)
 				s.markRemainingFailed(run.executionID, levels, li+1, nodeLabels)
@@ -342,7 +365,6 @@ func (s *Server) runWorkflow(ctx context.Context, run *workflowRun, wfName strin
 			if primarySID == "" {
 				primarySID = sid
 			}
-			// Serial nodes share session; only capture output when new session was created
 			if output != "" {
 				nodeOutputsMu.Lock()
 				nodeOutputs[node.ID] = output
@@ -357,14 +379,21 @@ func (s *Server) runWorkflow(ctx context.Context, run *workflowRun, wfName strin
 				err    error
 			}
 			ch := make(chan result, len(aiNodes))
-			isFirst := firstAI
-			firstAI = false
 
-			for i, node := range aiNodes {
-				go func(n store.WorkflowNode, injectContext bool) {
-					_, output, err := s.executeAINodeOnSession(ctx, run, wfName, n, li, req, nodeLabels, parentMap, nodeOutputs, humanGateOutputs, injectContext, "")
+			// Snapshot nodeOutputs so parallel goroutines read a consistent copy
+			// without racing on the map with writes from the result-collection loop.
+			nodeOutputsMu.Lock()
+			nodeOutputsSnap := make(map[string]string, len(nodeOutputs))
+			for k, v := range nodeOutputs {
+				nodeOutputsSnap[k] = v
+			}
+			nodeOutputsMu.Unlock()
+
+			for _, node := range aiNodes {
+				go func(n store.WorkflowNode) {
+					_, output, err := s.executeAINodeOnSession(ctx, run, wfName, n, li, req, nodeLabels, parentMap, nodeOutputsSnap, "")
 					ch <- result{nodeID: n.ID, output: output, err: err}
-				}(node, isFirst && i == 0)
+				}(node)
 			}
 
 			var firstErr error
@@ -402,8 +431,7 @@ func (s *Server) runWorkflow(ctx context.Context, run *workflowRun, wfName strin
 
 // executeAINodeOnSession runs an AI node. If reuseSID is non-empty, the node's
 // prompt is queued onto that existing session (serial chain reuse). Otherwise a
-// new session is created. Returns the session ID used and the node's text output
-// (non-empty only for new sessions; serial-chain nodes share context so output is "").
+// new session is created. Returns the session ID used and the node's text output.
 func (s *Server) executeAINodeOnSession(
 	ctx context.Context,
 	run *workflowRun,
@@ -414,8 +442,6 @@ func (s *Server) executeAINodeOnSession(
 	nodeLabels map[string]string,
 	parentMap map[string][]string,
 	nodeOutputs map[string]string,
-	humanGateOutputs map[string]string,
-	injectContext bool,
 	reuseSID string,
 ) (string, string, error) {
 	config, _ := node.Data["config"].(map[string]interface{})
@@ -438,34 +464,34 @@ func (s *Server) executeAINodeOnSession(
 
 	s.emitWorkflowProgress(run.executionID, node.ID, "running")
 
-	// When reusing the same session (serial chain), skip upstream AI output injection
-	// — the session already has full conversation history.
-	// Only inject upstream AI context for new sessions (parallel/map/reduce).
-	var upstreamOutputs map[string]string
-	if reuseSID == "" {
-		upstreamOutputs = nodeOutputs
-	}
+	resetOnEntry, _ := config["resetOnEntry"].(bool)
 
-	fullPrompt := buildNodePrompt(node, prompt, req.UserContext, req.Tasks, upstreamOutputs, parentMap, nodeLabels, injectContext, config)
-
-	// Always prepend continued input from human gate parent nodes, even when reusing
-	// the serial session (the human's input was never sent to that session).
-	for _, pid := range parentMap[node.ID] {
-		if input, ok := humanGateOutputs[pid]; ok && input != "" {
-			fullPrompt = fmt.Sprintf("[%s]\n%s\n\n---\n\n%s", nodeLabels[pid], input, fullPrompt)
-		}
-	}
+	fullPrompt := buildNodePrompt(node, prompt, nodeOutputs, parentMap, nodeLabels, req.Env, config)
 
 	parts := []MessagePart{{Type: "text", Content: fullPrompt}}
-	if injectContext {
-		parts = append(parts, buildRefParts(req.Tasks, config)...)
-	}
 
 	features := extractFeatures(config)
 
 	sid := reuseSID
+
+	// Reset session on entry: when reusing a serial-chain session and
+	// resetOnEntry is true, clear the underlying agent ID so the next
+	// message starts a fresh conversation instead of resuming.
+	if resetOnEntry && reuseSID != "" {
+		if err := s.Store.UpdateSessionAgentID(sid, ""); err != nil {
+			log.Printf("[workflow] resetOnEntry: failed to clear agent session ID: %v", err)
+		}
+		log.Printf("[workflow] Node %q: reset session on entry (sid=%s)", nodeLabels[node.ID], sid)
+	}
+
 	if sid == "" {
-		sessionName := fmt.Sprintf("WF: %s — %s", wfName, nodeLabels[node.ID])
+		// Include a short execution-ID prefix so multiple parallel runs of the
+		// same workflow are distinguishable in the session list.
+		shortExec := run.executionID
+		if len(shortExec) > 6 {
+			shortExec = shortExec[:6]
+		}
+		sessionName := fmt.Sprintf("WF[%s] %s — %s", shortExec, wfName, nodeLabels[node.ID])
 		var err error
 		sid, err = s.createWorkflowSession(run, sessionName, agentName)
 		if err != nil {
@@ -507,7 +533,11 @@ func (s *Server) executeAINodeOnSession(
 			break
 		}
 
-		hookPrompt := buildHookPrompt(hook.Prompt, output)
+		// Substitute {{env_xxx}} tokens in the hook prompt using the workflow's
+		// env map. prev_node_output is intentionally not exposed here — the
+		// node's output is already prepended by buildHookPrompt.
+		hookUserPrompt := substituteEnvVars(hook.Prompt, req.Env)
+		hookPrompt := buildHookPrompt(hookUserPrompt, output)
 		hookOutput, hookErr := s.runEphemeralAgent(ctx, agentName, workDir, hookPrompt)
 		if hookErr != nil {
 			log.Printf("[workflow] Hook agent error: %v", hookErr)
@@ -564,10 +594,6 @@ func (s *Server) executeAINodeOnSession(
 	}
 	s.emitWorkflowProgress(run.executionID, node.ID, "completed")
 
-	// Return output only for new sessions; serial-chain reuses share conversation history.
-	if reuseSID != "" {
-		return sid, "", nil
-	}
 	return sid, output, nil
 }
 
@@ -609,7 +635,7 @@ func buildHookPrompt(userPrompt, nodeOutput string) string {
 
 const hookAgentTimeout = 60 * time.Second
 
-// runEphemeralAgent performs a one-shot agent call without creating a BoxNex session.
+// runEphemeralAgent performs a one-shot agent call without creating a Nexbox session.
 // The agent is resolved by name (falling back to the server default). The call
 // always starts a fresh underlying conversation (SessionID = "").
 func (s *Server) runEphemeralAgent(ctx context.Context, agentName, workDir, prompt string) (string, error) {
@@ -676,10 +702,21 @@ func (s *Server) createWorkflowSession(run *workflowRun, name, agent string) (st
 
 	run.mu.Lock()
 	run.sessionIDs = append(run.sessionIDs, session.ID)
+	wtPath := run.worktreePath
 	run.mu.Unlock()
 
+	// Pin every session in a worktree-mode run to the run's shared worktree.
+	// ensureWorktree treats a non-empty WorktreePath as already-created and
+	// returns it as-is, so this both shares the directory across nodes and
+	// avoids per-session worktree creation on first message.
+	if wtPath != "" {
+		if err := s.Store.UpdateSessionWorktree(session.ID, "worktree", wtPath); err != nil {
+			log.Printf("[workflow] Failed to pin session %s to run worktree %s: %v", session.ID, wtPath, err)
+		}
+	}
+
 	s.Hub.NotifyChange("session", session.ID, "created")
-	log.Printf("[workflow] Created session %s (%s, agent=%s)", session.ID, name, agent)
+	log.Printf("[workflow] Created session %s (%s, agent=%s, worktree=%s)", session.ID, name, agent, wtPath)
 	return session.ID, nil
 }
 
@@ -764,76 +801,73 @@ func (s *Server) cancelAllSessions(run *workflowRun) {
 // Prompt building
 // ---------------------------------------------------------------------------
 
+// envVarRe matches {{env_<name>}} tokens where name is [A-Za-z0-9_]+.
+var envVarRe = regexp.MustCompile(`\{\{env_([A-Za-z0-9_]+)\}\}`)
+
+// substituteEnvVars replaces {{env_<name>}} tokens in prompt using env. Unknown
+// tokens are replaced with the empty string.
+func substituteEnvVars(prompt string, env map[string]string) string {
+	return envVarRe.ReplaceAllStringFunc(prompt, func(match string) string {
+		name := match[len("{{env_") : len(match)-len("}}")]
+		if v, ok := env[name]; ok {
+			return v
+		}
+		return ""
+	})
+}
+
+// buildNodePrompt produces the final prompt for an AI node by substituting
+// {{env_xxx}} tokens in the node's configured prompt. `env_prev_node_output`
+// is synthesized from the direct upstream nodes' outputs; all other tokens
+// come from the caller-supplied env map.
 func buildNodePrompt(
 	node store.WorkflowNode,
-	prompt, userContext string,
-	tasks []store.Task,
+	prompt string,
 	nodeOutputs map[string]string,
 	parentMap map[string][]string,
 	nodeLabels map[string]string,
-	injectContext bool,
+	userEnv map[string]string,
 	config map[string]interface{},
 ) string {
-	var sb strings.Builder
-
-	if injectContext {
-		if userContext != "" {
-			sb.WriteString("[User Context]\n")
-			sb.WriteString(userContext)
-			sb.WriteString("\n\n---\n\n")
-		}
-		if len(tasks) > 0 {
-			sb.WriteString("[Task Context]\n")
-			for _, t := range tasks {
-				sb.WriteString(fmt.Sprintf("- %s (status: %s, priority: %s)\n", t.Title, t.Status, t.Priority))
-				if t.Description != "" {
-					sb.WriteString(fmt.Sprintf("  %s\n", t.Description))
-				}
-			}
-			sb.WriteString("\n---\n\n")
-		}
+	env := make(map[string]string, len(userEnv)+1)
+	for k, v := range userEnv {
+		env[k] = v
 	}
+	// prev_node_output is reserved: user-supplied env cannot shadow it.
+	env["prev_node_output"] = buildPrevNodeOutput(node.ID, parentMap, nodeOutputs, nodeLabels)
 
-	parents := parentMap[node.ID]
-	var upstreams []string
-	for _, pid := range parents {
-		if out, ok := nodeOutputs[pid]; ok && out != "" {
-			upstreams = append(upstreams, fmt.Sprintf("## %s\n%s", nodeLabels[pid], out))
-		}
-	}
-	if len(upstreams) > 0 {
-		sb.WriteString("[Context from previous steps]\n\n")
-		sb.WriteString(strings.Join(upstreams, "\n\n"))
-		sb.WriteString("\n\n---\n\n")
-	}
-
-	sb.WriteString(prompt)
+	result := substituteEnvVars(prompt, env)
 
 	if enableE2E, _ := config["enableE2E"].(bool); enableE2E {
+		var sb strings.Builder
+		sb.WriteString(result)
 		sb.WriteString("\n\n---\n\n[E2E Browser Testing]\n")
 		sb.WriteString("You now have Chrome DevTools MCP tools available for end-to-end browser testing. ")
 		sb.WriteString("Use take_snapshot to see the page structure (accessibility tree with UIDs), then interact with elements using their UIDs. ")
 		sb.WriteString("Typical workflow: navigate_page -> take_snapshot -> click/fill/type_text -> take_screenshot to verify. ")
 		sb.WriteString("Always call take_snapshot before interacting to get fresh UIDs. ")
 		sb.WriteString("After completing the above task, use these tools to verify the changes work correctly in the browser.")
+		return sb.String()
 	}
 
-	return sb.String()
+	return result
 }
 
-func buildRefParts(tasks []store.Task, config map[string]interface{}) []MessagePart {
-	var parts []MessagePart
-	for _, t := range tasks {
-		parts = append(parts, MessagePart{Type: "task_ref", TaskID: t.ID, TaskData: t})
-	}
-	if assetRefs, ok := config["assetRef"].([]interface{}); ok {
-		for _, a := range assetRefs {
-			if aid, ok := a.(string); ok && aid != "" {
-				parts = append(parts, MessagePart{Type: "asset_ref", AssetID: aid})
+// buildPrevNodeOutput concatenates the outputs of all direct upstream nodes
+// for a given node, separated by a horizontal rule. Parents without recorded
+// output are skipped.
+func buildPrevNodeOutput(nodeID string, parentMap map[string][]string, nodeOutputs map[string]string, nodeLabels map[string]string) string {
+	var parts []string
+	for _, pid := range parentMap[nodeID] {
+		if out, ok := nodeOutputs[pid]; ok && out != "" {
+			label := nodeLabels[pid]
+			if label == "" {
+				label = pid
 			}
+			parts = append(parts, fmt.Sprintf("## %s\n%s", label, out))
 		}
 	}
-	return parts
+	return strings.Join(parts, "\n\n---\n\n")
 }
 
 func extractFeatures(config map[string]interface{}) []string {
@@ -1036,31 +1070,6 @@ func truncateStr(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "...(truncated)"
-}
-
-// ---------------------------------------------------------------------------
-// WorkflowExecutor interface for MCP
-// ---------------------------------------------------------------------------
-
-func (s *Server) ExecuteWorkflow(workflowID, projectID, userContext, triggeredBy string, taskIDs []string) (string, error) {
-	var tasks []store.Task
-	for _, tid := range taskIDs {
-		if t, err := s.Store.GetTask(tid); err == nil && t != nil {
-			tasks = append(tasks, *t)
-		}
-	}
-
-	exec, err := s.Execute(ExecuteWorkflowRequest{
-		WorkflowID:  workflowID,
-		ProjectID:   projectID,
-		UserContext: userContext,
-		Tasks:       tasks,
-		TriggeredBy: triggeredBy,
-	})
-	if err != nil {
-		return "", err
-	}
-	return exec.ID, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -28,9 +28,9 @@ if [[ -z "${BASE_URL:-}" ]]; then
   mkdir -p "$DATA_DIR"
 
   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-  BINARY="$SCRIPT_DIR/boxnex"
+  BINARY="$SCRIPT_DIR/nexbox"
   if [[ ! -x "$BINARY" ]]; then
-    echo "boxnex binary not found at $BINARY — run: cd server && go build -o boxnex ." >&2
+    echo "nexbox binary not found at $BINARY — run: cd server && go build -o nexbox ." >&2
     exit 1
   fi
 

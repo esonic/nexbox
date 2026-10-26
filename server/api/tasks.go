@@ -7,7 +7,7 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/boxnex/store"
+	"github.com/esonic/nexbox/store"
 )
 
 func (s *Server) ListTasks(w http.ResponseWriter, r *http.Request) {
@@ -18,25 +18,11 @@ func (s *Server) ListTasks(w http.ResponseWriter, r *http.Request) {
 
 	var projectIDs []string
 	if projectID != "" {
-		// Validate the requesting user can access this project.
-		if GetUserRole(r) != "admin" {
-			project, err := s.Store.GetProject(projectID)
-			if err != nil || project == nil || project.OwnerID != GetUserID(r) {
-				writeError(w, http.StatusForbidden, "access denied")
-				return
-			}
-		}
 		projectIDs = []string{projectID}
-	} else if GetUserRole(r) != "admin" {
-		// Scope to the user's own projects so tasks from other users are never leaked.
-		allProjects, err := s.Store.ListProjects()
-		if err == nil {
-			userID := GetUserID(r)
-			for _, p := range allProjects {
-				if p.OwnerID == userID {
-					projectIDs = append(projectIDs, p.ID)
-				}
-			}
+	} else if joined := s.joinedProjectIDs(); joined != nil {
+		projectIDs = make([]string, 0, len(joined))
+		for id := range joined {
+			projectIDs = append(projectIDs, id)
 		}
 	}
 
@@ -61,14 +47,8 @@ func (s *Server) CreateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "title is required")
 		return
 	}
-	// Validate project ownership so users can only create tasks in their own projects.
-	if req.ProjectID != "" && GetUserRole(r) != "admin" {
-		project, err := s.Store.GetProject(req.ProjectID)
-		if err != nil || project == nil || project.OwnerID != GetUserID(r) {
-			writeError(w, http.StatusForbidden, "access denied")
-			return
-		}
-	}
+
+	// Validate parent (max 1 level)
 	if req.ParentID != "" {
 		parent, err := s.Store.GetTask(req.ParentID)
 		if err != nil || parent == nil {
@@ -88,7 +68,7 @@ func (s *Server) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	// Notify assigner
 	if req.Assigner != "" {
-		actor := s.currentUser()
+		actor := s.currentUser(r)
 		recipient := buildRecipient(actor, req.Assigner)
 		if err := s.sendNotification(task.ProjectID, task.ID, task.Title,
 			actor+" assigned you to a task", recipient, task.ID, "", "", "", nil); err != nil {
@@ -121,7 +101,6 @@ func (s *Server) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Capture old assigner before update to detect changes
 	var oldAssigner string
 	var gotOldTask bool
 	if req.Assigner != nil {
@@ -146,9 +125,8 @@ func (s *Server) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Hub.NotifyChange("task", id, "updated")
 
-	// Notify new assigner if changed (only when we successfully read the old task)
 	if gotOldTask && req.Assigner != nil && *req.Assigner != "" && *req.Assigner != oldAssigner {
-		actor := s.currentUser()
+		actor := s.currentUser(r)
 		recipient := buildRecipient(actor, *req.Assigner)
 		if err := s.sendNotification(task.ProjectID, task.ID, task.Title,
 			actor+" assigned you to a task", recipient, task.ID, "", "", "", nil); err != nil {
@@ -170,49 +148,41 @@ func (s *Server) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) IncrementTaskRefCount(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "taskId")
-	err := s.Store.IncrementTaskRefCount(id)
-	if writeStoreError(w, err, "IncrementTaskRefCount", "failed to increment ref count") {
+func (s *Server) SetTaskParent(w http.ResponseWriter, r *http.Request) {
+	taskID := chi.URLParam(r, "taskId")
+
+	var req store.SetParentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	if req.ParentID == "" {
+		writeError(w, http.StatusBadRequest, "parent_id is required")
+		return
+	}
+
+	parentID := req.ParentID
+	_, err := s.Store.UpdateTask(taskID, store.UpdateTaskRequest{ParentID: &parentID})
+	if err != nil {
+		if store.IsValidationError(err) {
+			writeError(w, http.StatusBadRequest, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to set parent: "+err.Error())
+		}
+		return
+	}
+	s.Hub.NotifyChange("task", taskID, "updated")
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) ListTaskAssets(w http.ResponseWriter, r *http.Request) {
+func (s *Server) RemoveTaskParent(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
-	assets, err := s.Store.ListTaskAssets(taskID)
-	if writeStoreError(w, err, "ListTaskAssets", "failed to list task assets") {
+	emptyParent := ""
+	_, err := s.Store.UpdateTask(taskID, store.UpdateTaskRequest{ParentID: &emptyParent})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to remove parent: "+err.Error())
 		return
 	}
-	if assets == nil {
-		assets = []Asset{}
-	}
-	writeJSON(w, http.StatusOK, assets)
-}
-
-func (s *Server) LinkTaskAsset(w http.ResponseWriter, r *http.Request) {
-	taskID := chi.URLParam(r, "taskId")
-	var body struct {
-		AssetID string `json:"asset_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.AssetID == "" {
-		writeError(w, http.StatusBadRequest, "asset_id is required")
-		return
-	}
-	ta, err := s.Store.LinkTaskAsset(taskID, body.AssetID)
-	if writeStoreError(w, err, "LinkTaskAsset", "failed to link asset") {
-		return
-	}
-	writeJSON(w, http.StatusCreated, ta)
-}
-
-func (s *Server) UnlinkTaskAsset(w http.ResponseWriter, r *http.Request) {
-	taskID := chi.URLParam(r, "taskId")
-	assetID := chi.URLParam(r, "assetId")
-	err := s.Store.UnlinkTaskAsset(taskID, assetID)
-	if writeStoreError(w, err, "UnlinkTaskAsset", "failed to unlink asset") {
-		return
-	}
+	s.Hub.NotifyChange("task", taskID, "updated")
 	w.WriteHeader(http.StatusNoContent)
 }

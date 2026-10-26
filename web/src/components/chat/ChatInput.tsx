@@ -1,27 +1,29 @@
-import { useState, useRef, useEffect, useCallback } from "react";
-import { useTranslation } from "react-i18next";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { toast } from "sonner";
-import { Send, StopCircle, FileText, ChevronDown, Check, X, GitBranch, ImagePlus, Play, Pencil, Workflow, MessageSquare, CircleHelp } from "lucide-react";
+import { Send, StopCircle, Command, FileText, ChevronDown, Check, X, GitBranch, ImagePlus, Play, Pencil, Workflow, MessageSquare, CircleHelp } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { INPUT_HEIGHT_MIN, INPUT_HEIGHT_MAX } from "@/lib/constants";
+import { agentLabel } from "@/lib/agents";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
   QuestionCard,
   parseAskQuestionInput,
   formatAnswersMessage,
+  OTHER_OPTION_ID,
   type QuestionAnswer,
 } from "@/components/chat/QuestionCard";
 import { TodoPanel } from "@/components/chat/TodoPanel";
-import { imageApi, filesApi, type DiffResponse, type FileEntry } from "@/lib/api";
+import { imageApi, filesApi, promptTemplatesApi, sessionsApi, type DiffResponse, type FileEntry, type PromptTemplate } from "@/lib/api";
 import { createPortal } from "react-dom";
 import { useAppStore } from "@/stores/app";
 import { STATUS_ICONS } from "@/plugins/task/task-icons";
 import { normalizeStatus, shortId, STATUS_MAP } from "@/plugins/task/task-config";
-import { formatRelativeDate } from "@/lib/utils";
-import type { Task } from "@/types";
+import type { Task, ModelInfo } from "@/types";
 import type { PickedAsset, PickedWorkflow, InlineComment, RichQueuedMessage } from "@/stores/app";
 import type { QueuedMessage } from "@/hooks/useChatSession";
+import { ContextUsageIndicator } from "@/components/chat/ContextUsageIndicator";
+import { WorktreeSelector, type WorktreeSelectorProps } from "@/components/chat/WorktreeSelector";
 
 export interface AttachedImage {
   file: File;
@@ -30,24 +32,24 @@ export interface AttachedImage {
   url?: string;
 }
 
-const DRAFT_KEY_PREFIX = "boxnex-draft:";
+const DRAFT_KEY_PREFIX = "nexbox-draft:";
 
-const AGENT_LABELS: Record<string, string> = {
-  claude: "Claude Code",
-  codex: "Codex",
-};
+export const SLASH_COMMANDS = [
+  {
+    name: "browser",
+    label: "Enable Browser Control",
+    description: "Enable browser control, or connect to an existing Chrome",
+    prompt: "You now have Chrome DevTools MCP tools available for browser control. " +
+      "Use take_snapshot to see the page structure (accessibility tree with UIDs), then interact with elements using their UIDs. " +
+      "Typical workflow: navigate_page -> take_snapshot -> click/fill/type_text -> take_screenshot to verify. " +
+      "Always call take_snapshot before interacting to get fresh UIDs.",
+    features: ["chrome_devtools"],
+    needsInput: true,
+    inputHint: "What should the browser do, or connect http://127.0.0.1:9222 [task]...",
+  },
+] as const;
 
-const MODEL_OPTIONS: { value: string; label: string }[] = [
-  { value: "opus", label: "Opus" },
-  { value: "sonnet", label: "Sonnet" },
-  { value: "haiku", label: "Haiku" },
-];
-
-const MODEL_LABELS: Record<string, string> = {
-  sonnet: "Sonnet",
-  haiku: "Haiku",
-  opus: "Opus",
-};
+type SlashCommand = typeof SLASH_COMMANDS[number];
 
 const ASSET_TYPE_COLORS: Record<string, string> = {
   requirement_doc: "text-blue-400",
@@ -129,11 +131,19 @@ function RichQueuedItem({
   onSendNow,
   onRemove,
   onEdit,
+  canSendNow,
+  isFront,
 }: {
   item: RichQueuedMessage;
   onSendNow: () => void;
   onRemove: () => void;
   onEdit: (text: string) => void;
+  // When true, show an "interject" button that jumps this message into the
+  // running turn through the agent's advertised control capability.
+  canSendNow: boolean;
+  // The front (oldest) queued item is also the target of the Enter shortcut,
+  // so its button advertises it.
+  isFront: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.text);
@@ -176,6 +186,15 @@ function RichQueuedItem({
           </span>
         )}
         <div className="flex items-center shrink-0">
+          {!editing && canSendNow && (
+            <button
+              onClick={onSendNow}
+              title={isFront ? "Interject now (Enter)" : "Interject now"}
+              className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-primary"
+            >
+              <Play className="h-3 w-3" />
+            </button>
+          )}
           {editing ? (
             <button onClick={commitEdit} className="p-1 rounded hover:bg-accent text-primary">
               <Check className="h-3 w-3" />
@@ -229,6 +248,10 @@ function RichQueuedItem({
   );
 }
 
+// ---------------------------------------------------------------------------
+// AskUserQuestion support — parse + convert to QuestionCard format
+// ---------------------------------------------------------------------------
+
 interface ParsedUserQuestion {
   question: string; // full question text (used as answer key)
   header: string;   // short label for display
@@ -258,22 +281,17 @@ function parseUserInputQuestions(input: string): ParsedUserQuestion[] | null {
   }
 }
 
-/** Converted question data for QuestionCard + answer building */
 interface ConvertedQuestionData {
   title?: string;
   questions: { id: string; prompt: string; options: { id: string; label: string }[]; allow_multiple?: boolean }[];
-  // Maps option id → original label (without description suffix)
   optionLabelMap: Record<string, string>;
-  // Maps question id → original question text (for answers key)
   questionTextMap: Record<string, string>;
 }
 
-/** Convert AskUserQuestion input JSON to QuestionCard's Question[] format */
 function convertToQuestionCardFormat(input: string): ConvertedQuestionData | null {
   const parsed = parseUserInputQuestions(input);
   if (!parsed || parsed.length === 0) return null;
 
-  // Extract title from raw JSON if present
   let title: string | undefined;
   try {
     const raw = JSON.parse(input);
@@ -291,7 +309,7 @@ function convertToQuestionCardFormat(input: string): ConvertedQuestionData | nul
       prompt: q.header,
       options: q.options.map((o, oi) => {
         const oId = `q${qi}_o${oi}`;
-        optionLabelMap[oId] = o.label; // store original label
+        optionLabelMap[oId] = o.label;
         return {
           id: oId,
           label: o.description ? `${o.label} — ${o.description}` : o.label,
@@ -324,19 +342,21 @@ function UserInputPanel({
   // Structured questions → use QuestionCard
   if (questionCardData) {
     return (
-      <div className="py-3 border-b">
+      <div className="pb-3 border-b">
         <QuestionCard
           title={questionCardData.title}
           questions={questionCardData.questions}
           onSubmit={(answers: QuestionAnswer[]) => {
-            // Build answers map: { "question text" → "selected label(s)" }
-            // This matches the Claude CLI AskUserQuestion expected response format
             const answersMap: Record<string, string> = {};
             for (const ans of answers) {
               const questionText = questionCardData.questionTextMap[ans.question_id];
               if (!questionText) continue;
               const selectedLabels = ans.selected_options
-                .map((optId) => questionCardData.optionLabelMap[optId] || optId)
+                .map((optId) =>
+                  optId === OTHER_OPTION_ID
+                    ? (ans.custom_text || "Other")
+                    : (questionCardData.optionLabelMap[optId] || optId)
+                )
                 .join(", ");
               answersMap[questionText] = selectedLabels;
             }
@@ -366,7 +386,7 @@ function UserInputPanel({
   };
 
   return (
-    <div className="py-3 border-b">
+    <div className="pb-3 border-b">
       <div className="flex items-start gap-2 px-1">
         <CircleHelp className="h-4 w-4 text-blue-400 mt-0.5 shrink-0" />
         <div className="flex-1 min-w-0 space-y-2">
@@ -403,33 +423,38 @@ function UserInputPanel({
   );
 }
 
+// ---------------------------------------------------------------------------
+
 interface ChatInputProps {
   sessionId: string;
-  projectId?: string;
   isConnected: boolean;
   isStreaming: boolean;
   agentName: string;
+  canInterject: boolean;
   modelName: string;
+  effort: string;
   availableAgents: string[];
+  availableModels: string[];
+  availableModelInfos: ModelInfo[];
   sessionHasMessages: boolean;
+  canChangeModel: boolean;
+  worktree?: WorktreeSelectorProps;
   pickedTasks: Task[];
   pickedAssets: PickedAsset[];
   pickedWorkflows: PickedWorkflow[];
   pendingQuestion: ReturnType<typeof parseAskQuestionInput>;
-  pendingTodo?: { todos: Array<{ id: string; content: string; status: string }>; isPending: boolean } | null;
+  pendingTodo?: { todos: Array<{ id: string; content: string; status: string; blockedBy?: string[] }>; isPending: boolean; title?: string } | null;
   pendingUserInput?: { toolUseId: string; toolName: string; input: string } | null;
-  onSendToolResponse?: (toolUseId: string, response: string) => void;
+  onSendToolResponse?: (toolUseId: string, response: string, skip?: boolean) => void;
   queue: QueuedMessage[];
   gitDiffStats?: DiffResponse | null;
   onSend: (message: string, images?: AttachedImage[], features?: string[]) => void;
   onStop: () => void;
   onChangeAgent: (agent: string) => void;
   onChangeModel: (model: string) => void;
+  onChangeEffort: (effort: string) => void;
   onRemovePickedTask: (taskId: string) => void;
-  onAddPickedTask: (task: Task) => void;
   onRemovePickedAsset: (assetId: string) => void;
-  onAddPickedAsset: (asset: PickedAsset) => void;
-  onAddPickedWorkflow: (wf: PickedWorkflow) => void;
   onRemovePickedWorkflow: (wfId: string) => void;
   onOpenGit?: () => void;
   onQueueSendNow: (id: string) => void;
@@ -445,13 +470,18 @@ interface ChatInputProps {
 
 export function ChatInput({
   sessionId,
-  projectId,
   isConnected,
   isStreaming,
   agentName,
+  canInterject,
   modelName,
+  effort,
   availableAgents,
+  availableModels,
+  availableModelInfos,
   sessionHasMessages,
+  canChangeModel,
+  worktree,
   pickedTasks,
   pickedAssets,
   pickedWorkflows,
@@ -465,11 +495,9 @@ export function ChatInput({
   onStop,
   onChangeAgent,
   onChangeModel,
+  onChangeEffort,
   onRemovePickedTask,
-  onAddPickedTask,
   onRemovePickedAsset,
-  onAddPickedAsset,
-  onAddPickedWorkflow,
   onRemovePickedWorkflow,
   onOpenGit,
   onQueueSendNow,
@@ -482,11 +510,17 @@ export function ChatInput({
   pickedComments,
   onClearPickedComments,
 }: ChatInputProps) {
-  const { t } = useTranslation();
   const [input, setInput] = useState(() => {
     try { return localStorage.getItem(DRAFT_KEY_PREFIX + sessionId) || ""; }
     catch { return ""; }
   });
+  const [showSlashMenu, setShowSlashMenu] = useState(false);
+  const [slashFilter, setSlashFilter] = useState("");
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [activeCommand, setActiveCommand] = useState<SlashCommand | null>(null);
+  const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
+  const [showAgentMenu, setShowAgentMenu] = useState(false);
+  const agentMenuRef = useRef<HTMLDivElement>(null);
   const [showModelMenu, setShowModelMenu] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement>(null);
 
@@ -529,35 +563,6 @@ export function ChatInput({
     });
   }, []);
 
-  // File picker state for @ mention
-  const [filePickerOpen, setFilePickerOpen] = useState(false);
-  const [filePickerQuery, setFilePickerQuery] = useState("");
-  const [filePickerAnchor, setFilePickerAnchor] = useState(0);
-  const [filePickerFiles, setFilePickerFiles] = useState<FileEntry[]>([]);
-  const [filePickerSelected, setFilePickerSelected] = useState(0);
-  const filePickerMenuRef = useRef<HTMLDivElement>(null);
-
-  // Load file list lazily when picker first opens
-  useEffect(() => {
-    if (!filePickerOpen || !projectId) return;
-    if (filePickerFiles.length > 0) return;
-    filesApi.tree(projectId, sessionId).then(entries => {
-      const flat: FileEntry[] = [];
-      const flatten = (list: FileEntry[]) => {
-        for (const e of list) {
-          if (!e.is_dir) flat.push(e);
-          if (e.children) flatten(e.children);
-        }
-      };
-      flatten(entries);
-      setFilePickerFiles(flat);
-    }).catch(() => {});
-  }, [filePickerOpen, projectId, sessionId, filePickerFiles.length]);
-
-  const filteredPickerFiles = filePickerFiles
-    .filter(f => !filePickerQuery || f.path.toLowerCase().includes(filePickerQuery.toLowerCase()))
-    .slice(0, 10);
-
   const saveDraft = useCallback((value: string) => {
     try {
       if (value) localStorage.setItem(DRAFT_KEY_PREFIX + sessionId, value);
@@ -565,59 +570,96 @@ export function ChatInput({
     } catch { /* ignore */ }
   }, [sessionId]);
 
-  // Drop non-image files: upload to project root then insert @relative/path
-  const handleFileDrop = useCallback(async (files: File[], currentInput: string) => {
-    if (!projectId) return;
-    let cur = currentInput;
-    for (const file of files) {
-      try {
-        // Use "." (not "/") as directory — backend rejects absolute paths
-        const result = await filesApi.upload(projectId, file, ".", sessionId);
-        const ref = result.path || file.name;
-        cur = (cur ? cur + " " : "") + `@${ref}`;
-        setInput(cur);
-        saveDraft(cur);
-        setFilePickerFiles([]);
-      } catch (e: any) {
-        toast.error(`Failed to upload ${file.name}`, { description: e.message });
-      }
-    }
-  }, [projectId, sessionId, saveDraft]);
-
   useEffect(() => {
     try { setInput(localStorage.getItem(DRAFT_KEY_PREFIX + sessionId) || ""); }
     catch { setInput(""); }
   }, [sessionId]);
 
+  const currentProjectId = useAppStore((s) => s.currentSession?.project_id);
+
+  // @ file picker state
+  const [filePickerOpen, setFilePickerOpen] = useState(false);
+  const [filePickerQuery, setFilePickerQuery] = useState("");
+  const [filePickerAnchor, setFilePickerAnchor] = useState(0);
+  const [filePickerFiles, setFilePickerFiles] = useState<FileEntry[]>([]);
+  const [filePickerSelected, setFilePickerSelected] = useState(0);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const filePickerMenuRef = useRef<HTMLDivElement>(null);
+  const slashMenuRef = useRef<HTMLDivElement>(null);
 
-  // Input area resize
-  const [inputHeight, setInputHeight] = useState(100);
-  const isInputResizing = useRef(false);
-  const inputResizeStartY = useRef(0);
-  const inputResizeStartH = useRef(0);
-
-  const handleInputResizeMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    isInputResizing.current = true;
-    inputResizeStartY.current = e.clientY;
-    inputResizeStartH.current = inputHeight;
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!isInputResizing.current) return;
-      const delta = inputResizeStartY.current - ev.clientY;
-      setInputHeight(Math.min(INPUT_HEIGHT_MAX, Math.max(INPUT_HEIGHT_MIN, inputResizeStartH.current + delta)));
+  // Fill the composer when a "Next" quick-reply button is clicked in this
+  // session's chat (see NextActions in ChatMessage). It only fills the box —
+  // the user still chooses to send or edit.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId: string; text: string }>).detail;
+      if (!detail || detail.sessionId !== sessionId || !detail.text) return;
+      setInput(detail.text);
+      saveDraft(detail.text);
+      requestAnimationFrame(() => textareaRef.current?.focus());
     };
-    const onMouseUp = () => {
-      isInputResizing.current = false;
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-    };
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  }, [inputHeight]);
+    window.addEventListener("nexbox:set-composer", handler);
+    return () => window.removeEventListener("nexbox:set-composer", handler);
+  }, [sessionId, saveDraft]);
 
-  // Close file picker on outside click
+  const isMobile = useIsMobile();
+  // Auto-growing textarea: starts at 1 line on mobile / 3 lines on desktop
+  // and grows with content up to 20 lines, after which the textarea scrolls
+  // internally. The min/max include vertical padding (py-2 = 16px) on top of
+  // text-sm's 20px line-height.
+  const TEXTAREA_LINE_HEIGHT = 20;
+  const TEXTAREA_VERTICAL_PADDING = 16;
+  const textareaMinHeight =
+    TEXTAREA_LINE_HEIGHT * (isMobile ? 1 : 3) + TEXTAREA_VERTICAL_PADDING;
+  const textareaMaxHeight = TEXTAREA_LINE_HEIGHT * 19 + TEXTAREA_VERTICAL_PADDING;
+
+  const resizeTextarea = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const next = Math.min(textareaMaxHeight, Math.max(textareaMinHeight, el.scrollHeight));
+    el.style.height = `${next}px`;
+  }, [textareaMinHeight, textareaMaxHeight]);
+
+  useLayoutEffect(() => {
+    resizeTextarea();
+  }, [input, resizeTextarea]);
+
+  const filteredCommands = SLASH_COMMANDS.filter((cmd) =>
+    cmd.name.toLowerCase().includes(slashFilter.toLowerCase()) ||
+    cmd.label.toLowerCase().includes(slashFilter.toLowerCase())
+  );
+  const filteredTemplates = promptTemplates.filter((t) => {
+    const q = slashFilter.toLowerCase();
+    return t.name.toLowerCase().includes(q) || t.content.toLowerCase().includes(q);
+  });
+  const slashItemCount = filteredCommands.length + filteredTemplates.length;
+
+  // Refetch on every open so edits made in Settings show up immediately.
+  useEffect(() => {
+    if (!showSlashMenu) return;
+    promptTemplatesApi.list().then(setPromptTemplates).catch(() => {});
+  }, [showSlashMenu]);
+
+  const filteredPickerFiles = filePickerFiles
+    .filter((f) => !filePickerQuery || f.path.toLowerCase().includes(filePickerQuery.toLowerCase()))
+    .slice(0, 10);
+
+  // Load file list lazily when picker first opens.
+  useEffect(() => {
+    if (!filePickerOpen || !currentProjectId) return;
+    if (filePickerFiles.length > 0) return;
+
+    filesApi.flat(currentProjectId, sessionId)
+      .then((entries) => setFilePickerFiles(entries || []))
+      .catch(() => {});
+  }, [filePickerOpen, currentProjectId, sessionId, filePickerFiles.length]);
+
+  useEffect(() => {
+    setFilePickerFiles([]);
+  }, [currentProjectId, sessionId]);
+
   useEffect(() => {
     if (!filePickerOpen) return;
     const handler = (e: MouseEvent) => {
@@ -629,11 +671,22 @@ export function ChatInput({
     return () => document.removeEventListener("mousedown", handler);
   }, [filePickerOpen]);
 
-  // Close model menu on outside click
+  // Close agent menu on outside click
+  useEffect(() => {
+    if (!showAgentMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (agentMenuRef.current && !agentMenuRef.current.contains(e.target as Node)) {
+        setShowAgentMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showAgentMenu]);
+
   useEffect(() => {
     if (!showModelMenu) return;
     const handler = (e: MouseEvent) => {
-      if (showModelMenu && modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
+      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
         setShowModelMenu(false);
       }
     };
@@ -641,55 +694,149 @@ export function ChatInput({
     return () => document.removeEventListener("mousedown", handler);
   }, [showModelMenu]);
 
-  const handleSend = () => {
-    const hasContent = input.trim() || attachedImages.length > 0 || pickedTasks.length > 0 || pickedAssets.length > 0 || pickedWorkflows.length > 0 || pickedComments.length > 0;
+  // Whether the composer has anything to send/queue right now.
+  const hasComposerContent = () =>
+    !!(input.trim() || attachedImages.length > 0 || pickedTasks.length > 0 || pickedAssets.length > 0 || pickedWorkflows.length > 0 || pickedComments.length > 0 || activeCommand);
+
+  const canInterjectFront = canInterject && richQueue.length > 0;
+
+  const browserConfigPending = useRef(false);
+  const [savingBrowserConfig, setSavingBrowserConfig] = useState(false);
+
+  const handleSend = async () => {
+    if (browserConfigPending.current) return;
+    const hasContent = hasComposerContent();
     if (!hasContent) return;
     if (attachedImages.length > 0 && !attachedImages.every(i => i.filename)) return;
 
     let message = input;
-    const features: string[] | undefined = undefined;
+    let features: string[] | undefined;
+
+    const inlineBrowser = !activeCommand && /^\/browser(?:\s|$)/.test(input.trim());
+    const command = activeCommand ?? (inlineBrowser ? SLASH_COMMANDS[0] : null);
+    if (command) {
+      let userInput = inlineBrowser ? input.trim().replace(/^\/browser\s*/, "") : input.trim();
+      let browserPrompt: string = command.prompt;
+      if (/^connect(?:\s|$)/.test(userInput)) {
+        const match = /^connect\s+(\S+)(?:\s+([\s\S]*))?$/.exec(userInput);
+        if (!match) {
+          toast.error("Use /browser connect http://127.0.0.1:9222 [task]");
+          return;
+        }
+        const browserURL = match[1];
+        browserConfigPending.current = true;
+        setSavingBrowserConfig(true);
+        try {
+          await sessionsApi.update(sessionId, { chrome_browser_url: browserURL });
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : "Failed to save Chrome address");
+          return;
+        } finally {
+          browserConfigPending.current = false;
+          setSavingBrowserConfig(false);
+        }
+        userInput = match[2]?.trim() ?? "List the existing tabs and wait for my next instruction.";
+        browserPrompt += `\nConnect to my externally managed Chrome at ${browserURL}. Start by listing existing tabs. Chrome's lifecycle is managed by me.`;
+      }
+      message = userInput
+        ? `${browserPrompt}\n\nUser request: ${userInput}`
+        : browserPrompt;
+      features = [...command.features];
+      setActiveCommand(null);
+    }
 
     onSend(message, attachedImages.length > 0 ? attachedImages : undefined, features);
     setInput("");
     saveDraft("");
     setAttachedImages([]);
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-    }
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
+    const cursorPos = e.target.selectionStart || 0;
     setInput(value);
     saveDraft(value);
 
-    // @ file picker detection
-    if (projectId) {
-      const cursor = e.target.selectionStart;
-      const textBefore = value.slice(0, cursor);
-      const atIdx = textBefore.lastIndexOf("@");
-      if (atIdx !== -1 && !/\s/.test(textBefore.slice(atIdx + 1))) {
-        setFilePickerQuery(textBefore.slice(atIdx + 1));
-        setFilePickerAnchor(atIdx);
-        setFilePickerOpen(true);
-        setFilePickerSelected(0);
-      } else {
-        setFilePickerOpen(false);
-      }
+    // Slash command detection
+    if (value.startsWith("/")) {
+      setShowSlashMenu(true);
+      setSlashFilter(value.slice(1));
+      setSelectedCommandIndex(0);
+      setFilePickerOpen(false);
+    } else {
+      setShowSlashMenu(false);
+      setSlashFilter("");
     }
+
+    // @ file picker detection
+    const textBeforeCursor = value.slice(0, cursorPos);
+    if (!currentProjectId) {
+      setFilePickerOpen(false);
+      return;
+    }
+    const atIdx = textBeforeCursor.lastIndexOf("@");
+    if (atIdx !== -1 && !/\s/.test(textBeforeCursor.slice(atIdx + 1))) {
+      setFilePickerQuery(textBeforeCursor.slice(atIdx + 1));
+      setFilePickerAnchor(atIdx);
+      setFilePickerOpen(true);
+      setFilePickerSelected(0);
+      return;
+    }
+    setFilePickerOpen(false);
   };
+
+  const executeSlashCommand = (cmd: SlashCommand) => {
+    setShowSlashMenu(false);
+    setSlashFilter("");
+    setInput("");
+
+    if ("needsInput" in cmd && cmd.needsInput) {
+      setActiveCommand(cmd);
+      setTimeout(() => textareaRef.current?.focus(), 0);
+      return;
+    }
+
+    const features = "features" in cmd ? ([...cmd.features] as string[]) : undefined;
+    onSend(cmd.prompt, undefined, features);
+  };
+
+  const applyTemplate = (tpl: PromptTemplate) => {
+    setShowSlashMenu(false);
+    setSlashFilter("");
+    setInput(tpl.content);
+    saveDraft(tpl.content);
+    setTimeout(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(tpl.content.length, tpl.content.length);
+    }, 0);
+  };
+
+  const selectSlashItem = (index: number) => {
+    if (index < filteredCommands.length) executeSlashCommand(filteredCommands[index]);
+    else applyTemplate(filteredTemplates[index - filteredCommands.length]);
+  };
+
+  useEffect(() => {
+    if (!showSlashMenu || slashItemCount === 0) return;
+    const container = slashMenuRef.current;
+    if (!container) return;
+    const item = container.querySelector(`[data-cmd-index="${selectedCommandIndex}"]`);
+    if (item) item.scrollIntoView({ block: "nearest" });
+  }, [selectedCommandIndex, showSlashMenu, slashItemCount]);
 
   const insertFileRef = useCallback((file: FileEntry) => {
     const el = textareaRef.current;
     const cursor = el?.selectionStart ?? (filePickerAnchor + filePickerQuery.length + 1);
     const before = input.slice(0, filePickerAnchor);
     const after = input.slice(cursor);
-    // Use full relative path so Claude can locate files in subdirectories
     const ref = file.path || file.name;
-    const newInput = before + `@${ref} ` + after;
+    const newInput = `${before}@${ref} ${after}`;
     setInput(newInput);
     saveDraft(newInput);
     setFilePickerOpen(false);
+
     setTimeout(() => {
       if (!el) return;
       el.focus();
@@ -698,19 +845,37 @@ export function ChatInput({
     }, 0);
   }, [input, filePickerAnchor, filePickerQuery.length, saveDraft]);
 
+  /** Generic handler for popup-menu keyboard navigation (ArrowUp/Down, Enter/Tab, Escape). */
+  const navigateMenu = (
+    e: React.KeyboardEvent,
+    count: number,
+    selectedIndex: number,
+    setIndex: React.Dispatch<React.SetStateAction<number>>,
+    onSelect: () => void,
+    onDismiss: () => void,
+  ): boolean => {
+    switch (e.key) {
+      case "ArrowDown": e.preventDefault(); setIndex(selectedIndex < count - 1 ? selectedIndex + 1 : 0); return true;
+      case "ArrowUp":   e.preventDefault(); setIndex(selectedIndex > 0 ? selectedIndex - 1 : count - 1); return true;
+      case "Enter":
+      case "Tab":        e.preventDefault(); onSelect(); return true;
+      case "Escape":     e.preventDefault(); onDismiss(); return true;
+      default: return false;
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.nativeEvent.isComposing) return;
 
-    // @ file picker keyboard navigation
     if (filePickerOpen && filteredPickerFiles.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setFilePickerSelected(i => Math.min(i + 1, filteredPickerFiles.length - 1));
+        setFilePickerSelected((i) => Math.min(i + 1, filteredPickerFiles.length - 1));
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setFilePickerSelected(i => Math.max(i - 1, 0));
+        setFilePickerSelected((i) => Math.max(i - 1, 0));
         return;
       }
       if (e.key === "Enter" || e.key === "Tab") {
@@ -719,15 +884,42 @@ export function ChatInput({
         return;
       }
       if (e.key === "Escape") {
+        e.preventDefault();
         setFilePickerOpen(false);
         return;
       }
     }
 
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (showSlashMenu && slashItemCount > 0) {
+      if (navigateMenu(e, slashItemCount, selectedCommandIndex, setSelectedCommandIndex,
+        () => selectSlashItem(selectedCommandIndex),
+        () => { setShowSlashMenu(false); setInput(""); },
+      )) return;
+    }
+    if (e.key === "Escape" && activeCommand && !showSlashMenu && !filePickerOpen) {
       e.preventDefault();
+      setActiveCommand(null);
+      return;
+    }
+    // On mobile, Enter inserts a newline (matches WeChat/IME behavior). Use
+    // the Send button to submit. On desktop, Enter sends and Shift+Enter is
+    // a newline.
+    if (!isMobile && e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      // With an empty composer, Enter acts as the "interject" shortcut: send the
+      // front (oldest) queued message into the active reply. With
+      // content, it sends/queues that content as usual.
+      if (!hasComposerContent() && canInterjectFront) {
+        onRichQueueSendNow(richQueue[0].id);
+        return;
+      }
       handleSend();
     }
+  };
+
+  const handleAgentChange = (agent: string) => {
+    setShowAgentMenu(false);
+    onChangeAgent(agent);
   };
 
   const handleModelChange = (model: string) => {
@@ -735,24 +927,37 @@ export function ChatInput({
     onChangeModel(model);
   };
 
-  const currentModelLabel = MODEL_LABELS[modelName] || MODEL_LABELS["sonnet"];
+  const handleEffortChange = (lvl: string) => {
+    setShowModelMenu(false);
+    onChangeEffort(lvl);
+  };
+
+  const selectedModel = modelName;
+  const currentModelInfo = availableModelInfos.find((m) => m.id === selectedModel);
+  const displayModelLabel = (info?: ModelInfo, fallback?: string) => {
+    const raw = info?.label || fallback || "";
+    const hay = `${info?.id || ""} ${raw}`.toLowerCase();
+    if (hay.includes("haiku")) return "Haiku";
+    if (hay.includes("opus")) return "Opus";
+    if (hay.includes("sonnet")) return "Sonnet";
+    return raw || "Model";
+  };
+  const currentModelLabel = selectedModel ? displayModelLabel(currentModelInfo, selectedModel) : "Select model";
+  const visibleModels = availableModels.filter((m) => m.toLowerCase() !== "default");
+  const supportedEfforts = currentModelInfo?.supported_efforts || [];
+  const currentEffort = effort || currentModelInfo?.default_effort || "";
+  const effortLabel = currentEffort ? currentEffort[0].toUpperCase() + currentEffort.slice(1) : "";
 
   return (
     <div className="shrink-0">
-      {/* Resize handle */}
-      <div
-        className="h-1 cursor-row-resize hover:bg-primary/20 active:bg-primary/40 transition-colors"
-        onMouseDown={handleInputResizeMouseDown}
-      />
-      <div className="max-w-3xl mx-auto px-4 pb-3">
-        {/* Todo panel (TodoWrite from Claude) */}
+      <div className="max-w-4xl mx-auto px-0 sm:px-4 pb-2 sm:pb-3">
         {pendingTodo && (
-          <TodoPanel todos={pendingTodo.todos} isPending={pendingTodo.isPending} />
+          <TodoPanel todos={pendingTodo.todos} title={pendingTodo.title} />
         )}
 
-        {/* Question panel (MCP ask_question) */}
+        {/* Question panel */}
         {pendingQuestion && (
-          <div className="py-3 border-b">
+          <div className="pb-3 border-b">
             <QuestionCard
               title={pendingQuestion.title}
               questions={pendingQuestion.questions}
@@ -772,22 +977,19 @@ export function ChatInput({
           <UserInputPanel
             input={pendingUserInput.input}
             onSubmit={(response) => onSendToolResponse(pendingUserInput.toolUseId, response)}
-            onSkip={() => onSendToolResponse(pendingUserInput.toolUseId, "Skip this question, please continue.")}
+            onSkip={() => onSendToolResponse(pendingUserInput.toolUseId, "", true)}
           />
         )}
 
         {/* Unified input box */}
         <div
-          className="relative rounded-xl border border-input bg-background shadow-sm focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background transition-shadow"
+          className="relative rounded-none border-x-0 sm:rounded-xl sm:border-x border border-input bg-background shadow-sm focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background transition-shadow"
           onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
           onDrop={(e) => {
             e.preventDefault();
             e.stopPropagation();
             const files = Array.from(e.dataTransfer.files);
-            const imageFiles = files.filter(f => f.type.startsWith("image/"));
-            const otherFiles = files.filter(f => !f.type.startsWith("image/"));
-            if (imageFiles.length > 0) addImageFiles(imageFiles);
-            if (otherFiles.length > 0) handleFileDrop(otherFiles, input);
+            if (files.length > 0) addImageFiles(files);
           }}
         >
           {/* Git diff bar */}
@@ -795,9 +997,16 @@ export function ChatInput({
             <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/60 text-xs">
               <div className="flex items-center gap-2 text-muted-foreground">
                 <GitBranch className="h-3 w-3" />
+                {gitDiffStats.repository_count && gitDiffStats.repository_count > 1 && (
+                  <span>{gitDiffStats.repository_count} repositories</span>
+                )}
                 <span>{gitDiffStats.total_files} file{gitDiffStats.total_files !== 1 ? "s" : ""} changed</span>
-                <span className="text-green-500 font-medium">+{gitDiffStats.insertions}</span>
-                <span className="text-red-500 font-medium">-{gitDiffStats.deletions}</span>
+                {gitDiffStats.stats_included && (
+                  <>
+                    <span className="text-green-500 font-medium">+{gitDiffStats.insertions}</span>
+                    <span className="text-red-500 font-medium">-{gitDiffStats.deletions}</span>
+                  </>
+                )}
               </div>
               {onOpenGit && (
                 <button
@@ -813,10 +1022,12 @@ export function ChatInput({
           {/* Queued messages (rich client-side + legacy server-side) */}
           {(richQueue.length > 0 || queue.length > 0) && (
             <div className="px-3 pt-3 space-y-1">
-              {richQueue.map((item) => (
+              {richQueue.map((item, i) => (
                 <RichQueuedItem
                   key={item.id}
                   item={item}
+                  canSendNow={canInterject}
+                  isFront={i === 0}
                   onSendNow={() => onRichQueueSendNow(item.id)}
                   onRemove={() => onRichQueueRemove(item.id)}
                   onEdit={(text) => onRichQueueEdit(item.id, text)}
@@ -833,8 +1044,78 @@ export function ChatInput({
               ))}
             </div>
           )}
-
-
+          {/* Slash command menu */}
+          {showSlashMenu && slashItemCount > 0 && (
+            <div ref={slashMenuRef} className="absolute bottom-full left-0 right-0 mb-2 bg-background border rounded-lg shadow-lg overflow-hidden z-10 max-h-64 overflow-y-auto">
+              {filteredCommands.length > 0 && (
+                <div className="p-2 text-xs text-muted-foreground border-b">
+                  <Command className="inline h-3 w-3 mr-1" />
+                  Commands
+                </div>
+              )}
+              {filteredCommands.map((cmd, index) => (
+                <button
+                  key={cmd.name}
+                  data-cmd-index={index}
+                  onClick={() => executeSlashCommand(cmd)}
+                  className={`w-full text-left px-3 py-2 flex items-start gap-3 hover:bg-accent transition-colors ${
+                    index === selectedCommandIndex ? "bg-accent" : ""
+                  }`}
+                >
+                  <span className="font-mono text-sm text-primary w-24 shrink-0">/{cmd.name}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium">{cmd.label}</div>
+                    <div className="text-xs text-muted-foreground truncate">{cmd.description}</div>
+                  </div>
+                </button>
+              ))}
+              {filteredTemplates.length > 0 && (
+                <div className="p-2 text-xs text-muted-foreground border-b border-t">
+                  <FileText className="inline h-3 w-3 mr-1" />
+                  Prompt templates
+                </div>
+              )}
+              {filteredTemplates.map((tpl, i) => {
+                const index = filteredCommands.length + i;
+                return (
+                  <button
+                    key={tpl.name}
+                    data-cmd-index={index}
+                    onClick={() => applyTemplate(tpl)}
+                    className={`w-full text-left px-3 py-2 hover:bg-accent transition-colors ${
+                      index === selectedCommandIndex ? "bg-accent" : ""
+                    }`}
+                  >
+                    <div className="text-sm font-medium truncate">{tpl.name}</div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      {tpl.content.slice(0, 200).replace(/\s+/g, " ")}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {/* Active command chip */}
+          {activeCommand && (
+            <div className="flex items-center gap-1.5 px-3 pt-2">
+              <span
+                className={cn(
+                  "inline-flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded-md text-xs font-medium transition-colors",
+                  "bg-primary/10 border border-primary/25 text-primary"
+                )}
+              >
+                <Command className="h-3 w-3 shrink-0" />
+                <span className="font-mono">/{activeCommand.name}</span>
+                <span className="text-muted-foreground font-normal">{activeCommand.label}</span>
+                <button
+                  onClick={() => setActiveCommand(null)}
+                  className="ml-0.5 p-0.5 rounded hover:bg-primary/15 text-primary/50 hover:text-primary transition-colors"
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              </span>
+            </div>
+          )}
 
           {/* Picked task, asset & workflow badges */}
           {(pickedTasks.length > 0 || pickedAssets.length > 0 || pickedWorkflows.length > 0 || pickedComments.length > 0) && (
@@ -978,55 +1259,62 @@ export function ChatInput({
                 addImageFiles(imageFiles);
               }
             }}
-            placeholder={!isConnected ? t("chat.connecting") : t("chat.placeholder")}
-            disabled={!isConnected}
-            className="resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
-            style={{ height: inputHeight }}
-            rows={3}
+            placeholder={!isConnected ? "Connecting..." : activeCommand && "inputHint" in activeCommand ? activeCommand.inputHint : "/ for commands, @ for files..."}
+            disabled={!isConnected || savingBrowserConfig}
+            className="resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 min-h-0 overflow-y-auto text-[15px]"
+            rows={1}
           />
 
           {/* Bottom toolbar */}
-          <div className="flex items-center justify-between px-3 pb-2 pt-1">
-            <div className="flex items-center gap-2">
-              {isConnected ? (
-                <span className="h-2 w-2 rounded-full bg-green-500 shrink-0" title="Connected" />
-              ) : (
-                <span className="text-xs text-red-500">Disconnected</span>
+          <div className="flex items-center justify-between gap-2 px-2 sm:px-3 pb-2 pt-1">
+            <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap min-w-0">
+              <span
+                className={`inline-block h-2 w-2 rounded-full shrink-0 ${isConnected ? "bg-green-500" : "bg-red-500"}`}
+                title={isConnected ? "Connected" : "Disconnected"}
+                aria-label={isConnected ? "Connected" : "Disconnected"}
+              />
+              <span className="sr-only">{isConnected ? "Connected" : "Disconnected"}</span>
+              {worktree && (
+                <>
+                  <span className="text-muted-foreground/40 text-xs hidden sm:inline">·</span>
+                  <WorktreeSelector {...worktree} />
+                </>
               )}
               {agentName && (
-                <span
-                  className="text-[10px] font-medium px-1.5 py-0.5 rounded-sm bg-blue-500/15 text-blue-400"
-                >
-                  {AGENT_LABELS[agentName] || agentName}
-                </span>
-              )}
-              {/* Model selector */}
-              {agentName === "claude" && (
                 <>
-                  <span className="text-muted-foreground/40 text-xs">·</span>
-                  <div className="relative" ref={modelMenuRef}>
+                  <span className="text-muted-foreground/40 text-xs hidden sm:inline">·</span>
+                  <div className="relative shrink-0" ref={agentMenuRef}>
                     <button
-                      onClick={() => setShowModelMenu((v) => !v)}
-                      className="text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 transition-colors bg-violet-500/15 text-violet-400 hover:bg-violet-500/25 cursor-pointer"
-                      title="Click to change model"
+                      onClick={() => {
+                        if (!sessionHasMessages && availableAgents.length > 1) setShowAgentMenu((v) => !v);
+                      }}
+                      className={cn(
+                        "text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 whitespace-nowrap transition-colors",
+                        sessionHasMessages
+                          ? "bg-blue-500/15 text-blue-400 cursor-default"
+                          : "bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 cursor-pointer"
+                      )}
+                      title={sessionHasMessages ? "Agent locked after first message" : "Click to change agent"}
                     >
-                      {currentModelLabel}
-                      <ChevronDown className="h-2.5 w-2.5" />
+                      {agentLabel(agentName)}
+                      {!sessionHasMessages && availableAgents.length > 1 && (
+                        <ChevronDown className="h-2.5 w-2.5" />
+                      )}
                     </button>
 
-                    {showModelMenu && (
-                      <div className="absolute left-0 bottom-full z-50 mb-1 w-36 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
-                        {MODEL_OPTIONS.map((opt) => (
+                    {showAgentMenu && (
+                      <div className="absolute left-0 bottom-full z-50 mb-1 w-40 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
+                        {availableAgents.map((ag) => (
                           <button
-                            key={opt.value}
-                            onClick={() => handleModelChange(opt.value)}
+                            key={ag}
+                            onClick={() => handleAgentChange(ag)}
                             className={cn(
                               "w-full flex items-center justify-between px-3 py-1.5 text-xs hover:bg-accent transition-colors",
-                              (modelName || "sonnet") === opt.value && "bg-accent/50 font-medium"
+                              agentName === ag && "bg-accent/50 font-medium"
                             )}
                           >
-                            <span>{opt.label}</span>
-                            {(modelName || "sonnet") === opt.value && <Check className="h-3 w-3 text-primary" />}
+                            <span>{agentLabel(ag)}</span>
+                            {agentName === ag && <Check className="h-3 w-3 text-primary" />}
                           </button>
                         ))}
                       </div>
@@ -1034,8 +1322,87 @@ export function ChatInput({
                   </div>
                 </>
               )}
+              {availableModels.length > 0 && (
+                <>
+                  <span className="text-muted-foreground/40 text-xs hidden sm:inline">·</span>
+                  <div className="relative shrink-0" ref={modelMenuRef}>
+                    <button
+                      onClick={() => canChangeModel && setShowModelMenu((v) => !v)}
+                      className={cn(
+                        "text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 text-left transition-colors bg-violet-500/15 text-violet-400",
+                        canChangeModel ? "hover:bg-violet-500/25 cursor-pointer" : "opacity-60 cursor-not-allowed"
+                      )}
+                      title={canChangeModel ? "Click to change model" : "This agent only allows choosing a model before the conversation starts"}
+                    >
+                      <span className="min-w-0 break-words">
+                        {currentModelLabel}
+                        {effortLabel && (
+                          <span className="text-violet-400/60 font-normal"> · {effortLabel}</span>
+                        )}
+                      </span>
+                      <ChevronDown className="h-2.5 w-2.5 shrink-0" />
+                    </button>
+
+                    {showModelMenu && canChangeModel && (
+                      <div className="absolute left-0 bottom-full z-50 mb-1 w-64 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
+                        <div className="px-3 pt-1.5 pb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground/60">
+                          Models
+                        </div>
+                        <div className="max-h-64 overflow-y-auto">
+                        {visibleModels.map((model) => {
+                          const info = availableModelInfos.find((m) => m.id === model);
+                          return (
+                            <button
+                              key={model}
+                              onClick={() => handleModelChange(model)}
+                              className={cn(
+                                "w-full flex flex-col items-start gap-0 px-3 py-1.5 text-xs hover:bg-accent transition-colors",
+                                selectedModel === model && "bg-accent/50 font-medium"
+                              )}
+                              title={info?.description || model}
+                            >
+                              <div className="w-full flex items-center justify-between">
+                                <span className="truncate">{displayModelLabel(info, model)}</span>
+                                {selectedModel === model && <Check className="h-3 w-3 text-primary" />}
+                              </div>
+                            </button>
+                          );
+                        })}
+                        </div>
+                        {supportedEfforts.length > 0 && (
+                          <>
+                            <div className="border-t border-border my-1" />
+                            <div className="px-3 pt-1.5 pb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground/60">
+                              Effort
+                            </div>
+                            {supportedEfforts.map((lvl) => (
+                              <button
+                                key={lvl}
+                                onClick={() => handleEffortChange(lvl)}
+                                className={cn(
+                                  "w-full flex items-center justify-between px-3 py-1.5 text-xs hover:bg-accent transition-colors",
+                                  currentEffort === lvl && "bg-accent/50 font-medium"
+                                )}
+                              >
+                                <span className="truncate">{lvl[0].toUpperCase() + lvl.slice(1)}</span>
+                                {currentEffort === lvl && <Check className="h-3 w-3 text-primary" />}
+                              </button>
+                            ))}
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex shrink-0">
+                    <ContextUsageIndicator
+                      sessionId={sessionId}
+                      fallbackContextWindow={currentModelInfo?.context_window || 0}
+                    />
+                  </div>
+                </>
+              )}
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 shrink-0">
               <Button
                 variant="ghost"
                 size="icon"
@@ -1046,31 +1413,37 @@ export function ChatInput({
               >
                 <ImagePlus className="h-3.5 w-3.5" />
               </Button>
-              {isStreaming && (
-                <Button
-                  onClick={onStop}
-                  size="icon"
-                  variant="outline"
-                  className="h-7 w-7 rounded-md shrink-0"
-                  title="Stop"
-                >
-                  <StopCircle className="h-3.5 w-3.5" />
-                </Button>
-              )}
-              <Button
-                onClick={handleSend}
-                disabled={!isConnected || uploading || (!input.trim() && pickedTasks.length === 0 && pickedAssets.length === 0 && pickedWorkflows.length === 0 && pickedComments.length === 0 && attachedImages.length === 0)}
-                size="icon"
-                className="h-7 w-7 rounded-md shrink-0"
-                title={isStreaming ? "Queue message" : "Send message"}
-              >
-                <Send className="h-3.5 w-3.5" />
-              </Button>
+              {(() => {
+                const hasContentToSend = !!(input.trim() || activeCommand || pickedTasks.length > 0 || pickedAssets.length > 0 || pickedWorkflows.length > 0 || pickedComments.length > 0 || attachedImages.length > 0);
+                if (isStreaming && !hasContentToSend) {
+                  return (
+                    <Button
+                      onClick={onStop}
+                      size="icon"
+                      variant="outline"
+                      className="h-7 w-7 rounded-md shrink-0"
+                      title="Stop"
+                    >
+                      <StopCircle className="h-3.5 w-3.5" />
+                    </Button>
+                  );
+                }
+                return (
+                  <Button
+                    onClick={handleSend}
+                    disabled={!isConnected || uploading || !hasContentToSend}
+                    size="icon"
+                    className="h-7 w-7 rounded-md shrink-0"
+                    title={isStreaming ? "Queue message" : "Send message"}
+                  >
+                    <Send className="h-3.5 w-3.5" />
+                  </Button>
+                );
+              })()}
             </div>
           </div>
         </div>
       </div>
-      {/* @ File picker dropdown */}
       {filePickerOpen && filteredPickerFiles.length > 0 && textareaRef.current && createPortal(
         <div
           ref={filePickerMenuRef}
@@ -1083,14 +1456,14 @@ export function ChatInput({
           }}
           className="bg-popover border rounded-lg shadow-lg overflow-hidden max-h-52 overflow-y-auto"
         >
-          {filteredPickerFiles.map((file, i) => (
+          {filteredPickerFiles.map((file, index) => (
             <div
               key={file.path}
               onMouseDown={(e) => { e.preventDefault(); insertFileRef(file); }}
-              onMouseEnter={() => setFilePickerSelected(i)}
+              onMouseEnter={() => setFilePickerSelected(index)}
               className={cn(
                 "flex items-center gap-2 px-3 py-1.5 cursor-pointer text-sm",
-                i === filePickerSelected ? "bg-accent" : "hover:bg-accent/50"
+                index === filePickerSelected ? "bg-accent" : "hover:bg-accent/50",
               )}
             >
               <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
@@ -1099,7 +1472,7 @@ export function ChatInput({
             </div>
           ))}
         </div>,
-        document.body
+        document.body,
       )}
     </div>
   );

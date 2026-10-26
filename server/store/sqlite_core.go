@@ -15,39 +15,53 @@ import (
 // Projects
 // ---------------------------------------------------------------------------
 
-const projectColumns = `id, namespace_id, name, description, git_repo_path, gitlab_repo_url, created_by, owner_id, version, created_at, updated_at`
+const projectColumns = `id, owner_user_id, namespace_id, name, description, git_repo_path, gitlab_repo_url, gitlab_token, extra, created_by, version, created_at, updated_at, auto_managed_dir`
 
 func scanProject(row interface{ Scan(...interface{}) error }) (*Project, error) {
 	var p Project
-	err := row.Scan(&p.ID, &p.NamespaceID, &p.Name, &p.Description, &p.GitRepoPath, &p.GitLabRepoURL, &p.CreatedBy, &p.OwnerID, &p.Version, &p.CreatedAt, &p.UpdatedAt)
+	var ignoredGitLabURL, ignoredToken, ignoredExtra string
+	var autoManaged int
+	err := row.Scan(&p.ID, &p.OwnerUserID, &p.NamespaceID, &p.Name, &p.Description, &p.GitRepoPath, &ignoredGitLabURL, &ignoredToken, &ignoredExtra, &p.CreatedBy, &p.Version, &p.CreatedAt, &p.UpdatedAt, &autoManaged)
 	if err != nil {
 		return nil, err
 	}
+	p.AutoManagedDir = autoManaged != 0
 	return &p, nil
 }
 
 func (s *SQLiteStore) CreateProject(req CreateProjectRequest) (*Project, error) {
 	now := time.Now()
+	createdBy := req.CreatedBy
+	if createdBy == "" {
+		createdBy = "local"
+	}
 	p := &Project{
-		ID:            uuid.New().String(),
-		NamespaceID:   "local",
-		Name:          req.Name,
-		Description:   req.Description,
-		GitRepoPath:   req.GitRepoPath,
-		GitLabRepoURL: req.GitLabRepoURL,
-		CreatedBy:     "local",
-		OwnerID:       req.OwnerID,
-		Version:       1,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:             uuid.New().String(),
+		OwnerUserID:    req.OwnerUserID,
+		NamespaceID:    "local",
+		Name:           req.Name,
+		Description:    req.Description,
+		GitRepoPath:    req.GitRepoPath,
+		AutoManagedDir: req.AutoManagedDir,
+		CreatedBy:      createdBy,
+		Version:        1,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 
+	autoManagedInt := 0
+	if p.AutoManagedDir {
+		autoManagedInt = 1
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO projects (id, namespace_id, name, description, git_repo_path, gitlab_repo_url, created_by, owner_id, version, created_at, updated_at)
+		`INSERT INTO projects (id, owner_user_id, namespace_id, name, description, git_repo_path, created_by, version, created_at, updated_at, auto_managed_dir)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.NamespaceID, p.Name, p.Description, p.GitRepoPath, p.GitLabRepoURL, p.CreatedBy, p.OwnerID, p.Version, p.CreatedAt, p.UpdatedAt,
+		p.ID, p.OwnerUserID, p.NamespaceID, p.Name, p.Description, p.GitRepoPath, p.CreatedBy, p.Version, p.CreatedAt, p.UpdatedAt, autoManagedInt,
 	)
 	if err != nil {
+		if isUniqueConstraintErr(err) {
+			return nil, ErrVersionConflict
+		}
 		return nil, fmt.Errorf("insert project: %w", err)
 	}
 	return p, nil
@@ -68,7 +82,49 @@ func (s *SQLiteStore) ListProjects() ([]Project, error) {
 		}
 		projects = append(projects, *p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate projects: %w", err)
+	}
 	return projects, nil
+}
+
+// ListProjectsByOwner returns projects owned by the given user.
+func (s *SQLiteStore) ListProjectsByOwner(ownerUserID int64) ([]Project, error) {
+	rows, err := s.db.Query(`SELECT `+projectColumns+` FROM projects WHERE owner_user_id = ? ORDER BY updated_at DESC`, ownerUserID)
+	if err != nil {
+		return nil, fmt.Errorf("query projects by owner: %w", err)
+	}
+	defer rows.Close()
+
+	var projects []Project
+	for rows.Next() {
+		p, err := scanProject(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan project: %w", err)
+		}
+		projects = append(projects, *p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate projects by owner: %w", err)
+	}
+	return projects, nil
+}
+
+// GetProjectByNameForOwner returns the project named name owned by ownerUserID,
+// or (nil, nil) when there is no match. Used by the create handler to enforce
+// per-user uniqueness before attempting the insert.
+func (s *SQLiteStore) GetProjectByNameForOwner(ownerUserID int64, name string) (*Project, error) {
+	p, err := scanProject(s.db.QueryRow(
+		`SELECT `+projectColumns+` FROM projects WHERE owner_user_id = ? AND name = ? LIMIT 1`,
+		ownerUserID, name,
+	))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get project by owner+name: %w", err)
+	}
+	return p, nil
 }
 
 func (s *SQLiteStore) GetProject(id string) (*Project, error) {
@@ -97,14 +153,11 @@ func (s *SQLiteStore) UpdateProject(id string, req UpdateProjectRequest) (*Proje
 	if req.GitRepoPath != nil {
 		p.GitRepoPath = *req.GitRepoPath
 	}
-	if req.GitLabRepoURL != nil {
-		p.GitLabRepoURL = *req.GitLabRepoURL
-	}
 	newVersion := p.Version + 1
 	p.UpdatedAt = time.Now()
 
-	query := `UPDATE projects SET name=?, description=?, git_repo_path=?, gitlab_repo_url=?, version=?, updated_at=? WHERE id=?`
-	args := []interface{}{p.Name, p.Description, p.GitRepoPath, p.GitLabRepoURL, newVersion, p.UpdatedAt, p.ID}
+	query := `UPDATE projects SET name=?, description=?, git_repo_path=?, version=?, updated_at=? WHERE id=?`
+	args := []interface{}{p.Name, p.Description, p.GitRepoPath, newVersion, p.UpdatedAt, p.ID}
 
 	if req.ExpectedVersion != nil {
 		query += ` AND version=?`
@@ -147,6 +200,9 @@ func (s *SQLiteStore) GetProjectsByIDs(ids []string) ([]Project, error) {
 		}
 		projects = append(projects, *p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate projects by ids: %w", err)
+	}
 	return projects, nil
 }
 
@@ -157,9 +213,26 @@ func (s *SQLiteStore) DeleteProject(id string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.Exec(`DELETE FROM sessions WHERE project_id = ?`, id); err != nil {
-		return fmt.Errorf("delete project sessions: %w", err)
+	// Cascade-delete dependent rows to avoid orphans.
+	cascadeQueries := []struct{ sql, label string }{
+		{`DELETE FROM review_comments WHERE asset_id IN (SELECT id FROM assets WHERE project_id = ?)`, "review_comments"},
+		{`DELETE FROM asset_versions WHERE asset_id IN (SELECT id FROM assets WHERE project_id = ?)`, "asset_versions"},
+		{`DELETE FROM task_comments WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)`, "task_comments"},
+		{`DELETE FROM assets WHERE project_id = ?`, "assets"},
+		{`DELETE FROM tasks WHERE project_id = ?`, "tasks"},
+		{`DELETE FROM wf_node_logs WHERE execution_id IN (SELECT id FROM wf_executions WHERE workflow_id IN (SELECT id FROM workflows WHERE project_id = ?))`, "wf_node_logs"},
+		{`DELETE FROM wf_executions WHERE workflow_id IN (SELECT id FROM workflows WHERE project_id = ?)`, "wf_executions"},
+		{`DELETE FROM workflow_schedules WHERE workflow_id IN (SELECT id FROM workflows WHERE project_id = ?)`, "workflow_schedules"},
+		{`DELETE FROM workflows WHERE project_id = ?`, "workflows"},
+		{`DELETE FROM sessions WHERE project_id = ?`, "sessions"},
+		{`DELETE FROM web_shares WHERE project_id = ?`, "web_shares"},
 	}
+	for _, cq := range cascadeQueries {
+		if _, err := tx.Exec(cq.sql, id); err != nil {
+			return fmt.Errorf("delete project %s: %w", cq.label, err)
+		}
+	}
+
 	result, err := tx.Exec(`DELETE FROM projects WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete project: %w", err)
@@ -177,22 +250,23 @@ func (s *SQLiteStore) DeleteProject(id string) error {
 func (s *SQLiteStore) CreateSession(req CreateSessionRequest) (*Session, error) {
 	now := time.Now()
 	sess := &Session{
-		ID:          uuid.New().String(),
-		NamespaceID: "local",
-		Name:        req.Name,
-		ProjectID:   req.ProjectID,
-		Agent:       req.Agent,
-		Model:       req.Model,
-		CreatedBy:   "local",
-		UserID:      req.UserID,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:           uuid.New().String(),
+		NamespaceID:  "local",
+		Name:         req.Name,
+		ProjectID:    req.ProjectID,
+		Agent:        req.Agent,
+		Model:        req.Model,
+		Effort:       req.Effort,
+		CreatedBy:    "local",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		LastActiveAt: now,
 	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO sessions (id, namespace_id, name, project_id, agent, model, agent_session_id, stream_id, features, created_by, user_id, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, '', '', '', ?, ?, ?, ?)`,
-		sess.ID, sess.NamespaceID, sess.Name, sess.ProjectID, sess.Agent, sess.Model, sess.CreatedBy, sess.UserID, sess.CreatedAt, sess.UpdatedAt,
+		`INSERT INTO sessions (id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, features, created_by, created_at, updated_at, last_active_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, ?, ?)`,
+		sess.ID, sess.NamespaceID, sess.Name, sess.ProjectID, sess.Agent, sess.Model, sess.Effort, sess.CreatedBy, sess.CreatedAt, sess.UpdatedAt, sess.LastActiveAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
@@ -200,18 +274,111 @@ func (s *SQLiteStore) CreateSession(req CreateSessionRequest) (*Session, error) 
 	return sess, nil
 }
 
+// GetOrCreateScratchSession returns the existing hidden ("scratch") session for
+// the given project, or creates one if none exists. There is at most one live
+// scratch session per project (enforced by a partial unique index), so the
+// session acts as a stable per-project input buffer: the user fills in
+// agent/model/worktree/draft, and the session is promoted to a visible one as
+// soon as a user message is persisted to it.
+func (s *SQLiteStore) GetOrCreateScratchSession(projectID string) (*Session, error) {
+	if projectID == "" {
+		return nil, fmt.Errorf("GetOrCreateScratchSession: projectID required")
+	}
+
+	// Fast path: existing scratch session.
+	row := s.db.QueryRow(
+		`SELECT `+sessionColumns+` FROM sessions WHERE project_id = ? AND is_hidden = 1 AND deleted_at IS NULL LIMIT 1`,
+		projectID,
+	)
+	if sess, err := scanSession(row); err == nil {
+		return sess, nil
+	} else if err != sql.ErrNoRows {
+		return nil, fmt.Errorf("query scratch session: %w", err)
+	}
+
+	// Create one. The partial unique index on (project_id) WHERE is_hidden=1
+	// guarantees no duplicates under concurrent callers; if a racing insert
+	// wins, our INSERT fails and we re-read.
+	now := time.Now()
+	sess := &Session{
+		ID:          uuid.New().String(),
+		NamespaceID: "local",
+		// "New Session" matches the placeholder-name list checked by the
+		// frontend autoRenameSession helper, so the LLM-generated title
+		// kicks in on first send just like for sessions created via the
+		// "+" button.
+		Name:         "New Session",
+		ProjectID:    projectID,
+		CreatedBy:    "local",
+		IsHidden:     true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		LastActiveAt: now,
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO sessions (id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, features, is_hidden, created_by, created_at, updated_at, last_active_at)
+		 VALUES (?, ?, ?, ?, '', '', '', '', '', '', 1, ?, ?, ?, ?)`,
+		sess.ID, sess.NamespaceID, sess.Name, sess.ProjectID, sess.CreatedBy, sess.CreatedAt, sess.UpdatedAt, sess.LastActiveAt,
+	)
+	if err != nil {
+		// Race: another caller created one between our SELECT and INSERT.
+		// Re-read and return that.
+		row := s.db.QueryRow(
+			`SELECT `+sessionColumns+` FROM sessions WHERE project_id = ? AND is_hidden = 1 AND deleted_at IS NULL LIMIT 1`,
+			projectID,
+		)
+		if existing, scanErr := scanSession(row); scanErr == nil {
+			return existing, nil
+		}
+		return nil, fmt.Errorf("insert scratch session: %w", err)
+	}
+	return sess, nil
+}
+
+// UnhideSession flips a hidden ("scratch") session into a visible one. Used
+// when a user sends the first message into the scratch session — it just gets
+// promoted in place, no copy needed. Returns true iff a row was actually
+// flipped (i.e. the session existed and was previously hidden), so the caller
+// can avoid spamming change events for the common already-visible case.
+func (s *SQLiteStore) UnhideSession(id string) (bool, error) {
+	if id == "" {
+		return false, nil
+	}
+	res, err := s.db.Exec(`UPDATE sessions SET is_hidden = 0 WHERE id = ? AND is_hidden = 1`, id)
+	if err != nil {
+		return false, fmt.Errorf("unhide session: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("unhide session rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
+// sessionColumns is the canonical column list for SELECTing a Session row.
+// Keep this in sync with scanSession.
+const sessionColumns = `id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, sort_order, features, chrome_browser_url, worktree_mode, worktree_path, forked_from_session_id, forked_from_message_id, forked_at_agent_checkpoint, is_hidden, created_by, created_at, updated_at, deleted_at, last_active_at, is_pinned`
+
 func scanSession(row interface{ Scan(...interface{}) error }) (*Session, error) {
 	var sess Session
-	var deletedAt sql.NullTime
-	if err := row.Scan(&sess.ID, &sess.NamespaceID, &sess.Name, &sess.ProjectID, &sess.Agent, &sess.Model,
-		&sess.AgentSessionID, &sess.StreamID, &sess.SortOrder, &sess.Features,
+	var deletedAt, lastActiveAt sql.NullTime
+	var isHidden int
+	if err := row.Scan(&sess.ID, &sess.NamespaceID, &sess.Name, &sess.ProjectID, &sess.Agent,
+		&sess.Model, &sess.Effort, &sess.AgentSessionID, &sess.StreamID, &sess.SortOrder, &sess.Features, &sess.ChromeBrowserURL,
 		&sess.WorktreeMode, &sess.WorktreePath,
-		&sess.CreatedBy, &sess.UserID, &sess.CreatedAt, &sess.UpdatedAt, &deletedAt); err != nil {
+		&sess.ForkedFromSessionID, &sess.ForkedFromMessageID, &sess.ForkedAtAgentCheckpoint,
+		&isHidden,
+		&sess.CreatedBy, &sess.CreatedAt, &sess.UpdatedAt, &deletedAt, &lastActiveAt, &sess.IsPinned); err != nil {
 		return nil, err
 	}
 	if sess.WorktreeMode == "" {
 		sess.WorktreeMode = "local"
 	}
+	sess.LastActiveAt = sess.CreatedAt
+	if lastActiveAt.Valid {
+		sess.LastActiveAt = lastActiveAt.Time
+	}
+	sess.IsHidden = isHidden != 0
 	if deletedAt.Valid {
 		sess.DeletedAt = &deletedAt.Time
 	}
@@ -220,8 +387,7 @@ func scanSession(row interface{ Scan(...interface{}) error }) (*Session, error) 
 
 func (s *SQLiteStore) ListSessions() ([]Session, error) {
 	rows, err := s.db.Query(
-		`SELECT id, namespace_id, name, project_id, agent, model, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, user_id, created_at, updated_at, deleted_at
-		 FROM sessions WHERE deleted_at IS NULL ORDER BY sort_order ASC, created_at DESC`,
+		`SELECT ` + sessionColumns + ` FROM sessions WHERE deleted_at IS NULL AND is_hidden = 0 ORDER BY sort_order ASC, created_at DESC`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query sessions: %w", err)
@@ -244,8 +410,7 @@ func (s *SQLiteStore) ListSessions() ([]Session, error) {
 
 func (s *SQLiteStore) ListTrashedSessions() ([]Session, error) {
 	rows, err := s.db.Query(
-		`SELECT id, namespace_id, name, project_id, agent, model, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, user_id, created_at, updated_at, deleted_at
-		 FROM sessions WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`,
+		`SELECT ` + sessionColumns + ` FROM sessions WHERE deleted_at IS NOT NULL AND is_hidden = 0 ORDER BY deleted_at DESC`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query trashed sessions: %w", err)
@@ -268,8 +433,7 @@ func (s *SQLiteStore) ListTrashedSessions() ([]Session, error) {
 
 func (s *SQLiteStore) GetSession(id string) (*Session, error) {
 	row := s.db.QueryRow(
-		`SELECT id, namespace_id, name, project_id, agent, model, agent_session_id, stream_id, sort_order, features, worktree_mode, worktree_path, created_by, user_id, created_at, updated_at, deleted_at
-		 FROM sessions WHERE id = ?`, id,
+		`SELECT `+sessionColumns+` FROM sessions WHERE id = ?`, id,
 	)
 	sess, err := scanSession(row)
 	if err == sql.ErrNoRows {
@@ -282,33 +446,213 @@ func (s *SQLiteStore) GetSession(id string) (*Session, error) {
 }
 
 func (s *SQLiteStore) UpdateSession(id string, req UpdateSessionRequest) (*Session, error) {
-	sess, err := s.GetSession(id)
-	if err != nil || sess == nil {
-		return nil, err
+	// Apply only requested fields. Reading a snapshot and writing every field
+	// back can undo an unrelated concurrent edit (for example, rename vs pin).
+	fields := []string{"updated_at = ?"}
+	args := []any{time.Now()}
+	add := func(column string, value any) {
+		fields = append(fields, column+" = ?")
+		args = append(args, value)
 	}
-
 	if req.Name != nil {
-		sess.Name = *req.Name
+		add("name", *req.Name)
 	}
 	if req.ProjectID != nil {
-		sess.ProjectID = *req.ProjectID
+		add("project_id", *req.ProjectID)
 	}
 	if req.Agent != nil {
-		sess.Agent = *req.Agent
+		add("agent", *req.Agent)
 	}
 	if req.Model != nil {
-		sess.Model = *req.Model
+		add("model", *req.Model)
 	}
-	sess.UpdatedAt = time.Now()
-
-	_, err = s.db.Exec(
-		`UPDATE sessions SET name = ?, project_id = ?, agent = ?, model = ?, updated_at = ? WHERE id = ?`,
-		sess.Name, sess.ProjectID, sess.Agent, sess.Model, sess.UpdatedAt, sess.ID,
-	)
-	if err != nil {
+	if req.Effort != nil {
+		add("effort", *req.Effort)
+	}
+	if req.ChromeBrowserURL != nil {
+		add("chrome_browser_url", *req.ChromeBrowserURL)
+	}
+	if req.IsPinned != nil {
+		add("is_pinned", *req.IsPinned)
+	}
+	args = append(args, id)
+	if _, err := s.db.Exec("UPDATE sessions SET "+strings.Join(fields, ", ")+" WHERE id = ?", args...); err != nil {
 		return nil, fmt.Errorf("update session: %w", err)
 	}
-	return sess, nil
+	return s.GetSession(id)
+}
+
+// ForkSession creates a new session whose history is a prefix of an existing
+// (parent) session ending with the message identified by atMessageID. The new
+// session inherits agent/model/effort/project/namespace/worktree_mode/worktree_path/features
+// from its parent, has its own ID, and starts with `agent_session_id` empty
+// so the next chat turn triggers the backend fork. The new session also
+// records its lineage and opaque agent checkpoint.
+//
+// Messages are copied in chronological order until the row whose id matches
+// atMessageID is hit (inclusive), then the iteration stops. Each copy gets a
+// fresh Nexbox message id but keeps role/parts/metadata/created_at, so the
+// UI renders the forked prefix immediately and the parent is left untouched.
+//
+// Returns the newly created Session.
+func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint, agent string) (*Session, error) {
+	if parentID == "" || atMessageID == "" {
+		return nil, fmt.Errorf("ForkSession: parentID and atMessageID required")
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Load parent session.
+	parent, err := scanSession(tx.QueryRow(
+		`SELECT `+sessionColumns+` FROM sessions WHERE id = ?`, parentID,
+	))
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("parent session not found: %s", parentID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load parent session: %w", err)
+	}
+
+	// Confirm the cut-point message belongs to the parent.
+	var atSessionID string
+	err = tx.QueryRow(`SELECT session_id FROM chat_messages WHERE id = ?`, atMessageID).Scan(&atSessionID)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("fork-at message not found: %s", atMessageID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load fork-at message: %w", err)
+	}
+	if atSessionID != parentID {
+		return nil, fmt.Errorf("fork-at message does not belong to parent session")
+	}
+
+	// Stamp the caller-resolved agent so the fork's first turn runs against
+	// the same backend the fork was gated on; fall back to the parent's
+	// column for callers that don't resolve one.
+	if agent == "" {
+		agent = parent.Agent
+	}
+
+	now := time.Now()
+	newSess := &Session{
+		ID:                      uuid.New().String(),
+		NamespaceID:             parent.NamespaceID,
+		Name:                    name,
+		ProjectID:               parent.ProjectID,
+		Agent:                   agent,
+		Model:                   parent.Model,
+		Effort:                  parent.Effort,
+		ChromeBrowserURL:        parent.ChromeBrowserURL,
+		Features:                parent.Features, // inherit per-session UI features (e.g. chrome_devtools)
+		WorktreeMode:            parent.WorktreeMode,
+		WorktreePath:            parent.WorktreePath,
+		ForkedFromSessionID:     parent.ID,
+		ForkedFromMessageID:     atMessageID,
+		ForkedAtAgentCheckpoint: checkpoint,
+		CreatedBy:               parent.CreatedBy,
+		CreatedAt:               now,
+		UpdatedAt:               now,
+		LastActiveAt:            now,
+	}
+	if newSess.Name == "" {
+		base := parent.Name
+		if base == "" {
+			base = "Session"
+		}
+		newSess.Name = base + " (fork)"
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO sessions
+			(id, namespace_id, name, project_id, agent, model, effort,
+			 agent_session_id, stream_id, sort_order, features, chrome_browser_url,
+			 worktree_mode, worktree_path,
+			 forked_from_session_id, forked_from_message_id, forked_at_agent_checkpoint,
+			 created_by, created_at, updated_at, last_active_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		newSess.ID, newSess.NamespaceID, newSess.Name, newSess.ProjectID, newSess.Agent,
+		newSess.Model, newSess.Effort,
+		newSess.Features, newSess.ChromeBrowserURL,
+		newSess.WorktreeMode, newSess.WorktreePath,
+		newSess.ForkedFromSessionID, newSess.ForkedFromMessageID, newSess.ForkedAtAgentCheckpoint,
+		newSess.CreatedBy, newSess.CreatedAt, newSess.UpdatedAt, newSess.LastActiveAt,
+	); err != nil {
+		return nil, fmt.Errorf("insert forked session: %w", err)
+	}
+
+	// Copy messages up to (and including) the cut point. We load the parent's
+	// full message list in chronological order and stop once we've copied
+	// the message whose id matches atMessageID. We do this in Go (rather
+	// than SQL with `created_at <=` + tie-break) because the SQLite driver
+	// can round-trip time.Time values with subtly different precision when
+	// comparing against bound parameters, which made the inclusive boundary
+	// unreliable in tests.
+	rows, err := tx.Query(
+		`SELECT id, role, parts, metadata, created_at FROM chat_messages
+		 WHERE session_id = ?
+		 ORDER BY created_at ASC, id ASC`,
+		parentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read parent messages: %w", err)
+	}
+	type rowCopy struct {
+		role, parts, metadata string
+		createdAt             time.Time
+	}
+	var toCopy []rowCopy
+	foundCut := false
+	for rows.Next() {
+		var rc rowCopy
+		var id string
+		if err := rows.Scan(&id, &rc.role, &rc.parts, &rc.metadata, &rc.createdAt); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan parent message: %w", err)
+		}
+		toCopy = append(toCopy, rc)
+		if id == atMessageID {
+			foundCut = true
+			break
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate parent messages: %w", err)
+	}
+	if !foundCut {
+		// Belt-and-braces: the cut-message id was validated above to belong
+		// to this session, but if a concurrent delete races us we'd otherwise
+		// end up copying the entire history. Refuse instead.
+		return nil, fmt.Errorf("fork-at message not found in parent's message stream: %s", atMessageID)
+	}
+
+	for _, rc := range toCopy {
+		if _, err := tx.Exec(
+			`INSERT INTO chat_messages (id, session_id, role, parts, metadata, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			uuid.New().String(), newSess.ID, rc.role, rc.parts, rc.metadata, rc.createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("copy message: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit fork tx: %w", err)
+	}
+
+	return newSess, nil
+}
+
+// TouchSessionActivity is called at conversational boundaries, never for
+// metadata edits or progressive assistant flushes.
+func (s *SQLiteStore) TouchSessionActivity(id string) error {
+	now := time.Now()
+	_, err := s.db.Exec(`UPDATE sessions SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id)
+	return err
 }
 
 func (s *SQLiteStore) UpdateSessionAgentID(id, agentSessionID string) error {
@@ -346,7 +690,7 @@ func (s *SQLiteStore) UpdateSessionWorktree(id, mode, path string) error {
 // GetExpiredSessionWorktrees returns worktree_paths for sessions that are about to be purged.
 func (s *SQLiteStore) GetExpiredSessionWorktrees(olderThan time.Time) ([]string, error) {
 	rows, err := s.db.Query(
-		`SELECT worktree_path FROM sessions WHERE deleted_at IS NOT NULL AND deleted_at < ? AND worktree_path != ''`,
+		`SELECT DISTINCT worktree_path FROM sessions WHERE deleted_at IS NOT NULL AND deleted_at < ? AND worktree_path != ''`,
 		olderThan,
 	)
 	if err != nil {
@@ -360,6 +704,31 @@ func (s *SQLiteStore) GetExpiredSessionWorktrees(olderThan time.Time) ([]string,
 			return nil, err
 		}
 		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
+// GetReferencedWorktreePaths includes trashed and hidden sessions: their work
+// must remain available for restoration. Active runs also own their worktree
+// between nodes, even when no session currently references it.
+func (s *SQLiteStore) GetReferencedWorktreePaths() ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT worktree_path FROM sessions WHERE worktree_path != ''
+		UNION
+		SELECT worktree_path FROM wf_executions
+		WHERE worktree_path != '' AND status IN ('pending', 'running')
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
 	}
 	return paths, rows.Err()
 }
@@ -497,11 +866,40 @@ func (s *SQLiteStore) CreateMessage(sessionID, role string, parts []MessagePart,
 		return nil, fmt.Errorf("insert message: %w", err)
 	}
 
-	if _, err := s.db.Exec(`UPDATE sessions SET updated_at = ? WHERE id = ?`, time.Now(), sessionID); err != nil {
-		log.Printf("[sqlite] failed to update session updated_at (id=%s): %v", sessionID, err)
+	// Empty assistant placeholders and progressive saves are not activity.
+	if role == "user" || (role == "assistant" && len(parts) > 0) {
+		if err := s.TouchSessionActivity(sessionID); err != nil {
+			log.Printf("[sqlite] failed to update session activity (id=%s): %v", sessionID, err)
+		}
 	}
 
 	return m, nil
+}
+
+// GetMessage loads a single message by ID. Returns (nil, nil) when not found.
+func (s *SQLiteStore) GetMessage(id string) (*ChatMessage, error) {
+	var m ChatMessage
+	var partsJSON, metadataJSON string
+	err := s.db.QueryRow(
+		`SELECT id, session_id, role, parts, metadata, created_at FROM chat_messages WHERE id = ?`, id,
+	).Scan(&m.ID, &m.SessionID, &m.Role, &partsJSON, &metadataJSON, &m.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get message: %w", err)
+	}
+	if partsJSON != "" && partsJSON != "[]" {
+		if err := json.Unmarshal([]byte(partsJSON), &m.Parts); err != nil {
+			return nil, fmt.Errorf("unmarshal parts: %w", err)
+		}
+	}
+	if metadataJSON != "" && metadataJSON != "{}" {
+		if err := json.Unmarshal([]byte(metadataJSON), &m.Metadata); err != nil {
+			return nil, fmt.Errorf("unmarshal metadata: %w", err)
+		}
+	}
+	return &m, nil
 }
 
 func (s *SQLiteStore) ListMessages(sessionID string) ([]ChatMessage, error) {
@@ -522,7 +920,6 @@ func (s *SQLiteStore) ListMessages(sessionID string) ([]ChatMessage, error) {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 
-		m.Parts = []MessagePart{}
 		if partsJSON != "" && partsJSON != "[]" {
 			if err := json.Unmarshal([]byte(partsJSON), &m.Parts); err != nil {
 				return nil, fmt.Errorf("unmarshal parts: %w", err)
@@ -536,6 +933,9 @@ func (s *SQLiteStore) ListMessages(sessionID string) ([]ChatMessage, error) {
 		}
 
 		items = append(items, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate messages: %w", err)
 	}
 	return items, nil
 }
@@ -581,7 +981,6 @@ func (s *SQLiteStore) ListMessagesPaginated(sessionID string, limit int, beforeI
 			return nil, false, fmt.Errorf("scan message: %w", err)
 		}
 
-		m.Parts = []MessagePart{}
 		if partsJSON != "" && partsJSON != "[]" {
 			if err := json.Unmarshal([]byte(partsJSON), &m.Parts); err != nil {
 				return nil, false, fmt.Errorf("unmarshal parts: %w", err)
@@ -595,6 +994,9 @@ func (s *SQLiteStore) ListMessagesPaginated(sessionID string, limit int, beforeI
 		}
 
 		items = append(items, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate messages paginated: %w", err)
 	}
 
 	// Check if there are more messages
@@ -628,18 +1030,6 @@ func (s *SQLiteStore) UpdateMessageParts(messageID string, parts []MessagePart, 
 func (s *SQLiteStore) DeleteMessagesBySession(sessionID string) error {
 	_, err := s.db.Exec(`DELETE FROM chat_messages WHERE session_id = ?`, sessionID)
 	return err
-}
-
-// TrimSessionMessages keeps only the latest keepCount messages for a session, deleting older ones.
-func (s *SQLiteStore) TrimSessionMessages(sessionID string, keepCount int) (int64, error) {
-	res, err := s.db.Exec(
-		`DELETE FROM chat_messages WHERE session_id = ? AND id NOT IN (
-			SELECT id FROM chat_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?
-		)`, sessionID, sessionID, keepCount)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
 }
 
 func (s *SQLiteStore) CreateUserMessage(sessionID, content string) (*ChatMessage, error) {
@@ -676,6 +1066,9 @@ func (s *SQLiteStore) ListQueuedMessages(sessionID string) ([]QueuedMessage, err
 			}
 		}
 		items = append(items, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate queued messages: %w", err)
 	}
 	return items, nil
 }
@@ -790,6 +1183,9 @@ func (s *SQLiteStore) SessionsWithQueuedMessages() ([]string, error) {
 		}
 		ids = append(ids, id)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sessions with queued messages: %w", err)
+	}
 	return ids, nil
 }
 
@@ -840,6 +1236,9 @@ func (s *SQLiteStore) ListReviewComments(assetID string) ([]ReviewComment, error
 			return nil, fmt.Errorf("scan review comment: %w", err)
 		}
 		items = append(items, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate review comments: %w", err)
 	}
 	return items, nil
 }
@@ -1030,6 +1429,9 @@ func (s *SQLiteStore) ListTasks(limit, offset int, projectIDs []string, search s
 		}
 		items = append(items, *t)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tasks: %w", err)
+	}
 
 	return items, nil
 }
@@ -1111,6 +1513,16 @@ func (s *SQLiteStore) IncrementTaskRefCount(id string) error {
 	return err
 }
 
+func (s *SQLiteStore) SetParent(taskID, parentID string) error {
+	_, err := s.db.Exec(`UPDATE tasks SET parent_id = ?, updated_at = ? WHERE id = ?`, parentID, time.Now(), taskID)
+	return err
+}
+
+func (s *SQLiteStore) RemoveParent(taskID string) error {
+	_, err := s.db.Exec(`UPDATE tasks SET parent_id = '', updated_at = ? WHERE id = ?`, time.Now(), taskID)
+	return err
+}
+
 func (s *SQLiteStore) DeleteTask(id string) error {
 	rows, err := s.db.Query(`SELECT id FROM tasks WHERE id = ? OR parent_id = ?`, id, id)
 	if err != nil {
@@ -1122,6 +1534,10 @@ func (s *SQLiteStore) DeleteTask(id string) error {
 		if err := rows.Scan(&tid); err == nil {
 			taskIDs = append(taskIDs, tid)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate tasks to delete: %w", err)
 	}
 	rows.Close()
 	if len(taskIDs) == 0 {
@@ -1179,62 +1595,10 @@ func (s *SQLiteStore) DeleteTask(id string) error {
 	if _, err := tx.Exec(`DELETE FROM task_comments WHERE task_id IN (`+joined+`)`, args...); err != nil {
 		return fmt.Errorf("delete task comments: %w", err)
 	}
-	if _, err := tx.Exec(`DELETE FROM task_assets WHERE task_id IN (`+joined+`)`, args...); err != nil {
-		return fmt.Errorf("delete task assets: %w", err)
-	}
 	if _, err := tx.Exec(`DELETE FROM tasks WHERE id IN (`+joined+`)`, args...); err != nil {
 		return fmt.Errorf("delete tasks: %w", err)
 	}
 	return tx.Commit()
-}
-
-// --- Task-Asset associations ---
-
-func (s *SQLiteStore) LinkTaskAsset(taskID, assetID string) (*TaskAsset, error) {
-	ta := &TaskAsset{
-		ID:        uuid.New().String(),
-		TaskID:    taskID,
-		AssetID:   assetID,
-		CreatedAt: time.Now(),
-	}
-
-	_, err := s.db.Exec(
-		`INSERT INTO task_assets (id, task_id, asset_id, created_at) VALUES (?, ?, ?, ?)`,
-		ta.ID, ta.TaskID, ta.AssetID, ta.CreatedAt,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("insert task_asset: %w", err)
-	}
-	return ta, nil
-}
-
-func (s *SQLiteStore) ListTaskAssets(taskID string) ([]Asset, error) {
-	rows, err := s.db.Query(
-		`SELECT a.id, a.project_id, a.type, a.title, a.current_version, a.status, a.created_by, a.created_at, a.updated_at
-		 FROM assets a
-		 JOIN task_assets ta ON ta.asset_id = a.id
-		 WHERE ta.task_id = ?
-		 ORDER BY a.updated_at DESC`, taskID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("query task assets: %w", err)
-	}
-	defer rows.Close()
-
-	var items []Asset
-	for rows.Next() {
-		var a Asset
-		if err := rows.Scan(&a.ID, &a.ProjectID, &a.Type, &a.Title, &a.CurrentVersion, &a.Status, &a.CreatedBy, &a.CreatedAt, &a.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan asset: %w", err)
-		}
-		items = append(items, a)
-	}
-	return items, nil
-}
-
-func (s *SQLiteStore) UnlinkTaskAsset(taskID, assetID string) error {
-	_, err := s.db.Exec(`DELETE FROM task_assets WHERE task_id = ? AND asset_id = ?`, taskID, assetID)
-	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -1300,7 +1664,7 @@ func (s *SQLiteStore) queryAssets(projectID, assetType string, limit, offset int
 		conditions = append(conditions, `title LIKE ?`)
 		args = append(args, "%"+q+"%")
 	}
-	query := `SELECT id, project_id, type, title, current_version, status, created_by, created_at, updated_at FROM assets WHERE ` +
+	query := `SELECT id, project_id, type, title, current_version, status, created_by, created_at, updated_at, lark_doc_url FROM assets WHERE ` +
 		strings.Join(conditions, ` AND `) + ` ORDER BY updated_at DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 
@@ -1313,10 +1677,13 @@ func (s *SQLiteStore) queryAssets(projectID, assetType string, limit, offset int
 	var items []Asset
 	for rows.Next() {
 		var a Asset
-		if err := rows.Scan(&a.ID, &a.ProjectID, &a.Type, &a.Title, &a.CurrentVersion, &a.Status, &a.CreatedBy, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.ProjectID, &a.Type, &a.Title, &a.CurrentVersion, &a.Status, &a.CreatedBy, &a.CreatedAt, &a.UpdatedAt, &a.LarkDocURL); err != nil {
 			return nil, fmt.Errorf("scan asset: %w", err)
 		}
 		items = append(items, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate assets: %w", err)
 	}
 	return items, nil
 }
@@ -1332,9 +1699,9 @@ func (s *SQLiteStore) ListAssetsByType(projectID, assetType string, limit, offse
 func (s *SQLiteStore) GetAsset(id string) (*Asset, error) {
 	var a Asset
 	err := s.db.QueryRow(
-		`SELECT id, project_id, type, title, current_version, status, created_by, created_at, updated_at
+		`SELECT id, project_id, type, title, current_version, status, created_by, created_at, updated_at, lark_doc_url
 		 FROM assets WHERE id = ?`, id,
-	).Scan(&a.ID, &a.ProjectID, &a.Type, &a.Title, &a.CurrentVersion, &a.Status, &a.CreatedBy, &a.CreatedAt, &a.UpdatedAt)
+	).Scan(&a.ID, &a.ProjectID, &a.Type, &a.Title, &a.CurrentVersion, &a.Status, &a.CreatedBy, &a.CreatedAt, &a.UpdatedAt, &a.LarkDocURL)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1342,6 +1709,14 @@ func (s *SQLiteStore) GetAsset(id string) (*Asset, error) {
 		return nil, fmt.Errorf("get asset: %w", err)
 	}
 	return &a, nil
+}
+
+func (s *SQLiteStore) SetAssetLarkDoc(id, url string) error {
+	_, err := s.db.Exec(
+		`UPDATE assets SET lark_doc_url = ?, updated_at = ? WHERE id = ?`,
+		url, time.Now(), id,
+	)
+	return err
 }
 
 func (s *SQLiteStore) UpdateAsset(id string, req UpdateAssetRequest) (*Asset, error) {
@@ -1354,10 +1729,10 @@ func (s *SQLiteStore) UpdateAsset(id string, req UpdateAssetRequest) (*Asset, er
 	// Read inside the transaction so the version check at the UPDATE is consistent.
 	var asset Asset
 	err = tx.QueryRow(
-		`SELECT id, project_id, type, title, current_version, status, created_by, created_at, updated_at
+		`SELECT id, project_id, type, title, current_version, status, created_by, created_at, updated_at, lark_doc_url
 		 FROM assets WHERE id = ?`, id,
 	).Scan(&asset.ID, &asset.ProjectID, &asset.Type, &asset.Title, &asset.CurrentVersion,
-		&asset.Status, &asset.CreatedBy, &asset.CreatedAt, &asset.UpdatedAt)
+		&asset.Status, &asset.CreatedBy, &asset.CreatedAt, &asset.UpdatedAt, &asset.LarkDocURL)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1417,8 +1792,22 @@ func (s *SQLiteStore) UpdateAsset(id string, req UpdateAssetRequest) (*Asset, er
 }
 
 func (s *SQLiteStore) DeleteAsset(id string) error {
-	_, err := s.db.Exec(`DELETE FROM assets WHERE id = ?`, id)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`DELETE FROM review_comments WHERE asset_id = ?`, id); err != nil {
+		return fmt.Errorf("delete asset review_comments: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM asset_versions WHERE asset_id = ?`, id); err != nil {
+		return fmt.Errorf("delete asset_versions: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM assets WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("delete asset: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) GetAssetVersions(assetID string) ([]AssetVersion, error) {
@@ -1438,6 +1827,9 @@ func (s *SQLiteStore) GetAssetVersions(assetID string) ([]AssetVersion, error) {
 			return nil, fmt.Errorf("scan version: %w", err)
 		}
 		items = append(items, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate asset versions: %w", err)
 	}
 	return items, nil
 }
@@ -1523,13 +1915,8 @@ func (s *SQLiteStore) ListChanges(sinceID int64, limit int, order string) ([]Cha
 		}
 		items = append(items, c)
 	}
-	return items, nil
-}
-
-func (s *SQLiteStore) PurgeOldChanges(olderThan time.Time) (int64, error) {
-	result, err := s.db.Exec(`DELETE FROM changes WHERE created_at < ?`, olderThan)
-	if err != nil {
-		return 0, fmt.Errorf("purge old changes: %w", err)
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate changes: %w", err)
 	}
-	return result.RowsAffected()
+	return items, nil
 }

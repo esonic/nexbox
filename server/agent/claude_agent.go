@@ -6,35 +6,185 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // ClaudeAgent implements the Agent interface using the Claude Code CLI.
 // It spawns a claude subprocess with stream-json I/O for each message exchange.
 type ClaudeAgent struct {
-	CLIPath      string            // Path to claude CLI binary (default: "claude")
-	MCPServerURL      string   // Optional: URL of the BoxNex MCP server
-	MCPToolNames      []string // MCP tool names (e.g. "mcp__boxnex__save_asset"); populated from mcp.Server.ToolNames()
-	AlwaysOnMCPToolNames []string // Tool names always included regardless of user features; from mcp.Server.AlwaysOnToolNames()
-	DataDir      string            // For isolated session storage
-	Verbose      bool              // Enable verbose logging
-	ContainerMgr *ContainerManager // Optional: run inside Docker container per project
+	CLIPath      string   // Path to claude CLI binary (default: "claude")
+	MCPServerURL string   // Optional: URL of the NexBox MCP server
+	MCPToolNames []string // MCP tool names (e.g. "mcp__nexbox__save_asset"); populated from mcp.Server.ToolNames()
+	DataDir      string   // For isolated session storage
+	Verbose      bool     // Enable verbose logging
+
+	// Cached init_response data. Populated by the first ProbeInitialize() call
+	// or opportunistically whenever a real SendMessage receives its init_response.
+	modelsMu     sync.Mutex
+	cachedModels []ModelInfo
+	cachedProbed bool
 }
 
 // NewClaudeAgent creates a new Claude Code agent with default settings.
 func NewClaudeAgent() *ClaudeAgent {
 	return &ClaudeAgent{
 		CLIPath: "claude",
-		Verbose: false,
+		Verbose: true,
 	}
 }
 
 // Ensure ClaudeAgent implements Agent at compile time.
 var _ Agent = (*ClaudeAgent)(nil)
 
+func (a *ClaudeAgent) Capabilities() Capabilities {
+	return Capabilities{Fork: true, Interject: true, ChromeDevTools: true, ModelSwitchMode: ModelSwitchCurrentSession}
+}
+
 // HasMCP returns whether MCP is configured for this agent.
 func (a *ClaudeAgent) HasMCP() bool {
 	return a.MCPServerURL != ""
+}
+
+// stripWatermarkChars removes invisible combining marks that an upstream
+// platform layer injects as a watermark into model text output (currently a
+// repeated U+05B4 prefix). Filtering inside the agent keeps these characters
+// out of every downstream consumer (WebSocket, DB, sub-agent callers) without
+// touching tool inputs/outputs that may legitimately contain other Unicode.
+func stripWatermarkChars(s string) string {
+	if !strings.ContainsRune(s, '\u05B4') {
+		return s
+	}
+	return strings.ReplaceAll(s, "\u05B4", "")
+}
+
+// terminalTaskStatuses mirrors TERMINAL_TASK_STATUSES in the Claude Agent SDK:
+// a task with one of these statuses has finished. task_notification reports
+// "stopped" (the CLI's mapped form of a killed task) while task_updated reports
+// the raw "killed" — treat both the same. Non-terminal: pending/running/paused.
+var terminalTaskStatuses = map[string]bool{
+	"completed": true,
+	"failed":    true,
+	"stopped":   true,
+	"killed":    true,
+}
+
+func isTerminalTaskStatus(status string) bool { return terminalTaskStatuses[status] }
+
+func isFailedTaskStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "failed", "stopped", "killed":
+		return true
+	default:
+		return false
+	}
+}
+
+// assistantText returns the text from one complete assistant message. Claude
+// attaches parent_tool_use_id to sub-agent messages, so the caller can retain
+// the latest child response as the Agent card's result without forwarding it
+// into the main transcript.
+func assistantText(content []AssistantContent) string {
+	var parts []string
+	for _, block := range content {
+		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func claudeTaskPatchSummary(patch map[string]interface{}) string {
+	for _, key := range []string{"result", "summary"} {
+		if value, ok := patch[key].(string); ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// translateAssistantContent converts the content blocks of one complete
+// `assistant` stream-json message into unified StreamEvents.
+//
+// parentToolUseID is the `parent_tool_use_id` of the message: empty for the
+// main agent, set when the message was produced by a sub-agent (Task tool).
+//
+// Sub-agent text/thinking belongs to that sub-agent's context, NOT the main
+// transcript. The CLI delivers a sub-agent's narration as ordinary `assistant`
+// messages (carrying parent_tool_use_id) with NO partial streaming — verified
+// against the real CLI in claude_subagent_stream_test.go. Forwarding it as a
+// top-level text/thinking event leaked the sub-agent's words into the main
+// reply (and merged them with the main agent's prose). So we suppress text and
+// thinking from sub-agent messages here: their tool calls still stream (nested
+// under the Agent card via ParentToolID), and their outcome flows back to the
+// main agent through the Task tool_result plus the subtask summary.
+//
+// hasPartialText/hasPartialThinking indicate the main agent already streamed
+// this block via stream_event deltas, so the consolidated copy is skipped to
+// avoid duplication (only meaningful for the main agent — sub-agents never set
+// these because they don't stream partials).
+func translateAssistantContent(
+	content []AssistantContent,
+	parentToolUseID string,
+	hasPartialText, hasPartialThinking bool,
+	cb EventCallback,
+) {
+	isSubAgent := parentToolUseID != ""
+	for _, c := range content {
+		switch c.Type {
+		case "text":
+			if isSubAgent {
+				continue // sub-agent narration: not part of the main transcript
+			}
+			if !hasPartialText {
+				cb(StreamEvent{Type: EventTextDelta, Content: c.Text})
+			}
+
+		case "tool_use":
+			inputJSON, _ := json.Marshal(c.Input)
+			cb(StreamEvent{
+				Type:         EventToolStart,
+				ToolID:       c.ID,
+				ToolName:     c.Name,
+				Input:        string(inputJSON),
+				ParentToolID: parentToolUseID,
+			})
+
+		case "thinking":
+			if isSubAgent || c.Thinking == "" {
+				continue // sub-agent reasoning is internal to the Agent card
+			}
+			if hasPartialThinking {
+				continue // already streamed via stream_event deltas
+			}
+			var thinkingMeta map[string]interface{}
+			if c.Signature != "" {
+				thinkingMeta = map[string]interface{}{"signature": c.Signature}
+			}
+			cb(StreamEvent{
+				Type:     EventThinking,
+				ToolID:   c.ID,
+				ToolName: "Thinking",
+				Content:  c.Thinking,
+				Metadata: thinkingMeta,
+			})
+
+		case "redacted_thinking":
+			if isSubAgent {
+				continue
+			}
+			log.Printf("[claude-agent] Redacted thinking block (content hidden)")
+			cb(StreamEvent{
+				Type:     EventThinking,
+				ToolName: "Thinking",
+				Content:  "[Thinking content redacted]",
+			})
+
+		default:
+			log.Printf("[claude-agent] Unhandled content block type=%q id=%s", c.Type, c.ID)
+		}
+	}
 }
 
 // SendMessage implements Agent.SendMessage using the Claude Code CLI.
@@ -43,6 +193,21 @@ func (a *ClaudeAgent) SendMessage(
 	req Request,
 	cb EventCallback,
 ) (Result, error) {
+	// Wrap cb so model-generated natural-language fields (text + thinking) are
+	// scrubbed of upstream watermark chars before reaching the caller. Tool
+	// inputs/outputs are passed through untouched.
+	rawCB := cb
+	cb = func(event StreamEvent) {
+		switch event.Type {
+		case EventTextDelta, EventThinking, EventSubTaskStart, EventSubTaskProgress, EventSubTaskDone:
+			event.Content = stripWatermarkChars(event.Content)
+			if event.Content == "" && (event.Type == EventTextDelta || event.Type == EventThinking) {
+				return
+			}
+		}
+		rawCB(event)
+	}
+
 	// Pre-check work directory
 	if req.WorkDir != "" {
 		info, err := os.Stat(req.WorkDir)
@@ -59,95 +224,79 @@ func (a *ClaudeAgent) SendMessage(
 
 	// Create Claude CLI client
 	client := NewClaudeClient()
+	if a.CLIPath != "" {
+		client.CLIPath = a.CLIPath
+	}
 	client.Verbose = a.Verbose
 
-	// Ensure a Docker container is running for this project and wire it into the client.
-	if a.ContainerMgr != nil && req.WorkDir != "" {
-		containerID, err := a.ContainerMgr.EnsureContainer(req.WorkDir, req.WorkDir, req.UserID, req.ContainerQuota)
-		if err != nil {
-			return Result{}, fmt.Errorf("ensure container for %s: %w", req.WorkDir, err)
-		}
-		client.ContainerMgr = a.ContainerMgr
-		client.ContainerID = containerID
-	}
+	// Validate effort against the live Claude catalog. The catalog is the
+	// CLI's own list — if the requested effort isn't advertised for the
+	// selected model, drop it rather than forwarding an unsupported flag.
+	effort := a.validateEffort(req.Model, req.Effort)
 
 	// Build query options (no SystemPrompt - we use BuildPrompt for all context)
 	opts := QueryOptions{
 		WorkDir:                req.WorkDir,
 		Model:                  req.Model,
+		Effort:                 effort,
 		IncludePartialMessages: true,
 	}
 
-	// Full capabilities - all tools available
-	// opts.AllowedTools = []string{
-	// 	// Core development tools
-	// 	"Bash", "Read", "Write", "Edit", "Glob", "Grep",
-	// 	// Planning & organization
-	// 	"EnterPlanMode", "ExitPlanMode",
-	// 	// Web resources
-	// 	"WebSearch", "WebFetch",
-	// 	// task
-	// 	"AskUserQuestion", "Agent", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "TaskOutput",
-	// }
-	// Use bypassPermissions as the base mode — the control protocol's
-	// can_use_tool handler in claude_cli.go will auto-allow non-interactive
-	// tools, so this is effectively the same behavior. Interactive tools
-	// (AskUserQuestion) are routed to the UserInputHandler.
+	// Don't restrict tools — let Claude CLI discover all available tools from
+	// MCP servers. bypassPermissions handles the security model.
+	opts.AllowedTools = nil
 	opts.PermissionMode = "bypassPermissions"
 
-	// Wire interactive handler for AskUserQuestion support
-	if req.UserInputHandler != nil {
-		opts.UserInputHandler = req.UserInputHandler
-	}
+	// Wire up interactive tool support (AskUserQuestion)
+	opts.UserInputHandler = req.UserInputHandler
+
+	// Wire up live message injection (interjection) when the API layer requested it.
+	opts.RegisterInterject = req.RegisterInterject
+
+	// Claude has its own built-in AskUserQuestion tool, so block the MCP version
+	// to avoid confusion. Codex doesn't have a built-in equivalent, so it uses
+	// the MCP ask_question tool instead.
+	opts.DisallowedTools = []string{"mcp__nexbox__ask_question"}
 
 	// Generate MCP config if MCPServerURL is set
 	var mcpConfigPath string
 	if a.MCPServerURL != "" {
-		// Append the boxnex conversation ID as ?session= so the MCP server can
+		// Append the nexbox conversation ID as ?session= so the MCP server can
 		// identify which session is making tool calls without the AI passing it.
-		boxnexURL := a.MCPServerURL
+		nexboxURL := a.MCPServerURL
 		if req.ConversationID != "" {
-			boxnexURL += "?session=" + req.ConversationID
+			nexboxURL += "?session=" + req.ConversationID
 		}
 		servers := map[string]interface{}{
-			"boxnex": map[string]interface{}{
+			"nexbox": map[string]interface{}{
 				"type": "http",
-				"url":  boxnexURL,
+				"url":  nexboxURL,
 			},
 		}
-
-		opts.AllowedTools = append(opts.AllowedTools, filterMCPTools(a.MCPToolNames, req.UserFeatures)...)
-		opts.AllowedTools = append(opts.AllowedTools, a.AlwaysOnMCPToolNames...)
 
 		if hasFeature(req.Features, "chrome_devtools") && req.ChromeMCPURL != "" {
 			servers["chrome"] = map[string]interface{}{
 				"type": "http",
 				"url":  req.ChromeMCPURL,
 			}
-			opts.AllowedTools = append(opts.AllowedTools, req.ChromeMCPToolNames...)
 			log.Printf("[claude-agent] Chrome DevTools MCP enabled: %s", req.ChromeMCPURL)
 		}
 
-		// Inject extra MCP servers from installed marketplace packages
+		// Inject extra MCP servers from installed marketplace packages.
 		for _, mcp := range req.ExtraMCPServers {
-			entry := map[string]interface{}{"type": mcp.Type}
+			entry := map[string]interface{}{}
 			if mcp.Type == "http" {
-				u := mcp.URL
-				// Append ?session= so HandleMCPProxy can verify project ownership.
-				// The session UUID also acts as an unguessable token, blocking
-				// unauthenticated access to the proxy from the public internet.
-				if req.ConversationID != "" {
-					if strings.Contains(u, "?") {
-						u += "&session=" + req.ConversationID
-					} else {
-						u += "?session=" + req.ConversationID
-					}
+				entry["type"] = "http"
+				mcpURL := mcp.URL
+				if mcp.AppendSessionURL && req.ConversationID != "" {
+					mcpURL += "?session=" + req.ConversationID
 				}
-				entry["url"] = u
+				entry["url"] = mcpURL
 				if len(mcp.Headers) > 0 {
 					entry["headers"] = mcp.Headers
 				}
-			} else if mcp.Type == "stdio" {
+			} else {
+				// stdio: Claude CLI infers type from "command" field; do NOT include "type"
 				entry["command"] = mcp.Cmd
 				if len(mcp.Args) > 0 {
 					entry["args"] = mcp.Args
@@ -157,15 +306,12 @@ func (a *ClaudeAgent) SendMessage(
 				}
 			}
 			servers[mcp.Key] = entry
-			for _, toolName := range mcp.ToolNames {
-				opts.AllowedTools = append(opts.AllowedTools, "mcp__"+mcp.Key+"__"+toolName)
-			}
 		}
 
 		mcpConfig := map[string]interface{}{"mcpServers": servers}
 		mcpConfigBytes, _ := json.Marshal(mcpConfig)
 
-		tmpFile, err := os.CreateTemp(a.DataDir, "boxnex-mcp-*.json")
+		tmpFile, err := os.CreateTemp(a.DataDir, "nexbox-mcp-*.json")
 		if err != nil {
 			return Result{}, fmt.Errorf("create MCP config temp file: %w", err)
 		}
@@ -184,27 +330,48 @@ func (a *ClaudeAgent) SendMessage(
 		log.Printf("[claude-agent] MCP config content: %s", string(mcpConfigBytes))
 	}
 
-	// Plugin directories
+	// Plugin directories (installed from marketplace)
 	if len(req.PluginDirs) > 0 {
 		opts.PluginDirs = req.PluginDirs
 		log.Printf("[claude-agent] Plugin dirs: %v", req.PluginDirs)
 	}
 
-	// Resume session if exists
-	if req.SessionID != "" {
+	// Resume / fork: a fork is just a resume of the parent's CLI session id
+	// with --fork-session (and optionally --resume-session-at <uuid>) layered
+	// on. The new session id is reported back via the result message.
+	if req.Fork != nil {
+		if req.Fork.SessionID == "" || req.Fork.Checkpoint == "" {
+			return Result{}, fmt.Errorf("claude fork requires session id and checkpoint")
+		}
+		opts.Resume = req.Fork.SessionID
+		opts.ForkSession = true
+		opts.ResumeAtMessageUUID = req.Fork.Checkpoint
+	} else if req.SessionID != "" {
 		opts.Resume = req.SessionID
 	}
 
-	// Build the combined prompt
-	isNewSession := req.SessionID == ""
+	// Ensure DataDir exists for any temp files
+	if a.DataDir != "" {
+		if err := os.MkdirAll(filepath.Join(a.DataDir, "tmp"), 0755); err != nil {
+			log.Printf("[claude-agent] Failed to create tmp dir: %v", err)
+		}
+	}
+
+	// Build the combined prompt. A fork inherits the parent's context, so
+	// it's effectively a resume — the new session is "new" only on the
+	// Nexbox side, not in terms of model context.
+	isNewSession := req.SessionID == "" && req.Fork == nil
 	combinedPrompt := BuildPrompt(req.StaticContext, req.DynamicContext, req.Message, isNewSession, req.Images)
 
 	// Log request details
 	log.Printf("[claude-agent] ========== Request ==========")
 	log.Printf("[claude-agent] conversationID: %s", req.ConversationID)
 	log.Printf("[claude-agent] sessionID: %s (new: %v)", req.SessionID, isNewSession)
+	if req.Fork != nil {
+		log.Printf("[claude-agent] fork: parent=%s", req.Fork.SessionID)
+	}
 	log.Printf("[claude-agent] workDir: %s", req.WorkDir)
-	log.Printf("[claude-agent] message: %s", req.Message)
+	log.Printf("[claude-agent] message length: %d bytes", len(req.Message))
 	log.Printf("[claude-agent] allowedTools: %v", opts.AllowedTools)
 	if opts.MCPConfigPath != "" {
 		log.Printf("[claude-agent] mcpConfigPath: %s", opts.MCPConfigPath)
@@ -213,21 +380,156 @@ func (a *ClaudeAgent) SendMessage(
 
 	// Execute query and translate Claude CLI events to unified StreamEvents
 	var result Result
-	isResumeAttempt := req.SessionID != ""
+	// A fork is still "resuming" the parent CLI session under the hood, so a
+	// missing parent session should surface as ErrSessionExpired.
+	isResumeAttempt := req.SessionID != "" || req.Fork != nil
 	resumeFailed := false
-	// budgetCtx wraps the caller's context so we can cancel mid-task when the
-	// accumulated token usage exceeds the user's available balance.
-	budgetCtx, budgetCancel := context.WithCancel(ctx)
-	defer budgetCancel()
-	var budgetExceeded bool
-	// seenMessageIDs deduplicates per-step token usage from assistant messages.
-	// Parallel tool calls share the same message ID with identical usage data.
-	seenMessageIDs := make(map[string]bool)
-	var accInputTokens, accOutputTokens int
-	var hasPartialText, hasPartialThinking, doneSent bool
+	var accInputTokens int
+	var hasPartialText, hasPartialThinking bool
+	// CLI-resolved main model slug (e.g. "claude-sonnet-4-6"). Captured at
+	// init time so the later context_usage emit can pick the correct entry
+	// out of `modelUsage` (which also contains subagent models like haiku).
+	var mainModelSlug string
+	// Last assistant-line UUID seen during the turn. Each assistant content
+	// block (text / thinking / tool_use) is its own JSONL line with its own
+	// uuid; we keep the latest because Claude's `--resume-session-at` cuts
+	// inclusively, so forking at the end of a Nexbox turn requires the last
+	// assistant uuid of that turn.
+	var lastAssistantUUID string
 
+	// Maps a sub-agent's task_id → the Agent tool_use_id that launched it. Built
+	// primarily from task_started (which carries both ids). Claude Code 2.1.206+
+	// can instead report the lifecycle only through background_tasks_changed,
+	// whose entries have no tool_use_id, so top-level Agent/Task launches are also
+	// retained below as an ordered fallback. Accessed only from the single
+	// stream-reading goroutine, so no lock is needed.
+	subAgentTaskTool := map[string]string{}
+	subAgentTaskType := map[string]string{}
+	subAgentResults := map[string]string{} // Agent tool_use_id -> latest child assistant text
+	type subAgentLaunch struct {
+		toolUseID   string
+		description string
+	}
+	var subAgentLaunches []subAgentLaunch
+	subAgentLaunchSeen := map[string]bool{}
+	subAgentLaunchClaimed := map[string]bool{}
+	backgroundTaskSnapshot := map[string]ClaudeBackgroundTask{}
+	type subTaskDoneState struct {
+		status  string
+		summary string
+	}
+	subAgentDone := map[string]subTaskDoneState{}
 
-	resultSessionID, err := client.Query(budgetCtx, combinedPrompt, opts, func(msg StreamMessage, parsed *AssistantMessage) {
+	emitSubAgentDone := func(msg StreamMessage, toolUseID, status, summary string) {
+		if toolUseID == "" {
+			toolUseID = subAgentTaskTool[msg.TaskID]
+		}
+		taskType := msg.TaskType
+		if taskType == "" {
+			taskType = subAgentTaskType[msg.TaskID]
+		}
+		if childResult := strings.TrimSpace(subAgentResults[toolUseID]); childResult != "" {
+			summary = childResult
+		}
+		summary = strings.TrimSpace(summary)
+
+		key := toolUseID
+		if key == "" {
+			key = msg.TaskID
+		}
+		if previous, seen := subAgentDone[key]; seen {
+			// task_updated is often followed by task_notification. Emit the
+			// latter only when it enriches an earlier empty result.
+			if previous.status == status {
+				if previous.summary == summary || previous.summary != "" || summary == "" {
+					return
+				}
+			}
+		}
+		subAgentDone[key] = subTaskDoneState{status: status, summary: summary}
+
+		cb(StreamEvent{
+			Type:    EventSubTaskDone,
+			Content: summary,
+			IsError: isFailedTaskStatus(status),
+			Metadata: map[string]interface{}{
+				"task_id":           msg.TaskID,
+				"status":            status,
+				"tool_use_id":       toolUseID,
+				"task_type":         taskType,
+				"workflow_progress": msg.WorkflowProgress,
+			},
+		})
+	}
+
+	launchDescription := func(input interface{}) string {
+		fields, ok := input.(map[string]interface{})
+		if !ok {
+			return ""
+		}
+		for _, key := range []string{"description", "prompt"} {
+			if value, ok := fields[key].(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+		return ""
+	}
+	rememberSubAgentLaunches := func(content []AssistantContent) {
+		for _, block := range content {
+			if block.Type != "tool_use" || block.ID == "" ||
+				(!strings.EqualFold(block.Name, "Agent") && !strings.EqualFold(block.Name, "Task")) {
+				continue
+			}
+			if subAgentLaunchSeen[block.ID] {
+				continue
+			}
+			subAgentLaunchSeen[block.ID] = true
+			subAgentLaunches = append(subAgentLaunches, subAgentLaunch{
+				toolUseID:   block.ID,
+				description: launchDescription(block.Input),
+			})
+		}
+	}
+	claimSubAgentLaunch := func(toolUseID string) {
+		if toolUseID != "" {
+			subAgentLaunchClaimed[toolUseID] = true
+		}
+	}
+	matchSubAgentLaunch := func(task ClaudeBackgroundTask) string {
+		if toolUseID := subAgentTaskTool[task.TaskID]; toolUseID != "" {
+			return toolUseID
+		}
+		if task.TaskType != "" && task.TaskType != "local_agent" {
+			return ""
+		}
+
+		description := strings.TrimSpace(task.Description)
+		matched := ""
+		if description != "" {
+			for _, launch := range subAgentLaunches {
+				if !subAgentLaunchClaimed[launch.toolUseID] &&
+					strings.EqualFold(launch.description, description) {
+					matched = launch.toolUseID
+					break
+				}
+			}
+		}
+		if matched == "" {
+			for _, launch := range subAgentLaunches {
+				if !subAgentLaunchClaimed[launch.toolUseID] {
+					matched = launch.toolUseID
+					break
+				}
+			}
+		}
+		if matched != "" {
+			subAgentTaskTool[task.TaskID] = matched
+			subAgentLaunchClaimed[matched] = true
+		}
+		return matched
+	}
+
+	resultSessionID, err := client.Query(ctx, combinedPrompt, opts, func(msg StreamMessage, parsed *AssistantMessage) {
 		if msg.Type != "stream_event" {
 			log.Printf("[claude-agent] Received: type=%s, subtype=%s, session=%s", msg.Type, msg.Subtype, msg.SessionID)
 		}
@@ -236,143 +538,186 @@ func (a *ClaudeAgent) SendMessage(
 		case "system":
 			log.Printf("[claude-agent] System message: subtype=%s", msg.Subtype)
 
-		switch msg.Subtype {
-		case "init":
-			if msg.Data != nil {
-				var tools []string
-				if toolsRaw, ok := msg.Data["tools"].([]interface{}); ok {
-					for _, t := range toolsRaw {
-						if toolName, ok := t.(string); ok {
-							tools = append(tools, toolName)
+			switch msg.Subtype {
+			case "init":
+				// Init fields are at top level of the system.init message.
+				log.Printf("[claude-agent] Session initialized: model=%s perm=%s version=%s tools=%d mcp=%d",
+					msg.Model, msg.PermissionMode, msg.ClaudeCodeVersion, len(msg.Tools), len(msg.MCPServers))
+				if msg.Model != "" {
+					mainModelSlug = msg.Model
+				}
+				for _, srvMap := range msg.MCPServers {
+					name, _ := srvMap["name"].(string)
+					status, _ := srvMap["status"].(string)
+					log.Printf("[claude-agent] MCP server: %s, status: %s", name, status)
+				}
+				sessionInfo := map[string]interface{}{}
+				if msg.Model != "" {
+					sessionInfo["model"] = msg.Model
+				}
+				if msg.PermissionMode != "" {
+					sessionInfo["permissionMode"] = msg.PermissionMode
+				}
+				if msg.Cwd != "" {
+					sessionInfo["cwd"] = msg.Cwd
+				}
+				if msg.ClaudeCodeVersion != "" {
+					sessionInfo["version"] = msg.ClaudeCodeVersion
+				}
+				if msg.OutputStyle != "" {
+					sessionInfo["outputStyle"] = msg.OutputStyle
+				}
+				if len(sessionInfo) > 0 {
+					cb(StreamEvent{Type: EventSessionInfo, Metadata: sessionInfo})
+				}
+			case "compact_boundary":
+				log.Printf("[claude-agent] Context compaction occurred")
+				cb(StreamEvent{
+					Type:    EventSystem,
+					Content: "Context compacted to fit within limits",
+				})
+			case "init_response":
+				log.Printf("[claude-agent] Initialize response: %d models", len(msg.InitModels))
+				a.updateModelCacheFromInit(msg.InitModels)
+			case "background_tasks_changed":
+				next := make(map[string]ClaudeBackgroundTask, len(msg.BackgroundTasks))
+				for _, task := range msg.BackgroundTasks {
+					if task.TaskID == "" {
+						continue
+					}
+					next[task.TaskID] = task
+					if task.TaskType != "" {
+						subAgentTaskType[task.TaskID] = task.TaskType
+					}
+					matchSubAgentLaunch(task)
+				}
+				for taskID, previousTask := range backgroundTaskSnapshot {
+					if _, stillRunning := next[taskID]; stillRunning {
+						continue
+					}
+					taskType := previousTask.TaskType
+					if taskType == "" {
+						taskType = subAgentTaskType[taskID]
+					}
+					if taskType != "" && taskType != "local_agent" && taskType != "local_workflow" {
+						continue
+					}
+					toolUseID := matchSubAgentLaunch(previousTask)
+					if toolUseID == "" {
+						continue
+					}
+					status := "completed"
+					if previous, seen := subAgentDone[toolUseID]; seen && previous.status != "" {
+						// Preserve an explicit failure/interruption received before the
+						// task disappeared from the status-only snapshot.
+						status = previous.status
+					}
+					emitSubAgentDone(StreamMessage{
+						TaskID:   taskID,
+						TaskType: taskType,
+					}, toolUseID, status, "")
+				}
+				backgroundTaskSnapshot = next
+			case "task_started":
+				toolUseID := msg.ToolUseID
+				if toolUseID != "" {
+					if previous := subAgentTaskTool[msg.TaskID]; previous != "" && previous != toolUseID {
+						// An earlier snapshot-only fallback was provisional. Prefer the
+						// protocol's explicit association and release the old candidate.
+						delete(subAgentLaunchClaimed, previous)
+					}
+				}
+				if toolUseID == "" {
+					toolUseID = matchSubAgentLaunch(ClaudeBackgroundTask{
+						TaskID:      msg.TaskID,
+						TaskType:    msg.TaskType,
+						Description: msg.Description,
+					})
+				}
+				if msg.TaskID != "" && toolUseID != "" {
+					subAgentTaskTool[msg.TaskID] = toolUseID
+					claimSubAgentLaunch(toolUseID)
+				}
+				if msg.TaskID != "" && msg.TaskType != "" {
+					subAgentTaskType[msg.TaskID] = msg.TaskType
+				}
+				cb(StreamEvent{
+					Type:    EventSubTaskStart,
+					Content: msg.Description,
+					Metadata: map[string]interface{}{
+						"task_id":       msg.TaskID,
+						"tool_use_id":   toolUseID,
+						"task_type":     msg.TaskType,
+						"workflow_name": msg.WorkflowName,
+					},
+				})
+			case "task_progress":
+				toolUseID := msg.ToolUseID
+				if toolUseID == "" {
+					toolUseID = subAgentTaskTool[msg.TaskID]
+				}
+				cb(StreamEvent{
+					Type:    EventSubTaskProgress,
+					Content: msg.Description,
+					Metadata: map[string]interface{}{
+						"task_id":           msg.TaskID,
+						"last_tool_name":    msg.LastToolName,
+						"tool_use_id":       toolUseID,
+						"task_type":         msg.TaskType,
+						"workflow_progress": msg.WorkflowProgress,
+					},
+				})
+			case "task_notification":
+				// Accumulate subagent token usage into input tokens.
+				if msg.Usage != nil {
+					if v, ok := msg.Usage["total_tokens"]; ok {
+						if n, ok := toInt(v); ok && n > 0 {
+							accInputTokens += n
+							log.Printf("[claude-agent] Subagent tokens accumulated: %d (all→input)", n)
 						}
 					}
 				}
-				log.Printf("[claude-agent] Session initialized with tools: %v", tools)
-				if mcpServersRaw, ok := msg.Data["mcp_servers"].([]interface{}); ok {
-					for _, srv := range mcpServersRaw {
-						if srvMap, ok := srv.(map[string]interface{}); ok {
-							name, _ := srvMap["name"].(string)
-							status, _ := srvMap["status"].(string)
-							log.Printf("[claude-agent] MCP server: %s, status: %s", name, status)
-						}
+				toolUseID := msg.ToolUseID
+				if toolUseID == "" {
+					toolUseID = subAgentTaskTool[msg.TaskID]
+				}
+				emitSubAgentDone(msg, toolUseID, msg.Status, msg.Summary)
+				if isTerminalTaskStatus(msg.Status) {
+					delete(subAgentTaskTool, msg.TaskID)
+					delete(subAgentTaskType, msg.TaskID)
+					delete(subAgentResults, toolUseID)
+				}
+			case "task_updated":
+				// A background sub-agent (Agent tool) can signal terminal completion
+				// ONLY via task_updated — no task_notification (that's for sync
+				// tools). Per the Claude Agent SDK (TaskUpdatedMessage): the status
+				// lives in `patch`, not at top level, and only a TERMINAL status
+				// means done — pending/running/paused (or a patch with no status)
+				// must NOT complete the card. Translate task_id → the launching
+				// Agent tool_use_id. Keep the mapping briefly because a later
+				// task_notification may carry a richer completion summary.
+				patchStatus, _ := msg.Patch["status"].(string)
+				if isTerminalTaskStatus(patchStatus) {
+					if toolUseID := subAgentTaskTool[msg.TaskID]; toolUseID != "" {
+						emitSubAgentDone(msg, toolUseID, patchStatus, claudeTaskPatchSummary(msg.Patch))
 					}
 				}
 			}
-		case "compact_boundary":
-			log.Printf("[claude-agent] Context compaction occurred")
-			cb(StreamEvent{Type: EventSystem, Content: "Context compacted to fit within limits"})
-		case "init_response":
-			log.Printf("[claude-agent] Initialize response: %v", msg.Data)
-		case "task_started":
-			cb(StreamEvent{
-				Type:    EventSubTaskStart,
-				Content: msg.Description,
-				Metadata: map[string]interface{}{
-					"task_id": msg.TaskID,
-				},
-			})
-		case "task_progress":
-			cb(StreamEvent{
-				Type:    EventSubTaskProgress,
-				Content: msg.Description,
-				Metadata: map[string]interface{}{
-					"task_id":        msg.TaskID,
-					"last_tool_name": msg.LastToolName,
-				},
-			})
-		case "task_notification":
-			// Accumulate subagent token usage into input tokens.
-			if msg.Usage != nil {
-				if v, ok := msg.Usage["total_tokens"]; ok {
-					if n, ok := toInt(v); ok && n > 0 {
-						accInputTokens += n
-						log.Printf("[claude-agent] Subagent tokens accumulated: %d (all→input)", n)
-					}
-				}
-			}
-			cb(StreamEvent{
-				Type:    EventSubTaskDone,
-				Content: msg.Summary,
-				Metadata: map[string]interface{}{
-					"task_id": msg.TaskID,
-					"status":  msg.Status,
-				},
-			})
-		}
 
 		case "assistant":
-			// Accumulate per-step token usage. Each step produces one or more
-			// assistant messages that share the same ID (parallel tool calls).
-			// Deduplicate by ID so we don't double-count.
-			if parsed != nil && parsed.ID != "" && !seenMessageIDs[parsed.ID] {
-				seenMessageIDs[parsed.ID] = true
-				if parsed.Usage != nil {
-					if v, ok := parsed.Usage["input_tokens"].(float64); ok {
-						accInputTokens += int(v)
-					}
-					if v, ok := parsed.Usage["output_tokens"].(float64); ok {
-						accOutputTokens += int(v)
-					}
-					log.Printf("[claude-agent] assistant step %s: input=%v output=%v (acc: in=%d out=%d)",
-						parsed.ID, parsed.Usage["input_tokens"], parsed.Usage["output_tokens"],
-						accInputTokens, accOutputTokens)
-					// Per-step budget check: cancel if accumulated tokens exceed user balance.
-					if req.TokenBudget > 0 && int64(accInputTokens+accOutputTokens) >= req.TokenBudget {
-						log.Printf("[claude-agent] Token budget exceeded: %d >= %d, cancelling",
-							accInputTokens+accOutputTokens, req.TokenBudget)
-						budgetExceeded = true
-						budgetCancel()
-					}
-				}
+			if msg.UUID != "" {
+				lastAssistantUUID = msg.UUID
 			}
 			if parsed != nil {
-				for _, content := range parsed.Content {
-					switch content.Type {
-					case "text":
-						if hasPartialText {
-							// Text already streamed via stream_event deltas; skip to avoid duplication.
-						} else {
-							cb(StreamEvent{
-								Type:    EventTextDelta,
-								Content: content.Text,
-							})
-						}
-
-					case "tool_use":
-						inputJSON, _ := json.Marshal(content.Input)
-						cb(StreamEvent{
-							Type:     EventToolStart,
-							ToolID:   content.ID,
-							ToolName: content.Name,
-							Input:    string(inputJSON),
-						})
-
-					case "thinking":
-						if content.Thinking != "" {
-							if hasPartialThinking {
-								// Thinking already streamed via stream_event deltas; skip to avoid duplication.
-							} else {
-								cb(StreamEvent{
-									Type:     EventThinking,
-									ToolID:   content.ID,
-									ToolName: "Thinking",
-									Content:  content.Thinking,
-								})
-							}
-						}
-
-					case "redacted_thinking":
-						log.Printf("[claude-agent] Redacted thinking block (content hidden)")
-						cb(StreamEvent{
-							Type:     EventThinking,
-							ToolName: "Thinking",
-							Content:  "[Thinking content redacted]",
-						})
-
-					default:
-						log.Printf("[claude-agent] Unhandled content block type=%q id=%s", content.Type, content.ID)
+				if msg.ParentToolUseID == "" {
+					rememberSubAgentLaunches(parsed.Content)
+				}
+				if msg.ParentToolUseID != "" {
+					if text := strings.TrimSpace(assistantText(parsed.Content)); text != "" {
+						subAgentResults[msg.ParentToolUseID] = text
 					}
 				}
+				translateAssistantContent(parsed.Content, msg.ParentToolUseID, hasPartialText, hasPartialThinking, cb)
 				// Reset partial flags after processing the complete assistant message.
 				hasPartialText = false
 				hasPartialThinking = false
@@ -389,6 +734,20 @@ func (a *ClaudeAgent) SendMessage(
 				if err := json.Unmarshal(msg.Message, &userMsg); err == nil {
 					// Content can be an array of blocks
 					if contents, ok := userMsg.Content.([]interface{}); ok {
+						// msg.ToolUseResult is a single object at the top level of this
+						// JSONL line, not one-per-block. It's only safe to attribute to
+						// a specific tool_result when this message carries exactly one
+						// (parallel tool calls can land multiple tool_result blocks in
+						// the same "user" message, and we have no per-block key to
+						// disambiguate which one toolUseResult belongs to) — otherwise
+						// skip it rather than risk attaching the wrong file's diff to
+						// the wrong tool card.
+						toolResultCount := 0
+						for _, c := range contents {
+							if cm, ok := c.(map[string]interface{}); ok && cm["type"] == "tool_result" {
+								toolResultCount++
+							}
+						}
 						for _, c := range contents {
 							if cm, ok := c.(map[string]interface{}); ok {
 								if cm["type"] == "tool_result" {
@@ -453,11 +812,17 @@ func (a *ClaudeAgent) SendMessage(
 									} else {
 										log.Printf("[claude-agent] Tool result: id=%s, isError=%v, output_len=%d", toolUseID, isError, len(output))
 									}
+									var diff string
+									if toolResultCount == 1 {
+										diff = claudeToolResultDiff(msg.ToolUseResult)
+									}
 									cb(StreamEvent{
-										Type:    EventToolResult,
-										ToolID:  toolUseID,
-										Output:  output,
-										IsError: isError,
+										Type:         EventToolResult,
+										ToolID:       toolUseID,
+										Output:       output,
+										Diff:         diff,
+										IsError:      isError,
+										ParentToolID: msg.ParentToolUseID,
 									})
 								}
 							}
@@ -485,20 +850,13 @@ func (a *ClaudeAgent) SendMessage(
 					log.Printf("[claude-agent] Error data: %+v", msg.Data)
 				}
 
-				// If the context was already cancelled (user-initiated stop), the error
-				// result is caused by the interrupt — suppress it to avoid showing a
-				// spurious error in the UI. The caller handles the cancellation separately.
-				if budgetCtx.Err() != nil {
-					log.Printf("[claude-agent] Suppressing error after context cancel: %v", msg.Errors)
-				} else {
-					errMsg := buildErrorMessage(msg)
-					log.Printf("[claude-agent] Sending error event: %s", errMsg)
-					cb(StreamEvent{
-						Type:    EventError,
-						Content: errMsg,
-						IsError: true,
-					})
-				}
+				errMsg := buildErrorMessage(msg)
+				log.Printf("[claude-agent] Sending error event: %s", errMsg)
+				cb(StreamEvent{
+					Type:    EventError,
+					Content: errMsg,
+					IsError: true,
+				})
 			}
 
 			// Build metadata
@@ -510,15 +868,12 @@ func (a *ClaudeAgent) SendMessage(
 				if v, ok := msg.Usage["output_tokens"].(float64); ok {
 					metadata["outputTokens"] = int(v)
 				}
-			}
-			// Fallback: use step-accumulated tokens when the result message has no usage
-			// or reports zero tokens (happens on interrupt — the API call was aborted).
-			resultIn, _ := metadata["inputTokens"].(int)
-			resultOut, _ := metadata["outputTokens"].(int)
-			if resultIn == 0 && resultOut == 0 && (accInputTokens > 0 || accOutputTokens > 0) {
-				metadata["inputTokens"] = accInputTokens
-				metadata["outputTokens"] = accOutputTokens
-				log.Printf("[claude-agent] result has zero/no usage; using step-accumulated fallback: input=%d output=%d", accInputTokens, accOutputTokens)
+				if v, ok := msg.Usage["cache_read_input_tokens"].(float64); ok {
+					metadata["cacheReadInputTokens"] = int(v)
+				}
+				if v, ok := msg.Usage["cache_creation_input_tokens"].(float64); ok {
+					metadata["cacheCreationInputTokens"] = int(v)
+				}
 			}
 			if msg.TotalCostUSD > 0 {
 				metadata["totalCostUsd"] = msg.TotalCostUSD
@@ -531,10 +886,51 @@ func (a *ClaudeAgent) SendMessage(
 				metadata["stopReason"] = msg.StopReason
 			}
 
+			// Emit a context_usage event representing the main agent's
+			// current prompt size (what Claude's `/context` shows).
+			//
+			// CAUTION: `result.modelUsage[model]` aggregates ALL API calls
+			// made during this turn — including subagent calls (Task tool
+			// launching Haiku/Opus subagents) AND each iteration of the
+			// main agent's tool-use loop. Summing its cache_read/cache_create
+			// inflates the value several-fold vs the actual context size.
+			// For example, a 3-iteration turn with a 40k cached prefix
+			// reports cache_read ≈ 120k while the true context is ~40k.
+			//
+			// The correct signal is `result.usage.iterations[last]`: each
+			// iteration is one API call whose input+cache_read+cache_create
+			// is the FULL prompt size of that call. The last iteration
+			// therefore reflects the final state of the main agent's
+			// context. Also excludes subagent API calls — they have their
+			// own conversation.
+			mainModel, mainUsage := pickMainModelUsage(msg.ModelUsage, mainModelSlug, opts.Model)
+			used, haveIterUsage := lastIterationPromptSize(msg.Usage)
+			if !haveIterUsage && mainUsage != nil {
+				// Fallback: no iterations array (rare / unknown CLI shape).
+				// Still better than summing cache_read across subagents;
+				// at least this scopes to the main model.
+				used = int(mainUsage.InputTokens + mainUsage.CacheReadInputTokens + mainUsage.CacheCreationInputTokens)
+			}
+			if used > 0 || mainUsage != nil {
+				meta := map[string]interface{}{
+					"model":      mainModel,
+					"usedTokens": used,
+				}
+				if mainUsage != nil {
+					meta["inputTokens"] = int(mainUsage.InputTokens)
+					meta["outputTokens"] = int(mainUsage.OutputTokens)
+					meta["cacheReadInputTokens"] = int(mainUsage.CacheReadInputTokens)
+					meta["cacheCreationInputTokens"] = int(mainUsage.CacheCreationInputTokens)
+					meta["contextWindow"] = int(mainUsage.ContextWindow)
+					meta["maxOutputTokens"] = int(mainUsage.MaxOutputTokens)
+				}
+				cb(StreamEvent{Type: EventContextUsage, Metadata: meta})
+			}
+
 			result.SessionID = msg.SessionID
+			result.Checkpoint = lastAssistantUUID
 			result.Metadata = metadata
 
-			doneSent = true
 			cb(StreamEvent{
 				Type:      EventDone,
 				SessionID: msg.SessionID,
@@ -542,8 +938,7 @@ func (a *ClaudeAgent) SendMessage(
 			})
 
 		case "stream_event":
-			// Partial message streaming: incremental text and thinking deltas arrive here
-			// before the complete assistant message.
+			// Partial message streaming: incremental text/thinking deltas.
 			if len(msg.Event) > 0 {
 				var event struct {
 					Type  string `json:"type"`
@@ -585,27 +980,12 @@ func (a *ClaudeAgent) SendMessage(
 		return Result{}, ErrSessionExpired
 	}
 	if err != nil {
-		// On cancellation (user stop or budget exceeded): emit a synthetic EventDone
-		// with accumulated tokens so billing (SettleTokens) settles accurately.
-		if budgetCtx.Err() != nil && !doneSent && (accInputTokens > 0 || accOutputTokens > 0) {
-			fallbackMeta := map[string]interface{}{
-				"inputTokens":  accInputTokens,
-				"outputTokens": accOutputTokens,
-			}
-			result.Metadata = fallbackMeta
-			log.Printf("[claude-agent] Cancelled: emitting synthetic EventDone with fallback tokens: input=%d output=%d", accInputTokens, accOutputTokens)
-			cb(StreamEvent{
-				Type:      EventDone,
-				SessionID: resultSessionID,
-				Metadata:  fallbackMeta,
-			})
-		}
-		// Budget exceeded: return the dedicated sentinel so chat.go can
-		// distinguish this from a user-initiated stop.
-		if budgetExceeded {
-			return Result{}, ErrInsufficientBalance
-		}
-		return Result{}, fmt.Errorf("claude query: %w", err)
+		// A stopped or errored turn never reaches the `case "result"` branch
+		// that populates result.Metadata, so surface the last assistant uuid we
+		// saw during streaming. Without this the partial turn is persisted with
+		// no durable checkpoint unless we surface the last assistant identity.
+		result.Checkpoint = lastAssistantUUID
+		return result, fmt.Errorf("claude query: %w", err)
 	}
 
 	// Use session ID from query result if not set from result event
@@ -615,6 +995,290 @@ func (a *ClaudeAgent) SendMessage(
 
 	log.Printf("[claude-agent] Query completed, session ID: %s", result.SessionID)
 	return result, nil
+}
+
+// ListSupportedModels returns the Claude CLI's live model catalog. The data
+// originates from the `initialize` control_response: every field (display
+// name, description, effort support) comes straight from the CLI. Once
+// populated, the cache is refreshed opportunistically every time a real
+// SendMessage completes an init handshake; callers get a fast response.
+//
+// The second return value is a source label ("dynamic" / "none") mirroring
+// the Codex contract used by `ListAvailableModels`.
+func (a *ClaudeAgent) ListSupportedModels(ctx context.Context) ([]ModelInfo, string) {
+	a.modelsMu.Lock()
+	if a.cachedProbed {
+		out := append([]ModelInfo(nil), a.cachedModels...)
+		a.modelsMu.Unlock()
+		return out, "dynamic"
+	}
+	a.modelsMu.Unlock()
+
+	client := NewClaudeClient()
+	if a.CLIPath != "" {
+		client.CLIPath = a.CLIPath
+	}
+	client.Verbose = false
+
+	init, err := client.ProbeInitialize(ctx)
+	if err != nil {
+		log.Printf("[claude-agent] ProbeInitialize failed: %v — falling back to standard aliases", err)
+		fallback := mergeStandardClaudeAliases(nil)
+		a.modelsMu.Lock()
+		a.cachedModels = fallback
+		a.cachedProbed = true
+		a.modelsMu.Unlock()
+		return append([]ModelInfo(nil), fallback...), "fallback"
+	}
+
+	models := convertClaudeInitModels(init.Models)
+	a.modelsMu.Lock()
+	a.cachedModels = models
+	a.cachedProbed = true
+	a.modelsMu.Unlock()
+
+	return append([]ModelInfo(nil), models...), "dynamic"
+}
+
+// WarmupSupportedModels is best-effort eager initialization, mirroring the
+// Codex agent's hook so server startup can pre-warm the model cache.
+func (a *ClaudeAgent) WarmupSupportedModels(ctx context.Context) {
+	_, _ = a.ListSupportedModels(ctx)
+}
+
+// updateModelCacheFromInit refreshes the in-memory catalog with data
+// delivered as part of a normal SendMessage's init handshake.
+func (a *ClaudeAgent) updateModelCacheFromInit(models []ClaudeInitModel) {
+	if len(models) == 0 {
+		return
+	}
+	converted := convertClaudeInitModels(models)
+	a.modelsMu.Lock()
+	a.cachedModels = converted
+	a.cachedProbed = true
+	a.modelsMu.Unlock()
+}
+
+// convertClaudeInitModels projects the Claude-specific init payload onto the
+// unified ModelInfo shape the API layer consumes. After conversion we make
+// sure the three standard CLI aliases (opus / sonnet / haiku) are present:
+// the CLI's catalog is sometimes incomplete (sonnet has been observed to
+// disappear depending on subscription tier / region / CLI version) but the
+// missing alias still works as a --model argument, so we synthesize an entry
+// for any that the live response left out.
+func convertClaudeInitModels(in []ClaudeInitModel) []ModelInfo {
+	out := make([]ModelInfo, 0, len(in))
+	for _, m := range in {
+		info := ModelInfo{
+			ID:          m.Value,
+			Label:       m.DisplayName,
+			Description: m.Description,
+			IsDefault:   m.Value == "default",
+		}
+		if m.SupportsEffort {
+			info.SupportedEfforts = append([]string(nil), m.SupportedEffortLevels...)
+			// Claude doesn't return a per-model default; pick the highest
+			// non-experimental level the model actually accepts.
+			info.DefaultEffort = pickClaudeDefaultEffort(info.SupportedEfforts)
+		}
+		caps := map[string]bool{}
+		if m.SupportsAdaptiveThinking {
+			caps["adaptiveThinking"] = true
+		}
+		if m.SupportsFastMode {
+			caps["fastMode"] = true
+		}
+		if m.SupportsAutoMode {
+			caps["autoMode"] = true
+		}
+		if len(caps) > 0 {
+			info.Capabilities = caps
+		}
+		out = append(out, info)
+	}
+	return mergeStandardClaudeAliases(out)
+}
+
+// standardClaudeAliases is the canonical short-name list the Claude CLI has
+// historically accepted as --model arguments. Order here is the display
+// order we use when synthesizing a missing entry.
+var standardClaudeAliases = []struct {
+	id, label string
+}{
+	{"opus", "Opus"},
+	{"sonnet", "Sonnet"},
+	{"haiku", "Haiku"},
+}
+
+// mergeStandardClaudeAliases ensures opus / sonnet / haiku each appear in the
+// model list. Missing entries are appended with a minimal stub — effort
+// levels are copied from any peer that exposes them so the UI's EFFORT picker
+// has reasonable choices.
+//
+// "Already present" is matched case-insensitively against both the ID
+// (claude-sonnet-4-6, sonnet) and the label (Sonnet) — the CLI typically
+// returns the long ID with the short word as the label, so a literal
+// `present[alias.id]` lookup would double-list every family.
+func mergeStandardClaudeAliases(models []ModelInfo) []ModelInfo {
+	hasAlias := func(alias string) bool {
+		for _, m := range models {
+			if strings.Contains(strings.ToLower(m.ID), alias) ||
+				strings.EqualFold(m.Label, alias) {
+				return true
+			}
+		}
+		return false
+	}
+
+	var sampleEfforts []string
+	var sampleDefault string
+	for _, m := range models {
+		if sampleEfforts == nil && len(m.SupportedEfforts) > 0 {
+			sampleEfforts = append([]string(nil), m.SupportedEfforts...)
+			sampleDefault = m.DefaultEffort
+		}
+	}
+	for _, alias := range standardClaudeAliases {
+		if hasAlias(alias.id) {
+			continue
+		}
+		stub := ModelInfo{
+			ID:    alias.id,
+			Label: alias.label,
+		}
+		if len(sampleEfforts) > 0 {
+			stub.SupportedEfforts = append([]string(nil), sampleEfforts...)
+			stub.DefaultEffort = sampleDefault
+		}
+		models = append(models, stub)
+	}
+	return models
+}
+
+// validateEffort drops the requested effort level if it isn't advertised
+// for the current model in the cached catalog. This is a defense-in-depth
+// guard against stale session state (e.g. a session that kept an effort
+// from a different agent or a since-deprecated model). If the cache is
+// empty (CLI unreachable at startup), we forward the effort as-is.
+func (a *ClaudeAgent) validateEffort(model, effort string) string {
+	if effort == "" {
+		return ""
+	}
+	a.modelsMu.Lock()
+	info := a.cachedModels
+	probed := a.cachedProbed
+	a.modelsMu.Unlock()
+	if !probed || len(info) == 0 {
+		return effort
+	}
+	for _, m := range info {
+		if m.ID != model {
+			continue
+		}
+		for _, allowed := range m.SupportedEfforts {
+			if allowed == effort {
+				return effort
+			}
+		}
+		log.Printf("[claude-agent] dropping unsupported effort %q for model %q (allowed: %v)",
+			effort, model, m.SupportedEfforts)
+		return ""
+	}
+	// Unknown model (e.g. user typed a custom slug) — pass through.
+	return effort
+}
+
+// lastIterationPromptSize returns the size (input + cache_read +
+// cache_creation) of the last API call made during this turn, as
+// recorded in `result.usage.iterations[]`. That value matches what
+// Claude's `/context` slash command reports. Returns (size, true) if
+// iterations data is available, otherwise (0, false).
+func lastIterationPromptSize(usage map[string]interface{}) (int, bool) {
+	if usage == nil {
+		return 0, false
+	}
+	itersRaw, ok := usage["iterations"].([]interface{})
+	if !ok || len(itersRaw) == 0 {
+		return 0, false
+	}
+	last, ok := itersRaw[len(itersRaw)-1].(map[string]interface{})
+	if !ok {
+		return 0, false
+	}
+	intOr := func(k string) int {
+		if v, ok := last[k].(float64); ok {
+			return int(v)
+		}
+		return 0
+	}
+	return intOr("input_tokens") + intOr("cache_read_input_tokens") + intOr("cache_creation_input_tokens"), true
+}
+
+// pickMainModelUsage selects the entry from `result.modelUsage` that
+// belongs to the main agent (as opposed to subagent models like Haiku
+// spawned by the Task tool). Strategy, in order:
+//
+//  1. The CLI-resolved slug captured from the `system.init` message
+//     (exact match, e.g. "claude-sonnet-4-6").
+//  2. Fuzzy match on the `--model` alias (e.g. opts.Model="sonnet"
+//     matches key "claude-sonnet-4-6").
+//  3. The entry with the largest input+cache_create — subagents are
+//     typically called with tiny prompts compared to the main thread.
+//
+// Returns (slug, entry) or ("", nil) if the map is empty.
+func pickMainModelUsage(usage map[string]ClaudeModelUsageEntry, resolvedSlug, alias string) (string, *ClaudeModelUsageEntry) {
+	if len(usage) == 0 {
+		return "", nil
+	}
+	if resolvedSlug != "" {
+		if entry, ok := usage[resolvedSlug]; ok {
+			entry := entry
+			return resolvedSlug, &entry
+		}
+	}
+	if alias != "" {
+		needle := strings.ToLower(alias)
+		for k, v := range usage {
+			if strings.Contains(strings.ToLower(k), needle) {
+				v := v
+				return k, &v
+			}
+		}
+	}
+	var bestKey string
+	var best ClaudeModelUsageEntry
+	var bestScore int64 = -1
+	for k, v := range usage {
+		score := v.InputTokens + v.CacheCreationInputTokens + v.CacheReadInputTokens
+		if score > bestScore {
+			bestScore = score
+			bestKey = k
+			best = v
+		}
+	}
+	return bestKey, &best
+}
+
+// pickClaudeDefaultEffort returns the pre-selected effort for a Claude
+// model based on the CLI-reported `supportedEffortLevels`. Claude's
+// initialize response does not include a per-model default, so we pick
+// the safest common default — `medium` — falling back to `high` then
+// `low` if `medium` isn't advertised. We intentionally avoid `xhigh` and
+// `max` as auto-defaults because they're opt-in "burn" modes.
+func pickClaudeDefaultEffort(efforts []string) string {
+	has := map[string]bool{}
+	for _, e := range efforts {
+		has[e] = true
+	}
+	for _, candidate := range []string{"medium", "high", "low"} {
+		if has[candidate] {
+			return candidate
+		}
+	}
+	if len(efforts) > 0 {
+		return efforts[0]
+	}
+	return ""
 }
 
 // isSessionError returns true for error subtypes that indicate the resumed
@@ -660,39 +1324,6 @@ func isBenignToolError(output string) bool {
 		}
 	}
 	return false
-}
-
-// mcpToolFeatureMap maps MCP tool name suffixes to the feature bit required.
-// Tools not in this map are always included.
-var mcpToolFeatureMap = map[string]int64{
-	"save_asset":          1 << 1, // FeatureAsset
-	"get_asset_content":   1 << 1,
-	"list_assets":         1 << 1,
-	"list_asset_comments": 1 << 1,
-	"create_task":         1 << 0, // FeatureTask
-	"get_task":            1 << 0,
-	"list_tasks":          1 << 0,
-	"update_task":         1 << 0,
-	"list_workflows":      1 << 2, // FeatureWorkflow
-	"get_workflow":        1 << 2,
-	"execute_workflow":    1 << 2,
-}
-
-// filterMCPTools removes tools whose feature bit is not enabled in userFeatures.
-func filterMCPTools(allTools []string, userFeatures int64) []string {
-	var filtered []string
-	for _, tool := range allTools {
-		// Extract the tool suffix after the last "__"
-		suffix := tool
-		if idx := strings.LastIndex(tool, "__"); idx >= 0 {
-			suffix = tool[idx+2:]
-		}
-		requiredBit, guarded := mcpToolFeatureMap[suffix]
-		if !guarded || (userFeatures&requiredBit) != 0 {
-			filtered = append(filtered, tool)
-		}
-	}
-	return filtered
 }
 
 // buildErrorMessage produces a user-friendly error string from a result message.
@@ -746,4 +1377,55 @@ func toInt(v interface{}) (int, bool) {
 		return int(n), true
 	}
 	return 0, false
+}
+
+// claudeToolUseResultPatch is the shape of Claude Code's `toolUseResult` for
+// the Edit tool: a file path plus ready-made unified-diff hunks (each without
+// its own file header, just "@@ -a,b +c,d @@" followed by " "/"+"/"-" lines).
+type claudeToolUseResultPatch struct {
+	Type            string `json:"type"`
+	FilePath        string `json:"filePath"`
+	StructuredPatch []struct {
+		OldStart int      `json:"oldStart"`
+		OldLines int      `json:"oldLines"`
+		NewStart int      `json:"newStart"`
+		NewLines int      `json:"newLines"`
+		Lines    []string `json:"lines"`
+	} `json:"structuredPatch"`
+	// Write create: content is authoritative because the file did not exist.
+	Content string `json:"content"`
+}
+
+// claudeToolResultDiff extracts a unified diff from Claude Code's
+// structured tool result. Edits and overwrites use structuredPatch; a Write
+// explicitly marked create can render its full content as a new-file diff.
+// An overwrite without a patch has no before-image, so it produces no diff.
+func claudeToolResultDiff(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var patch claudeToolUseResultPatch
+	if json.Unmarshal(raw, &patch) != nil || patch.FilePath == "" {
+		return ""
+	}
+	if len(patch.StructuredPatch) == 0 {
+		if patch.Type == "create" {
+			return unifiedDiffForFullContent(patch.FilePath, patch.Content, false)
+		}
+		return ""
+	}
+	hunks := make([]string, 0, len(patch.StructuredPatch))
+	for _, h := range patch.StructuredPatch {
+		if len(h.Lines) == 0 {
+			continue
+		}
+		var body strings.Builder
+		fmt.Fprintf(&body, "@@ -%d,%d +%d,%d @@\n", h.OldStart, h.OldLines, h.NewStart, h.NewLines)
+		for _, line := range h.Lines {
+			body.WriteString(line)
+			body.WriteString("\n")
+		}
+		hunks = append(hunks, body.String())
+	}
+	return unifiedDiffFromHunks(patch.FilePath, hunks)
 }

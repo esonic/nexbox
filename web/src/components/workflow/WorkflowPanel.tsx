@@ -1,13 +1,30 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { Plus, Trash2, Loader2, Pencil, Search } from 'lucide-react';
+import { Plus, Trash2, Loader2, Pencil, Search, Copy, ChevronDown, ClipboardPaste } from 'lucide-react';
 import { UserChip } from '@/plugins/task/components/UserPicker';
 import { toast } from 'sonner';
-import { workflowApi, Workflow } from '@/lib/workflowApi';
+import { workflowApi, Workflow, WorkflowDefinition } from '@/lib/workflowApi';
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from '@/components/ui/dropdown-menu';
 import WorkflowEditor from './WorkflowEditor';
 import WorkflowRunsView from './WorkflowRunsView';
 import { formatRelativeDate } from '@/lib/utils';
 import { globalWS } from '@/lib/ws';
+
+const CLIPBOARD_WORKFLOW_TYPE = 'nexbox-workflow';
+const CLIPBOARD_WORKFLOW_VERSION = 1;
+
+interface WorkflowClipboardPayload {
+  type: typeof CLIPBOARD_WORKFLOW_TYPE;
+  version: number;
+  name: string;
+  description: string;
+  definition: WorkflowDefinition;
+}
 
 interface WorkflowPanelProps {
   projectId: string;
@@ -166,6 +183,62 @@ export function WorkflowPanel({ projectId, onEditStateChange }: WorkflowPanelPro
     refreshWorkflows();
   };
 
+  const handleCopyToClipboard = async (workflow: Workflow) => {
+    const payload: WorkflowClipboardPayload = {
+      type: CLIPBOARD_WORKFLOW_TYPE,
+      version: CLIPBOARD_WORKFLOW_VERSION,
+      name: workflow.name,
+      description: workflow.description || '',
+      definition: workflow.definition,
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload));
+      toast.success('Workflow copied to clipboard', { duration: 1500 });
+    } catch (error: any) {
+      toast.error('Failed to copy: ' + error.message);
+    }
+  };
+
+  const handlePasteFromClipboard = async () => {
+    let text: string;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch (error: any) {
+      toast.error('Failed to read clipboard: ' + error.message);
+      return;
+    }
+    let payload: WorkflowClipboardPayload;
+    try {
+      const parsed = JSON.parse(text);
+      if (
+        !parsed ||
+        parsed.type !== CLIPBOARD_WORKFLOW_TYPE ||
+        typeof parsed.name !== 'string' ||
+        !parsed.definition ||
+        !Array.isArray(parsed.definition.nodes) ||
+        !Array.isArray(parsed.definition.edges)
+      ) {
+        throw new Error('not a workflow');
+      }
+      payload = parsed;
+    } catch {
+      toast.error('Clipboard does not contain a valid workflow');
+      return;
+    }
+    try {
+      const created = await workflowApi.create(
+        projectId,
+        `${payload.name} (Copy)`,
+        payload.description || '',
+        payload.definition,
+      );
+      setWorkflows((prev) => [created, ...prev]);
+      toast.success('Workflow pasted', { duration: 1500 });
+    } catch (error: any) {
+      toast.error('Failed to create workflow: ' + error.message);
+    }
+  };
+
   const handleDelete = async (id: string) => {
     setConfirmDeleteId(null);
     try {
@@ -251,14 +324,34 @@ export function WorkflowPanel({ projectId, onEditStateChange }: WorkflowPanelPro
         </div>
 
         <div className="ml-auto">
-          <button
-            onClick={handleCreate}
-            className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-accent/40 border border-border/30 hover:border-border/50 transition-colors"
-            title="New workflow"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>New</span>
-          </button>
+          <div className="inline-flex items-stretch rounded-md border border-border/30 hover:border-border/50 transition-colors overflow-hidden">
+            <button
+              onClick={handleCreate}
+              className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/40 transition-colors"
+              title="New workflow"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>New</span>
+            </button>
+            <div className="w-px bg-border/30" />
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  className="flex items-center px-1 text-muted-foreground hover:text-foreground hover:bg-accent/40 transition-colors"
+                  title="More create options"
+                  aria-label="More create options"
+                >
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={handlePasteFromClipboard}>
+                  <ClipboardPaste className="h-3.5 w-3.5" />
+                  <span>From clipboard</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
       </div>
 
@@ -342,6 +435,14 @@ export function WorkflowPanel({ projectId, onEditStateChange }: WorkflowPanelPro
                       title="Edit design"
                     >
                       <Pencil className="w-3 h-3" />
+                    </button>
+                    {/* Copy to clipboard button */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleCopyToClipboard(workflow); }}
+                      className="p-1 rounded text-muted-foreground/60 hover:text-foreground hover:bg-accent/60 transition-colors"
+                      title="Copy workflow to clipboard"
+                    >
+                      <Copy className="w-3 h-3" />
                     </button>
                     {/* Delete button */}
                     <div className="relative">

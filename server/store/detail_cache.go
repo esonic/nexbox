@@ -13,10 +13,10 @@ import (
 // The main message table only stores a lightweight summary (tool_group + thinking markers),
 // while this cache holds the complete original parts for lazy loading when users expand.
 type DetailCache struct {
-	db *sql.DB
+	db *DB
 }
 
-func NewDetailCache(db *sql.DB) *DetailCache {
+func NewDetailCache(db *DB) *DetailCache {
 	return &DetailCache{db: db}
 }
 

@@ -2,12 +2,19 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta id="theme-color-meta" name="theme-color" content="#ffffff" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <title>BoxNex</title>
+    <meta name="description" content="A browser workspace for coding agents. Run locally or on your own server." />
+    <title>NexBox — Coding Agent Workspace</title>
     <style>
       /* Prevent flash of unstyled content */
       body { margin: 0; background: #ffffff; }
@@ -17,9 +24,13 @@
   <body>
     <script>
       // Apply saved theme immediately to prevent flash
-      if (localStorage.getItem('theme') === 'dark') {
+      var __isDark = localStorage.getItem('theme') === 'dark';
+      if (__isDark) {
         document.body.classList.add('dark');
       }
+      // Sync status bar color (PWA / TWA reads this)
+      var __meta = document.getElementById('theme-color-meta');
+      if (__meta) __meta.setAttribute('content', __isDark ? '#0d0d0d' : '#ffffff');
     </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

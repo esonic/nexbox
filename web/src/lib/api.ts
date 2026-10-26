@@ -1,33 +1,49 @@
 import type {
   Task, Project, Session, Asset, AssetVersion,
   ReviewComment, DiffResult, ChatMessage, MessagePart,
-  TaskAsset, TaskLabel, TaskComment, ReactionSummary,
+  TaskLabel, ModelInfo, AgentCapabilities,
 } from "@/types";
 
 const API_BASE = "/api";
 
-const TOKEN_KEY = "boxnex_jwt";
-export function getToken(): string | null { return localStorage.getItem(TOKEN_KEY); }
-export function setToken(t: string): void  { localStorage.setItem(TOKEN_KEY, t); }
-export function clearToken(): void         { localStorage.removeItem(TOKEN_KEY); }
+// Paths that should NOT trigger an auth redirect on 401 — typically the
+// auth endpoints themselves (the LoginPage needs to render the error
+// inline rather than bouncing back to /login).
+const AUTH_REDIRECT_SKIP = new Set<string>([
+  "/login",
+  "/logout",
+  "/auth/me",
+]);
+
+function redirectToLogin() {
+  if (typeof window === "undefined") return;
+  const path = window.location.pathname;
+  if (path === "/login" || path.startsWith("/login")) return;
+  const from = encodeURIComponent(path + window.location.search);
+  window.location.assign(`/login?from=${from}`);
+}
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const token = getToken();
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options?.headers,
     },
   });
-  if (res.status === 401) {
-    clearToken();
-    window.dispatchEvent(new Event("boxnex:logout"));
-  }
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || res.statusText);
+    if (res.status === 401 && !AUTH_REDIRECT_SKIP.has(path)) {
+      redirectToLogin();
+    }
+    const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string; code?: string };
+    throw new ApiError(err.error || res.statusText, res.status, err.code);
   }
   const text = await res.text();
   if (!text) return undefined as T;
@@ -40,53 +56,27 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 function createTasksApi(prefix: string) {
   return {
-    list: (limit = 30, offset = 0, projectId?: string, q?: string) => {
+    list: (limit = 30, offset = 0, projectId?: string, q?: string, source?: string) => {
       let url = `${prefix}/tasks?limit=${limit}&offset=${offset}`;
       if (projectId) url += `&project_id=${projectId}`;
       if (q) url += `&q=${encodeURIComponent(q)}`;
+      if (source) url += `&source=${source}`;
       return request<Task[]>(url);
     },
     get: (id: string) =>
       request<Task>(`${prefix}/tasks/${id}`),
-    create: (data: { title: string; parent_id?: string; description?: string; priority?: string; project_id?: string; assigner?: string }) =>
+    create: (data: { title: string; description?: string; priority?: string; project_id?: string }) =>
       request<Task>(`${prefix}/tasks`, {
         method: "POST",
         body: JSON.stringify(data),
       }),
-    update: (id: string, data: Partial<{ title: string; description: string; status: string; priority: string; parent_id: string; project_id: string; assigner: string }>) =>
+    update: (id: string, data: Partial<{ title: string; description: string; status: string; priority: string; project_id: string }>) =>
       request<Task>(`${prefix}/tasks/${id}`, {
         method: "PUT",
         body: JSON.stringify(data),
       }),
     delete: (id: string) =>
       request<void>(`${prefix}/tasks/${id}`, { method: "DELETE" }),
-    incrementRefCount: (taskId: string) =>
-      request<void>(`${prefix}/tasks/${taskId}/ref-count`, { method: "POST" }),
-    // Task-Asset associations
-    listAssets: (taskId: string) =>
-      request<Asset[]>(`${prefix}/tasks/${taskId}/assets`),
-    linkAsset: (taskId: string, assetId: string) =>
-      request<TaskAsset>(`${prefix}/tasks/${taskId}/assets`, {
-        method: "POST",
-        body: JSON.stringify({ asset_id: assetId }),
-      }),
-    unlinkAsset: (taskId: string, assetId: string) =>
-      request<void>(`${prefix}/tasks/${taskId}/assets/${assetId}`, { method: "DELETE" }),
-    // Task comments
-    listComments: (taskId: string) =>
-      request<TaskComment[]>(`${prefix}/tasks/${taskId}/comments`),
-    createComment: (taskId: string, data: { body: string }) =>
-      request<TaskComment>(`${prefix}/tasks/${taskId}/comments`, {
-        method: "POST",
-        body: JSON.stringify(data),
-      }),
-    updateComment: (commentId: string, data: { body: string }) =>
-      request<TaskComment>(`${prefix}/task-comments/${commentId}`, {
-        method: "PUT",
-        body: JSON.stringify(data),
-      }),
-    deleteComment: (commentId: string) =>
-      request<void>(`${prefix}/task-comments/${commentId}`, { method: "DELETE" }),
     addLabel: (taskId: string, labelName: string) =>
       request<void>(`${prefix}/tasks/${taskId}/labels`, {
         method: "POST",
@@ -141,45 +131,30 @@ export const assetsApi = createAssetsApi("");
 export const projectsApi = {
   list: () => request<Project[]>("/projects"),
   get: (id: string) => request<Project>(`/projects/${id}`),
-  create: (data: { namespace_id?: string; name: string; description?: string; git_repo_path?: string }) =>
+  create: (data: {
+    name: string;
+    description?: string;
+    auto_create_dir?: boolean;
+    git_repo_path?: string;
+  }) =>
     request<Project>("/projects", {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  update: (id: string, data: Partial<{
-    name: string; description: string; git_repo_path: string;
-  }>) =>
+  update: (id: string, data: Partial<{ name: string; description: string }>) =>
     request<Project>(`/projects/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),
   delete: (id: string) =>
     request<void>(`/projects/${id}`, { method: "DELETE" }),
-  listMembers: (id: string) =>
-    request<{ user_name: string; created_at: string }[]>(`/projects/${id}/members`),
-  addMember: (id: string, userName: string) =>
-    request<void>(`/projects/${id}/members`, {
-      method: "POST",
-      body: JSON.stringify({ user_name: userName }),
-    }),
-  removeMember: (id: string, userName: string) =>
-    request<void>(`/projects/${id}/members/${encodeURIComponent(userName)}`, { method: "DELETE" }),
-  leave: (id: string) =>
-    request<void>(`/projects/${id}/members/me`, { method: "DELETE" }),
-  lookupByDir: (dir: string) =>
-    request<{ remote_id: string; git_repo_path: string }>(`/projects/lookup-by-dir?dir=${encodeURIComponent(dir)}`),
-  checkGitDir: (path: string) =>
-    request<Project>(`/projects/by-git-dir?path=${encodeURIComponent(path)}`),
-  addToSidebar: (id: string, localDir: string) =>
-    request<Project>(`/projects/${id}`, {
-      method: "PUT",
-      body: JSON.stringify({ git_repo_path: localDir }),
-    }),
-  removeFromSidebar: (id: string) =>
-    request<Project>(`/projects/${id}`, {
-      method: "PUT",
-      body: JSON.stringify({ git_repo_path: "" }),
-    }),
+  // Returns the per-project hidden "scratch" session, creating it on first
+  // call. Used by the sidebar when the user clicks a project row to open a
+  // new-chat surface without committing to a real session — the server
+  // promotes it (is_hidden -> false) automatically as soon as the user sends
+  // the first message.
+  scratchSession: (id: string) =>
+    request<Session>(`/projects/${id}/scratch-session`),
 };
 
 // Sessions
@@ -188,16 +163,14 @@ export const sessionsApi = {
     request<{ sessions: Session[]; active_session_ids: string[] | null }>("/sessions"),
   listTrashed: () =>
     request<{ sessions: Session[] }>("/sessions/trash"),
-  emptyTrash: () =>
-    request<{ purged: number }>("/sessions/trash", { method: "DELETE" }),
   get: (id: string) =>
     request<Session>(`/sessions/${id}`),
-  create: (data: { name?: string; project_id?: string; agent?: string; model?: string }) =>
+  create: (data: { name?: string; project_id?: string; agent?: string; model?: string; effort?: string }) =>
     request<Session>("/sessions", {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  update: (id: string, data: Partial<{ name: string; project_id: string; agent: string; model: string }>) =>
+  update: (id: string, data: Partial<{ name: string; project_id: string; agent: string; model: string; effort: string; chrome_browser_url: string; is_pinned: boolean }>) =>
     request<Session>(`/sessions/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
@@ -206,6 +179,8 @@ export const sessionsApi = {
     request<void>(`/sessions/${id}`, { method: "DELETE" }),
   restore: (id: string) =>
     request<Session>(`/sessions/${id}/restore`, { method: "POST" }),
+  emptyTrash: () =>
+    request<{ purged: number }>("/sessions/trash", { method: "DELETE" }),
   reorder: (sessionIds: string[]) =>
     request<void>("/sessions/reorder", {
       method: "PUT",
@@ -218,6 +193,19 @@ export const sessionsApi = {
     }),
   getWorktreeStatus: (id: string) =>
     request<{ dirty: boolean; worktree_path?: string }>(`/sessions/${id}/worktree-status`),
+  fork: (id: string, messageId: string, name?: string) =>
+    request<Session>(`/sessions/${id}/fork`, {
+      method: "POST",
+      body: JSON.stringify({
+        message_id: messageId,
+        name,
+      }),
+    }),
+  autoTitle: (id: string, message: string) =>
+    request<Session>(`/sessions/${id}/auto-title`, {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    }),
 };
 
 // Chat Messages (per session)
@@ -228,7 +216,12 @@ export const messagesApi = {
     if (limit !== undefined) params.set('limit', limit.toString());
     if (beforeId) params.set('before', beforeId);
     if (params.toString()) url += `?${params.toString()}`;
-    return request<{ messages: ChatMessage[]; active: boolean; has_more?: boolean }>(url);
+    return request<{
+      messages: ChatMessage[];
+      active: boolean;
+      has_more?: boolean;
+      pending_input?: { toolUseId: string; toolName: string; input: string };
+    }>(url);
   },
   getDetails: (messageId: string) =>
     request<{ parts: MessagePart[] }>(`/messages/${messageId}/details`),
@@ -265,28 +258,37 @@ export const queueApi = {
 // Git operations (project-level)
 export interface DiffFileInfo {
   path: string;
+  original_path?: string;
+  workspace_path?: string;
   status: string;
   insertions: number;
   deletions: number;
+  binary?: boolean;
 }
 
 export interface DiffResponse {
+  repository_id?: string;
   files: DiffFileInfo[];
   total_files: number;
   insertions: number;
   deletions: number;
   diff?: string;
+  stats_included?: boolean;
+  repository_count?: number;
 }
 
 export interface GitFileEntry {
   path: string;
+  original_path?: string;
   status: string;
 }
 
 export interface GitStatusResponse {
+  repository_id?: string;
   staged: GitFileEntry[];
   unstaged: GitFileEntry[];
   untracked: GitFileEntry[];
+  ahead?: number;
 }
 
 export interface GitCommitInfo {
@@ -299,6 +301,8 @@ export interface GitCommitInfo {
 
 export interface GitCommitFileEntry {
   path: string;
+  original_path?: string;
+  workspace_path?: string;
   status: string;
 }
 
@@ -306,68 +310,188 @@ export interface GitBranchInfo {
   name: string;
   is_current: boolean;
   is_remote: boolean;
+  /** Branch name without the remote prefix; only set for remote-tracking branches. */
+  local_name?: string;
   upstream?: string;
   ahead?: number;
   behind?: number;
 }
 
 export interface GitBranchResponse {
+  repository_id?: string;
   current: string;
   branches: GitBranchInfo[];
 }
 
-function sid(sessionId?: string) {
-  return sessionId ? `?session_id=${sessionId}` : "";
+export interface GitScope {
+  projectId: string;
+  sessionId?: string;
+  repositoryId: string;
 }
-function sidAmp(sessionId?: string) {
-  return sessionId ? `&session_id=${sessionId}` : "";
+
+export interface GitRepository {
+  id: string;
+  name: string;
+  display_path: string;
+  relation: "workspace" | "ancestor" | "nested" | "symlink";
+  is_symlink: boolean;
+  shared: boolean;
+  outside_workspace: boolean;
+  aliases: string[];
+  branch: string;
+  detached: boolean;
+  remote_name?: string;
+  remote_url?: string;
+  status: {
+    branch: string;
+    detached: boolean;
+    staged: number;
+    unstaged: number;
+    untracked: number;
+    total: number;
+    ahead?: number;
+    behind?: number;
+  };
+}
+
+export interface GitRepositoriesResponse {
+  workspace_mode: "local" | "worktree";
+  default_repository_id: string;
+  repositories: GitRepository[];
+  dirty_repository_count: number;
+  truncated: boolean;
+  warnings: string[];
+}
+
+export interface GitWorkspaceStatusResponse {
+  summary: {
+    repository_count: number;
+    dirty_repository_count: number;
+    total_files: number;
+    insertions: number;
+    deletions: number;
+    stats_included: boolean;
+  };
+  repositories: Array<{ repository_id: string; total_files: number; insertions: number; deletions: number }>;
+  files: Array<{
+    repository_id: string;
+    repository_path: string;
+    workspace_path: string;
+    index_status?: string;
+    worktree_status?: string;
+  }>;
+}
+
+export interface RepositoryFileRef {
+  repository_id: string;
+  repository_name: string;
+  repository_display_path: string;
+  path: string;
+  workspace_path?: string;
+}
+
+function gitQuery(scope: GitScope, extras?: Record<string, string | number | boolean | undefined>) {
+  const params = new URLSearchParams();
+  if (scope.sessionId) params.set("session_id", scope.sessionId);
+  params.set("repository_id", scope.repositoryId);
+  for (const [key, value] of Object.entries(extras ?? {})) {
+    if (value !== undefined && value !== false && value !== "") params.set(key, String(value));
+  }
+  return `?${params.toString()}`;
+}
+
+function repositoryScoped<T extends { repository_id?: string }>(scope: GitScope, promise: Promise<T>): Promise<T> {
+  return promise
+    .then((result) => {
+      if (result.repository_id !== scope.repositoryId) {
+        throw new Error("Discarded a response from a previously selected Git repository");
+      }
+      return result;
+    })
+    .catch((error) => {
+      reportInvalidRepositoryScope(scope, error);
+      throw error;
+    });
+}
+
+function repositoryRequest<T>(scope: GitScope, promise: Promise<T>): Promise<T> {
+  return promise.catch((error) => {
+    reportInvalidRepositoryScope(scope, error);
+    throw error;
+  });
+}
+
+function repositoryMutation(scope: GitScope, promise: Promise<void>): Promise<void> {
+  return repositoryRequest(scope, promise);
+}
+
+function reportInvalidRepositoryScope(scope: GitScope, error: unknown) {
+  if (!(error instanceof ApiError) || (error.code !== "repository_stale" && error.code !== "repository_not_found")) return;
+  window.dispatchEvent(new CustomEvent("git-repository-invalid", { detail: scope }));
 }
 
 export const gitApi = {
-  status: (projectId: string, sessionId?: string) =>
-    request<GitStatusResponse>(`/projects/${projectId}/git-status${sid(sessionId)}`),
-  commit: (projectId: string, data: { file_paths: string[]; message: string }, sessionId?: string) =>
-    request<{ hash: string; short_hash: string }>(`/projects/${projectId}/git-commit${sid(sessionId)}`, {
+  repositories: (projectId: string, sessionId?: string, refresh = false) => {
+    const params = new URLSearchParams();
+    if (sessionId) params.set("session_id", sessionId);
+    if (refresh) params.set("refresh", "true");
+    return request<GitRepositoriesResponse>(`/projects/${projectId}/git-repositories${params.toString() ? `?${params}` : ""}`);
+  },
+  workspaceStatus: (
+    projectId: string,
+    sessionId?: string,
+    options: { includeFiles?: boolean; includeStats?: boolean } = {},
+  ) => {
+    const params = new URLSearchParams();
+    if (sessionId) params.set("session_id", sessionId);
+    if (options.includeFiles) params.set("include_files", "true");
+    if (options.includeStats) params.set("include_stats", "true");
+    return request<GitWorkspaceStatusResponse>(`/projects/${projectId}/git-workspace-status${params.toString() ? `?${params}` : ""}`);
+  },
+  status: (scope: GitScope) =>
+    repositoryScoped(scope, request<GitStatusResponse>(`/projects/${scope.projectId}/git-status${gitQuery(scope)}`)),
+  commit: (scope: GitScope, data: { file_paths: string[]; message: string }) =>
+    repositoryScoped(scope, request<{ repository_id?: string; hash: string; short_hash: string }>(`/projects/${scope.projectId}/git-commit${gitQuery(scope)}`, {
       method: "POST",
       body: JSON.stringify(data),
-    }),
-  discard: (projectId: string, data: { file_path: string }, sessionId?: string) =>
-    request<void>(`/projects/${projectId}/git-discard${sid(sessionId)}`, {
+    })),
+  discard: (scope: GitScope, data: { file_path: string }) =>
+    repositoryMutation(scope, request<void>(`/projects/${scope.projectId}/git-discard${gitQuery(scope)}`, {
       method: "POST",
       body: JSON.stringify(data),
-    }),
-  log: (projectId: string, limit?: number, skip?: number, sessionId?: string) =>
-    request<GitCommitInfo[]>(`/projects/${projectId}/git-log?limit=${limit || 20}${skip ? `&skip=${skip}` : ""}${sidAmp(sessionId)}`),
-  commitFiles: (projectId: string, hash: string, sessionId?: string) =>
-    request<GitCommitFileEntry[]>(`/projects/${projectId}/git-commit-files?hash=${hash}${sidAmp(sessionId)}`),
-  commitDiff: (projectId: string, hash: string, sessionId?: string) =>
-    request<{ diff: string }>(`/projects/${projectId}/git-commit-diff?hash=${hash}${sidAmp(sessionId)}`),
-  generateMessage: (projectId: string, data: { file_paths: string[] }, sessionId?: string) =>
-    request<{ message: string }>(`/projects/${projectId}/generate-commit-message${sid(sessionId)}`, {
+    })),
+  log: (scope: GitScope, limit?: number, skip?: number) =>
+    repositoryScoped(scope, request<{ repository_id?: string; commits: GitCommitInfo[] }>(`/projects/${scope.projectId}/git-log${gitQuery(scope, { limit: limit || 20, skip })}`)).then((result) => result.commits),
+  commitFiles: (scope: GitScope, hash: string) =>
+    repositoryScoped(scope, request<{ repository_id?: string; files: GitCommitFileEntry[] }>(`/projects/${scope.projectId}/git-commit-files${gitQuery(scope, { hash })}`)).then((result) => result.files),
+  commitDiff: (scope: GitScope, hash: string) =>
+    repositoryScoped(scope, request<{ repository_id?: string; diff: string }>(`/projects/${scope.projectId}/git-commit-diff${gitQuery(scope, { hash })}`)),
+  generateMessage: (scope: GitScope, data: { file_paths: string[] }) =>
+    repositoryScoped(scope, request<{ repository_id?: string; message: string }>(`/projects/${scope.projectId}/generate-commit-message${gitQuery(scope)}`, {
       method: "POST",
       body: JSON.stringify(data),
-    }),
-  branches: (projectId: string, sessionId?: string) =>
-    request<GitBranchResponse>(`/projects/${projectId}/git-branches${sid(sessionId)}`),
-  checkout: (projectId: string, data: { branch: string; create?: boolean }, sessionId?: string) =>
-    request<{ branch: string }>(`/projects/${projectId}/git-checkout${sid(sessionId)}`, {
+    })),
+  branches: (scope: GitScope) =>
+    repositoryScoped(scope, request<GitBranchResponse>(`/projects/${scope.projectId}/git-branches${gitQuery(scope)}`)),
+  checkout: (scope: GitScope, data: { branch: string; create?: boolean; start_point?: string }) =>
+    repositoryScoped(scope, request<{ repository_id?: string; branch: string }>(`/projects/${scope.projectId}/git-checkout${gitQuery(scope)}`, {
       method: "POST",
       body: JSON.stringify(data),
-    }),
-  stage: (projectId: string, data: { file_paths: string[] }, sessionId?: string) =>
-    request<void>(`/projects/${projectId}/git-stage${sid(sessionId)}`, {
+    })),
+  stage: (scope: GitScope, data: { file_paths: string[] }) =>
+    repositoryMutation(scope, request<void>(`/projects/${scope.projectId}/git-stage${gitQuery(scope)}`, {
       method: "POST",
       body: JSON.stringify(data),
-    }),
-  unstage: (projectId: string, data: { file_paths: string[] }, sessionId?: string) =>
-    request<void>(`/projects/${projectId}/git-unstage${sid(sessionId)}`, {
+    })),
+  unstage: (scope: GitScope, data: { file_paths: string[] }) =>
+    repositoryMutation(scope, request<void>(`/projects/${scope.projectId}/git-unstage${gitQuery(scope)}`, {
       method: "POST",
       body: JSON.stringify(data),
-    }),
-  push: (projectId: string, sessionId?: string) =>
-    request<{ output: string }>(`/projects/${projectId}/git-push${sid(sessionId)}`, { method: "POST" }),
-  pull: (projectId: string, sessionId?: string) =>
-    request<{ output: string }>(`/projects/${projectId}/git-pull${sid(sessionId)}`, { method: "POST" }),
+    })),
+  push: (scope: GitScope) =>
+    repositoryScoped(scope, request<{ repository_id?: string; output: string }>(`/projects/${scope.projectId}/git-push${gitQuery(scope)}`, { method: "POST" })),
+  pull: (scope: GitScope) =>
+    repositoryScoped(scope, request<{ repository_id?: string; output: string }>(`/projects/${scope.projectId}/git-pull${gitQuery(scope)}`, { method: "POST" })),
 };
 
 // File browser
@@ -375,6 +499,7 @@ export interface FileEntry {
   name: string;
   path: string;
   is_dir: boolean;
+  is_symlink?: boolean;
   size?: number;
   children?: FileEntry[];
 }
@@ -394,57 +519,94 @@ export interface FileSearchResult {
 }
 
 export const filesApi = {
-  tree: (projectId: string, sessionId?: string) =>
-    request<FileEntry[]>(`/projects/${projectId}/files${sessionId ? `?session_id=${sessionId}` : ""}`),
-  content: (projectId: string, path: string, sessionId?: string) =>
-    request<FileContentResponse>(`/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`),
-  writeContent: (projectId: string, path: string, content: string, sessionId?: string) =>
-    request<{ path: string; size: number }>(`/projects/${projectId}/file-content${sessionId ? `?session_id=${sessionId}` : ""}`, { method: "PUT", body: JSON.stringify({ path, content }) }),
-  search: (projectId: string, query: string, type: "name" | "content" = "name", sessionId?: string) =>
-    request<FileSearchResult[]>(`/projects/${projectId}/file-search?q=${encodeURIComponent(query)}&type=${type}${sessionId ? `&session_id=${sessionId}` : ""}`),
-  upload: async (projectId: string, file: File, path: string, sessionId?: string): Promise<{ path: string; size: number }> => {
+  // List immediate children of a directory. Pass empty path for the project root.
+  list: (projectId: string, path: string, sessionId?: string) => {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    if (sessionId) params.set("session_id", sessionId);
+    const qs = params.toString();
+    return request<FileEntry[]>(`/projects/${projectId}/files${qs ? `?${qs}` : ""}`);
+  },
+  // Flat list of files (not directories) — used by the chat file picker.
+  flat: (projectId: string, sessionId?: string) =>
+    request<FileEntry[]>(`/projects/${projectId}/files-flat${sessionId ? `?session_id=${sessionId}` : ""}`),
+  content: (projectId: string, path: string, sessionId?: string, repositoryId?: string) => {
+    const promise = request<FileContentResponse>(`/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`);
+    return repositoryId ? repositoryRequest({ projectId, sessionId, repositoryId }, promise) : promise;
+  },
+  // Committed (HEAD) version of a file, used as the dirty-diff baseline in the
+  // editor. exists=false (with empty content) for new/untracked files.
+  head: (projectId: string, path: string, sessionId?: string, repositoryId?: string) => {
+    const promise = request<{ repository_id?: string; path: string; in_repo: boolean; exists: boolean; content: string }>(`/projects/${projectId}/git-file-head?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`);
+    return repositoryId
+      ? repositoryScoped({ projectId, sessionId, repositoryId }, promise)
+      : promise;
+  },
+  search: (projectId: string, query: string, type: "name" | "content" = "name", sessionId?: string, caseSensitive?: boolean) =>
+    request<FileSearchResult[]>(`/projects/${projectId}/file-search?q=${encodeURIComponent(query)}&type=${type}${sessionId ? `&session_id=${sessionId}` : ""}${caseSensitive ? "&case=1" : ""}`),
+  save: (projectId: string, path: string, content: string, sessionId?: string, repositoryId?: string) => {
+    const promise = request<{ path: string; size?: number }>(
+      `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`,
+      { method: "PUT", body: JSON.stringify({ content }) },
+    );
+    return repositoryId ? repositoryRequest({ projectId, sessionId, repositoryId }, promise) : promise;
+  },
+  delete: (projectId: string, path: string, sessionId?: string, repositoryId?: string) => {
+    const promise = request<void>(
+      `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`,
+      { method: "DELETE" },
+    );
+    return repositoryId ? repositoryRequest({ projectId, sessionId, repositoryId }, promise) : promise;
+  },
+  upload: async (
+    projectId: string,
+    directory: string,
+    file: File,
+    options?: { overwrite?: boolean; sessionId?: string },
+  ): Promise<{ path: string; name: string; size: number } | { conflict: true; name: string; directory: string }> => {
+    const params = new URLSearchParams();
+    if (directory) params.set("path", directory);
+    if (options?.overwrite) params.set("overwrite", "true");
+    if (options?.sessionId) params.set("session_id", options.sessionId);
     const form = new FormData();
     form.append("file", file);
-    form.append("path", path);
-    const url = `${API_BASE}/projects/${projectId}/files/upload${sessionId ? `?session_id=${sessionId}` : ""}`;
-    const token = getToken();
-    const res = await fetch(url, {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/file-upload${params.toString() ? `?${params}` : ""}`, {
       method: "POST",
       body: form,
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
+    if (res.status === 409) {
+      const body = await res.json().catch(() => ({}));
+      return { conflict: true, name: body.name ?? file.name, directory: body.directory ?? directory };
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
       throw new Error(err.error || res.statusText);
     }
     return res.json();
   },
-  downloadUrl: (projectId: string, path: string, sessionId?: string): string =>
-    `${API_BASE}/projects/${projectId}/files/download?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`,
-  delete: (projectId: string, path: string, sessionId?: string) =>
-    request<{ deleted: string }>(`/projects/${projectId}/files/delete?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}`, { method: "DELETE" }),
+  downloadUrl: (projectId: string, path: string, sessionId?: string, repositoryId?: string) =>
+    `${API_BASE}/projects/${projectId}/file-download?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`,
+  serveUrl: (projectId: string, path: string, sessionId?: string, repositoryId?: string) =>
+    `${API_BASE}/projects/${projectId}/file-serve?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`,
+  move: (projectId: string, from: string, to: string, sessionId?: string) =>
+    request<{ from: string; to: string }>(
+      `/projects/${projectId}/file-move${sessionId ? `?session_id=${sessionId}` : ""}`,
+      { method: "POST", body: JSON.stringify({ from, to }) },
+    ),
+  createWebShare: (projectId: string, path: string) =>
+    request<{ id: string; url: string }>(
+      `/projects/${projectId}/web-shares`,
+      { method: "POST", body: JSON.stringify({ path }) },
+    ),
 };
 
 export const diffApi = {
-  get: (projectId: string, sessionId?: string) =>
-    request<DiffResponse>(`/projects/${projectId}/diff${sid(sessionId)}`),
-  stats: (projectId: string, sessionId?: string) =>
-    request<DiffResponse>(`/projects/${projectId}/diff-stats${sid(sessionId)}`),
-  fileDiff: (projectId: string, path: string, full?: boolean, sessionId?: string) =>
-    request<{ diff: string }>(`/projects/${projectId}/file-diff?path=${encodeURIComponent(path)}${full ? "&full=true" : ""}${sidAmp(sessionId)}`),
-};
-
-// GitLab integration
-export interface CreateMRResponse {
-  iid: number;
-  web_url: string;
-  title: string;
-  state: string;
-}
-
-export const gitlabApi = {
-  createMR: (projectId: string) =>
-    request<CreateMRResponse>(`/projects/${projectId}/create-mr`, { method: "POST" }),
+  get: (scope: GitScope) =>
+    repositoryScoped(scope, request<DiffResponse>(`/projects/${scope.projectId}/diff${gitQuery(scope)}`)),
+  stats: (scope: GitScope) =>
+    repositoryScoped(scope, request<DiffResponse>(`/projects/${scope.projectId}/diff-stats${gitQuery(scope)}`)),
+  fileDiff: (scope: GitScope, path: string, full?: boolean, staged?: boolean) =>
+    repositoryScoped(scope, request<{ repository_id?: string; diff: string; too_large?: boolean; max_bytes?: number }>(`/projects/${scope.projectId}/file-diff${gitQuery(scope, { path, full, staged })}`)),
 };
 
 // Labels (project-scoped)
@@ -458,21 +620,6 @@ export const labelsApi = {
     }),
   delete: (projectId: string, id: string) =>
     request<void>(`/projects/${projectId}/labels/${id}`, { method: "DELETE" }),
-};
-
-// Reactions (generic)
-export const reactionsApi = {
-  get: (targetType: string, targetId: string) =>
-    request<ReactionSummary[]>(`/reactions/${targetType}/${targetId}`),
-  add: (targetType: string, targetId: string, emoji: string) =>
-    request<void>(`/reactions/${targetType}/${targetId}`, {
-      method: "POST",
-      body: JSON.stringify({ emoji }),
-    }),
-  remove: (targetType: string, targetId: string, emoji: string) =>
-    request<void>(`/reactions/${targetType}/${targetId}?emoji=${encodeURIComponent(emoji)}`, {
-      method: "DELETE",
-    }),
 };
 
 // Comments
@@ -564,17 +711,36 @@ export interface ServerInfo {
   server_url?: string;
 }
 
+export interface PromptTemplate {
+  name: string;
+  content: string;
+}
+
+export const promptTemplatesApi = {
+  list: () => request<PromptTemplate[]>("/prompt-templates"),
+  replace: (templates: PromptTemplate[]) =>
+    request<PromptTemplate[]>("/prompt-templates", {
+      method: "PUT",
+      body: JSON.stringify(templates),
+    }),
+};
+
 export const serverApi = {
   info: () => request<ServerInfo>("/info"),
-  availableAgents: () => request<{ agents: string[]; default: string }>("/available-agents"),
+  availableAgents: () => request<{
+    agents: string[];
+    default: string;
+    capabilities: Record<string, AgentCapabilities>;
+  }>("/available-agents"),
+  availableModels: (agent: string) => request<{ agent: string; models: string[]; models_info?: ModelInfo[]; source: string }>(`/available-models?agent=${encodeURIComponent(agent)}`),
   setDefaultAgent: (agent: string) =>
     request<{ default: string }>("/default-agent", {
       method: "PUT",
       body: JSON.stringify({ agent }),
     }),
   getSettings: () =>
-    request<{ default_agent: string; has_token: boolean; masked_token: string; has_gitlab_token: boolean; masked_gitlab_token: string; disable_cloud: boolean }>("/settings"),
-  updateSettings: (data: { default_agent?: string; token?: string; gitlab_token?: string; disable_cloud?: boolean }) =>
+    request<{ default_agent: string; chrome_headless: boolean; suggest_next_actions: boolean; mcp_tools?: { task_management?: boolean } }>("/settings"),
+  updateSettings: (data: { default_agent?: string; chrome_headless?: boolean; suggest_next_actions?: boolean; mcp_tools?: { task_management?: boolean } }) =>
     request<void>("/settings", {
       method: "PUT",
       body: JSON.stringify(data),
@@ -589,71 +755,60 @@ export interface CloudInfo extends ServerInfo {
   user_name?: string;
 }
 
-export interface BalanceInfo {
-  user_id: string;
-  balance_tokens: number;
-  reserved_tokens: number;
-  total_recharged: number;
-  balance_cny: number;
-}
+export type AuthStatus =
+  | { auth_required: false }
+  | { auth_required: true; username: string; user_id: number };
 
-export const balanceApi = {
-  get: () => request<BalanceInfo>("/balance"),
-};
-
-export const updateApi = {
-  status: () => request<{ state: string; remote_version?: string }>("/update/status"),
-  restart: () => request<{ restarting: boolean }>("/update/restart", { method: "POST" }),
-};
-
+// Password authentication is optional; account-free instances return local mode.
 export const authApi = {
-  loginUrl: () => request<{ url: string }>("/auth/login-url"),
-  logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
-};
-
-// Members (namespace-level fuzzy search)
-export interface Member {
-  user_name: string;
-  display_name: string;
-  avatar_url: string;
-}
-
-export const membersApi = {
-  search: (q: string) =>
-    request<Member[]>(`/members?q=${encodeURIComponent(q)}`),
+  login: (username: string, password: string) =>
+    request<AuthStatus>("/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  logout: () =>
+    request<void>("/logout", { method: "POST" }),
+  me: () =>
+    request<AuthStatus>("/auth/me"),
 };
 
 // ---------------------------------------------------------------------------
 // Marketplace
 // ---------------------------------------------------------------------------
 
-// Local plugin (admin-managed, from marketplace_dir — supports JSON, SKILL.md, and .claude-plugin formats)
+
+// Local plugin (from marketplace directory — supports JSON, SKILL.md, and .claude-plugin formats)
 export interface LocalPlugin {
   id: string;
   name: string;
   description: string;
-  type: string;       // "mcp", "skill", "plugin", or "lsp"
-  version: string;
+  type: string;       // "mcp", "skill", "plugin", "lsp"
+  version?: string;
   command?: string;
   args?: string[];
   env_vars?: string[];
-  icon_url?: string;
-  author?: string;       // from plugin.json author.name
+  author?: string;
   source?: string;       // "custom", "skill", "plugin", "connector"
   mcp_config?: string;   // raw .mcp.json content
   lsp_config?: string;   // raw .lsp.json content
-  auth_type?: string;    // "oauth", "apikey", "none"
-  install_path?: string; // absolute path on disk (for plugin/skill install)
+  auth_type?: string;    // "oauth", "apikey", "oauth_discovery", "none"
+  install_path?: string; // absolute path on disk
+  category?: string;
+  homepage?: string;
+  components?: string[];
+  source_label?: string; // short display label, e.g. "anthropics/skills"
+  source_full?: string;  // full path or git URL for tooltip
 }
 
 export interface InstalledMCP {
   name: string;
-  project_id: string;
+  project_id: string;   // "" = global, else project-scoped
   package_id: string;
   version: string;
   mcp_key: string;
   manifest: string;
-  env_values: string;
+  env_values: string;   // JSON: user-provided env secrets
+  auth_type: string;    // "none", "apikey", "oauth_discovery", "oauth"
   installed_at: number;
 }
 
@@ -673,11 +828,38 @@ export interface InstalledPluginEntry {
   installed_at: number;
 }
 
+export interface MarketplaceSource {
+  id: string;
+  type: string;   // "local", "git", or "mcp"
+  url: string;
+  path: string;
+  name: string;
+  added_at: number;
+}
+
 export const marketplaceApi = {
-  // Local plugins (admin-managed directory)
+  // Local plugins (directory-based)
   listPlugins: () => request<LocalPlugin[]>("/marketplace/plugins"),
 
   getPlugin: (id: string) => request<LocalPlugin>(`/marketplace/plugins/${id}`),
+
+  // Marketplace sources (Add Marketplace)
+  listSources: () => request<MarketplaceSource[]>("/marketplace/sources"),
+
+  addSource: (input: string) =>
+    request<MarketplaceSource>("/marketplace/sources", {
+      method: "POST",
+      body: JSON.stringify({ input }),
+    }),
+
+  addMCPSource: (name: string, url: string, headers: Record<string, string>) =>
+    request<MarketplaceSource>("/marketplace/mcp-sources", {
+      method: "POST",
+      body: JSON.stringify({ name, url, headers }),
+    }),
+
+  removeSource: (id: string) =>
+    request<void>(`/marketplace/sources/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   // Installed MCPs
   listInstalledMCPs: (projectId?: string) => {
@@ -685,14 +867,14 @@ export const marketplaceApi = {
     return request<InstalledMCP[]>(`/marketplace/installed-mcps${qs}`);
   },
 
-  installMCP: (body: { name: string; package_id?: string; version?: string; mcp_key: string; manifest: object; env?: Record<string, string>; project_id?: string; auth_type?: string }) =>
+  installMCP: (body: { name: string; package_id?: string; version?: string; mcp_key?: string; manifest: object; env?: Record<string, string>; project_id?: string; auth_type?: string }) =>
     request<InstalledMCP>("/marketplace/installed-mcps", {
       method: "POST",
-      body: JSON.stringify({ ...body, manifest: JSON.stringify(body.manifest) }),
+      body: JSON.stringify(body),
     }),
 
   uninstallMCP: (name: string, projectId?: string) => {
-    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    const qs = projectId !== undefined ? `?project_id=${encodeURIComponent(projectId)}` : "";
     return request<void>(`/marketplace/installed-mcps/${encodeURIComponent(name)}${qs}`, {
       method: "DELETE",
     });
@@ -711,7 +893,7 @@ export const marketplaceApi = {
     }),
 
   uninstallSkill: (name: string, projectId?: string) => {
-    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    const qs = projectId !== undefined ? `?project_id=${encodeURIComponent(projectId)}` : "";
     return request<void>(
       `/marketplace/installed-skills/${encodeURIComponent(name)}${qs}`,
       { method: "DELETE" }
@@ -731,7 +913,7 @@ export const marketplaceApi = {
     }),
 
   uninstallPlugin: (name: string, projectId?: string) => {
-    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    const qs = projectId !== undefined ? `?project_id=${encodeURIComponent(projectId)}` : "";
     return request<void>(
       `/marketplace/installed-plugins/${encodeURIComponent(name)}${qs}`,
       { method: "DELETE" }
@@ -745,37 +927,12 @@ export const marketplaceApi = {
       method: "POST",
     });
   },
-};
 
-// JWT-based auth (cloud/SaaS mode)
-export interface AuthUser {
-  id: string;
-  username: string;
-  email?: string;
-  role: string;
-  features: number;
-}
-export interface AuthResponse {
-  token: string;
-  user: AuthUser;
-}
-export const authCloudApi = {
-  register: (email: string, password: string, code: string) =>
-    request<AuthResponse>("/auth/register", {
-      method: "POST",
-      body: JSON.stringify({ email, password, code }),
-    }),
-  login: (email: string, password: string) =>
-    request<AuthResponse>("/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
-    }),
-  sendVerification: (email: string) =>
-    request<{ ok: boolean }>("/auth/send-verification", {
-      method: "POST",
-      body: JSON.stringify({ email }),
-    }),
-  logout: () =>
-    request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
-  me: () => request<AuthUser>("/auth/me"),
+  // Probe an installed MCP to detect whether OAuth is required.
+  // If the upstream returns 401, the server broadcasts connector:needs_auth via
+  // WebSocket so the frontend's existing "Authorize" toast is shown automatically.
+  probeMCP: (name: string, projectId?: string) => {
+    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return request<{ name: string; key: string; state: "ready" | "needs_auth" | "auth_rejected" | "unavailable" | "runtime_managed"; tool_count?: number; message?: string }>(`/connectors/${encodeURIComponent(name)}/probe${qs}`, { method: "POST" });
+  },
 };

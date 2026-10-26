@@ -10,34 +10,37 @@ import (
 // ---------------------------------------------------------------------------
 
 type Project struct {
-	ID            string    `json:"id"`
-	NamespaceID   string    `json:"namespace_id"`
-	Name          string    `json:"name"`
-	Description   string    `json:"description"`
-	GitRepoPath   string    `json:"git_repo_path"`
-	GitLabRepoURL string    `json:"gitlab_repo_url,omitempty"`
-	CreatedBy     string    `json:"created_by"`
-	OwnerID       string    `json:"owner_id"`
-	Version       int       `json:"version"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID          string `json:"id"`
+	OwnerUserID int64  `json:"owner_user_id"`
+	NamespaceID string `json:"namespace_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	GitRepoPath string `json:"git_repo_path"`
+	IsGitRepo   bool   `json:"is_git_repo"` // transient: true if <GitRepoPath>/.git exists
+	// AutoManagedDir is true when GitRepoPath was created and is owned by the
+	// server (under data-dir/users/<user>/<name>/). When false, the user
+	// supplied an existing path; rename/delete must leave it alone.
+	AutoManagedDir bool      `json:"auto_managed_dir"`
+	CreatedBy      string    `json:"created_by"`
+	Version        int       `json:"version"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-
 type CreateProjectRequest struct {
-	NamespaceID   string `json:"namespace_id,omitempty"`
-	Name          string `json:"name"`
-	Description   string `json:"description"`
-	GitRepoPath   string `json:"git_repo_path"`
-	GitLabRepoURL string `json:"gitlab_repo_url"`
-	OwnerID       string `json:"owner_id,omitempty"` // set by API layer
+	OwnerUserID    int64  `json:"-"` // set by server from auth context, never from body
+	NamespaceID    string `json:"namespace_id,omitempty"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	GitRepoPath    string `json:"git_repo_path"`
+	AutoManagedDir bool   `json:"-"` // set by server based on auto_create_dir
+	CreatedBy      string `json:"-"` // set by server from auth context
 }
 
 type UpdateProjectRequest struct {
 	Name            *string `json:"name,omitempty"`
 	Description     *string `json:"description,omitempty"`
 	GitRepoPath     *string `json:"git_repo_path,omitempty"`
-	GitLabRepoURL   *string `json:"gitlab_repo_url,omitempty"`
 	ExpectedVersion *int    `json:"expected_version,omitempty"`
 }
 
@@ -51,10 +54,11 @@ type Task struct {
 	ParentID     string     `json:"parent_id"`
 	Title        string     `json:"title"`
 	Description  string     `json:"description"`
-	Status       string     `json:"status"`
-	Priority     string     `json:"priority"`
+	Status       string     `json:"status"`   // "open" | "closed"
+	Priority     string     `json:"priority"` // "low" | "medium" | "high" | "critical"
 	Assigner     string     `json:"assigner"`
 	RefCount     int        `json:"ref_count"`
+	DueDate      *time.Time `json:"due_date,omitempty"`
 	CommentCount int        `json:"comment_count"`
 	CreatedBy    string     `json:"created_by"`
 	Version      int        `json:"version"`
@@ -62,22 +66,26 @@ type Task struct {
 	UpdatedAt    time.Time  `json:"updated_at"`
 	ClosedAt     *time.Time `json:"closed_at,omitempty"`
 	Labels       []string   `json:"labels"`
-}
-
-type TaskAsset struct {
-	ID        string    `json:"id"`
-	TaskID    string    `json:"task_id"`
-	AssetID   string    `json:"asset_id"`
-	CreatedAt time.Time `json:"created_at"`
+	// Source identifies data origin: "local" (SQLite) or "gitlab" (GitLab API).
+	Source       string `json:"source"`
+	ExternalID   string `json:"external_id,omitempty"`
+	ExternalURL  string `json:"external_url,omitempty"`
+	ExternalType string `json:"external_type,omitempty"` // "Issue", "Task", etc.
+	// Children is populated at query time, not stored.
+	Children   []Task `json:"children,omitempty"`
+	ChildCount int    `json:"child_count"`
 }
 
 type CreateTaskRequest struct {
-	ProjectID   string `json:"project_id"`
-	ParentID    string `json:"parent_id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Priority    string `json:"priority"`
-	Assigner    string `json:"assigner"`
+	ProjectID   string   `json:"project_id"`
+	ParentID    string   `json:"parent_id"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Status      string   `json:"status"`
+	Priority    string   `json:"priority"`
+	Assigner    string   `json:"assigner"`
+	DueDate     string   `json:"due_date"`
+	Labels      []string `json:"labels"`
 }
 
 type UpdateTaskRequest struct {
@@ -88,7 +96,12 @@ type UpdateTaskRequest struct {
 	Status          *string `json:"status,omitempty"`
 	Priority        *string `json:"priority,omitempty"`
 	Assigner        *string `json:"assigner,omitempty"`
+	DueDate         *string `json:"due_date,omitempty"`
 	ExpectedVersion *int    `json:"expected_version,omitempty"`
+}
+
+type SetParentRequest struct {
+	ParentID string `json:"parent_id"`
 }
 
 // ---------------------------------------------------------------------------
@@ -152,23 +165,33 @@ type ReactionSummary struct {
 // ---------------------------------------------------------------------------
 
 type Session struct {
-	ID             string     `json:"id"`
-	NamespaceID    string     `json:"namespace_id"`
-	Name           string     `json:"name"`
-	ProjectID      string     `json:"project_id"`
-	Agent          string     `json:"agent"`
-	Model          string     `json:"model"`
-	AgentSessionID string     `json:"agent_session_id"`
-	StreamID       string     `json:"stream_id"`
-	SortOrder      int        `json:"sort_order"`
-	Features       string     `json:"features"`
-	WorktreeMode   string     `json:"worktree_mode"`   // "local" | "worktree"
-	WorktreePath   string     `json:"worktree_path"`   // empty until worktree is created
-	CreatedBy      string     `json:"created_by"`
-	UserID         string     `json:"user_id"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	DeletedAt      *time.Time `json:"deleted_at,omitempty"`
+	ID               string `json:"id"`
+	NamespaceID      string `json:"namespace_id"`
+	Name             string `json:"name"`
+	ProjectID        string `json:"project_id"`
+	Agent            string `json:"agent"`
+	Model            string `json:"model"`
+	Effort           string `json:"effort"`
+	AgentSessionID   string `json:"agent_session_id"`
+	StreamID         string `json:"stream_id"`
+	SortOrder        int    `json:"sort_order"`
+	IsPinned         bool   `json:"is_pinned"`
+	Features         string `json:"features"`
+	ChromeBrowserURL string `json:"chrome_browser_url"` // empty = NexBox-managed Chrome
+	WorktreeMode     string `json:"worktree_mode"`      // "local" | "worktree"
+	WorktreePath     string `json:"worktree_path"`      // empty until worktree is created
+	// session, these record the parent and the Nexbox message at which the
+	// fork was taken. ForkedAtAgentCheckpoint is an opaque value interpreted
+	// only by the selected agent adapter on the first turn of the fork.
+	ForkedFromSessionID     string     `json:"forked_from_session_id,omitempty"`
+	ForkedFromMessageID     string     `json:"forked_from_message_id,omitempty"`
+	ForkedAtAgentCheckpoint string     `json:"forked_at_agent_checkpoint,omitempty"`
+	IsHidden                bool       `json:"is_hidden"`
+	CreatedBy               string     `json:"created_by"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
+	LastActiveAt            time.Time  `json:"last_active_at"`
+	DeletedAt               *time.Time `json:"deleted_at,omitempty"`
 }
 
 type CreateSessionRequest struct {
@@ -176,14 +199,17 @@ type CreateSessionRequest struct {
 	ProjectID string `json:"project_id"`
 	Agent     string `json:"agent"`
 	Model     string `json:"model"`
-	UserID    string `json:"user_id,omitempty"` // set by API layer
+	Effort    string `json:"effort"`
 }
 
 type UpdateSessionRequest struct {
-	Name      *string `json:"name,omitempty"`
-	ProjectID *string `json:"project_id,omitempty"`
-	Agent     *string `json:"agent,omitempty"`
-	Model     *string `json:"model,omitempty"`
+	IsPinned         *bool   `json:"is_pinned,omitempty"`
+	ChromeBrowserURL *string `json:"chrome_browser_url,omitempty"`
+	Name             *string `json:"name,omitempty"`
+	ProjectID        *string `json:"project_id,omitempty"`
+	Agent            *string `json:"agent,omitempty"`
+	Model            *string `json:"model,omitempty"`
+	Effort           *string `json:"effort,omitempty"`
 }
 
 type ReorderSessionsRequest struct {
@@ -222,6 +248,7 @@ type Asset struct {
 	CreatedBy      string    `json:"created_by"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	LarkDocURL     string    `json:"lark_doc_url,omitempty"`
 }
 
 type AssetWithContent struct {
@@ -255,12 +282,23 @@ type UpdateAssetRequest struct {
 // ---------------------------------------------------------------------------
 
 type MessagePart struct {
-	Type       string      `json:"type"`
-	Content    string      `json:"content,omitempty"`
-	ToolCallID string      `json:"toolCallId,omitempty"`
-	ToolName   string      `json:"toolName,omitempty"`
-	Input      interface{} `json:"input,omitempty"`
-	Output     string      `json:"output,omitempty"`
+	Type       string `json:"type"`
+	Content    string `json:"content,omitempty"`
+	ToolCallID string `json:"toolCallId,omitempty"`
+	ToolName   string `json:"toolName,omitempty"`
+	// ParentToolID, on tool_use parts, is the tool_use_id of the Task
+	// tool that launched this sub-agent's call. Empty for top-level
+	// tool calls made directly by the main agent.
+	ParentToolID string      `json:"parentToolCallId,omitempty"`
+	Input        interface{} `json:"input,omitempty"`
+	// Summary is the human-readable description associated with an Agent/Task
+	// tool. It is kept separate from the final tool_result so the card can show
+	// both what was delegated and what the sub-agent returned after a reload.
+	Summary string `json:"summary,omitempty"`
+	Output  string `json:"output,omitempty"`
+	// Diff is a unified diff (git-style ---/+++/@@ hunks) attached to a
+	// tool_result part for a single-file edit/write-family tool call.
+	Diff       string      `json:"diff,omitempty"`
 	State      string      `json:"state,omitempty"`
 	IsError    bool        `json:"isError,omitempty"`
 	Count      int         `json:"count,omitempty"`
@@ -270,19 +308,33 @@ type MessagePart struct {
 	Title      string      `json:"title,omitempty"`
 	AssetType  string      `json:"assetType,omitempty"`
 	WorkflowID string      `json:"workflowId,omitempty"`
+	// Image file information for persistence
+	Filename string `json:"filename,omitempty"`
+	URL      string `json:"url,omitempty"`
 	// Widget (visualize_show_widget)
 	WidgetCode      string   `json:"widgetCode,omitempty"`
 	LoadingMessages []string `json:"loadingMessages,omitempty"`
+	// WorkflowProgress holds the merged phase/agent snapshot for a dynamic
+	// Workflow tool call ({phases:[...], agents:[...], status, summary}).
+	// Persisted on the Workflow tool_use part so the progress tree survives a
+	// browser refresh and is replayed by GET /messages.
+	WorkflowProgress json.RawMessage `json:"workflowProgress,omitempty"`
 }
 
 type MessageMetadata struct {
-	SessionID      string  `json:"sessionId,omitempty"`
-	SDKMessageUUID string  `json:"sdkMessageUuid,omitempty"`
-	InputTokens    int     `json:"inputTokens,omitempty"`
-	OutputTokens   int     `json:"outputTokens,omitempty"`
-	TotalCostUSD   float64 `json:"totalCostUsd,omitempty"`
-	DurationMs     int64   `json:"durationMs,omitempty"`
-	ToolCalls      int     `json:"toolCalls,omitempty"`
+	SessionID                string  `json:"sessionId,omitempty"`
+	AgentCheckpoint          string  `json:"agentCheckpoint,omitempty"`
+	InputTokens              int     `json:"inputTokens,omitempty"`
+	OutputTokens             int     `json:"outputTokens,omitempty"`
+	CacheReadInputTokens     int     `json:"cacheReadInputTokens,omitempty"`
+	CacheCreationInputTokens int     `json:"cacheCreationInputTokens,omitempty"`
+	TotalCostUSD             float64 `json:"totalCostUsd,omitempty"`
+	DurationMs               int64   `json:"durationMs,omitempty"`
+	ToolCalls                int     `json:"toolCalls,omitempty"`
+	// Interjected marks a user message that was injected into a running turn
+	// (queue-jump), so the UI can tag it — its position relative to the reply
+	// is intentional, not a misordering.
+	Interjected bool `json:"interjected,omitempty"`
 }
 
 type ChatMessage struct {
@@ -304,11 +356,11 @@ type QueuedMessageImage struct {
 }
 
 type QueuedMessage struct {
-	ID        string              `json:"id"`
-	SessionID string              `json:"session_id"`
-	Text      string              `json:"text"`
+	ID        string               `json:"id"`
+	SessionID string               `json:"session_id"`
+	Text      string               `json:"text"`
 	Images    []QueuedMessageImage `json:"images,omitempty"`
-	CreatedAt time.Time           `json:"created_at"`
+	CreatedAt time.Time            `json:"created_at"`
 }
 
 type CreateQueuedMessageRequest struct {
@@ -418,7 +470,16 @@ type Workflow struct {
 	CreatedAt   time.Time       `json:"created_at"`
 	UpdatedAt   time.Time       `json:"updated_at"`
 	Schedule    string          `json:"schedule,omitempty"` // JSON-encoded WorkflowSchedule, empty = no schedule
-	IsRunning   bool            `json:"is_running,omitempty"` // computed at query time, not stored
+	// ScheduleUpdatedAt is when the local schedule was last saved. Used by the
+	// scheduler to avoid firing retroactively for a slot that already passed
+	// before the user set the schedule. Server-only; not serialised to clients.
+	ScheduleUpdatedAt time.Time `json:"-"`
+	// WorktreeMode controls per-run isolation. "local" (default) uses the project
+	// repo directly. "worktree" creates a fresh git worktree per execution; all
+	// sessions in that run share it, and concurrent runs of the same workflow are
+	// allowed (each run gets its own worktree/branch).
+	WorktreeMode string `json:"worktree_mode"`        // "local" | "worktree"
+	IsRunning    bool   `json:"is_running,omitempty"` // computed at query time, not stored
 }
 
 type WorkflowDefinition struct {
@@ -428,9 +489,9 @@ type WorkflowDefinition struct {
 
 type WorkflowNode struct {
 	ID       string                 `json:"id"`
-	Type     string                 `json:"type"` // llm/http/condition/transform/code
+	Type     string                 `json:"type"`     // llm/http/condition/transform/code
 	Position map[string]float64     `json:"position"` // {x, y}
-	Data     map[string]interface{} `json:"data"` // {label, config}
+	Data     map[string]interface{} `json:"data"`     // {label, config}
 }
 
 type WorkflowEdge struct {
@@ -453,6 +514,7 @@ type WorkflowExecution struct {
 	CompletedAt        *time.Time `json:"completed_at,omitempty"`
 	DurationMs         *int64     `json:"duration_ms,omitempty"`
 	CreatedAt          time.Time  `json:"created_at"`
+	WorktreePath       string     `json:"worktree_path,omitempty"` // populated when workflow's worktree_mode is "worktree"
 }
 
 type WorkflowNodeLog struct {
@@ -460,10 +522,10 @@ type WorkflowNodeLog struct {
 	ExecutionID string     `json:"execution_id"`
 	NodeID      string     `json:"node_id"`
 	NodeType    string     `json:"node_type"`
-	NodeLabel   string     `json:"node_label"`           // display name at execution time
-	Level       int        `json:"level"`                // topological DAG level; same level = parallel nodes
-	Status      string     `json:"status"`               // pending|running|waiting|completed|failed|cancelled
-	Input       string     `json:"input,omitempty"`      // input to this node; for human nodes: the continue input
+	NodeLabel   string     `json:"node_label"`      // display name at execution time
+	Level       int        `json:"level"`           // topological DAG level; same level = parallel nodes
+	Status      string     `json:"status"`          // pending|running|waiting|completed|failed|cancelled
+	Input       string     `json:"input,omitempty"` // input to this node; for human nodes: the continue input
 	Output      string     `json:"output,omitempty"`
 	Error       string     `json:"error,omitempty"`
 	HookRetries int        `json:"hook_retries,omitempty"` // number of hook retry iterations
@@ -495,106 +557,10 @@ type UpdateWorkflowRequest struct {
 	Definition      *json.RawMessage `json:"definition,omitempty"`
 	Status          *string          `json:"status,omitempty"`
 	ExpectedVersion *int             `json:"expected_version,omitempty"`
-	Schedule        *string          `json:"schedule,omitempty"` // JSON-encoded WorkflowSchedule or "" to clear
+	Schedule        *string          `json:"schedule,omitempty"`      // JSON-encoded WorkflowSchedule or "" to clear
+	WorktreeMode    *string          `json:"worktree_mode,omitempty"` // "local" | "worktree"
 }
 
 type ExecuteWorkflowRequest struct {
 	Input map[string]interface{} `json:"input,omitempty"`
-}
-
-// ---------------------------------------------------------------------------
-// User
-// ---------------------------------------------------------------------------
-
-// Feature flag bitmask constants for User.Features field.
-const (
-	FeatureTask     int64 = 1 << 0 // can see Task management
-	FeatureAsset    int64 = 1 << 1 // can see Asset management
-	FeatureWorkflow int64 = 1 << 2 // can see Workflow management
-	FeatureTerminal int64 = 1 << 3 // can see Terminal
-	FeatureGit      int64 = 1 << 4 // can see Git / Files panels
-)
-
-type User struct {
-	ID           string    `json:"id"`
-	Username     string    `json:"username"`
-	PasswordHash string    `json:"-"`
-	Email        string    `json:"email,omitempty"`
-	Role         string    `json:"role"` // "admin" | "user"
-	Features     int64     `json:"features"` // bitmask of Feature* constants
-	Quotas       string    `json:"quotas,omitempty"` // JSON: {"cpu":"1.0","memory":"2g","pids":200}
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-}
-
-type CreateUserRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"` // plain text, caller must hash before passing to store
-	Email    string `json:"email,omitempty"`
-	Role     string `json:"role"` // default "user"
-}
-
-// ---------------------------------------------------------------------------
-// Billing
-// ---------------------------------------------------------------------------
-
-type UserBalance struct {
-	UserID         string    `json:"user_id"`
-	BalanceTokens  int64     `json:"balance_tokens"`
-	ReservedTokens int64     `json:"reserved_tokens"`
-	TotalRecharged int64     `json:"total_recharged"`
-	UpdatedAt      time.Time `json:"updated_at"`
-}
-
-type TokenTransaction struct {
-	ID        string    `json:"id"`
-	UserID    string    `json:"user_id"`
-	SessionID string    `json:"session_id,omitempty"`
-	Delta     int64     `json:"delta"`   // positive = recharge, negative = consume
-	Reason    string    `json:"reason"`  // "recharge" | "reserve" | "settle"
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// ---------------------------------------------------------------------------
-// Marketplace Plugin (local directory listing)
-// ---------------------------------------------------------------------------
-
-// MarketplacePlugin represents a plugin available in the admin-maintained
-// marketplace directory. Supports three formats:
-//   - Custom JSON files (*.json)
-//   - Anthropic skills (SKILL.md with YAML frontmatter)
-//   - Anthropic plugins (.claude-plugin/plugin.json + optional .mcp.json)
-type MarketplacePlugin struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Type        string   `json:"type"`       // "mcp", "skill", "plugin", "lsp", "remote_git"
-	Version     string   `json:"version"`
-	Command     string   `json:"command,omitempty"` // for mcp servers (stdio)
-	Args        []string `json:"args,omitempty"`
-	EnvVars     []string `json:"env_vars,omitempty"` // required env var names
-	IconURL     string   `json:"icon_url,omitempty"`
-	Author      string   `json:"author,omitempty"`
-	Category    string   `json:"category,omitempty"`  // "development", "productivity", etc.
-	Homepage    string   `json:"homepage,omitempty"`
-	Source      string   `json:"source,omitempty"`       // "custom", "skill", "plugin", "connector", "remote_git"
-	MCPConfig   string   `json:"mcp_config,omitempty"`   // raw .mcp.json content (JSON string)
-	LSPConfig   string   `json:"lsp_config,omitempty"`   // JSON: lspServers map (for lsp type)
-	AuthType    string   `json:"auth_type,omitempty"`    // "none", "apikey", "oauth_discovery", "oauth"
-	Components  []string `json:"components,omitempty"`   // ["mcp","commands","agents","hooks","skills","lsp"]
-	InstallPath string   `json:"install_path,omitempty"` // absolute path on disk
-}
-
-// ---------------------------------------------------------------------------
-// Installed Plugin (Marketplace)
-// ---------------------------------------------------------------------------
-
-// InstalledPlugin represents a plugin installed by a user from the local
-// marketplace directory.
-type InstalledPlugin struct {
-	ID        string    `json:"id"`
-	UserID    string    `json:"user_id"`
-	PluginID  string    `json:"plugin_id"`
-	Config    string    `json:"config"` // JSON: env var values filled in by user
-	CreatedAt time.Time `json:"created_at"`
 }

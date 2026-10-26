@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -14,9 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/esonic/nexbox/store"
 	"github.com/go-chi/chi/v5"
-	"gitlab.okg.com/sre_ai/boxnex/store"
 )
+
+var oauthDiscoveryHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 // ---------------------------------------------------------------------------
 // MCP Reverse Proxy
@@ -29,23 +32,18 @@ import (
 func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Require a valid session ID.  This serves two purposes:
-	//   1. Project isolation — we use the session's ProjectID to scope the MCP
-	//      lookup, so one container cannot reach another project's connectors.
-	//   2. Public-internet protection — the session UUID is cryptographically
-	//      random, acting as an unguessable bearer token even if this route is
-	//      reachable from the public internet.
+	// Require a valid session ID for access control.
 	sessionID := r.URL.Query().Get("session")
 	if sessionID == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	sess, err := s.LocalStore.GetSession(sessionID)
+	sess, err := s.Store.GetSession(sessionID)
 	if err != nil || sess == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -64,16 +62,39 @@ func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get Authorization header value (lazy-refresh OAuth tokens).
-	authHeader, err := s.mcpAuthHeader(mcp)
+	// Resolve the complete header set. Static headers come directly from the
+	// installed manifest; OAuth, when configured, only replaces Authorization.
+	requestHeaders, err := s.mcpRequestHeaders(mcp)
 	if err != nil {
 		http.Error(w, "auth error for MCP "+name+": "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	var rpcRequest mcpProxyRequest
+	if r.Method == http.MethodPost && r.Body != nil {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 32<<20))
+		_ = r.Body.Close()
+		if err != nil {
+			http.Error(w, "MCP request body is too large or unreadable", http.StatusRequestEntityTooLarge)
+			return
+		}
+		_ = json.Unmarshal(body, &rpcRequest)
+		if rpcRequest.Method == "tools/call" {
+			body, err = s.translateMCPToolCall(mcp, body, rpcRequest)
+			if err != nil {
+				http.Error(w, "invalid MCP tool call", http.StatusBadRequest)
+				return
+			}
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+	}
 
 	// Build the forwarding URL: targetURL + the tail path after /mcp-proxy/{name}.
+	// Strip internal "session" query parameter before forwarding.
 	tail := chi.URLParam(r, "*")
-	fwdURL, err := buildForwardURL(targetURL, tail, r.URL.RawQuery)
+	fwdQuery := r.URL.Query()
+	fwdQuery.Del("session")
+	fwdURL, err := buildForwardURL(targetURL, tail, fwdQuery.Encode())
 	if err != nil {
 		http.Error(w, "invalid forward URL: "+err.Error(), http.StatusBadGateway)
 		return
@@ -83,14 +104,50 @@ func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 		Director: func(req *http.Request) {
 			req.URL = fwdURL
 			req.Host = fwdURL.Host
-			if authHeader != "" {
-				req.Header.Set("Authorization", authHeader)
+			for headerName, headerValue := range requestHeaders {
+				req.Header.Set(headerName, headerValue)
+			}
+			// Prefer JSON over SSE in the Accept header so that upstream MCP
+			// servers return application/json responses. Some servers incorrectly
+			// return Content-Type: text/event-stream with a plain JSON body when
+			// SSE is preferred, which breaks strict Streamable-HTTP clients like
+			// Codex's rmcp.
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			if rpcRequest.Method == "tools/list" {
+				// This reply is parsed and rewritten below. Do not forward a
+				// client's gzip negotiation and then try to parse compressed JSON.
+				req.Header.Set("Accept-Encoding", "identity")
 			}
 			// Remove hop-by-hop headers that shouldn't be forwarded.
 			req.Header.Del("X-Forwarded-For")
 		},
 		// Disable response buffering so SSE streams through immediately.
 		FlushInterval: -1,
+		// Detect upstream 401. Prompt only for known OAuth MCPs or after successful
+		// discovery; an API-key failure must not be mislabeled as OAuth.
+		ModifyResponse: func(resp *http.Response) error {
+			normalizeMCPNotificationResponse(rpcRequest, resp)
+			if resp.StatusCode == http.StatusUnauthorized {
+				log.Printf("[mcp-proxy] %s: upstream returned 401", name)
+				shouldPromptOAuth := mcp.AuthType == "oauth" || mcp.AuthType == "oauth_discovery"
+				if mcp.AuthType == "none" {
+					go func() {
+						if s.discoverAndMarkMCPOAuth(mcp, fwdURL.String()) {
+							s.broadcastNeedsAuth(name, mcp.ProjectID)
+						}
+					}()
+				}
+				if shouldPromptOAuth {
+					s.broadcastNeedsAuth(name, mcp.ProjectID)
+				}
+				// Preserve 401, WWW-Authenticate and the upstream body. Turning
+				// this into HTTP 200 with id:null breaks strict JSON-RPC clients.
+			}
+			if rpcRequest.Method == "tools/list" && resp.StatusCode == http.StatusOK {
+				return s.rewriteMCPToolList(resp, mcp, rpcRequest.ID)
+			}
+			return nil
+		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
 			log.Printf("[mcp-proxy] %s: upstream error: %v", name, err)
 			http.Error(rw, "upstream error: "+err.Error(), http.StatusBadGateway)
@@ -102,17 +159,17 @@ func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 // resolveMCPForProxy fetches the InstalledMCP record for proxying.
 // It tries project-scoped first, then global.
 func (s *Server) resolveMCPForProxy(name, projectID string) (*store.InstalledMCP, error) {
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		return nil, fmt.Errorf("local store not available")
 	}
 	if projectID != "" {
-		mcp, err := s.LocalStore.GetInstalledMCP(name, projectID)
+		mcp, err := s.Store.GetInstalledMCP(name, projectID)
 		if err == nil && mcp != nil {
 			return mcp, nil
 		}
 	}
 	// Fall back to global record.
-	mcp, err := s.LocalStore.GetInstalledMCP(name, "")
+	mcp, err := s.Store.GetInstalledMCP(name, "")
 	if err != nil || mcp == nil {
 		return nil, fmt.Errorf("MCP %q not installed", name)
 	}
@@ -121,10 +178,8 @@ func (s *Server) resolveMCPForProxy(name, projectID string) (*store.InstalledMCP
 
 // mcpTargetURL extracts the upstream URL from a stored manifest JSON.
 func mcpTargetURL(manifestJSON string) (*url.URL, error) {
-	var entry struct {
-		URL string `json:"url"`
-	}
-	if err := json.Unmarshal([]byte(manifestJSON), &entry); err != nil || entry.URL == "" {
+	entry, err := parseInstalledMCPManifest(manifestJSON)
+	if err != nil || entry.URL == "" {
 		return nil, fmt.Errorf("no url in manifest")
 	}
 	return url.Parse(entry.URL)
@@ -136,53 +191,67 @@ func buildForwardURL(base *url.URL, tail, rawQuery string) (*url.URL, error) {
 	if tail != "" {
 		fwd.Path = strings.TrimRight(fwd.Path, "/") + "/" + strings.TrimLeft(tail, "/")
 	}
-	fwd.RawQuery = rawQuery
+	query := base.Query()
+	forwarded, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return nil, err
+	}
+	for key, values := range forwarded {
+		query[key] = values
+	}
+	fwd.RawQuery = query.Encode()
 	return &fwd, nil
 }
 
-// mcpAuthHeader returns the Authorization header value for an installed MCP.
-// For apikey: reads the key from env_values.
-// For oauth_discovery/oauth: lazily refreshes the stored token.
-func (s *Server) mcpAuthHeader(mcp *store.InstalledMCP) (string, error) {
-	switch mcp.AuthType {
-	case "apikey":
-		return s.apikeyHeader(mcp)
-	case "oauth_discovery", "oauth":
-		return s.oauthHeader(mcp)
-	default:
-		return "", nil
+// mcpRequestHeaders returns the complete headers stored for an MCP. Placeholder
+// replacement here keeps MCPs installed by older BeeHub versions working; new
+// installs are already fully resolved before they are stored.
+func (s *Server) mcpRequestHeaders(mcp *store.InstalledMCP) (map[string]string, error) {
+	manifest, err := parseInstalledMCPManifest(mcp.Manifest)
+	if err != nil {
+		return nil, fmt.Errorf("parse MCP manifest: %w", err)
 	}
-}
 
-func (s *Server) apikeyHeader(mcp *store.InstalledMCP) (string, error) {
-	if mcp.EnvValues == "" || mcp.EnvValues == "{}" {
-		return "", nil
-	}
 	var vals map[string]string
-	if err := json.Unmarshal([]byte(mcp.EnvValues), &vals); err != nil {
-		return "", nil
-	}
-	// Look for a value with key that suggests it's an API key / token.
-	for k, v := range vals {
-		ku := strings.ToUpper(k)
-		if strings.Contains(ku, "TOKEN") || strings.Contains(ku, "KEY") || strings.Contains(ku, "SECRET") || strings.Contains(ku, "API") {
-			return "Bearer " + v, nil
+	if mcp.EnvValues != "" && mcp.EnvValues != "{}" {
+		if err := json.Unmarshal([]byte(mcp.EnvValues), &vals); err != nil {
+			return nil, fmt.Errorf("parse stored MCP values: %w", err)
 		}
 	}
-	// Fallback: return first value as Bearer token.
-	for _, v := range vals {
-		return "Bearer " + v, nil
+	resolved, _, err := resolveMCPHeaderTemplates(manifest.Headers, vals)
+	if err != nil {
+		return nil, err
 	}
-	return "", nil
+	if resolved == nil {
+		resolved = make(map[string]string)
+	}
+
+	if mcp.AuthType == "oauth_discovery" || mcp.AuthType == "oauth" {
+		authHeader, err := s.oauthHeader(mcp)
+		if err != nil {
+			return nil, err
+		}
+		if authHeader != "" {
+			for name := range resolved {
+				if strings.EqualFold(name, "Authorization") {
+					delete(resolved, name)
+				}
+			}
+			resolved["Authorization"] = authHeader
+		}
+	}
+	return resolved, nil
 }
 
 func (s *Server) oauthHeader(mcp *store.InstalledMCP) (string, error) {
-	tok, err := s.LocalStore.GetMCPOAuthToken(mcp.Name, mcp.ProjectID)
+	tok, err := s.Store.GetMCPOAuthToken(mcp.Name, mcp.ProjectID)
 	if err != nil {
 		return "", fmt.Errorf("get oauth token: %w", err)
 	}
 	if tok == nil || tok.AccessToken == "" {
-		return "", fmt.Errorf("MCP %q: OAuth not connected", mcp.Name)
+		// No token yet — forward the request without auth; upstream will 401
+		// which is caught by ModifyResponse and triggers the auth prompt.
+		return "", nil
 	}
 
 	// Lazy refresh: if token expires within 5 minutes, try to refresh.
@@ -192,32 +261,54 @@ func (s *Server) oauthHeader(mcp *store.InstalledMCP) (string, error) {
 			if err == nil {
 				refreshed.MCPName = mcp.Name
 				refreshed.ProjectID = mcp.ProjectID
-				_ = s.LocalStore.UpsertMCPOAuthToken(*refreshed)
+				_ = s.Store.UpsertMCPOAuthToken(*refreshed)
 				tok = refreshed
 			} else {
 				log.Printf("[mcp-proxy] %s: token refresh failed: %v", mcp.Name, err)
-				s.broadcastReauth(mcp.Name)
-				return "", fmt.Errorf("token expired for MCP %q, please reconnect", mcp.Name)
+				// Forward without auth; upstream will 401 and trigger re-auth.
+				return "", nil
 			}
 		} else {
-			// No refresh token available — cannot recover, require re-auth.
-			s.broadcastReauth(mcp.Name)
-			return "", fmt.Errorf("token expired for MCP %q and no refresh_token available, please reconnect", mcp.Name)
+			// No refresh token; forward without auth so upstream triggers 401.
+			return "", nil
 		}
 	}
 
 	return "Bearer " + tok.AccessToken, nil
 }
 
-// broadcastReauth pushes a connector:reauth_required event to all WS clients.
-func (s *Server) broadcastReauth(mcpName string) {
+// broadcastNeedsAuth pushes a connector:needs_auth event to all WS clients,
+// prompting the frontend to initiate the OAuth authorization flow.
+// projectID is included so the frontend can pass it to oauthStart.
+func (s *Server) broadcastNeedsAuth(mcpName, projectID string) {
 	if s.Hub == nil {
 		return
 	}
-	data, err := json.Marshal(map[string]any{"type": "connector:reauth_required", "name": mcpName})
+	data, err := json.Marshal(map[string]any{"type": "connector:needs_auth", "name": mcpName, "project_id": projectID})
 	if err == nil {
 		s.Hub.BroadcastRaw(data)
 	}
+}
+
+// broadcastReauth kept for backwards compatibility.
+func (s *Server) broadcastReauth(mcpName string) {
+	s.broadcastNeedsAuth(mcpName, "")
+}
+
+// discoverAndMarkMCPOAuth verifies OAuth discovery for an MCP whose auth type
+// is not known yet. A plain 401 is not enough to classify a server as OAuth.
+func (s *Server) discoverAndMarkMCPOAuth(mcp *store.InstalledMCP, rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	if _, err := discoverOAuthEndpoints(u.Scheme + "://" + u.Host); err != nil {
+		return false
+	}
+	if s.Store != nil {
+		_ = s.Store.UpdateInstalledMCPAuthType(mcp.Name, mcp.ProjectID, "oauth_discovery")
+	}
+	return true
 }
 
 // refreshOAuthToken uses the refresh_token grant to get a new access token.
@@ -267,12 +358,11 @@ type OAuthStartResponse struct {
 }
 
 // HandleOAuthStart initiates OAuth Authorization Code + PKCE for an installed MCP.
-// POST /api/connectors/{name}/oauth/start
 func (s *Server) HandleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	projectID := r.URL.Query().Get("project_id")
 
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "local store not available")
 		return
 	}
@@ -282,50 +372,78 @@ func (s *Server) HandleOAuthStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine OAuth client ID and authorization server URL.
-	clientID, authServerURL, err := resolveOAuthConfig(mcp)
+	authURL, err := s.startOAuthFlow(mcp)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 
-	// Discover authorization endpoint.
-	authEndpoint, tokenEndpoint, err := discoverOAuthEndpoints(authServerURL)
+	writeJSON(w, http.StatusOK, OAuthStartResponse{AuthURL: authURL})
+}
+
+// startOAuthFlow performs OAuth Authorization Code + PKCE setup for an installed MCP
+// and returns the authorization URL to redirect the user to.
+func (s *Server) startOAuthFlow(mcp *store.InstalledMCP) (string, error) {
+	name := mcp.Name
+
+	// Determine OAuth client ID and authorization server URL.
+	clientID, authServerURL, err := resolveOAuthConfig(mcp)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "OAuth discovery failed: "+err.Error())
-		return
+		return "", err
+	}
+
+	// If no client_id yet, check a previously stored token record (e.g. from a prior DCR).
+	if clientID == "" {
+		if existing, _ := s.Store.GetMCPOAuthToken(name, mcp.ProjectID); existing != nil && existing.ClientID != "" {
+			clientID = existing.ClientID
+		}
+	}
+
+	// Build redirect URI (our callback) — needed for DCR registration.
+	callbackURL := fmt.Sprintf("http://127.0.0.1:%d/api/connectors/oauth/callback", s.ListenPort)
+
+	// Discover authorization endpoint.
+	disc, err := discoverOAuthEndpoints(authServerURL)
+	if err != nil {
+		return "", fmt.Errorf("OAuth discovery failed: %w", err)
+	}
+
+	// If still no client_id, try Dynamic Client Registration (RFC 7591).
+	if clientID == "" {
+		if disc.RegistrationEndpoint == "" {
+			return "", fmt.Errorf("OAuth client_id not configured for MCP %s and server does not support Dynamic Client Registration", name)
+		}
+		clientID, err = dynamicClientRegister(disc.RegistrationEndpoint, callbackURL)
+		if err != nil {
+			return "", fmt.Errorf("OAuth client registration failed: %w", err)
+		}
+		log.Printf("[oauth] registered new client via DCR for MCP %s: %s", name, clientID)
 	}
 
 	// Generate PKCE verifier + challenge.
 	verifier, challenge, err := generatePKCE()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "PKCE generation failed")
-		return
+		return "", fmt.Errorf("PKCE generation failed")
 	}
 
 	// Generate random state.
 	state, err := randomBase64(16)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "state generation failed")
-		return
+		return "", fmt.Errorf("state generation failed")
 	}
-
-	// Build redirect URI (our callback).
-	callbackURL := fmt.Sprintf("http://127.0.0.1:%d/api/connectors/oauth/callback", s.ListenPort)
 
 	// Persist pending OAuth state.
 	pending := store.MCPOAuthToken{
 		MCPName:       name,
 		ProjectID:     mcp.ProjectID,
-		TokenEndpoint: tokenEndpoint,
+		TokenEndpoint: disc.TokenEndpoint,
 		ClientID:      clientID,
 		State:         state,
 		CodeVerifier:  verifier,
 		UpdatedAt:     time.Now(),
 	}
-	if err := s.LocalStore.UpsertMCPOAuthToken(pending); err != nil {
-		writeError(w, http.StatusInternalServerError, "store state: "+err.Error())
-		return
+	if err := s.Store.UpsertMCPOAuthToken(pending); err != nil {
+		return "", fmt.Errorf("store state: %w", err)
 	}
 
 	// Build authorization URL.
@@ -337,9 +455,70 @@ func (s *Server) HandleOAuthStart(w http.ResponseWriter, r *http.Request) {
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
 	}
-	authURL := authEndpoint + "?" + params.Encode()
+	return disc.AuthorizationEndpoint + "?" + params.Encode(), nil
+}
 
-	writeJSON(w, http.StatusOK, OAuthStartResponse{AuthURL: authURL})
+// ---------------------------------------------------------------------------
+// MCP Probe: detect auth requirement after install
+// ---------------------------------------------------------------------------
+
+// HandleMCPProbe uses the same discovery and authorization checks as chat.
+func (s *Server) HandleMCPProbe(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	projectID := r.URL.Query().Get("project_id")
+
+	if s.Store == nil {
+		writeError(w, http.StatusServiceUnavailable, "local store not available")
+		return
+	}
+	mcp, err := s.resolveMCPForProxy(name, projectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	key := installedMCPRuntimeKey(mcp)
+	entry, err := parseInstalledMCPManifest(mcp.Manifest)
+	if err == nil && entry.Type == "stdio" && entry.Cmd != "" {
+		writeJSON(w, http.StatusOK, mcpRuntimeStatus{Name: name, Key: key, State: "runtime_managed", Message: "Local stdio connector; availability is determined by the agent runtime."})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.probeInstalledMCP(r.Context(), mcp, key))
+}
+
+// probeMCPNeedsAuth sends an MCP initialize request to url and returns true if
+// the server responds with HTTP 401 (auth required). A 5-second timeout is used
+// so the probe never stalls the install flow.
+func probeMCPNeedsAuth(mcpURL string, headers map[string]string) (bool, error) {
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params": map[string]any{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]any{},
+			"clientInfo":      map[string]any{"name": "nexbox", "version": "1.0"},
+		},
+	})
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, mcpURL, strings.NewReader(string(body)))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	for name, value := range headers {
+		req.Header.Set(name, value)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode == http.StatusUnauthorized, nil
 }
 
 // HandleOAuthCallback exchanges the authorization code for tokens.
@@ -351,13 +530,13 @@ func (s *Server) HandleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing code or state", http.StatusBadRequest)
 		return
 	}
-	if s.LocalStore == nil {
+	if s.Store == nil {
 		http.Error(w, "local store not available", http.StatusServiceUnavailable)
 		return
 	}
 
 	// Look up pending OAuth flow by state.
-	pending, err := s.LocalStore.GetMCPOAuthTokenByState(state)
+	pending, err := s.Store.GetMCPOAuthTokenByState(state)
 	if err != nil || pending == nil {
 		http.Error(w, "unknown or expired OAuth state", http.StatusBadRequest)
 		return
@@ -380,14 +559,19 @@ func (s *Server) HandleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	tok.State = ""
 	tok.CodeVerifier = ""
 	tok.UpdatedAt = time.Now()
-	if err := s.LocalStore.UpsertMCPOAuthToken(*tok); err != nil {
+	if err := s.Store.UpsertMCPOAuthToken(*tok); err != nil {
 		http.Error(w, "store token: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	// Upgrade the MCP's auth_type so the proxy uses the OAuth token on future calls.
+	_ = s.Store.UpdateInstalledMCPAuthType(pending.MCPName, pending.ProjectID, "oauth_discovery")
+
 	// Notify frontend via WebSocket.
-	if data, err := json.Marshal(map[string]any{"type": "connector:connected", "name": pending.MCPName}); err == nil {
-		s.Hub.BroadcastRaw(data)
+	if s.Hub != nil {
+		if data, err := json.Marshal(map[string]any{"type": "connector:connected", "name": pending.MCPName, "project_id": pending.ProjectID}); err == nil {
+			s.Hub.BroadcastRaw(data)
+		}
 	}
 
 	// Return a small HTML page that closes the popup.
@@ -403,8 +587,7 @@ func (s *Server) HandleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 // resolveOAuthConfig returns (clientID, authServerBaseURL) for an MCP.
-// For oauth (explicit): reads clientId from the manifest's oauth field.
-// For oauth_discovery: uses the MCP's URL as the authorization server base.
+// clientID may be empty when the server supports Dynamic Client Registration (RFC 7591).
 func resolveOAuthConfig(mcp *store.InstalledMCP) (clientID, authServerURL string, err error) {
 	var entry struct {
 		URL   string `json:"url"`
@@ -417,12 +600,11 @@ func resolveOAuthConfig(mcp *store.InstalledMCP) (clientID, authServerURL string
 	}
 
 	if entry.OAuth != nil && entry.OAuth.ClientID != "" {
-		// Slack-style: explicit OAuth config with clientId and the URL is the server base.
-		return entry.OAuth.ClientID, entry.URL, nil
+		clientID = entry.OAuth.ClientID
 	}
 
-	// oauth_discovery: use env_values for client_id if provided, else empty (public client).
-	if mcp.EnvValues != "" && mcp.EnvValues != "{}" {
+	// oauth_discovery: use env_values for client_id if provided.
+	if clientID == "" && mcp.EnvValues != "" && mcp.EnvValues != "{}" {
 		var vals map[string]string
 		if json.Unmarshal([]byte(mcp.EnvValues), &vals) == nil {
 			if cid, ok := vals["CLIENT_ID"]; ok && cid != "" {
@@ -431,40 +613,77 @@ func resolveOAuthConfig(mcp *store.InstalledMCP) (clientID, authServerURL string
 		}
 	}
 
+	// Also check if a client_id was previously obtained via DCR and stored in the token record.
+	// (clientID remains empty here — HandleOAuthStart will look it up.)
+
 	if entry.URL == "" {
-		return "", "", fmt.Errorf("MCP has no URL for OAuth discovery")
+		return "", "", fmt.Errorf("MCP has no URL for OAuth")
 	}
 
-	// The authorization server is the origin of the MCP URL.
+	// Discovery is rooted at the MCP server's origin. The MCP endpoint itself
+	// commonly has a path (for example /mcp), which must not become part of the
+	// OAuth well-known URL just because an explicit client ID was configured.
 	u, err := url.Parse(entry.URL)
 	if err != nil {
 		return "", "", fmt.Errorf("parse MCP URL: %w", err)
 	}
+	// clientID may be empty — HandleOAuthStart will attempt DCR if the server supports it.
 	return clientID, u.Scheme + "://" + u.Host, nil
 }
 
-// discoverOAuthEndpoints performs RFC 9728 OAuth discovery.
-func discoverOAuthEndpoints(serverBase string) (authEndpoint, tokenEndpoint string, err error) {
+// oauthDiscoveryDoc holds the fields we care about from RFC 9728 discovery.
+type oauthDiscoveryDoc struct {
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
+	TokenEndpoint         string `json:"token_endpoint"`
+	RegistrationEndpoint  string `json:"registration_endpoint"` // RFC 7591 DCR
+}
+
+// discoverOAuthEndpoints performs RFC 9728 OAuth discovery and returns the full doc.
+func discoverOAuthEndpoints(serverBase string) (*oauthDiscoveryDoc, error) {
 	discoveryURL := strings.TrimRight(serverBase, "/") + "/.well-known/oauth-authorization-server"
-	resp, err := http.Get(discoveryURL) //nolint:gosec // serverBase is from our own config
+	resp, err := oauthDiscoveryHTTPClient.Get(discoveryURL) //nolint:gosec
 	if err != nil {
-		return "", "", fmt.Errorf("discovery request: %w", err)
+		return nil, fmt.Errorf("discovery request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("discovery returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("discovery returned %d", resp.StatusCode)
 	}
-	var doc struct {
-		AuthorizationEndpoint string `json:"authorization_endpoint"`
-		TokenEndpoint         string `json:"token_endpoint"`
-	}
+	var doc oauthDiscoveryDoc
 	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return "", "", fmt.Errorf("parse discovery doc: %w", err)
+		return nil, fmt.Errorf("parse discovery doc: %w", err)
 	}
 	if doc.AuthorizationEndpoint == "" || doc.TokenEndpoint == "" {
-		return "", "", fmt.Errorf("incomplete discovery doc")
+		return nil, fmt.Errorf("incomplete discovery doc")
 	}
-	return doc.AuthorizationEndpoint, doc.TokenEndpoint, nil
+	return &doc, nil
+}
+
+// dynamicClientRegister performs RFC 7591 Dynamic Client Registration.
+// Returns the client_id assigned by the authorization server.
+func dynamicClientRegister(registrationEndpoint, redirectURI string) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"redirect_uris":              []string{redirectURI},
+		"token_endpoint_auth_method": "none", // public client (PKCE)
+		"grant_types":                []string{"authorization_code"},
+		"response_types":             []string{"code"},
+	})
+	resp, err := http.Post(registrationEndpoint, "application/json", strings.NewReader(string(body))) //nolint:gosec
+	if err != nil {
+		return "", fmt.Errorf("registration request: %w", err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("registration returned %d: %s", resp.StatusCode, rb)
+	}
+	var reg struct {
+		ClientID string `json:"client_id"`
+	}
+	if err := json.Unmarshal(rb, &reg); err != nil || reg.ClientID == "" {
+		return "", fmt.Errorf("no client_id in registration response")
+	}
+	return reg.ClientID, nil
 }
 
 // exchangeCode exchanges an authorization code for tokens using PKCE.

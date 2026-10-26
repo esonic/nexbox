@@ -2,11 +2,15 @@ package chrome
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	gomcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -28,6 +32,14 @@ type Server struct {
 	screenshotDir string
 	toolNames     []string
 
+	lastUsedNano atomic.Int64
+	// inFlight counts tool handlers currently executing. The idle reaper checks
+	// it (under mu) so ReleaseBrowser never tears Chrome out from under a live
+	// call. Incremented/decremented by the registerTools wrapper.
+	inFlight atomic.Int32
+
+	toolGate chan struct{}
+
 	mu        sync.Mutex
 	started   bool
 	parentCtx context.Context
@@ -37,12 +49,27 @@ type Server struct {
 // NewServer creates a Chrome MCP server. Call EnsureStarted() to launch Chrome
 // and start serving. Use addr "127.0.0.1:0" for automatic port assignment.
 func NewServer(addr, screenshotDir string, browserOpts ...BrowserOptions) *Server {
-	return &Server{
+	s := &Server{
 		addr:          addr,
 		screenshotDir: screenshotDir,
 		browser:       NewBrowserManager(browserOpts...),
 		snapshot:      NewSnapshotManager(),
+		toolGate:      make(chan struct{}, 1),
 	}
+	s.lastUsedNano.Store(time.Now().UnixNano())
+	return s
+}
+
+// Touch resets the idle clock — call when the session is observed to be active
+// (e.g. the manager handed out the server for a new chat message).
+func (s *Server) Touch() {
+	s.lastUsedNano.Store(time.Now().UnixNano())
+}
+
+// LastUsed returns the most recent time a tool was invoked or the server was
+// touched. Used by the manager's idle reaper.
+func (s *Server) LastUsed() time.Time {
+	return time.Unix(0, s.lastUsedNano.Load())
 }
 
 // EnsureStarted starts the MCP HTTP server if not already done.
@@ -118,8 +145,7 @@ func (s *Server) IsStarted() bool {
 	return s.started
 }
 
-
-// Shutdown stops the MCP server and closes Chrome.
+// Shutdown stops the MCP server; externally owned Chrome is only disconnected.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -140,17 +166,48 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// ReleaseBrowser releases Chrome (or only the external connection) while
+// keeping the MCP HTTP server (and its port/URL) alive. A client that already
+// holds the URL keeps working: the next tool call relaunches Chrome lazily via
+// ensureBrowser. Returns true if a running browser was actually closed.
+//
+// Used by the idle reaper to reclaim the heavy resource (Chrome) without
+// invalidating the endpoint an in-flight turn's CLI is still connected to. The
+// whole check-and-close runs under mu, and skips if a tool call is in flight or
+// the server was touched since cutoff, so it never yanks Chrome out from under a
+// live call (a race the reaper's scan-then-act pass can't otherwise rule out).
+func (s *Server) ReleaseBrowser(cutoff time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.started || !s.browser.IsLaunched() {
+		return false
+	}
+	if s.inFlight.Load() > 0 {
+		return false // a tool call is running (or a >cutoff-long one); leave Chrome up
+	}
+	if !s.LastUsed().Before(cutoff) {
+		return false // touched since the reaper's scan; no longer idle
+	}
+	s.browser.Close()
+	// Drop stale accessibility UIDs: they'd resolve against a fresh Chrome after
+	// relaunch and could error or hit the wrong node. Reset the shared manager
+	// under its own lock instead of replacing a pointer held by handlers.
+	s.snapshot.Reset()
+	log.Printf("[chrome-mcp] Released idle Chrome browser (MCP server kept alive on %s)", s.actualAddr)
+	return true
+}
+
 // getPageCtx returns the current page's chromedp context.
 // It handles three cases:
 //  1. Chrome not yet launched → lazy first launch
 //  2. Chrome process dead/hung → kill and restart entirely
 //  3. All tabs closed but Chrome alive → create a new tab
-func (s *Server) getPageCtx() (context.Context, error) {
+func (s *Server) getPageCtx(requests ...context.Context) (context.Context, error) {
 	if err := s.ensureBrowser(); err != nil {
 		return nil, err
 	}
 
-	ctx, err := s.browser.EnsureActivePage()
+	ctx, err := s.browser.EnsureActivePage(requests...)
 	if err != nil {
 		log.Printf("[chrome-mcp] EnsureActivePage failed after launch: %v", err)
 		return nil, err
@@ -161,38 +218,74 @@ func (s *Server) getPageCtx() (context.Context, error) {
 // ensureBrowser guarantees Chrome is running. Called lazily on first tool use.
 // If Chrome is not launched, it starts it. If it's unhealthy, it restarts it.
 func (s *Server) ensureBrowser() error {
+	// Serialise health checks, connection creation and snapshot invalidation.
+	// A second first-use caller must observe the completed connection instead
+	// of invalidating UIDs produced by the first caller.
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.parentCtx == nil {
-		s.mu.Unlock()
 		return fmt.Errorf("chrome MCP not initialized")
 	}
 	parentCtx := s.parentCtx
-	s.mu.Unlock()
 
 	if s.browser.IsLaunched() && s.browser.IsHealthy() {
 		return nil
 	}
 
 	if s.browser.IsLaunched() {
-		log.Printf("[chrome-mcp] Chrome unhealthy, restarting...")
+		log.Printf("[chrome-mcp] Browser connection unhealthy, reconnecting...")
 		s.browser.Close()
-		s.snapshot = NewSnapshotManager()
 	}
 
-	log.Printf("[chrome-mcp] Launching Chrome...")
+	log.Printf("[chrome-mcp] Preparing browser connection...")
 	if err := s.browser.Launch(parentCtx); err != nil {
-		return fmt.Errorf("launch chrome: %w", err)
+		return fmt.Errorf("prepare browser connection: %w", err)
 	}
-	log.Printf("[chrome-mcp] Chrome launched successfully")
+	s.snapshot.Reset()
+	log.Printf("[chrome-mcp] Browser connected successfully")
 	return nil
 }
 
 func (s *Server) registerTools() {
 	add := func(tool gomcp.Tool, handler server.ToolHandlerFunc) {
 		name := tool.Name
+		gomcp.WithNumber("timeout", gomcp.Description("Operation timeout in milliseconds (default 30000, maximum 120000)"), gomcp.Min(1), gomcp.Max(120000), gomcp.MultipleOf(1))(&tool)
 		wrapped := func(ctx context.Context, req gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+			s.Touch()
+			s.inFlight.Add(1)
+			defer func() {
+				s.inFlight.Add(-1)
+				s.Touch() // refresh on exit too, so a long call isn't "idle" the instant it returns
+			}()
+			timeout := 30 * time.Second
+			if raw, ok := req.GetArguments()["timeout"]; ok {
+				data, _ := json.Marshal(raw)
+				var ms float64
+				if err := json.Unmarshal(data, &ms); err != nil || ms < 1 || ms > 120000 || math.Trunc(ms) != ms {
+					return errResult("timeout must be an integer from 1 to 120000 milliseconds"), nil
+				}
+				timeout = time.Duration(ms) * time.Millisecond
+			}
+			ctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			// Shared selected page and snapshot UIDs require ordered actions.
+			// Dialog handling must bypass the gate to unblock a pending script.
+			if name != "handle_dialog" && !(name == "get_page_info" && s.browser.CurrentDialog() != nil) {
+				select {
+				case s.toolGate <- struct{}{}:
+					defer func() { <-s.toolGate }()
+				case <-ctx.Done():
+					return errResult(ctx.Err().Error()), nil
+				}
+			}
+			started := time.Now()
 			log.Printf("[chrome-mcp] >> %s", name)
-			return handler(ctx, req)
+			result, err := handler(ctx, req)
+			if ctx.Err() != nil {
+				result, err = errResult(fmt.Sprintf("%s: %v; the action may already have taken effect, inspect the page before retrying", name, ctx.Err())), nil
+			}
+			log.Printf("[chrome-mcp] << %s duration=%s error=%v", name, time.Since(started).Round(time.Millisecond), err != nil || (result != nil && result.IsError))
+			return result, err
 		}
 		s.mcpServer.AddTool(tool, wrapped)
 		s.toolNames = append(s.toolNames, "mcp__chrome__"+name)
@@ -201,7 +294,7 @@ func (s *Server) registerTools() {
 	// Snapshot
 	add(gomcp.NewTool("take_snapshot",
 		gomcp.WithDescription("Capture a text snapshot of the page's accessibility tree. "+
-			"Returns elements with UIDs that can be used in click, fill, hover, and other tools. "+
+			"Returns elements with UIDs valid only for the selected page and latest snapshot. "+
 			"Call this tool first to understand the page structure before interacting."),
 		gomcp.WithString("filePath", gomcp.Description("Optional file path to save snapshot instead of returning inline")),
 	), s.handleTakeSnapshot)
@@ -210,7 +303,7 @@ func (s *Server) registerTools() {
 	add(gomcp.NewTool("navigate_page",
 		gomcp.WithDescription("Navigate the current page. Use type='url' to go to a URL, "+
 			"'back'/'forward' for history, or 'reload' to refresh."),
-		gomcp.WithString("type", gomcp.Description("Navigation type: url, back, forward, reload (default: url)")),
+		gomcp.WithString("type", gomcp.Description("Navigation type (default: url)"), gomcp.Enum("url", "back", "forward", "reload")),
 		gomcp.WithString("url", gomcp.Description("Target URL (required when type is 'url')")),
 	), s.handleNavigatePage)
 
@@ -222,14 +315,14 @@ func (s *Server) registerTools() {
 	), s.handleClick)
 
 	add(gomcp.NewTool("fill",
-		gomcp.WithDescription("Clear and fill an input, textarea, or select element with a value. "+
+		gomcp.WithDescription("Replace text in an editable input, textarea, or contenteditable, or select an option by its value. "+
 			"Identified by uid from take_snapshot."),
 		gomcp.WithString("uid", gomcp.Required(), gomcp.Description("Element UID from page snapshot")),
 		gomcp.WithString("value", gomcp.Required(), gomcp.Description("Value to fill")),
 	), s.handleFill)
 
 	add(gomcp.NewTool("type_text",
-		gomcp.WithDescription("Type text character by character into the currently focused element. "+
+		gomcp.WithDescription("Type literal text into the currently focused editable element. Uses keyboard events for ASCII and native text insertion for Unicode. "+
 			"Use fill for replacing entire input values; use type_text for simulating real typing."),
 		gomcp.WithString("text", gomcp.Required(), gomcp.Description("Text to type")),
 		gomcp.WithString("submitKey", gomcp.Description("Key to press after typing, e.g. 'Enter'")),
@@ -237,7 +330,7 @@ func (s *Server) registerTools() {
 
 	add(gomcp.NewTool("press_key",
 		gomcp.WithDescription("Press a key or key combination. "+
-			"Supports modifiers: Control+A, Shift+Tab, Meta+C, Alt+F4, etc."),
+			"Supports Enter, Tab, Escape, Backspace, Delete, arrows, Home/End, PageUp/PageDown, F1-F12 and modifiers such as Control+A, Shift+Tab, Meta+C. Use PageDown/PageUp to scroll."),
 		gomcp.WithString("key", gomcp.Required(),
 			gomcp.Description("Key or combo, e.g. 'Enter', 'Control+A', 'Shift+Tab'")),
 	), s.handlePressKey)
@@ -259,15 +352,31 @@ func (s *Server) registerTools() {
 	add(gomcp.NewTool("evaluate_script",
 		gomcp.WithDescription("Execute a JavaScript function in the page context. "+
 			"Pass a function declaration like '() => document.title' or '(el) => el.innerText'. "+
-			"If args are provided, UIDs are resolved to elements and passed as arguments."),
+			"Awaits async functions. Return JSON-serializable data; undefined is reported explicitly. Use for inspection, scrolling or operations without a dedicated tool. If args are provided, UIDs from the latest snapshot are passed as DOM elements."),
 		gomcp.WithString("function", gomcp.Required(),
 			gomcp.Description("JS function declaration, e.g. '() => document.title'")),
+		gomcp.WithArray("args", gomcp.Description("Optional DOM element arguments, e.g. [{\"uid\":\"s1_2\"}]"), gomcp.Items(map[string]any{
+			"type": "object", "properties": map[string]any{"uid": map[string]any{"type": "string"}}, "required": []string{"uid"}, "additionalProperties": false,
+		})),
 	), s.handleEvaluateScript)
 
 	add(gomcp.NewTool("wait_for",
 		gomcp.WithDescription("Wait until specific text appears on the page. "+
 			"Resolves as soon as any of the given texts is found. Returns a snapshot."),
+		gomcp.WithArray("text", gomcp.Required(), gomcp.Description("Non-empty list of visible text strings; returns when any appears"), gomcp.MinItems(1), gomcp.Items(map[string]any{"type": "string", "minLength": 1})),
 	), s.handleWaitFor)
+
+	add(gomcp.NewTool("upload_file",
+		gomcp.WithDescription("Set files on an input[type=file] identified by snapshot UID. Paths must be absolute and accessible on the Chrome host. An empty list clears the selection."),
+		gomcp.WithString("uid", gomcp.Required(), gomcp.Description("File input UID from take_snapshot")),
+		gomcp.WithArray("files", gomcp.Required(), gomcp.Items(map[string]any{"type": "string"}), gomcp.Description("Absolute paths on the Chrome host")),
+	), s.handleUploadFile)
+
+	add(gomcp.NewTool("handle_dialog",
+		gomcp.WithDescription("Accept or dismiss an open JavaScript alert, confirm, prompt or beforeunload dialog. Can run while another tool is waiting on the dialog. Use get_page_info to inspect its message. The tab must be attached before the dialog opens (e.g. via take_snapshot)."),
+		gomcp.WithString("action", gomcp.Required(), gomcp.Enum("accept", "dismiss")),
+		gomcp.WithString("promptText", gomcp.Description("Text to enter when accepting a prompt")),
+	), s.handleDialog)
 
 	// Page management
 	add(gomcp.NewTool("list_pages",
@@ -276,13 +385,18 @@ func (s *Server) registerTools() {
 
 	add(gomcp.NewTool("select_page",
 		gomcp.WithDescription("Switch to a different browser tab by page ID (from list_pages)."),
-		gomcp.WithNumber("pageId", gomcp.Required(), gomcp.Description("Page ID to switch to")),
+		gomcp.WithNumber("pageId", gomcp.Required(), gomcp.Description("Page ID to switch to"), gomcp.Min(1), gomcp.MultipleOf(1)),
 	), s.handleSelectPage)
 
 	add(gomcp.NewTool("new_page",
 		gomcp.WithDescription("Open a new browser tab, optionally navigating to a URL."),
 		gomcp.WithString("url", gomcp.Description("URL to navigate to (default: about:blank)")),
 	), s.handleNewPage)
+
+	add(gomcp.NewTool("close_page",
+		gomcp.WithDescription("Close the specified browser tab. If selected, another open tab is selected. Closing the last managed tab creates a blank tab on next use; external Chrome tabs are never created automatically."),
+		gomcp.WithNumber("pageId", gomcp.Required(), gomcp.Min(1), gomcp.MultipleOf(1), gomcp.Description("Page ID from list_pages")),
+	), s.handleClosePage)
 
 	add(gomcp.NewTool("get_page_info",
 		gomcp.WithDescription("Get the current page's URL and title."),

@@ -14,6 +14,12 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
+          // Vendored border-beam lives under src/ (not node_modules) but is a
+          // sizeable third-party lib — split it into its own chunk so it stays
+          // out of the main app bundle, matching the other vendor-* chunks.
+          if (id.includes("components/ui/border-beam")) {
+            return "vendor-border-beam";
+          }
           if (id.includes("node_modules")) {
             if (id.includes("react-dom") || id.includes("/react/") || id.includes("react-router")) {
               return "vendor-react";

@@ -39,7 +39,7 @@ func (s *Server) CreateReviewComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Notify asset creator and @mentions
-	actor := s.currentUser()
+	actor := s.currentUser(r)
 	if asset, aerr := s.Store.GetAsset(assetID); aerr == nil && asset != nil {
 		mentions := parseMentions(req.Content)
 		candidates := append([]string{asset.CreatedBy}, mentions...)

@@ -30,6 +30,9 @@ func (s *SQLiteStore) ListTaskComments(taskID string) ([]TaskComment, error) {
 		}
 		items = append(items, c)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate task comments: %w", err)
+	}
 	return items, nil
 }
 
@@ -138,6 +141,9 @@ func (s *SQLiteStore) ListLabels(_ string) ([]Label, error) {
 		}
 		items = append(items, l)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate labels: %w", err)
+	}
 	return items, nil
 }
 
@@ -241,6 +247,9 @@ func (s *SQLiteStore) GetReactionSummary(targetType, targetID, currentUser strin
 		}
 		r.UserReacted = userCount > 0
 		items = append(items, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate reactions: %w", err)
 	}
 	return items, nil
 }

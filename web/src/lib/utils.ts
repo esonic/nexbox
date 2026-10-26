@@ -30,6 +30,14 @@ export function formatDate(dateStr: string): string {
   });
 }
 
+/** Absolute local time, e.g. 2026/09/13 12:05:56 */
+export function formatAbsoluteDateTime(dateStr: string): string {
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 export function formatRelativeDate(dateStr: string): string {
   const now = new Date();
   const d = new Date(dateStr);
@@ -55,6 +63,7 @@ export function assetTypeLabel(type: string): string {
     code_change: "Code Change",
     unit_test: "Unit Test",
     test_case: "Test Case",
+    lark_doc: "Lark Doc",
   };
   return labels[type] || type;
 }

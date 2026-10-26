@@ -79,6 +79,38 @@ func TestSessionManager_SetActive_Nonexistent(t *testing.T) {
 	}
 }
 
+func TestSessionManager_TrySetActive(t *testing.T) {
+	sm := NewSessionManager()
+	if !sm.TrySetActive("session-1") {
+		t.Fatal("first claim should succeed")
+	}
+	if sm.TrySetActive("session-1") {
+		t.Fatal("second claim should fail while the session is active")
+	}
+	sm.SetActive("session-1", false)
+	if !sm.TrySetActive("session-1") {
+		t.Fatal("claim should succeed after the prior turn releases the session")
+	}
+}
+
+func TestSessionManager_TrySetActiveConcurrent(t *testing.T) {
+	sm := NewSessionManager()
+	const contenders = 32
+	results := make(chan bool, contenders)
+	for i := 0; i < contenders; i++ {
+		go func() { results <- sm.TrySetActive("session-1") }()
+	}
+	winners := 0
+	for i := 0; i < contenders; i++ {
+		if <-results {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("atomic claim winners = %d, want exactly 1", winners)
+	}
+}
+
 func TestSessionManager_IsActive_Default(t *testing.T) {
 	sm := NewSessionManager()
 	if sm.IsActive("nonexistent") {
@@ -203,6 +235,10 @@ func TestBuildArgs_FirstTurn(t *testing.T) {
 
 	expected := map[string]bool{
 		"--output-format": false,
+		"--input-format":  false,
+		"--verbose":       false,
+		"--tools":         false,
+		"default":         false,
 		"stream-json":     false,
 		"--session-id":    false,
 		"sess-123":        false,
@@ -257,6 +293,91 @@ func TestBuildArgs_ResumeTurn(t *testing.T) {
 	}
 }
 
+// TestBuildArgs_ForkSession verifies the CLI flag plumbing for forking:
+// --fork-session must accompany --resume, and --resume-session-at must
+// follow with the chosen assistant uuid. The resume-session-at flag is
+// hidden in claude --help but accepted by the parser; this test guards
+// against the order/name regressing.
+func TestBuildArgs_ForkSession(t *testing.T) {
+	c := NewClaudeClient()
+	args := c.buildArgs(QueryOptions{
+		Resume:              "parent-sid",
+		ForkSession:         true,
+		ResumeAtMessageUUID: "msg-uuid-1",
+	})
+
+	// Build a position map for easy assertions.
+	pos := map[string]int{}
+	for i, a := range args {
+		pos[a] = i
+	}
+	for _, want := range []string{"--resume", "--fork-session", "--resume-session-at"} {
+		if _, ok := pos[want]; !ok {
+			t.Errorf("missing %q in args: %v", want, args)
+		}
+	}
+	if pos["--resume"] >= pos["--fork-session"] {
+		t.Errorf("--fork-session must come after --resume; got order: %v", args)
+	}
+	if pos["--fork-session"] >= pos["--resume-session-at"] {
+		t.Errorf("--resume-session-at must come after --fork-session; got order: %v", args)
+	}
+	// Verify the values follow the flags.
+	if i := pos["--resume"]; i+1 >= len(args) || args[i+1] != "parent-sid" {
+		t.Errorf("expected --resume parent-sid; got: %v", args)
+	}
+	if i := pos["--resume-session-at"]; i+1 >= len(args) || args[i+1] != "msg-uuid-1" {
+		t.Errorf("expected --resume-session-at msg-uuid-1; got: %v", args)
+	}
+}
+
+// TestBuildArgs_ForkSessionWithoutAtMessage covers the degenerate case where
+// the caller asked to fork but didn't specify a cut point. The CLI should
+// still receive --fork-session (which forks at the current end), and no
+// --resume-session-at flag.
+func TestBuildArgs_ForkSessionWithoutAtMessage(t *testing.T) {
+	c := NewClaudeClient()
+	args := c.buildArgs(QueryOptions{
+		Resume:      "parent-sid",
+		ForkSession: true,
+	})
+
+	hasResumeAt := false
+	hasFork := false
+	for _, a := range args {
+		if a == "--resume-session-at" {
+			hasResumeAt = true
+		}
+		if a == "--fork-session" {
+			hasFork = true
+		}
+	}
+	if !hasFork {
+		t.Errorf("expected --fork-session in args: %v", args)
+	}
+	if hasResumeAt {
+		t.Errorf("--resume-session-at must not appear when ResumeAtMessageUUID is empty: %v", args)
+	}
+}
+
+// TestBuildArgs_ForkSessionRequiresResume verifies that ForkSession alone
+// (without Resume) does not produce --fork-session. The CLI rejects
+// --fork-session without a resume target, so we mirror that constraint
+// at the build-args layer.
+func TestBuildArgs_ForkSessionRequiresResume(t *testing.T) {
+	c := NewClaudeClient()
+	args := c.buildArgs(QueryOptions{
+		SessionID:           "new-sid",
+		ForkSession:         true,
+		ResumeAtMessageUUID: "msg-uuid-1",
+	})
+	for _, a := range args {
+		if a == "--fork-session" || a == "--resume-session-at" {
+			t.Errorf("fork flags must not be emitted without --resume: %v", args)
+		}
+	}
+}
+
 func TestBuildArgs_AllowedTools(t *testing.T) {
 	c := NewClaudeClient()
 	args := c.buildArgs(QueryOptions{
@@ -264,26 +385,22 @@ func TestBuildArgs_AllowedTools(t *testing.T) {
 		AllowedTools: []string{"Bash", "Read", "Write", "Edit", "Grep", "Glob"},
 	})
 
-	found := false
-	for i, arg := range args {
+	hasAllowedTools := false
+	toolSet := make(map[string]bool)
+	for _, arg := range args {
 		if arg == "--allowed-tools" {
-			found = true
-			// Remaining args after --allowed-tools should be the tools
-			tools := args[i+1:]
-			toolSet := make(map[string]bool)
-			for _, tool := range tools {
-				toolSet[tool] = true
-			}
-			for _, tool := range []string{"Bash", "Read", "Write", "Edit", "Grep", "Glob"} {
-				if !toolSet[tool] {
-					t.Errorf("missing tool %q in allowed-tools args: %v", tool, tools)
-				}
-			}
-			break
+			hasAllowedTools = true
+			continue
 		}
+		toolSet[arg] = true
 	}
-	if !found {
+	if !hasAllowedTools {
 		t.Error("expected --allowed-tools in args")
+	}
+	for _, tool := range []string{"Bash", "Read", "Write", "Edit", "Grep", "Glob"} {
+		if !toolSet[tool] {
+			t.Errorf("missing tool %q in args: %v", tool, args)
+		}
 	}
 }
 
@@ -322,15 +439,18 @@ func TestBuildStaticContext_Full(t *testing.T) {
 		ID:          "proj-001",
 		Name:        "Order Service",
 		Description: "E-commerce order system",
+		GitRepoPath: "/home/dev/order-service",
 	}
 
 	ctx := BuildStaticContext(project, "sess-001")
 
 	mustContain := []string{
-		"BoxNex AI platform",
+		"[Platform Context]",
+		"You are working within the Nexbox AI platform.",
 		"Project: Order Service",
 		"Project Description: E-commerce order system",
 		"Project ID: proj-001",
+		"Working Directory: /home/dev/order-service",
 	}
 
 	for _, s := range mustContain {
@@ -342,8 +462,9 @@ func TestBuildStaticContext_Full(t *testing.T) {
 
 func TestBuildStaticContext_NoDescription(t *testing.T) {
 	project := ProjectInfo{
-		ID:   "proj-002",
-		Name: "Simple App",
+		ID:          "proj-002",
+		Name:        "Simple App",
+		GitRepoPath: "/tmp/app",
 	}
 
 	ctx := BuildStaticContext(project, "")
@@ -361,18 +482,18 @@ func TestBuildStaticContext_NoDescription(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildDynamicContext_Empty(t *testing.T) {
-	ctx := BuildDynamicContext(nil, nil, nil, nil)
+	ctx := BuildDynamicContext(nil, nil, nil)
 	if ctx != "" {
 		t.Errorf("expected empty string for no refs, got %q", ctx)
 	}
 }
 
 func TestBuildDynamicContext_ProjectOnly(t *testing.T) {
-	proj := &ProjectInfo{ID: "proj-1", Name: "My Project"}
-	ctx := BuildDynamicContext(proj, nil, nil, nil)
+	proj := &ProjectInfo{ID: "proj-1", Name: "My Project", GitRepoPath: "/tmp/proj"}
+	ctx := BuildDynamicContext(proj, nil, nil)
 
 	mustContain := []string{
-		"[Project: My Project | ID: proj-1]",
+		"[Project: My Project | ID: proj-1 | Dir: /tmp/proj]",
 	}
 	for _, s := range mustContain {
 		if !containsString(ctx, s) {
@@ -390,7 +511,7 @@ func TestBuildDynamicContext_TasksOnly(t *testing.T) {
 		{ID: "task-2", Title: "Add feature", Priority: "medium", Status: "in_progress"},
 	}
 
-	ctx := BuildDynamicContext(nil, tasks, nil, nil)
+	ctx := BuildDynamicContext(nil, tasks, nil)
 
 	mustContain := []string{
 		"[Session References]",
@@ -416,7 +537,7 @@ func TestBuildDynamicContext_AssetsOnly(t *testing.T) {
 		{ID: "a-2", Type: "code_change", Title: "auth.go", Status: "approved"},
 	}
 
-	ctx := BuildDynamicContext(nil, nil, assets, nil)
+	ctx := BuildDynamicContext(nil, nil, assets)
 
 	mustContain := []string{
 		"[Session References]",
@@ -444,7 +565,7 @@ func TestBuildDynamicContext_Both(t *testing.T) {
 		{ID: "a-1", Type: "design_doc", Title: "API Design", Status: "draft"},
 	}
 
-	ctx := BuildDynamicContext(nil, tasks, assets, nil)
+	ctx := BuildDynamicContext(nil, tasks, assets)
 
 	mustContain := []string{
 		"[Session References]",
@@ -605,6 +726,102 @@ func TestStreamEvent_JSONRoundTrip(t *testing.T) {
 	}
 	if decoded.Input != original.Input {
 		t.Errorf("Input = %q, want %q", decoded.Input, original.Input)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Claude model alias merge
+// ---------------------------------------------------------------------------
+
+func TestMergeStandardClaudeAliases_FillsMissing(t *testing.T) {
+	// CLI returned only Opus (with effort levels) — the merge should
+	// synthesize Sonnet and Haiku, inheriting effort levels from the peer
+	// so the UI shows EFFORT options for them too.
+	cli := []ModelInfo{
+		{ID: "opus", Label: "Opus", SupportedEfforts: []string{"low", "medium", "high"}, DefaultEffort: "high"},
+	}
+	out := mergeStandardClaudeAliases(cli)
+	got := make(map[string]ModelInfo, len(out))
+	for _, m := range out {
+		got[m.ID] = m
+	}
+	for _, want := range []string{"opus", "sonnet", "haiku"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("merged list missing %q", want)
+		}
+	}
+	if eff := got["sonnet"].SupportedEfforts; len(eff) != 3 || eff[0] != "low" {
+		t.Errorf("sonnet should inherit peer efforts; got %v", eff)
+	}
+	if got["sonnet"].DefaultEffort != "high" {
+		t.Errorf("sonnet default effort = %q, want %q", got["sonnet"].DefaultEffort, "high")
+	}
+}
+
+func TestMergeStandardClaudeAliases_FromEmpty(t *testing.T) {
+	// Probe failure path: nothing came back from the CLI. We still want all
+	// three aliases so the picker isn't empty; they just have no effort
+	// metadata.
+	out := mergeStandardClaudeAliases(nil)
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d, want 3", len(out))
+	}
+	for i, want := range []string{"opus", "sonnet", "haiku"} {
+		if out[i].ID != want {
+			t.Errorf("out[%d].ID = %q, want %q", i, out[i].ID, want)
+		}
+		if len(out[i].SupportedEfforts) != 0 {
+			t.Errorf("out[%d] should have no effort metadata when no peer is present", i)
+		}
+	}
+}
+
+func TestMergeStandardClaudeAliases_PreservesExisting(t *testing.T) {
+	// All three already present — the merge must be a no-op.
+	in := []ModelInfo{
+		{ID: "opus", Label: "Opus Live"},
+		{ID: "sonnet", Label: "Sonnet Live"},
+		{ID: "haiku", Label: "Haiku Live"},
+	}
+	out := mergeStandardClaudeAliases(in)
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d, want 3", len(out))
+	}
+	if out[1].Label != "Sonnet Live" {
+		t.Errorf("preserved label lost; got %q", out[1].Label)
+	}
+}
+
+// Regression: when the CLI returns long IDs like "claude-opus-4-7" with
+// display label "Opus", the merge must NOT duplicate them as a separate
+// stub keyed on the bare alias.
+func TestMergeStandardClaudeAliases_LongIDsNotDuplicated(t *testing.T) {
+	in := []ModelInfo{
+		{ID: "claude-opus-4-7", Label: "Opus"},
+		{ID: "claude-haiku-4-5", Label: "Haiku"},
+	}
+	out := mergeStandardClaudeAliases(in)
+	// Should have the two originals + one synthesized sonnet stub. No
+	// duplicate Opus / Haiku rows.
+	labels := []string{}
+	for _, m := range out {
+		labels = append(labels, m.Label)
+	}
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d (labels=%v), want 3", len(out), labels)
+	}
+	seen := map[string]int{}
+	for _, m := range out {
+		seen[strings.ToLower(m.Label)]++
+	}
+	for word, n := range seen {
+		if n > 1 {
+			t.Errorf("%q appears %d times in merged list (labels=%v)", word, n, labels)
+		}
+	}
+	// And sonnet must be present exactly once.
+	if seen["sonnet"] != 1 {
+		t.Errorf("expected one sonnet entry, got %d (labels=%v)", seen["sonnet"], labels)
 	}
 }
 

@@ -1,28 +1,31 @@
 package api
 
-import "gitlab.okg.com/sre_ai/boxnex/store"
+import (
+	"encoding/json"
+
+	"github.com/esonic/nexbox/store"
+)
 
 // Type aliases pointing to the canonical definitions in the store package.
 // Existing handler code can continue using api.Project, api.Session, etc.
 type (
-	Project  = store.Project
-	Session  = store.Session
-	ReviewComment = store.ReviewComment
-	MessagePart  = store.MessagePart
+	Project         = store.Project
+	Session         = store.Session
+	ReviewComment   = store.ReviewComment
+	MessagePart     = store.MessagePart
 	MessageMetadata = store.MessageMetadata
-	ChatMessage  = store.ChatMessage
-	Task         = store.Task
-	TaskAsset    = store.TaskAsset
-	Asset        = store.Asset
-	AssetVersion = store.AssetVersion
-	TaskInfo     = store.TaskInfo
-	AssetInfo    = store.AssetInfo
+	ChatMessage     = store.ChatMessage
+	Task  = store.Task
+	Asset = store.Asset
+	AssetVersion    = store.AssetVersion
+	TaskInfo        = store.TaskInfo
+	AssetInfo       = store.AssetInfo
 
-	CreateProjectRequest    = store.CreateProjectRequest
-	UpdateProjectRequest    = store.UpdateProjectRequest
-	CreateSessionRequest    = store.CreateSessionRequest
-	UpdateSessionRequest    = store.UpdateSessionRequest
-	ReorderSessionsRequest  = store.ReorderSessionsRequest
+	CreateProjectRequest   = store.CreateProjectRequest
+	UpdateProjectRequest   = store.UpdateProjectRequest
+	CreateSessionRequest   = store.CreateSessionRequest
+	UpdateSessionRequest   = store.UpdateSessionRequest
+	ReorderSessionsRequest = store.ReorderSessionsRequest
 
 	CreateReviewCommentRequest = store.CreateReviewCommentRequest
 	UpdateReviewCommentRequest = store.UpdateReviewCommentRequest
@@ -64,6 +67,10 @@ type ChatRequest struct {
 	// For tool_response messages (interactive tool replies, e.g. AskUserQuestion)
 	ToolUseID    string `json:"tool_use_id,omitempty"`
 	ToolResponse string `json:"tool_response,omitempty"`
+	// Skip marks an interactive tool reply as a deliberate skip: the
+	// UserInputHandler returns an error so the tool is denied (same outcome as
+	// the input timeout), rather than passing the text through as an answer.
+	Skip bool `json:"skip,omitempty"`
 }
 
 type ChatEvent struct {
@@ -71,25 +78,72 @@ type ChatEvent struct {
 	Content   string `json:"content,omitempty"`
 	Tool      string `json:"tool,omitempty"`
 	ToolID    string `json:"tool_id,omitempty"`
-	Input     string `json:"input,omitempty"`
-	Output    string `json:"output,omitempty"`
-	IsError   bool   `json:"is_error,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	Message   string `json:"message,omitempty"`
 	TaskID    string `json:"task_id,omitempty"`
+	// ParentToolID, on tool_start/tool_result events, is the tool_use_id
+	// of the parent Task tool when the call came from a sub-agent.
+	// Lets the UI nest sub-agent tool calls under the correct Agent card,
+	// even with multiple sub-agents running in parallel.
+	ParentToolID string `json:"parent_tool_id,omitempty"`
+	Input        string `json:"input,omitempty"`
+	Output       string `json:"output,omitempty"`
+	IsError      bool   `json:"is_error,omitempty"`
+	// Diff is a unified diff (git-style ---/+++/@@ hunks) describing the file
+	// mutation made by an edit/write-family tool call. Set on tool_result
+	// events for single-file tools; empty when no diff could be derived.
+	Diff string `json:"diff,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
+	Message      string `json:"message,omitempty"`
+
+	// MessageID replaces the frontend's temporary streaming id with the
+	// durable BeeHub message id. AgentCheckpoint is opaque to API clients.
+	MessageID       string `json:"message_id,omitempty"`
+	AgentCheckpoint string `json:"agent_checkpoint,omitempty"`
 
 	// Widget (visualize_show_widget)
 	WidgetTitle     string   `json:"widget_title,omitempty"`
 	WidgetCode      string   `json:"widget_code,omitempty"`
 	LoadingMessages []string `json:"loading_messages,omitempty"`
 
-	Stats *ExecutionStats `json:"stats,omitempty"`
+	Stats        *ExecutionStats `json:"stats,omitempty"`
+	ContextUsage *ContextUsage   `json:"context_usage,omitempty"`
+	SessionInfo  *SessionInfo    `json:"session_info,omitempty"`
+
+	// WorkflowProgress carries the merged dynamic-workflow snapshot
+	// ({phases, agents, status, summary}) on subtask_progress / subtask_done
+	// events. ToolID is set to the Workflow tool_use_id so the frontend can
+	// attach the tree to the right tool card.
+	WorkflowProgress json.RawMessage `json:"workflow_progress,omitempty"`
 }
 
 type ExecutionStats struct {
-	DurationMs   int64   `json:"duration_ms"`
-	ToolCalls    int     `json:"tool_calls"`
-	InputTokens  int     `json:"input_tokens,omitempty"`
-	OutputTokens int     `json:"output_tokens,omitempty"`
-	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
+	DurationMs               int64   `json:"duration_ms"`
+	ToolCalls                int     `json:"tool_calls"`
+	InputTokens              int     `json:"input_tokens,omitempty"`
+	OutputTokens             int     `json:"output_tokens,omitempty"`
+	CacheReadInputTokens     int     `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int     `json:"cache_creation_input_tokens,omitempty"`
+	TotalCostUSD             float64 `json:"total_cost_usd,omitempty"`
+}
+
+// ContextUsage is emitted to the frontend each time the agent reports an
+// updated token count so the UI can render a live context-window indicator.
+type ContextUsage struct {
+	Model                 string `json:"model,omitempty"`
+	UsedTokens            int    `json:"used_tokens"`
+	InputTokens           int    `json:"input_tokens,omitempty"`
+	OutputTokens          int    `json:"output_tokens,omitempty"`
+	CachedInputTokens     int    `json:"cached_input_tokens,omitempty"`
+	ReasoningOutputTokens int    `json:"reasoning_output_tokens,omitempty"`
+	ContextWindow         int    `json:"context_window,omitempty"`
+	MaxOutputTokens       int    `json:"max_output_tokens,omitempty"`
+}
+
+// SessionInfo carries the init-time metadata exposed by the agent (model
+// resolved by the CLI, permission mode, CLI version, etc.).
+type SessionInfo struct {
+	Model          string `json:"model,omitempty"`
+	PermissionMode string `json:"permission_mode,omitempty"`
+	Cwd            string `json:"cwd,omitempty"`
+	Version        string `json:"version,omitempty"`
+	OutputStyle    string `json:"output_style,omitempty"`
 }

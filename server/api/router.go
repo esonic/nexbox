@@ -3,134 +3,50 @@ package api
 import (
 	"log"
 	"net/http"
-	_ "net/http/pprof" // registers pprof handlers on DefaultServeMux
 	"sync"
 	"time"
 
+	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/config"
+	"github.com/esonic/nexbox/gitrepo"
+	chromemcp "github.com/esonic/nexbox/mcp/chrome"
+	"github.com/esonic/nexbox/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"gitlab.okg.com/sre_ai/boxnex/agent"
-	"gitlab.okg.com/sre_ai/boxnex/config"
-	chromemcp "gitlab.okg.com/sre_ai/boxnex/mcp/chrome"
-	"gitlab.okg.com/sre_ai/boxnex/store"
 )
-
-// ---------------------------------------------------------------------------
-// IP-based rate limiter (stdlib only, no external dependencies)
-// ---------------------------------------------------------------------------
-
-// ipRateLimiter tracks per-IP request counts within a sliding window.
-type ipRateLimiter struct {
-	mu      sync.Mutex
-	buckets map[string]*rateBucket
-	limit   int           // max requests per window
-	window  time.Duration // window duration
-}
-
-type rateBucket struct {
-	count    int
-	windowAt time.Time // start of current window
-}
-
-func newIPRateLimiter(limit int, window time.Duration) *ipRateLimiter {
-	rl := &ipRateLimiter{
-		buckets: make(map[string]*rateBucket),
-		limit:   limit,
-		window:  window,
-	}
-	// Periodically clean up stale buckets to avoid unbounded memory growth.
-	go func() {
-		ticker := time.NewTicker(window * 10)
-		defer ticker.Stop()
-		for range ticker.C {
-			rl.mu.Lock()
-			cutoff := time.Now().Add(-rl.window)
-			for ip, b := range rl.buckets {
-				if b.windowAt.Before(cutoff) {
-					delete(rl.buckets, ip)
-				}
-			}
-			rl.mu.Unlock()
-		}
-	}()
-	return rl
-}
-
-// allow returns true if the request from ip is within the rate limit.
-func (rl *ipRateLimiter) allow(ip string) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	now := time.Now()
-	b, ok := rl.buckets[ip]
-	if !ok || now.Sub(b.windowAt) >= rl.window {
-		rl.buckets[ip] = &rateBucket{count: 1, windowAt: now}
-		return true
-	}
-	if b.count >= rl.limit {
-		return false
-	}
-	b.count++
-	return true
-}
-
-// registerRateLimit returns a middleware that enforces the given rate limiter,
-// extracting the client IP from RemoteAddr (best-effort; no proxy headers).
-func registerRateLimit(rl *ipRateLimiter) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := r.RemoteAddr
-			// Strip port if present.
-			if h, _, err := splitHostPort(ip); err == nil {
-				ip = h
-			}
-			if !rl.allow(ip) {
-				http.Error(w, "rate limit exceeded, try again later", http.StatusTooManyRequests)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-// splitHostPort is a minimal host:port splitter to avoid importing "net" for
-// a trivial operation (net is already an indirect dep via stdlib, so this is
-// fine; we just inline the split to keep imports clean).
-func splitHostPort(addr string) (host, port string, err error) {
-	// Walk backwards to find the last colon.
-	for i := len(addr) - 1; i >= 0; i-- {
-		if addr[i] == ':' {
-			return addr[:i], addr[i+1:], nil
-		}
-	}
-	return "", "", &net_addrErr{addr}
-}
-
-type net_addrErr struct{ addr string }
-
-func (e *net_addrErr) Error() string { return "missing port in address: " + e.addr }
 
 // Server holds all API dependencies
 type Server struct {
-	Store            store.Store            // unified data access (SQLiteStore or MySQLStore)
-	LocalStore       *store.SQLiteStore     // always-on local SQLite store for marketplace, cache, etc.
-	Config           *config.Manager        // local config (default_agent, server_url, token, etc.)
-	Agent            agent.Agent            // Default agent (from --agent flag)
-	AgentName        string                 // Default agent name
-	Agents           map[string]agent.Agent // All available agents by name
-	SessionManager   *agent.SessionManager
-	MCPServerURL     string
-	ListenPort       int                      // HTTP listen port (for MCP proxy URL generation; distinct from MCPServerURL which is the internal nexmcp tools server)
-	Hub              *ChatHub                 // Hub for session chat messages
-	TerminalMgr      *TerminalManager         // tracks active PTY for run_in_terminal tool
-	DetailCache      *store.DetailCache       // local cache for full message part details
-	DataDir          string                   // data directory for file storage (images, etc.)
-	Version          string                   // build-time version string
-	ChromeManager    *chromemcp.ChromeManager // Per-session Chrome DevTools MCP manager for E2E testing
-	ContainerMgr     *agent.ContainerManager  // Optional: Docker container isolation per project
+	Store             *store.SQLiteStore     // unified data access (always sqlite in local-only mode)
+	Config            *config.Manager        // local config
+	Auth              *Authenticator         // JWT signer + token parser
+	Agent             agent.Agent            // Default agent (from config)
+	AgentName         string                 // Default agent name
+	Agents            map[string]agent.Agent // All available agents by name
+	SessionManager    *agent.SessionManager
+	MCPServerURL      string
+	Hub               *ChatHub                 // Hub for session chat messages
+	TerminalMgr       *TerminalManager         // tracks active PTY for run_in_terminal tool
+	DetailCache       *store.DetailCache       // local cache for full message part details
+	DataDir           string                   // data directory for file storage (images, etc.)
+	Version           string                   // build-time version string
+	ChromeManager     *chromemcp.ChromeManager // Per-session Chrome DevTools MCP manager for E2E testing
+	ListenPort        int                      // actual TCP port the HTTP server is listening on
+	MarketplaceStats  *MarketplaceStatsBuffer  // In-memory stats accumulator
+	GitRepositories   *gitrepo.Resolver        // discovers and resolves repository scope within a workspace
+	OnMCPToolsChanged func()                   // called after MCP tool category settings change
+	WeChat            *WeChatJSSDK             // optional WeChat JS-SDK share signer (nil when unconfigured)
+
+	mcpRuntimeTools sync.Map // installation identity -> immutable MCP tool aliases
+	projectInitMu   sync.Mutex
 
 	// humanGates: executionID+":"+nodeID → channel carrying user input for human node continuation
 	humanGatesMu sync.Mutex
 	humanGates   map[string]chan string
+
+	// interjectQ serializes interjections per session in arrival order while
+	// keeping them off the WS read loop (see interjectQueue).
+	interjectQ interjectQueue
 }
 
 // ResolveAgent returns the agent for a given session, falling back to the default.
@@ -149,7 +65,7 @@ func errorOnlyLogger(next http.Handler) http.Handler {
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		start := time.Now()
 		next.ServeHTTP(ww, r)
-		if ww.Status() >= 500 {
+		if ww.Status() >= 400 {
 			log.Printf("%q %s %d %dB %s",
 				r.Method+" "+r.RequestURI, r.Proto, ww.Status(),
 				ww.BytesWritten(), time.Since(start))
@@ -165,243 +81,198 @@ func NewRouter(s *Server) *chi.Mux {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 
-	registerRL := newIPRateLimiter(5, time.Minute)
-	loginRL    := newIPRateLimiter(5, time.Minute)
-	verifyRL   := newIPRateLimiter(1, time.Minute)
-
 	r.Route("/api", func(r chi.Router) {
-		// ── Public routes (no auth required) ──
-		r.Get("/info", s.GetServerInfo)
-		r.With(registerRateLimit(registerRL)).Post("/auth/register", s.HandleRegister)
-		r.With(registerRateLimit(loginRL)).Post("/auth/login", s.HandleLogin)
-		r.With(registerRateLimit(verifyRL)).Post("/auth/send-verification", s.HandleSendVerification)
+		// Public auth endpoints (RequireAuth lets these through via isPublicPath).
+		r.Post("/login", s.HandleLogin)
+		r.Post("/logout", s.HandleLogout)
+		r.Get("/auth/me", s.HandleAuthMe)
 
-		// ── All routes requiring authentication ──
+		// Resolve the local owner, or require login when accounts exist.
 		r.Group(func(r chi.Router) {
-			r.Use(s.AuthMiddleware)
-
-			// Auth
-			r.Get("/auth/me", s.HandleMe)
-			r.Post("/auth/logout", s.HandleAuthLogout)
-
-			// Balance
-			r.Get("/balance", s.HandleGetBalance)
-
-			// Admin only
-			r.Group(func(r chi.Router) {
-				r.Use(AdminMiddleware)
-				r.Get("/admin/users", s.HandleAdminListUsers)
-				r.Patch("/admin/users/{userID}/features", s.HandleAdminUpdateUserFeatures)
-				r.Patch("/admin/users/{userID}/quota", s.HandleAdminUpdateUserQuota)
-				r.Post("/admin/recharge", s.HandleAdminRecharge)
-			})
-
-			// Quota (authenticated users)
-			r.Get("/quota", s.HandleGetMyQuota)
-
-			// Sessions
-			r.Route("/sessions", func(r chi.Router) {
-				r.Get("/", s.ListSessions)
-				r.Post("/", s.CreateSession)
-				r.Put("/reorder", s.ReorderSessions)
-				r.Get("/trash", s.ListTrashedSessions)
-				r.Delete("/trash", s.EmptyTrash)
-				r.Route("/{sessionId}", func(r chi.Router) {
-					r.Get("/", s.GetSession)
-					r.Put("/", s.UpdateSession)
-					r.Delete("/", s.DeleteSession)
-					r.Post("/restore", s.RestoreSession)
-					r.Get("/messages", s.ListSessionMessages)
-					r.Post("/upload-image", s.UploadImage)
-					r.Get("/image/{filename}", s.ServeImage)
-
-					// Worktree
-					r.Put("/worktree-mode", s.SetWorktreeMode)
-					r.Get("/worktree-status", s.GetWorktreeStatus)
-
-					// Message queue
-					r.Get("/queue", s.ListQueuedMessages)
-					r.Post("/queue", s.CreateQueuedMessage)
-					r.Put("/queue/{queueId}", s.UpdateQueuedMessage)
-					r.Delete("/queue/{queueId}", s.DeleteQueuedMessage)
-					r.Post("/queue/{queueId}/run", s.HandleRunQueuedMessage)
-				})
-			})
-
-			// Projects
-			r.Route("/projects", func(r chi.Router) {
-				r.Get("/", s.ListProjects)
-				r.Post("/", s.CreateProject)
-				r.Get("/lookup-by-dir", s.LookupProjectByDir)
-				r.Get("/by-git-dir", s.CheckProjectByGitDir)
-				r.Route("/{projectId}", func(r chi.Router) {
-					r.Use(s.requireProjectAccess)
-					r.Get("/", s.GetProject)
-					r.Put("/", s.UpdateProject)
-					r.Delete("/", s.DeleteProject)
-
-					// Git operations (project-level)
-					r.Get("/git-status", s.GetGitStatus)
-					r.Post("/git-commit", s.GitCommit)
-					r.Post("/git-discard", s.GitDiscard)
-					r.Get("/git-log", s.GitLog)
-					r.Get("/git-commit-files", s.GitCommitFiles)
-					r.Get("/git-commit-diff", s.GitCommitDiff)
-					r.Post("/generate-commit-message", s.GenerateCommitMessage)
-					r.Get("/git-branches", s.GetGitBranches)
-					r.Post("/git-checkout", s.GitCheckout)
-					r.Post("/git-stage", s.GitStage)
-					r.Post("/git-unstage", s.GitUnstage)
-					r.Post("/git-push", s.GitPush)
-					r.Post("/git-pull", s.GitPull)
-					r.Get("/diff", s.GetProjectDiff)
-					r.Get("/diff-stats", s.GetProjectDiffStats)
-					r.Get("/file-diff", s.GetProjectFileDiff)
-
-					// File browser
-					r.Get("/files", s.ListProjectFiles)
-					r.Get("/file-content", s.ReadProjectFile)
-					r.Put("/file-content", s.WriteProjectFile)
-					r.Get("/file-search", s.SearchProjectFiles)
-					r.Post("/files/upload", s.UploadProjectFile)
-					r.Get("/files/download", s.DownloadProjectFile)
-					r.Delete("/files/delete", s.DeleteProjectFile)
-
-					// Labels (project-scoped)
-					r.Get("/labels", s.ListLabels)
-					r.Post("/labels", s.CreateLabel)
-					r.Delete("/labels/{labelId}", s.DeleteLabel)
-
-					// Assets under project
-					r.Route("/assets", func(r chi.Router) {
-						r.Get("/", s.ListAssets)
-						r.Post("/", s.CreateAsset)
-					})
-				})
-			})
-
-			// Tasks
-			r.Route("/tasks", func(r chi.Router) {
-				r.Get("/", s.ListTasks)
-				r.Post("/", s.CreateTask)
-				r.Route("/{taskId}", func(r chi.Router) {
-					r.Use(s.requireTaskAccess)
-					r.Get("/", s.GetTask)
-					r.Put("/", s.UpdateTask)
-					r.Delete("/", s.DeleteTask)
-					r.Post("/ref-count", s.IncrementTaskRefCount)
-					r.Route("/assets", func(r chi.Router) {
-						r.Get("/", s.ListTaskAssets)
-						r.Post("/", s.LinkTaskAsset)
-						r.Delete("/{assetId}", s.UnlinkTaskAsset)
-					})
-					r.Route("/comments", func(r chi.Router) {
-						r.Get("/", s.ListTaskComments)
-						r.Post("/", s.CreateTaskComment)
-					})
-					r.Route("/labels", func(r chi.Router) {
-						r.Post("/", s.AddLabelToTask)
-						r.Delete("/{labelName}", s.RemoveLabelFromTask)
-					})
-				})
-			})
-			r.Put("/task-comments/{commentId}", s.UpdateTaskComment)
-			r.Delete("/task-comments/{commentId}", s.DeleteTaskComment)
-
-			// Reactions (generic: task, task_comment)
-			r.Route("/reactions/{targetType}/{targetId}", func(r chi.Router) {
-				r.Get("/", s.GetReactions)
-				r.Post("/", s.AddReaction)
-				r.Delete("/", s.RemoveReaction)
-			})
-
-			// Assets direct access by ID
-			r.Route("/assets/{assetId}", func(r chi.Router) {
-				r.Use(s.requireAssetAccess)
-				r.Get("/", s.GetAsset)
-				r.Put("/", s.UpdateAsset)
-				r.Delete("/", s.DeleteAsset)
-				r.Get("/versions", s.ListAssetVersions)
-				r.Get("/diff", s.DiffAssetVersions)
-				r.Route("/comments", func(r chi.Router) {
-					r.Get("/", s.ListReviewComments)
-					r.Post("/", s.CreateReviewComment)
-				})
-			})
-			r.Put("/comments/{commentId}", s.UpdateReviewComment)
-			r.Delete("/comments/{commentId}", s.DeleteReviewComment)
-
-			// Message part details (lazy loading)
-			r.Get("/messages/{messageId}/details", s.GetMessageDetails)
-
-			// Changes (audit trail)
-			r.Get("/changes", s.ListChanges)
-
-			// Utility
-			r.Post("/validate-path", s.ValidatePath)
-			r.Get("/browse-dir", s.BrowseDir)
-			r.Get("/available-agents", s.ListAvailableAgents)
-			r.Put("/default-agent", s.SetDefaultAgent)
-			r.Get("/settings", s.GetSettings)
-			r.Put("/settings", s.UpdateSettings)
-
-			// Workflows
-			s.RegisterWorkflowRoutes(r)
-
-			// Marketplace (MCP & Skill registry)
-			s.RegisterMarketplaceRoutes(r)
-
-			// MCP OAuth: initiate OAuth flow for an installed MCP connector
-			r.Post("/connectors/{name}/oauth/start", s.HandleOAuthStart)
+			r.Use(s.RequireAuth)
+			registerAuthedAPIRoutes(s, r)
 		})
-
-		// OAuth callback: browser redirect target (public — no auth required)
-		r.Get("/connectors/oauth/callback", s.HandleOAuthCallback)
 	})
 
-	// MCP reverse proxy — outside /api so Claude can reach it without auth headers.
-	// Claude connects from localhost; no user auth needed here.
-	r.Route("/mcp-proxy/{name}", func(r chi.Router) {
-		r.HandleFunc("/", s.HandleMCPProxy)
-		r.HandleFunc("/{*}", s.HandleMCPProxy)
-	})
+	// MCP reverse proxy (top-level so the URL is /mcp-proxy/{name}). The MCP
+	// auth path is its own scheme (MCP servers are launched as agent
+	// subprocesses) so we do NOT gate this with RequireAuth.
+	r.HandleFunc("/mcp-proxy/{name}/*", s.HandleMCPProxy)
+	r.HandleFunc("/mcp-proxy/{name}", s.HandleMCPProxy)
 
-	// pprof – goroutine dumps, heap profiles, etc.
-	// Protected: admin role required.
-	// Usage: curl -H "Authorization: Bearer <admin-token>" http://localhost:9040/debug/pprof/goroutine?debug=1
-	r.Group(func(r chi.Router) {
-		r.Use(s.AuthMiddleware)
-		r.Use(AdminMiddleware)
-		r.Mount("/debug", http.DefaultServeMux)
-	})
+	// App reverse proxy: forwards a path-prefixed route to a locally-running
+	// side app (e.g. the portfolio tracker on 127.0.0.1:3001) so it is served
+	// through the same public entrypoint. Outside RequireAuth — the proxied
+	// app handles its own auth. See app_proxy.go.
+	r.HandleFunc(appProxyPrefix(), s.HandleAppProxy)
+	r.HandleFunc(appProxyPrefix()+"/*", s.HandleAppProxy)
 
-	// WebSocket routes — authenticated via JWT in Authorization header or
-	// ?token=<jwt> query parameter (browsers cannot set headers on WS upgrades).
-	r.Group(func(r chi.Router) {
-		r.Use(s.WSAuthMiddleware)
+	// Public read-only access to shared HTML files. Intentionally outside
+	// the /api group and the RequireAuth middleware: anyone with the link
+	// can view the file. Returns 404 if the share id is unknown or the
+	// underlying file has been deleted.
+	r.Get("/web_share/{id}", s.ServeWebShare)
 
-		// Global multiplexed WebSocket
-		r.Get("/ws", s.HandleGlobalWS)
+	// Public WeChat JS-SDK config signer, used by shared pages to enable the
+	// in-app "分享给朋友" rich card. Outside RequireAuth like /web_share.
+	r.Get("/wx/js-config", s.HandleWeChatJSConfig)
 
-		// Terminal PTY WebSocket (session-scoped; must be registered before the legacy project route)
-		r.Get("/ws/terminal/sessions/{sessionId}", s.HandleTerminalSessionWS)
-		// Legacy project-scoped terminal (kept for backward compatibility)
-		r.Get("/ws/terminal/{projectId}", s.HandleTerminalWS)
-	})
+	// WebSocket endpoints. They expect the JWT via either the cookie or an
+	// `?auth=<token>` query parameter (cookies aren't reliable on WS upgrades
+	// across all browsers). Auth is enforced inline in each handler.
+	r.Get("/ws", s.HandleGlobalWS)
+	r.Get("/ws/terminal/sessions/{sessionId}", s.HandleTerminalSessionWS)
+	r.Get("/ws/terminal/{projectId}", s.HandleTerminalWS)
 
 	return r
 }
 
-// CORSOrigins returns the list of allowed CORS origins from config, falling
-// back to local-dev defaults when the config field is empty.
-func (s *Server) CORSOrigins() []string {
-	origins := s.Config.Get().CORSOrigins
-	if len(origins) == 0 {
-		return []string{
-			"http://localhost:5173",
-			"http://localhost:3000",
-			"http://127.0.0.1:5173",
-		}
-	}
-	return origins
+func registerAuthedAPIRoutes(s *Server, r chi.Router) {
+	// Sessions
+	r.Route("/sessions", func(r chi.Router) {
+		r.Get("/", s.ListSessions)
+		r.Post("/", s.CreateSession)
+		r.Put("/reorder", s.ReorderSessions)
+		r.Get("/trash", s.ListTrashedSessions)
+		r.Delete("/trash", s.EmptyTrash)
+		r.Route("/{sessionId}", func(r chi.Router) {
+			r.Get("/", s.GetSession)
+			r.Put("/", s.UpdateSession)
+			r.Delete("/", s.DeleteSession)
+			r.Post("/restore", s.RestoreSession)
+			r.Post("/fork", s.ForkSession)
+			r.Post("/auto-title", s.AutoTitleSession)
+			r.Get("/messages", s.ListSessionMessages)
+			r.Post("/upload-image", s.UploadImage)
+			r.Get("/image/{filename}", s.ServeImage)
+
+			r.Put("/worktree-mode", s.SetWorktreeMode)
+			r.Get("/worktree-status", s.GetWorktreeStatus)
+
+			r.Get("/queue", s.ListQueuedMessages)
+			r.Post("/queue", s.CreateQueuedMessage)
+			r.Put("/queue/{queueId}", s.UpdateQueuedMessage)
+			r.Delete("/queue/{queueId}", s.DeleteQueuedMessage)
+			r.Post("/queue/{queueId}/run", s.HandleRunQueuedMessage)
+		})
+	})
+
+	// Projects
+	r.Route("/projects", func(r chi.Router) {
+		r.Get("/", s.ListProjects)
+		r.Post("/", s.CreateProject)
+		r.Get("/lookup-by-dir", s.LookupProjectByDir)
+		r.Get("/by-git-dir", s.CheckProjectByGitDir)
+		r.Route("/{projectId}", func(r chi.Router) {
+			r.Get("/", s.GetProject)
+			r.Put("/", s.UpdateProject)
+			r.Delete("/", s.DeleteProject)
+			r.Get("/scratch-session", s.GetOrCreateScratchSession)
+
+			// Git operations (project-level)
+			r.Get("/git-repositories", s.GetGitRepositories)
+			r.Get("/git-workspace-status", s.GetGitWorkspaceStatus)
+			r.Get("/git-status", s.GetGitStatus)
+			r.Post("/git-commit", s.GitCommit)
+			r.Post("/git-discard", s.GitDiscard)
+			r.Get("/git-log", s.GitLog)
+			r.Get("/git-commit-files", s.GitCommitFiles)
+			r.Get("/git-commit-diff", s.GitCommitDiff)
+			r.Post("/generate-commit-message", s.GenerateCommitMessage)
+			r.Get("/git-branches", s.GetGitBranches)
+			r.Post("/git-checkout", s.GitCheckout)
+			r.Post("/git-stage", s.GitStage)
+			r.Post("/git-unstage", s.GitUnstage)
+			r.Post("/git-push", s.GitPush)
+			r.Post("/git-pull", s.GitPull)
+			r.Get("/diff", s.GetProjectDiff)
+			r.Get("/diff-stats", s.GetProjectDiffStats)
+			r.Get("/file-diff", s.GetProjectFileDiff)
+			r.Get("/git-file-head", s.GetProjectFileHead)
+
+			// File browser
+			r.Get("/files", s.ListProjectFiles)
+			r.Get("/files-flat", s.ListProjectFilesFlat)
+			r.Get("/file-content", s.ReadProjectFile)
+			r.Put("/file-content", s.SaveProjectFile)
+			r.Delete("/file-content", s.DeleteProjectFile)
+			r.Get("/file-search", s.SearchProjectFiles)
+			r.Post("/file-upload", s.UploadProjectFile)
+			r.Get("/file-download", s.DownloadProjectFile)
+			r.Get("/file-serve", s.ServeProjectFile)
+			r.Post("/file-move", s.MoveProjectFile)
+			r.Post("/web-shares", s.CreateWebShare)
+
+			// Labels (project-scoped)
+			r.Get("/labels", s.ListLabels)
+			r.Post("/labels", s.CreateLabel)
+			r.Delete("/labels/{labelId}", s.DeleteLabel)
+		})
+	})
+
+	// Tasks
+	r.Route("/tasks", func(r chi.Router) {
+		r.Get("/", s.ListTasks)
+		r.Post("/", s.CreateTask)
+		r.Route("/{taskId}", func(r chi.Router) {
+			r.Get("/", s.GetTask)
+			r.Put("/", s.UpdateTask)
+			r.Delete("/", s.DeleteTask)
+			r.Put("/parent", s.SetTaskParent)
+			r.Delete("/parent", s.RemoveTaskParent)
+			r.Route("/comments", func(r chi.Router) {
+				r.Get("/", s.ListTaskComments)
+				r.Post("/", s.CreateTaskComment)
+			})
+			r.Route("/labels", func(r chi.Router) {
+				r.Post("/", s.AddLabelToTask)
+				r.Delete("/{labelName}", s.RemoveLabelFromTask)
+			})
+		})
+	})
+	r.Put("/task-comments/{commentId}", s.UpdateTaskComment)
+	r.Delete("/task-comments/{commentId}", s.DeleteTaskComment)
+
+	r.Route("/reactions/{targetType}/{targetId}", func(r chi.Router) {
+		r.Get("/", s.GetReactions)
+		r.Post("/", s.AddReaction)
+		r.Delete("/", s.RemoveReaction)
+	})
+
+	r.Route("/projects/{projectId}/assets", func(r chi.Router) {
+		r.Get("/", s.ListAssets)
+		r.Post("/", s.CreateAsset)
+	})
+	r.Route("/assets/{assetId}", func(r chi.Router) {
+		r.Get("/", s.GetAsset)
+		r.Put("/", s.UpdateAsset)
+		r.Delete("/", s.DeleteAsset)
+		r.Get("/versions", s.ListAssetVersions)
+		r.Get("/diff", s.DiffAssetVersions)
+		r.Route("/comments", func(r chi.Router) {
+			r.Get("/", s.ListReviewComments)
+			r.Post("/", s.CreateReviewComment)
+		})
+	})
+	r.Put("/comments/{commentId}", s.UpdateReviewComment)
+	r.Delete("/comments/{commentId}", s.DeleteReviewComment)
+
+	r.Get("/messages/{messageId}/details", s.GetMessageDetails)
+	r.Get("/changes", s.ListChanges)
+
+	// Utility
+	r.Post("/validate-path", s.ValidatePath)
+	r.Get("/browse-dir", s.BrowseDir)
+	r.Get("/info", s.GetServerInfo)
+	r.Get("/available-agents", s.ListAvailableAgents)
+	r.Get("/available-models", s.ListAvailableModels)
+	r.Put("/default-agent", s.SetDefaultAgent)
+	r.Get("/settings", s.GetSettings)
+	r.Put("/settings", s.UpdateSettings)
+	r.Get("/prompt-templates", s.ListPromptTemplates)
+	r.Put("/prompt-templates", s.ReplacePromptTemplates)
+
+	s.RegisterWorkflowRoutes(r)
+	s.RegisterRalphRoutes(r)
+	s.RegisterMarketplaceRoutes(r)
 }

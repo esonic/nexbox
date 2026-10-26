@@ -174,10 +174,34 @@ func stringifyJSONValue(v interface{}) string {
 	}
 }
 
-func codexPatchToolStart(payload map[string]interface{}, raw json.RawMessage) (toolName string, input string, path string) {
-	patchText := firstJSONMapStringDeep(payload, "patch", "diff", "input", "patch_text", "unified_diff")
+func codexPatchToolStart(payload map[string]interface{}, raw json.RawMessage) (toolName string, input string, path string, patchText string) {
+	patchText = firstJSONMapStringDeep(payload, "patch", "diff", "input", "patch_text", "unified_diff")
 	if patchText == "" {
 		patchText = string(raw)
+	}
+
+	// A single "*** Begin Patch" envelope can touch several files (one
+	// "*** Add/Update/Delete File:" section each). The single-path Edit/
+	// Write/Delete shape below can only carry one, so multi-file patches
+	// route through the same "FileChange" shape codex's native fileChange
+	// items use — one card, one diff per file — instead of silently
+	// dropping every file after the first.
+	if sections := parseApplyPatchSections(patchText); len(sections) > 1 {
+		type fileChangeEntry struct {
+			Path string `json:"path"`
+			Kind string `json:"kind"`
+			Diff string `json:"diff,omitempty"`
+		}
+		changes := make([]fileChangeEntry, 0, len(sections))
+		for _, s := range sections {
+			k := s.kind
+			if k == "add" {
+				k = "create"
+			}
+			changes = append(changes, fileChangeEntry{Path: s.path, Kind: k, Diff: applyPatchSectionDiff(s.path, s)})
+		}
+		changesJSON, _ := json.Marshal(map[string]interface{}{"changes": changes})
+		return "FileChange", string(changesJSON), "", patchText
 	}
 
 	kind := strings.ToLower(strings.TrimSpace(firstJSONMapStringDeep(payload, "kind", "change_kind", "op", "operation", "action")))
@@ -201,10 +225,10 @@ func codexPatchToolStart(payload map[string]interface{}, raw json.RawMessage) (t
 
 	if path != "" {
 		pathJSON, _ := json.Marshal(map[string]string{"path": path})
-		return toolName, string(pathJSON), path
+		return toolName, string(pathJSON), path, patchText
 	}
 	patchJSON, _ := json.Marshal(map[string]string{"patch": patchText})
-	return toolName, string(patchJSON), ""
+	return toolName, string(patchJSON), "", patchText
 }
 
 func codexPatchResultMessage(toolName, path string) string {

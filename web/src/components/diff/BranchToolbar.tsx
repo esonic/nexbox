@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { toast } from "sonner";
 import {
   GitBranch,
@@ -11,24 +11,22 @@ import {
   X,
   Loader2,
   RefreshCw,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { gitApi, type GitBranchResponse } from "@/lib/api";
-import { useAppStore } from "@/stores/app";
+import { gitApi, type GitBranchResponse, type GitScope } from "@/lib/api";
 
-export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel, onNavigate }: {
-  projectId: string;
-  sessionId?: string;
+export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, onNavigate, sidebarCollapsed, onToggleSidebar, branchData }: {
+  scope: GitScope;
+  branchData?: GitBranchResponse;
   onBranchChanged?: () => void;
+  aheadCount?: number;
   navLabel?: string;
   onNavigate?: (direction: "prev" | "next") => void;
+  sidebarCollapsed?: boolean;
+  onToggleSidebar?: () => void;
 }) {
-  // Primary source: store (managed by SessionWorkspace's unified polling).
-  // Falls back to local state for mutations and standalone use.
-  const storeBranchData = useAppStore((s) => s.gitBranchData);
-  const setGitBranchData = useAppStore((s) => s.setGitBranchData);
-  const [localBranchData, setLocalBranchData] = useState<GitBranchResponse | null>(null);
-  const branchData = storeBranchData ?? localBranchData;
   const [showDropdown, setShowDropdown] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newBranchName, setNewBranchName] = useState("");
@@ -37,23 +35,6 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
   const [pulling, setPulling] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-
-  const loadBranches = useCallback(async () => {
-    try {
-      const data = await gitApi.branches(projectId, sessionId);
-      // Update store so all consumers see the latest data immediately.
-      setGitBranchData(data);
-      setLocalBranchData(data);
-    } catch (e) {
-      console.error("Failed to load branches:", e);
-    }
-  }, [projectId, sessionId, setGitBranchData]);
-
-  // Only do an initial local load if the store is empty (e.g. standalone use).
-  useEffect(() => {
-    if (!storeBranchData) loadBranches();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -74,10 +55,25 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
   const handleCheckout = async (branch: string) => {
     setSwitching(true);
     try {
-      await gitApi.checkout(projectId, { branch }, sessionId);
+      await gitApi.checkout(scope, { branch });
       toast.success(`Switched to ${branch}`);
       setShowDropdown(false);
-      await loadBranches();
+      onBranchChanged?.();
+    } catch (e) {
+      toast.error("Checkout failed", { description: String(e) });
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  // Create a local branch tracking a remote-tracking branch, instead of relying
+  // on checkout's DWIM (which fails when several remotes share the branch name).
+  const handleTrackRemote = async (localName: string, remoteBranch: string) => {
+    setSwitching(true);
+    try {
+      await gitApi.checkout(scope, { branch: localName, create: true, start_point: remoteBranch });
+      toast.success(`Switched to ${localName}`, { description: `Tracking ${remoteBranch}` });
+      setShowDropdown(false);
       onBranchChanged?.();
     } catch (e) {
       toast.error("Checkout failed", { description: String(e) });
@@ -91,12 +87,11 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
     if (!name) return;
     setSwitching(true);
     try {
-      await gitApi.checkout(projectId, { branch: name, create: true }, sessionId);
+      await gitApi.checkout(scope, { branch: name, create: true });
       toast.success(`Created and switched to ${name}`);
       setCreating(false);
       setNewBranchName("");
       setShowDropdown(false);
-      await loadBranches();
       onBranchChanged?.();
     } catch (e) {
       toast.error("Create branch failed", { description: String(e) });
@@ -108,9 +103,9 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
   const handlePush = async () => {
     setPushing(true);
     try {
-      await gitApi.push(projectId, sessionId);
+      await gitApi.push(scope);
       toast.success("Pushed to remote");
-      await loadBranches();
+      onBranchChanged?.();
     } catch (e) {
       toast.error("Push failed", { description: String(e) });
     } finally {
@@ -121,9 +116,8 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
   const handlePull = async () => {
     setPulling(true);
     try {
-      await gitApi.pull(projectId, sessionId);
+      await gitApi.pull(scope);
       toast.success("Pulled from remote");
-      await loadBranches();
       onBranchChanged?.();
     } catch (e) {
       toast.error("Pull failed", { description: String(e) });
@@ -132,12 +126,20 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
     }
   };
 
-  const currentBranch = branchData?.branches.find((b) => b.is_current);
   const localBranches = branchData?.branches.filter((b) => !b.is_remote) ?? [];
   const remoteBranches = branchData?.branches.filter((b) => b.is_remote) ?? [];
 
   return (
     <div className="flex items-center gap-1 px-2 py-1.5 border-b text-xs">
+      {onToggleSidebar && (
+        <button
+          onClick={onToggleSidebar}
+          className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+          title={sidebarCollapsed ? "Show changes panel" : "Hide changes panel"}
+        >
+          {sidebarCollapsed ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}
+        </button>
+      )}
       <div className="relative" ref={dropdownRef}>
         <button
           onClick={() => setShowDropdown(!showDropdown)}
@@ -145,11 +147,8 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
         >
           <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           <span className="truncate font-medium">{branchData?.current || "..."}</span>
-          {currentBranch && (currentBranch.ahead || 0) > 0 && (
-            <span className="text-[10px] text-blue-500">{currentBranch.ahead}↑</span>
-          )}
-          {currentBranch && (currentBranch.behind || 0) > 0 && (
-            <span className="text-[10px] text-orange-500">{currentBranch.behind}↓</span>
+          {(aheadCount ?? 0) > 0 && (
+            <span className="text-[10px] text-blue-500">{aheadCount}↑</span>
           )}
         </button>
 
@@ -204,16 +203,21 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
               <>
                 <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground bg-muted/30">Remote</div>
                 {remoteBranches.map((b) => {
-                  const localName = b.name.replace(/^origin\//, "");
-                  const hasLocal = localBranches.some((lb) => lb.name === localName);
+                  const localName = b.local_name || b.name;
+                  const local = localBranches.find((lb) => lb.name === localName);
                   return (
                     <button
                       key={b.name}
-                      onClick={() => !hasLocal && handleCheckout(localName)}
-                      disabled={switching || hasLocal}
-                      className={cn("w-full px-3 py-1.5 text-left hover:bg-muted transition-colors flex items-center gap-2 ml-5", hasLocal && "opacity-50")}
+                      onClick={() => {
+                        if (!local) handleTrackRemote(localName, b.name);
+                        else if (!local.is_current) handleCheckout(localName);
+                      }}
+                      disabled={switching || local?.is_current}
+                      className={cn("w-full px-3 py-1.5 text-left hover:bg-muted transition-colors flex items-center gap-2 ml-5", local?.is_current && "opacity-50")}
+                      title={local ? (local.is_current ? `Already on ${localName}` : `Switch to local ${localName}`) : `Create ${localName} tracking ${b.name}`}
                     >
                       <span className="truncate">{b.name}</span>
+                      {local && <span className="text-[10px] text-muted-foreground ml-auto shrink-0">local</span>}
                     </button>
                   );
                 })}
@@ -248,7 +252,7 @@ export function BranchToolbar({ projectId, sessionId, onBranchChanged, navLabel,
             </button>
           </>
         )}
-        <button onClick={() => { loadBranches(); onBranchChanged?.(); }} className="p-1.5 rounded hover:bg-muted transition-colors" title="Refresh">
+        <button onClick={onBranchChanged} className="p-1.5 rounded hover:bg-muted transition-colors" title="Refresh">
           <RefreshCw className="h-3.5 w-3.5" />
         </button>
       </div>

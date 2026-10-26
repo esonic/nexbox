@@ -3,12 +3,19 @@ package main
 import (
 	"embed"
 	"io/fs"
+	"mime"
 	"net/http"
 	"strings"
 )
 
 //go:embed all:webdist
 var webDistFS embed.FS
+
+func init() {
+	// The PWA manifest requires application/manifest+json so browsers
+	// (and TWA verification) recognise it; Go's default MIME table omits it.
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+}
 
 // embeddedSPAHandler returns an http.HandlerFunc that serves embedded static files
 // and falls back to index.html for SPA client-side routing.
