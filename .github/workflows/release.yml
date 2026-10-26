@@ -135,6 +135,7 @@ jobs:
     needs: [prepare, binaries]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
