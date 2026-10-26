@@ -39,9 +39,6 @@ interface SessionGroupProps {
   isProjectDragging: boolean;
   projectDropPosition: "above" | "below" | null;
   // Delete
-  confirmDeleteSessionId: string | null;
-  onConfirmDelete: (id: string) => void;
-  onCancelDelete: () => void;
   onDelete: (id: string) => void;
   // Selection
   onSelectSession: (id: string) => void;
@@ -54,7 +51,6 @@ export function SessionGroup({
   onRenameChange, onRenameCommit, onRenameCancel, onRenameStart,
   dragSessionId, dragOverSessionId, dragOverPosition,
   onDragStart, onDragOver, onDragEnd, onDrop,
-  confirmDeleteSessionId, onConfirmDelete, onCancelDelete,
   onDelete, dragDisabled, onTogglePin, pinPendingIds,
   projectDragProps, isProjectDragging, projectDropPosition,
   onSelectSession,
@@ -188,9 +184,6 @@ export function SessionGroup({
           onDragOver={onDragOver}
           onDragEnd={onDragEnd}
           onDrop={onDrop}
-          isConfirmingDelete={confirmDeleteSessionId === s.id}
-          onConfirmDelete={onConfirmDelete}
-          onCancelDelete={onCancelDelete}
           dragDisabled={dragDisabled}
           onTogglePin={onTogglePin}
           pinPending={pinPendingIds.has(s.id)}
