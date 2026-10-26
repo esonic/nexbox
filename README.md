@@ -84,3 +84,11 @@ Node.js, npm, Go, and the source directory are not required at runtime, but Git 
 - [Agent Support](docs/agents.md): CLIs, protocols, model selection, and capability limitations.
 - [Architecture](docs/architecture.md): Processes, storage, and workspace semantics.
 - [Marketplace and MCP](docs/marketplace.md): Sources, installation scopes, authorization, and availability.
+
+## Contributing and Security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development checks and pull request
+guidance. Report vulnerabilities privately according to
+[SECURITY.md](SECURITY.md); do not put credentials or exploit details in a
+public issue. Bundled dependency licenses are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

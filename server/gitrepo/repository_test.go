@@ -20,8 +20,8 @@ func initRepo(t *testing.T, path string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
-	runRepoGit(t, path, "config", "user.email", "beehub@example.com")
-	runRepoGit(t, path, "config", "user.name", "BeeHub Test")
+	runRepoGit(t, path, "config", "user.email", "nexbox@example.com")
+	runRepoGit(t, path, "config", "user.name", "NexBox Test")
 }
 
 func runRepoGit(t *testing.T, path string, args ...string) string {

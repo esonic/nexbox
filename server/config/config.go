@@ -14,6 +14,24 @@ type MCPToolsConfig struct {
 	TaskManagement *bool `json:"task_management,omitempty"`
 }
 
+// AndroidAssetLinksConfig describes the optional Android Trusted Web Activity
+// association served from /.well-known/assetlinks.json. Keeping it in the
+// instance config avoids binding the source tree to one deployment or signing
+// certificate.
+type AndroidAssetLinksConfig struct {
+	PackageName            string   `json:"package_name"`
+	SHA256CertFingerprints []string `json:"sha256_cert_fingerprints"`
+}
+
+// PublicWebConfig contains deployment-specific public files. VerificationFiles
+// maps a root-level filename (for example "provider-verification.txt") to its
+// contents. These values belong in the local, ignored config.json rather than
+// in source control.
+type PublicWebConfig struct {
+	VerificationFiles map[string]string        `json:"verification_files,omitempty"`
+	AndroidAssetLinks *AndroidAssetLinksConfig `json:"android_asset_links,omitempty"`
+}
+
 // TaskManagementEnabled reports whether the task tools are exposed.
 func (c MCPToolsConfig) TaskManagementEnabled() bool {
 	return c.TaskManagement != nil && *c.TaskManagement
@@ -32,6 +50,8 @@ type Config struct {
 	SuggestNextActions *bool `json:"suggest_next_actions,omitempty"`
 	// PromptTemplates are global (not per-project) reusable prompts.
 	PromptTemplates []PromptTemplate `json:"prompt_templates,omitempty"`
+	// PublicWeb holds optional deployment-specific verification responses.
+	PublicWeb PublicWebConfig `json:"public_web,omitempty"`
 }
 
 // PromptTemplate is a reusable, user-defined prompt that can be picked in the

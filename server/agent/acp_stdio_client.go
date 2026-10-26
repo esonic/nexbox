@@ -63,7 +63,7 @@ type acpStdioClient struct {
 	command string
 	args    []string
 	verbose bool
-	// env is the subprocess environment; nil inherits BeeHub's own.
+	// env is the subprocess environment; nil inherits NexBox's own.
 	env []string
 
 	cmd   *exec.Cmd

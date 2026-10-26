@@ -204,7 +204,7 @@ func buildForwardURL(base *url.URL, tail, rawQuery string) (*url.URL, error) {
 }
 
 // mcpRequestHeaders returns the complete headers stored for an MCP. Placeholder
-// replacement here keeps MCPs installed by older BeeHub versions working; new
+// replacement here keeps MCPs installed by older NexBox versions working; new
 // installs are already fully resolved before they are stored.
 func (s *Server) mcpRequestHeaders(mcp *store.InstalledMCP) (map[string]string, error) {
 	manifest, err := parseInstalledMCPManifest(mcp.Manifest)

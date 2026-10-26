@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -67,8 +68,8 @@ func NewClaudeClient() *ClaudeClient {
 		CLIPath: "claude",
 		Env:     make(map[string]string),
 	}
-	if dacs := os.Getenv("DACS"); dacs != "" {
-		c.Env["CLAUDE_CODE_TMPDIR"] = dacs + "/.claude-tmp"
+	if tmpDir := strings.TrimSpace(os.Getenv("NEXBOX_CLAUDE_TMPDIR")); tmpDir != "" {
+		c.Env["CLAUDE_CODE_TMPDIR"] = tmpDir
 	}
 	// send_to_session can block for the duration of another agent turn. Match
 	// NexBox's per-turn ceiling unless the operator set an explicit timeout.
@@ -695,7 +696,7 @@ func (c *ClaudeClient) Query(
 		// (num_turns==0, cost==0) *before* the real turn runs. Breaking on it
 		// ends the read loop before the actual assistant turn streams, so the
 		// message is persisted empty even though the CLI goes on to answer — the
-		// reply lands in the CLI transcript but never reaches BeeHub. The Agent
+		// reply lands in the CLI transcript but never reaches NexBox. The Agent
 		// SDK keeps a single stdout open across turns and never stops reading on
 		// a result (see claude-agent-sdk _read_messages), so the real turn
 		// arrives on this same stream: skip the no-op result and keep reading.

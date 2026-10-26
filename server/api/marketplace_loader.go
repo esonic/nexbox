@@ -65,7 +65,7 @@ func (s *Server) ListLocalPlugins(w http.ResponseWriter, r *http.Request) {
 // Examples:
 //
 //	git@github.com:anthropics/skills.git          → anthropics/skills
-//	git@gitlab.okg.com:sre/skills/code-review.git → sre/skills/code-review
+//	git@gitlab.example.com:team/skills/code-review.git → team/skills/code-review
 //	https://github.com/anthropics/skills.git       → anthropics/skills
 func gitSourceLabel(url string) string {
 	url = strings.TrimSuffix(url, ".git")

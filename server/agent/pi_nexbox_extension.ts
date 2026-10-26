@@ -81,16 +81,16 @@ export default async function (pi: ExtensionAPI) {
 		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...managedToolNames])]);
 	});
 
-	// Pi's public RPC fork command always branches before a user entry. BeeHub
+	// Pi's public RPC fork command always branches before a user entry. NexBox
 	// stores a completed-turn leaf instead, so this private command preserves the
 	// selected user/assistant turn by using the extension API's "at" position.
-	pi.registerCommand("beehub-fork-at-entry", {
-		description: "Internal BeeHub command for exact session forks",
+	pi.registerCommand("nexbox-fork-at-entry", {
+		description: "Internal NexBox command for exact session forks",
 		handler: async (args, ctx) => {
 			const entryId = args.trim();
-			if (!entryId || /\s/.test(entryId)) throw new Error("invalid BeeHub fork entry ID");
+			if (!entryId || /\s/.test(entryId)) throw new Error("invalid NexBox fork entry ID");
 			const result = await ctx.fork(entryId, { position: "at" });
-			if (result.cancelled) throw new Error("BeeHub fork was cancelled");
+			if (result.cancelled) throw new Error("NexBox fork was cancelled");
 		},
 	});
 

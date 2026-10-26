@@ -461,7 +461,7 @@ func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the cut point exclusively by BeeHub identity. The opaque agent
+	// Resolve the cut point exclusively by NexBox identity. The opaque agent
 	// checkpoint stored with the message is passed through without inspection.
 	atMsg, err := s.Store.GetMessage(req.MessageID)
 	if err != nil {

@@ -70,9 +70,8 @@ func isFetchableImageURL(s string) bool {
 }
 
 // publicBaseURL reconstructs the externally-visible scheme://host for the
-// request, honouring the reverse proxy in front of us (box-nex.top terminates
-// TLS and forwards over plain HTTP, so r.TLS is nil and we must trust the
-// X-Forwarded-* headers it sets).
+// request, honouring a reverse proxy that terminates TLS and forwards over
+// plain HTTP, where r.TLS is nil and X-Forwarded-* carries the public origin.
 func publicBaseURL(r *http.Request) string {
 	scheme := "http"
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {

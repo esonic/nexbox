@@ -92,7 +92,7 @@ done
 
 	var events []StreamEvent
 	_, err := a.SendMessage(ctx, Request{
-		ConversationID: "beehub-compat-multifile",
+		ConversationID: "nexbox-compat-multifile",
 		WorkDir:        t.TempDir(),
 		Message:        "edit two files",
 	}, func(e StreamEvent) { events = append(events, e) })
@@ -202,7 +202,7 @@ done
 
 	var events []StreamEvent
 	_, err := a.SendMessage(ctx, Request{
-		ConversationID: "beehub-compat-multifile-result",
+		ConversationID: "nexbox-compat-multifile-result",
 		WorkDir:        t.TempDir(),
 		Message:        "edit two files",
 	}, func(e StreamEvent) { events = append(events, e) })

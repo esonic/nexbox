@@ -1,14 +1,7 @@
 # Go
-server/boxnex
-
-# inject.so is a compiled binary — build with: make -C inject/
-inject/*.so
 server/logs/
 *.exe
-proxy/proxy
-stable/
 marketplace/
-target/
 .claude/
 
 # Embedded web dist (built by build.sh, contains copy of web/dist)
@@ -47,4 +40,3 @@ server/plugins/plugins.json
 server/config.json
 server/chrome/
 temp
-online

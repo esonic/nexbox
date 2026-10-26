@@ -119,7 +119,6 @@ export function UserPicker({ value, onChange, placeholder = "Username", classNam
     <div className={cn("relative", className)}>
       {editing ? (
         <input
-          // eslint-disable-next-line jsx-a11y/no-autofocus
           autoFocus
           value={draft}
           onChange={(e) => setDraft(e.target.value)}

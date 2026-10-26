@@ -22,7 +22,7 @@ export function useSessionReorder(loadSessions: () => void) {
     e.stopPropagation();
     if (useLayoutStore.getState().autoSortSessions) { e.preventDefault(); return; }
     setDragSessionId(sessionId);
-    e.dataTransfer.setData("application/x-beehub-session", sessionId);
+    e.dataTransfer.setData("application/x-nexbox-session", sessionId);
     e.dataTransfer.effectAllowed = "move";
     // Make the drag ghost semi-transparent
     if (e.currentTarget instanceof HTMLElement) {

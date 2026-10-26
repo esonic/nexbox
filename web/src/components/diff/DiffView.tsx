@@ -46,6 +46,16 @@ const CATEGORY_ORDER: FileCategory[] = ["staged", "unstaged", "untracked"];
 const LEFT_WIDTH_MIN = 200;
 const LEFT_WIDTH_MAX = 600;
 
+function scrollWithinContainer(container: HTMLElement, target: HTMLElement, block: "start" | "center") {
+  const containerRect = container.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  const centerOffset = block === "center" ? (container.clientHeight - targetRect.height) / 2 : 0;
+  container.scrollTo({
+    top: container.scrollTop + targetRect.top - containerRect.top - centerOffset,
+    behavior: "instant",
+  });
+}
+
 export function DiffView({ diffText, fileStats, projectId, sessionId, repository, isDefaultRepository, onCommitted, review }: DiffViewProps) {
   const isLazyMode = !diffText && !!fileStats;
   const repositoryId = repository?.id;
@@ -97,6 +107,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const gitStatus = review?.status;
   const fileRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const rightPanelRef = useRef<HTMLDivElement>(null);
 
   // Resizable left list. Width persisted to localStorage, clamped to a sane range.
   const splitContainerRef = useRef<HTMLDivElement>(null);
@@ -164,7 +175,9 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
     setActiveFile(key);
     setActiveFileCategory(category);
     if (viewMode === "inline") {
-      fileRefs.current[key]?.scrollIntoView({ behavior: "instant", block: "start" });
+      const container = rightPanelRef.current;
+      const target = fileRefs.current[key];
+      if (container && target) scrollWithinContainer(container, target, "start");
     }
   }, [viewMode]);
 
@@ -263,7 +276,6 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
   // --- Navigation state for BranchToolbar ---
   const [changeCount, setChangeCount] = useState(0);
   const [currentChangeIdx, setCurrentChangeIdx] = useState(0);
-  const rightPanelRef = useRef<HTMLDivElement>(null);
   const autoScrolledRef = useRef(false);
 
   // Inline comments for file list badges
@@ -284,9 +296,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
     const container = rightPanelRef.current;
     if (!container) return;
     const target = container.querySelector<HTMLElement>('[data-change-idx="0"]');
-    if (target) {
-      target.scrollIntoView({ behavior: "instant", block: "center" });
-    }
+    if (target) scrollWithinContainer(container, target, "center");
   }, [changeCount, viewMode]);
 
   const activeFileIdx = useMemo(() => {
@@ -319,7 +329,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
 
       const target = container.querySelector<HTMLElement>(`[data-change-idx="${targetIdx}"]`);
       if (target) {
-        target.scrollIntoView({ behavior: "instant", block: "center" });
+        scrollWithinContainer(container, target, "center");
         setCurrentChangeIdx(targetIdx);
       }
     }
@@ -390,7 +400,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0 overflow-hidden">
       {gitScope && (
         <BranchToolbar scope={gitScope} onBranchChanged={handleRefreshAll}
           branchData={review?.branches}
@@ -400,11 +410,11 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
           sidebarCollapsed={sidebarCollapsed}
           onToggleSidebar={() => setSidebarCollapsed((v) => !v)} />
       )}
-      <div className="flex flex-1 min-h-0" ref={splitContainerRef}>
+      <div className="flex flex-1 min-h-0 overflow-hidden" ref={splitContainerRef}>
         {/* Left sidebar (resizable) */}
         {!sidebarCollapsed && (
         <>
-        <div className="shrink-0 border-r flex flex-col" style={{ width: leftWidth }}>
+        <div className="shrink-0 min-h-0 overflow-hidden border-r flex flex-col" style={{ width: leftWidth }}>
           <div className="flex border-b text-xs">
             {(["changes", "history"] as const).map((tab) => (
               <button key={tab} onClick={() => setActiveTab(tab)}
@@ -449,7 +459,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
                   )}
                 </div>
               </div>
-              <div className="flex-1 overflow-y-auto">
+              <div className="flex-1 min-h-0 overflow-y-auto">
                 {filteredFiles.length === 0 && (
                   <div className="text-center py-8 text-muted-foreground text-xs">No changes</div>
                 )}
@@ -489,7 +499,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
                 })}
               </div>
               {projectId && (
-                <div className="border-t p-2 space-y-2">
+                <div className="shrink-0 border-t p-2 space-y-2">
                   <div className="relative">
                     <Textarea value={commitMsg} onChange={(e) => setCommitMsg(e.target.value)}
                       placeholder="Commit message..." className="text-xs min-h-[60px] pr-8 resize-none" rows={2} />
@@ -522,8 +532,8 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
         )}
 
         {/* Right: Diff content */}
-        <div className="flex-1 min-w-0 flex">
-          <div className="flex-1 overflow-y-auto min-w-0" ref={rightPanelRef}>
+        <div className="flex-1 min-w-0 min-h-0 flex overflow-hidden">
+          <div className="flex-1 min-w-0 min-h-0 overflow-y-auto" ref={rightPanelRef}>
             {activeTab === "changes" ? (
               viewMode === "inline" ? (
                 <div className="space-y-2 p-4">

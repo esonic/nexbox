@@ -219,7 +219,7 @@ export interface ChatEvent {
   stats?: ExecutionStats;
   context_usage?: ContextUsage;
   session_info?: SessionInfo;
-  // Durable BeeHub message id and opaque fork checkpoint for a completed turn.
+  // Durable NexBox message id and opaque fork checkpoint for a completed turn.
   message_id?: string;
   agent_checkpoint?: string;
   // Dynamic-workflow progress snapshot (merged server-side) carried on

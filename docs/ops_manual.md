@@ -117,8 +117,32 @@ NexBox 服务本身提供 HTTP。公开网络的 TLS 在反向代理层配置。
 | `mcp_tools.task_management` | 是否向 Agent 暴露内置任务管理工具，默认关闭 |
 | `suggest_next_actions` | 是否请求回复末尾给出可点击的后续建议，默认开启 |
 | `prompt_templates` | 全局提示词模板，单项包含 `name` 和 `content` |
-
 模型服务、登录信息和 Agent 原生配置由对应 CLI 管理，不写入这个配置文件。手动编辑 `config.json` 后重启服务；在界面修改的设置按各功能直接生效。当前存储后端为 SQLite。
+
+如需为 Claude CLI 指定独立临时目录，可设置 `NEXBOX_CLAUDE_TMPDIR`。该值会原样传给 Claude CLI 的 `CLAUDE_CODE_TMPDIR`。
+
+### 可选的站点验证与 Android TWA
+
+只有需要域名所有权验证或 Android Trusted Web Activity 的公开部署才需要
+`public_web`。普通本地和服务器部署无需添加这些字段。配置后，NexBox 会提供
+对应的根目录验证文件及 `/.well-known/assetlinks.json`：
+
+```json
+{
+  "public_web": {
+    "verification_files": {
+      "provider-verification.txt": "replace-with-your-verification-value"
+    },
+    "android_asset_links": {
+      "package_name": "com.example.app",
+      "sha256_cert_fingerprints": ["AA:BB:CC:..."]
+    }
+  }
+}
+```
+
+这些部署值放在实例现有的 `config.json` 中，不需要额外配置文件。没有配置时，
+相关 URL 不会发布验证内容。
 
 ## 数据与工作目录
 

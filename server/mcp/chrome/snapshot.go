@@ -78,7 +78,7 @@ func (sm *SnapshotManager) TakeSnapshot(ctx context.Context) (string, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	// Objects are only needed between snapshots; release the previous group.
-	_ = chromedp.Run(ctx, runtime.ReleaseObjectGroup("beehub-snapshot"))
+	_ = chromedp.Run(ctx, runtime.ReleaseObjectGroup("nexbox-snapshot"))
 	var raw axTreeResult
 	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		return cdp.Execute(ctx, "Accessibility.getFullAXTree", nil, &raw)
@@ -224,7 +224,7 @@ func (sm *SnapshotManager) ResolveNodeObject(ctx context.Context, uid string) (r
 
 	var objID runtime.RemoteObjectID
 	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		obj, err := dom.ResolveNode().WithBackendNodeID(backendID).WithObjectGroup("beehub-snapshot").Do(ctx)
+		obj, err := dom.ResolveNode().WithBackendNodeID(backendID).WithObjectGroup("nexbox-snapshot").Do(ctx)
 		if err != nil {
 			return fmt.Errorf("resolve node for uid %s: %w", uid, err)
 		}

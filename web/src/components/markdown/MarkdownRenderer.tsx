@@ -18,7 +18,8 @@ declare global {
   }
 }
 
-const MERMAID_CDN_URL = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js";
+const MERMAID_CDN_URL = "https://cdn.jsdelivr.net/npm/mermaid@12.2.0/dist/mermaid.min.js";
+const MERMAID_CDN_INTEGRITY = "sha384-8xUhuLNMjW/cI2Dacg3DR4WliYznvIg0LVG1stctThKD/YVrJFI9TNCFxft5NYgp";
 
 const DARK_MERMAID_THEME_VARIABLES: Record<string, string> = {
   background: "#020b18",
@@ -73,9 +74,11 @@ async function ensureMermaidLoaded(): Promise<MermaidRenderer> {
     window.__nexboxMermaidScriptPromise = new Promise<void>((resolve, reject) => {
       const script = document.createElement("script");
       script.src = MERMAID_CDN_URL;
+      script.integrity = MERMAID_CDN_INTEGRITY;
+      script.crossOrigin = "anonymous";
       script.async = true;
       script.onload = () => resolve();
-      script.onerror = () => reject(new Error("Failed to load mermaid runtime"));
+      script.onerror = () => reject(new Error("Failed to load the Mermaid runtime"));
       document.head.appendChild(script);
     });
   }

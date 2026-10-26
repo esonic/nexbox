@@ -1,4 +1,4 @@
-// Package mcpidentity defines the names BeeHub exposes to every agent runtime.
+// Package mcpidentity defines the names NexBox exposes to every agent runtime.
 package mcpidentity
 
 import (

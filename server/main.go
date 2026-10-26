@@ -388,7 +388,7 @@ func main() {
 	// Serve embedded frontend static files as fallback (SPA support)
 	if hasEmbeddedWeb() {
 		log.Printf("  Serving embedded frontend")
-		router.NotFound(embeddedSPAHandler())
+		router.NotFound(embeddedSPAHandler(cfgMgr))
 	} else {
 		startupLog.Printf("  No embedded frontend (build with build.sh to include)")
 		router.NotFound(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

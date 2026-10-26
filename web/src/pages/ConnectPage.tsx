@@ -350,7 +350,7 @@ export function ConnectPage() {
     localStorage.setItem("notification_last_read_id", String(maxId));
     setLastReadId(maxId);
     window.dispatchEvent(new CustomEvent("notification-read"));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [isCloud, myNotifications]);
 
   return (

@@ -25,7 +25,7 @@ func cloneWithRemoteBranches(t *testing.T, extraBranches ...string) string {
 	clone := filepath.Join(root, "clone")
 	runAPIGit(t, root, "clone", "-q", upstream, clone)
 	runAPIGit(t, clone, "config", "user.email", "test@example.com")
-	runAPIGit(t, clone, "config", "user.name", "BeeHub Test")
+	runAPIGit(t, clone, "config", "user.name", "NexBox Test")
 	return clone
 }
 

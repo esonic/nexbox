@@ -23,7 +23,7 @@ func initAPIRepo(t *testing.T, root string) {
 	}
 	runAPIGit(t, root, "init", "-q")
 	runAPIGit(t, root, "config", "user.email", "test@example.com")
-	runAPIGit(t, root, "config", "user.name", "BeeHub Test")
+	runAPIGit(t, root, "config", "user.name", "NexBox Test")
 }
 
 func runAPIGit(t *testing.T, root string, args ...string) string {

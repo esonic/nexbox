@@ -95,7 +95,7 @@ type ChatEvent struct {
 	Message      string `json:"message,omitempty"`
 
 	// MessageID replaces the frontend's temporary streaming id with the
-	// durable BeeHub message id. AgentCheckpoint is opaque to API clients.
+	// durable NexBox message id. AgentCheckpoint is opaque to API clients.
 	MessageID       string `json:"message_id,omitempty"`
 	AgentCheckpoint string `json:"agent_checkpoint,omitempty"`
 

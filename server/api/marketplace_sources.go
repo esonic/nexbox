@@ -510,7 +510,7 @@ func (s *Server) uninstallSourceItems(src store.MarketplaceSource) {
 
 // CloneOfficialMarketplaceRepos ensures the marketplace directory exists so
 // users can add their own sources later. The previous default source pointed
-// to a now-gone gitlab.okg.com repo; nexbox now ships with no preconfigured
+// to a deployment-specific private repository; NexBox now ships with no preconfigured
 // marketplace.
 func CloneOfficialMarketplaceRepos(dataDir string, ls *store.SQLiteStore) {
 	mpDir := filepath.Join(dataDir, "marketplace")

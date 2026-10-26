@@ -63,7 +63,7 @@ func TestCodexAgentForksAtTurnBeforeStartingMessage(t *testing.T) {
 	workDir := t.TempDir()
 
 	result, err := a.SendMessage(ctx, Request{
-		ConversationID: "beehub-fork",
+		ConversationID: "nexbox-fork",
 		WorkDir:        workDir,
 		Message:        "continue from fork",
 		Fork: &ForkContext{
@@ -119,7 +119,7 @@ func TestCodexAgentRegistersTurnSteerInterjector(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		result, err := a.SendMessage(ctx, Request{
-			ConversationID: "beehub-steer",
+			ConversationID: "nexbox-steer",
 			WorkDir:        workDir,
 			Message:        "start",
 			RegisterInterject: func(inject func(string) error) {

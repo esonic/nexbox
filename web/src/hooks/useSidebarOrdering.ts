@@ -47,7 +47,7 @@ export function useSidebarOrdering(groups: SessionGroupData[], reload: () => voi
     onDragStart: (e: React.DragEvent) => {
       if (!id) return;
       e.stopPropagation();
-      e.dataTransfer.setData("application/x-beehub-project", id);
+      e.dataTransfer.setData("application/x-nexbox-project", id);
       e.dataTransfer.effectAllowed = "move";
       setDragProject(id);
     },

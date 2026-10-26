@@ -93,7 +93,7 @@ func TestCodexAgent_StoppedTurnKeepsCheckpointEmpty(t *testing.T) {
 	done := make(chan outcome, 1)
 	go func() {
 		result, err := a.SendMessage(ctx, Request{
-			ConversationID: "beehub-stop",
+			ConversationID: "nexbox-stop",
 			WorkDir:        t.TempDir(),
 			Message:        "start",
 			RegisterInterject: func(func(string) error) {

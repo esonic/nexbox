@@ -343,7 +343,7 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 			exactFork = true
 		} else {
 			// Upgrade old user-entry checkpoints in place when the selected turn is
-			// still on the parent's active branch. This makes existing BeeHub
+			// still on the parent's active branch. This makes existing NexBox
 			// conversations benefit from exact forks as well as newly created ones.
 			var entries piEntriesState
 			if err := client.command(ctx, "get_entries", nil, &entries); err == nil {
@@ -356,9 +356,9 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 				return Result{}, fmt.Errorf("pi fork has invalid leaf checkpoint")
 			}
 			// Pi RPC's public fork command always branches before a user entry.
-			// The BeeHub extension exposes the runtime's position:"at" behavior so
+			// The NexBox extension exposes the runtime's position:"at" behavior so
 			// the selected completed turn remains in the new model context.
-			if err := client.command(ctx, "prompt", map[string]interface{}{"message": "/beehub-fork-at-entry " + leafID}, nil); err != nil {
+			if err := client.command(ctx, "prompt", map[string]interface{}{"message": "/nexbox-fork-at-entry " + leafID}, nil); err != nil {
 				return Result{}, fmt.Errorf("fork pi session at completed turn: %w", err)
 			}
 		} else {
@@ -650,7 +650,7 @@ func (a *PiAgent) publishUsage(usage piUsage, cb EventCallback, result *Result, 
 // piToolDiff extracts a unified diff from a completed edit/multiedit tool
 // call. Pi's edit tool already computes `details.patch` as a standard
 // unified diff (git-style ---/+++/@@ headers) internally, before any
-// possibility of a disk-state race with BeeHub's own process, so it is
+// possibility of a disk-state race with NexBox's own process, so it is
 // passed straight through. Pi's `write` tool does not currently return a
 // diff (it has no before/after comparison of its own), so writes fall back
 // to the plain "Successfully wrote to ..." text until pi adds one upstream;

@@ -249,7 +249,7 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >> "$0.calls"
   id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
   case "$line" in
-    *beehub-fork-at-entry*)
+    *nexbox-fork-at-entry*)
       session=child-session
       printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
       ;;
@@ -288,7 +288,7 @@ done
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(calls), `/beehub-fork-at-entry assistant-leaf`) {
+	if !strings.Contains(string(calls), `/nexbox-fork-at-entry assistant-leaf`) {
 		t.Fatalf("exact fork command missing: %s", calls)
 	}
 	if strings.Contains(string(calls), `"type":"fork"`) {

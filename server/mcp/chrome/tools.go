@@ -20,7 +20,7 @@ import (
 	gomcp "github.com/mark3labs/mcp-go/mcp"
 )
 
-const toolScriptComment = "/** source: BeeHub 用户授权的浏览器操作; summary: 执行浏览器工具的页面交互或检查 **/\n"
+const toolScriptComment = "/** source: NexBox 用户授权的浏览器操作; summary: 执行浏览器工具的页面交互或检查 **/\n"
 
 // Keep the tab's first Run on its long-lived context. Only subsequent actions
 // use a cancellable context, so a tool timeout cannot destroy the tab's event loop.

@@ -895,7 +895,6 @@ export function SessionWorkspace() {
                                     setWfNameEditing(false);
                                   }
                                 }}
-                                // eslint-disable-next-line jsx-a11y/no-autofocus
                                 autoFocus
                                 placeholder="Workflow Name"
                                 className="text-sm font-medium bg-transparent border-b border-border outline-none flex-1 min-w-0"
