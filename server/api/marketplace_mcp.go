@@ -9,9 +9,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	agentpkg "github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/mcpidentity"
 	"github.com/esonic/nexbox/store"
+	"github.com/go-chi/chi/v5"
 )
 
 var mcpHeaderVariablePattern = regexp.MustCompile(`\$\{([^{}]+)\}`)
@@ -153,6 +154,10 @@ func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
 		} `json:"mcpServers"`
 	}
 	if json.Unmarshal([]byte(manifestStr), &mcpServersWrap) == nil && len(mcpServersWrap.MCPServers) > 0 {
+		if len(mcpServersWrap.MCPServers) != 1 {
+			writeError(w, http.StatusBadRequest, "install one MCP server per package")
+			return
+		}
 		serverKeys := make([]string, 0, len(mcpServersWrap.MCPServers))
 		for k := range mcpServersWrap.MCPServers {
 			serverKeys = append(serverKeys, k)
@@ -200,16 +205,29 @@ func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	mcpKey := req.MCPKey
+	// The manifest is authoritative; older clients sent the display name in
+	// mcp_key even when the package supplied a separate technical identifier.
+	var manifest map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(manifestStr), &manifest); err != nil || manifest == nil {
+		writeError(w, http.StatusBadRequest, "manifest must be a JSON object")
+		return
+	}
+	var mcpKey string
+	_ = json.Unmarshal(manifest["key"], &mcpKey)
 	if mcpKey == "" {
-		var m struct {
-			Key string `json:"key"`
-		}
-		if json.Unmarshal([]byte(manifestStr), &m) == nil && m.Key != "" {
-			mcpKey = m.Key
-		} else {
-			mcpKey = req.Name
-		}
+		mcpKey = req.MCPKey
+	}
+	if mcpKey == "" {
+		mcpKey = req.Name
+	}
+	mcpKey = mcpidentity.ServerKey(mcpKey)
+	manifest["key"], _ = json.Marshal(mcpKey)
+	encodedManifest, _ := json.Marshal(manifest)
+	manifestStr = string(encodedManifest)
+	entry, err := parseInstalledMCPManifest(manifestStr)
+	if err != nil || (entry.URL == "" && entry.Cmd == "") {
+		writeError(w, http.StatusBadRequest, "manifest requires an HTTP URL or stdio command")
+		return
 	}
 
 	envValues := "{}"
@@ -260,20 +278,32 @@ func (s *Server) UninstallMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	name := chi.URLParam(r, "name")
 	projectID := r.URL.Query().Get("project_id")
-	all := projectID == "" // no project_id means delete all entries for this name
+	// An explicit empty project_id targets only the global installation.
+	all := projectID == "" && !r.URL.Query().Has("project_id")
+	if err := s.uninstallMCPScopes(name, projectID, all); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// uninstallMCP removes an installed MCP; an empty projectID removes every scope.
+func (s *Server) uninstallMCP(name, projectID string) error {
+	return s.uninstallMCPScopes(name, projectID, projectID == "")
+}
+
+func (s *Server) uninstallMCPScopes(name, projectID string, all bool) error {
 	if all {
 		if err := s.Store.DeleteInstalledMCPByName(name); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
+			return err
 		}
 		_ = s.Store.DeleteMCPOAuthTokenByName(name)
 	} else {
 		if err := s.Store.DeleteInstalledMCP(name, projectID); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
+			return err
 		}
 		_ = s.Store.DeleteMCPOAuthToken(name, projectID)
 	}
 	log.Printf("[marketplace] uninstalled MCP: %s (project=%q, all=%v)", name, projectID, all)
-	w.WriteHeader(http.StatusNoContent)
+	return nil
 }

@@ -109,7 +109,7 @@ func (bm *BrowserManager) attachLocked(parent context.Context) error {
 	bm.browserCtx, bm.allocCtx = root, root
 	bm.allocCancel = rootCancel
 	bm.transportCancel, bm.remoteBrowser = transportCancel, remote
-	if err := bm.syncExternalPagesLocked(); err != nil {
+	if err := bm.syncPagesLocked(); err != nil {
 		bm.closeLocked()
 		return fmt.Errorf("connect external Chrome: %w", err)
 	}
@@ -138,20 +138,22 @@ func (bm *BrowserManager) attachLocked(parent context.Context) error {
 	return nil
 }
 
-// syncExternalPagesLocked discovers user-opened tabs without navigating or
+// syncPagesLocked discovers live tabs (including site popups) without navigating or
 // creating any tabs. Contexts attach lazily when a page is actually used.
-func (bm *BrowserManager) syncExternalPagesLocked() error {
-	ctx, cancel := context.WithTimeout(bm.browserCtx, 3*time.Second)
+func (bm *BrowserManager) syncPagesLocked(requests ...context.Context) error {
+	ctx, cleanup := operationContext(bm.browserCtx, requestContext(requests))
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	targets, err := chromedp.Targets(ctx)
 	if err != nil {
-		return fmt.Errorf("list external Chrome tabs: %w", err)
+		return fmt.Errorf("list Chrome tabs: %w", err)
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].TargetID < targets[j].TargetID })
 	live := make(map[target.ID]*target.Info)
 	known := make(map[target.ID]bool)
 	for _, t := range targets {
-		if t.Type == "page" {
+		if t.Type == "page" && !bm.closedTargets[t.TargetID] {
 			live[t.TargetID] = t
 		}
 	}
@@ -167,15 +169,17 @@ func (bm *BrowserManager) syncExternalPagesLocked() error {
 		}
 	}
 	for _, t := range targets {
-		if t.Type != "page" || known[t.TargetID] {
+		if t.Type != "page" || known[t.TargetID] || bm.closedTargets[t.TargetID] {
 			continue
 		}
 		pageCtx, pageCancel := chromedp.NewContext(bm.browserCtx, chromedp.WithTargetID(t.TargetID))
 		bm.nextPageID++
-		bm.pages[bm.nextPageID] = &pageState{
+		ps := &pageState{
 			info: PageInfo{ID: bm.nextPageID, TargetID: t.TargetID, URL: t.URL, Title: t.Title},
 			ctx:  pageCtx, cancel: pageCancel,
 		}
+		bm.watchPage(ps)
+		bm.pages[bm.nextPageID] = ps
 	}
 	if _, ok := bm.pages[bm.currentPage]; !ok {
 		bm.currentPage = 0
@@ -188,11 +192,17 @@ func (bm *BrowserManager) syncExternalPagesLocked() error {
 	return nil
 }
 
-func (bm *BrowserManager) closeExternalPageLocked(ps *pageState) error {
-	ctx, cancel := context.WithTimeout(bm.browserCtx, 3*time.Second)
+func (bm *BrowserManager) closePageLocked(ps *pageState, request context.Context) error {
+	ctx, cleanup := operationContext(bm.browserCtx, request)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if err := target.CloseTarget(ps.info.TargetID).Do(cdp.WithExecutor(ctx, bm.remoteBrowser)); err != nil {
-		return fmt.Errorf("close external Chrome tab: %w", err)
+	executor := bm.remoteBrowser
+	if executor == nil {
+		executor = chromedp.FromContext(bm.browserCtx).Browser
+	}
+	if err := target.CloseTarget(ps.info.TargetID).Do(cdp.WithExecutor(ctx, executor)); err != nil {
+		return fmt.Errorf("close Chrome tab: %w", err)
 	}
 	if ps.cancel != nil {
 		ps.cancel()
@@ -200,15 +210,50 @@ func (bm *BrowserManager) closeExternalPageLocked(ps *pageState) error {
 	return nil
 }
 
-// runPageLocked bounds external operations without giving the first Run a
+// runPageLocked bounds target initialisation without giving the first Run a
 // short-lived context: chromedp ties the target's event loop to that context.
 // On timeout, dropping the transport lets the exit watcher cancel the root
 // before acquiring bm.mu, preserving tabs and unblocking the operation.
-func (bm *BrowserManager) runPageLocked(ctx context.Context, timeout time.Duration, actions ...chromedp.Action) error {
-	if bm.opts.BrowserURL == "" {
-		return chromedp.Run(ctx, actions...)
+func (bm *BrowserManager) runPageLocked(ctx, request context.Context, timeout time.Duration, actions ...chromedp.Action) error {
+	if err := request.Err(); err != nil {
+		return err
 	}
-	timer := time.AfterFunc(timeout, bm.transportCancel)
-	defer timer.Stop()
-	return chromedp.Run(ctx, actions...)
+	cancel := bm.transportCancel
+	if cancel == nil {
+		cancel = bm.allocCancel
+	}
+	watchCtx, watchCancel := context.WithTimeout(request, timeout)
+	defer watchCancel()
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(watchCtx, func() {
+		defer close(interrupted)
+		cancel()
+	})
+	err := chromedp.Run(ctx, actions...)
+	if !stop() {
+		// Complete interruption before allowing a new connection to start.
+		<-interrupted
+	}
+	if watchCtx.Err() != nil {
+		return watchCtx.Err()
+	}
+	return err
+}
+
+func requestContext(requests []context.Context) context.Context {
+	if len(requests) > 0 {
+		return requests[0]
+	}
+	return context.Background()
+}
+
+// Merge request cancellation with the persistent browser context without
+// reparenting the browser or its target event loop to a short-lived request.
+func operationContext(parent, request context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(request, cancel)
+	if request.Err() != nil {
+		cancel()
+	}
+	return ctx, func() { stop(); cancel() }
 }

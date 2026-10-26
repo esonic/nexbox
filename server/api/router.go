@@ -33,9 +33,11 @@ type Server struct {
 	ChromeManager     *chromemcp.ChromeManager // Per-session Chrome DevTools MCP manager for E2E testing
 	ListenPort        int                      // actual TCP port the HTTP server is listening on
 	MarketplaceStats  *MarketplaceStatsBuffer  // In-memory stats accumulator
-	GitRepositories  *gitrepo.Resolver // discovers and resolves repository scope within a workspace
+	GitRepositories   *gitrepo.Resolver        // discovers and resolves repository scope within a workspace
 	OnMCPToolsChanged func()                   // called after MCP tool category settings change
 	WeChat            *WeChatJSSDK             // optional WeChat JS-SDK share signer (nil when unconfigured)
+
+	mcpRuntimeTools sync.Map // installation identity -> immutable MCP tool aliases
 
 	// humanGates: executionID+":"+nodeID → channel carrying user input for human node continuation
 	humanGatesMu sync.Mutex

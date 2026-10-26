@@ -13,6 +13,8 @@ import { UNASSIGNED_PROJECT, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX } from "@/lib/
 import { useSessionNotifications } from "@/hooks/useSessionNotifications";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useSidebarData } from "@/hooks/useSidebarData";
+import { useSessionPin } from "@/hooks/useSessionPin";
+import { useSidebarOrdering } from "@/hooks/useSidebarOrdering";
 import { useGroupedSessions } from "@/hooks/useGroupedSessions";
 import { useSessionReorder } from "@/hooks/useSessionReorder";
 import { useMobileDrawerSwipe } from "@/hooks/useMobileDrawerSwipe";
@@ -67,6 +69,8 @@ export function AppSidebar() {
     dragSessionId, dragOverSessionId, dragOverPosition,
     handleDragStart, handleDragOver, handleDragEnd, handleDrop,
   } = useSessionReorder(loadSessions);
+  const ordering = useSidebarOrdering(groupedSessions, loadSessions);
+  const { pinPendingIds, handleTogglePin } = useSessionPin();
   useSessionNotifications();
 
   // Resize
@@ -443,7 +447,13 @@ export function AppSidebar() {
         <NewSessionButton onNewSession={handleNewSession} />
 
         {/* ── Sessions section header ── */}
-        <SessionsHeader onNewProject={handleOpenNewProject} />
+        <SessionsHeader
+          onNewProject={handleOpenNewProject}
+          autoSort={ordering.autoSort}
+          sorting={ordering.saving}
+          onSort={(sort) => { void ordering.saveOrder(sort); }}
+          onToggleAutoSort={ordering.toggleAutoSort}
+        />
 
         {/* ── Grouped session list ── */}
         <div className="flex-1 overflow-y-auto px-2 pb-2">
@@ -474,6 +484,12 @@ export function AppSidebar() {
               confirmDeleteSessionId={confirmDeleteSessionId}
               onConfirmDelete={setConfirmDeleteSessionId}
               onCancelDelete={() => setConfirmDeleteSessionId(null)}
+              dragDisabled={ordering.autoSort || ordering.saving}
+              onTogglePin={handleTogglePin}
+              pinPendingIds={pinPendingIds}
+              projectDragProps={ordering.projectDragProps(group.projectId)}
+              isProjectDragging={ordering.dragProject === group.projectId}
+              projectDropPosition={ordering.projectDrop?.id === group.projectId ? (ordering.projectDrop.below ? "below" : "above") : null}
               onDelete={handleDeleteSession}
               onSelectSession={handleSelectSession}
             />

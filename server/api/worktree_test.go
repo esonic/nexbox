@@ -384,6 +384,11 @@ func TestGetWorktreeStatus_CleanWorktree(t *testing.T) {
 	}
 	mustGit(repoDir, "add", ".")
 	mustGit(repoDir, "commit", "-m", "init")
+	// Publish the base commit. The session branch itself has no upstream.
+	remoteDir := filepath.Join(base, "remote.git")
+	mustGit(base, "init", "--bare", remoteDir)
+	mustGit(repoDir, "remote", "add", "origin", remoteDir)
+	mustGit(repoDir, "push", "origin", "HEAD:refs/heads/main")
 
 	// Create the worktree on a new branch
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
@@ -404,59 +409,6 @@ func TestGetWorktreeStatus_CleanWorktree(t *testing.T) {
 
 	if !isWorktreeDirty(wtDir) {
 		t.Error("worktree with staged file should be dirty")
-	}
-}
-
-func TestCloneWorktreeForForkPreservesAncestorProjectDirectory(t *testing.T) {
-	s := newWorktreeServer(t)
-	repository := t.TempDir()
-	initAPIRepo(t, repository)
-	commitAPIFile(t, repository, "module/tracked.txt", "tracked\n")
-	project, err := s.Store.CreateProject(store.CreateProjectRequest{Name: "fork-subdirectory", GitRepoPath: filepath.Join(repository, "module")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	parent, err := s.Store.CreateSession(store.CreateSessionRequest{Name: "parent", ProjectID: project.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Store.UpdateSessionWorktree(parent.ID, "worktree", ""); err != nil {
-		t.Fatal(err)
-	}
-	parent, err = s.Store.GetSession(parent.ID)
-	if err != nil || parent == nil {
-		t.Fatalf("load parent: %v", err)
-	}
-	parentDirectory := s.ensureWorktree(parent.ID, parent, filepath.Join(repository, "module"))
-
-	child, err := s.Store.CreateSession(store.CreateSessionRequest{Name: "child", ProjectID: project.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.cloneWorktreeForFork(child, parent)
-	persistedChild, err := s.Store.GetSession(child.ID)
-	if err != nil || persistedChild == nil {
-		t.Fatalf("load child: %v", err)
-	}
-	if persistedChild.WorktreeMode != "worktree" || persistedChild.WorktreePath == "" {
-		t.Fatalf("forked child worktree = %#v", persistedChild)
-	}
-	childRoot, err := gitWorktreeRoot(persistedChild.WorktreePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(childRoot, "module"); persistedChild.WorktreePath != want {
-		t.Fatalf("forked child work directory = %q, want %q", persistedChild.WorktreePath, want)
-	}
-	if prefix := runAPIGit(t, persistedChild.WorktreePath, "rev-parse", "--show-prefix"); prefix != "module/\n" {
-		t.Fatalf("forked child prefix = %q, want module/", prefix)
-	}
-
-	if err := RemoveWorktree(persistedChild.WorktreePath); err != nil {
-		t.Fatalf("remove child worktree: %v", err)
-	}
-	if err := RemoveWorktree(parentDirectory); err != nil {
-		t.Fatalf("remove parent worktree: %v", err)
 	}
 }
 

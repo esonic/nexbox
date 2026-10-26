@@ -27,6 +27,10 @@ interface LayoutState {
   killTerminal: (sessionId: string) => void;
 
   // Sidebar
+  autoSortSessions: boolean;
+  setAutoSortSessions: (enabled: boolean) => void;
+  projectOrder: string[];
+  setProjectOrder: (ids: string[]) => void;
   sidebarOpen: boolean;
   toggleSidebar: () => void;
   sidebarCollapsed: boolean;
@@ -65,6 +69,10 @@ export const useLayoutStore = create<LayoutState>()(
           },
         })),
 
+      autoSortSessions: false,
+      setAutoSortSessions: (enabled) => set({ autoSortSessions: enabled }),
+      projectOrder: [],
+      setProjectOrder: (ids) => set({ projectOrder: ids }),
       sidebarOpen: true,
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
       sidebarCollapsed: false,
@@ -84,6 +92,8 @@ export const useLayoutStore = create<LayoutState>()(
         terminalStates: Object.fromEntries(
           Object.entries(state.terminalStates).map(([id, ts]) => [id, { show: ts.show, key: 0 }])
         ),
+        autoSortSessions: state.autoSortSessions,
+        projectOrder: state.projectOrder,
         sidebarOpen: state.sidebarOpen,
         sidebarCollapsed: state.sidebarCollapsed,
         sidebarWidth: state.sidebarWidth,

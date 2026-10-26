@@ -1342,6 +1342,21 @@ func (a *CodexAgent) SendMessage(
 				emitCodexItemCompleted(n.Item, agentStreamed, reasoningStreamed, codexParentedCallback(parentToolID, cb))
 			}
 
+		case "mcpServer/startupStatus/updated":
+			var n struct {
+				ThreadID      string `json:"threadId"`
+				Name          string `json:"name"`
+				Status        string `json:"status"`
+				FailureReason string `json:"failureReason"`
+			}
+			if json.Unmarshal(params, &n) == nil && n.Status == "failed" && (n.ThreadID == "" || isMainThread(n.ThreadID)) {
+				message := fmt.Sprintf("MCP %s failed to start; its tools are unavailable for this turn.", n.Name)
+				if n.FailureReason == "reauthenticationRequired" {
+					message = fmt.Sprintf("MCP %s requires authorization before its tools can be used.", n.Name)
+				}
+				cb(StreamEvent{Type: EventSystem, Content: message})
+			}
+
 		case "item/mcpToolCall/progress":
 			var n codexMcpToolCallProgressNotification
 			if err := json.Unmarshal(params, &n); err == nil && n.Message != "" && isMainThread(n.ThreadID) {

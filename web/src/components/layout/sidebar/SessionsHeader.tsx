@@ -1,21 +1,32 @@
 import { useEffect, useRef, useState } from "react";
-import { History, Trash2, X, RotateCcw, FolderPlus } from "lucide-react";
+import { History, Trash2, X, RotateCcw, ArrowDownWideNarrow, FolderPlus } from "lucide-react";
 import { toast } from "sonner";
 import { sessionsApi } from "@/lib/api";
-import { formatRelativeDate } from "@/lib/utils";
+import { cn, formatRelativeDate } from "@/lib/utils";
 import { useAppStore } from "@/stores/app";
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent,
+  DropdownMenuItem, DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
+import type { SessionSort } from "@/lib/session-order";
 import type { Session } from "@/types";
+
+/**
+ * "Sessions" section header with the recently-deleted (trash) popover. Owns its
+ * own open/confirm state and trash data; restoring a session pushes it back
+ * into the store.
+ */
+const sortItemClassName = "justify-between rounded-md text-[13px] leading-5 text-muted-foreground focus:text-foreground";
 
 interface SessionsHeaderProps {
   onNewProject: () => void;
+  autoSort: boolean;
+  sorting: boolean;
+  onSort: (sort: SessionSort) => void;
+  onToggleAutoSort: () => void;
 }
 
-/**
- * "Sessions" section header with the new-project and recently-deleted (trash)
- * actions. Owns its own trash open/confirm state and data; restoring a session
- * pushes it back into the store.
- */
-export function SessionsHeader({ onNewProject }: SessionsHeaderProps) {
+export function SessionsHeader({ onNewProject, autoSort, sorting, onSort, onToggleAutoSort }: SessionsHeaderProps) {
   const setSessions = useAppStore((s) => s.setSessions);
 
   const [showTrash, setShowTrash] = useState(false);
@@ -72,13 +83,56 @@ export function SessionsHeader({ onNewProject }: SessionsHeaderProps) {
     <div className="flex items-center justify-between pl-4 pr-3 pt-2 pb-1.5 relative" ref={trashRef}>
       <span className="text-[13px] font-medium text-muted-foreground/60">Sessions</span>
       <div className="flex items-center gap-0.5">
-        <button
-          onClick={onNewProject}
-          className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-          title="New project"
-        >
+        <button onClick={onNewProject} className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground" title="New project">
           <FolderPlus className="h-3.5 w-3.5" />
         </button>
+        <DropdownMenu onOpenChange={(open) => { if (open) setShowTrash(false); }}>
+          <DropdownMenuTrigger asChild>
+            <button
+              disabled={sorting}
+              className={cn(
+                "p-1 rounded hover:bg-accent hover:text-muted-foreground transition-colors disabled:opacity-40",
+                autoSort ? "text-muted-foreground/70" : "text-muted-foreground/40",
+              )}
+              title={autoSort ? "Sort sessions · automatic activity sorting on" : "Sort sessions"}
+              aria-label="Sort sessions"
+            >
+              <ArrowDownWideNarrow className="h-3.5 w-3.5" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-52">
+            <DropdownMenuItem className={sortItemClassName} disabled={sorting} onSelect={() => onSort("created")}>
+              Sort by creation time
+            </DropdownMenuItem>
+            <DropdownMenuItem className={sortItemClassName} disabled={sorting} onSelect={() => onSort("activity")}>
+              Sort by last activity
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem className={sortItemClassName} role="menuitemcheckbox" aria-checked={autoSort} disabled={sorting} onSelect={(event) => {
+              event.preventDefault();
+              onToggleAutoSort();
+            }}>
+              Auto-sort by activity
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "relative h-4 w-7 shrink-0 rounded-full transition-colors motion-reduce:transition-none",
+                  autoSort ? "bg-muted-foreground/60" : "bg-muted-foreground/20",
+                )}
+              >
+                <span className={cn(
+                  "absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-background shadow-sm transition-transform duration-150 motion-reduce:transition-none",
+                  autoSort && "translate-x-3",
+                )} />
+              </span>
+            </DropdownMenuItem>
+            {autoSort && (
+              <p className="px-2 pt-1 pb-1.5 text-[11px] leading-4 text-muted-foreground/60">
+                Session dragging is disabled while auto-sort is on.
+              </p>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
         <button
           onClick={handleOpenTrash}
           className="p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-muted-foreground transition-colors"

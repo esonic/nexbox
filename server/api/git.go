@@ -1169,6 +1169,13 @@ func parseGitBranches(ctx context.Context, dir string) (*GitBranchResponse, erro
 		}
 
 		if isCurrent {
+			if upstream == "" || trackInfo == "[gone]" {
+				count, err := gitrepo.CountUnpublishedCommits(ctx, dir)
+				if err != nil {
+					return nil, err
+				}
+				branch.Ahead = count
+			}
 			result.Current = name
 		}
 		result.Branches = append(result.Branches, branch)

@@ -1,5 +1,8 @@
 import { useState } from "react";
 import { sessionsApi } from "@/lib/api";
+import { useLayoutStore } from "@/stores/layout";
+import { moveItem } from "@/lib/session-order";
+import { toast } from "sonner";
 import { useAppStore } from "@/stores/app";
 import type { Session } from "@/types";
 
@@ -16,7 +19,10 @@ export function useSessionReorder(loadSessions: () => void) {
   const [dragOverPosition, setDragOverPosition] = useState<"above" | "below" | null>(null);
 
   const handleDragStart = (e: React.DragEvent, sessionId: string) => {
+    e.stopPropagation();
+    if (useLayoutStore.getState().autoSortSessions) { e.preventDefault(); return; }
     setDragSessionId(sessionId);
+    e.dataTransfer.setData("application/x-beehub-session", sessionId);
     e.dataTransfer.effectAllowed = "move";
     // Make the drag ghost semi-transparent
     if (e.currentTarget instanceof HTMLElement) {
@@ -24,8 +30,18 @@ export function useSessionReorder(loadSessions: () => void) {
     }
   };
 
-  const handleDragOver = (e: React.DragEvent, sessionId: string) => {
+  const handleDragOver = (e: React.DragEvent, sessionId: string, groupSessions: Session[]) => {
+    if (!dragSessionId) return;
+    // Match the rendered group, including the merged Unassigned group.
+    const source = groupSessions.find((s) => s.id === dragSessionId);
+    const target = groupSessions.find((s) => s.id === sessionId);
+    if (!source || !target || !!source.is_pinned !== !!target.is_pinned) {
+      setDragOverSessionId(null);
+      setDragOverPosition(null);
+      return;
+    }
     e.preventDefault();
+    e.stopPropagation();
     e.dataTransfer.dropEffect = "move";
     if (!dragSessionId || dragSessionId === sessionId) {
       setDragOverSessionId(null);
@@ -47,25 +63,21 @@ export function useSessionReorder(loadSessions: () => void) {
 
   const handleDrop = (e: React.DragEvent, targetSessionId: string, groupSessions: Session[]) => {
     e.preventDefault();
+    e.stopPropagation();
+    if (useLayoutStore.getState().autoSortSessions) { handleDragEnd(); return; }
     if (!dragSessionId || dragSessionId === targetSessionId) {
       handleDragEnd();
       return;
     }
 
-    // Build new order for this group only (drag is scoped within a folder)
-    const ids = groupSessions.map((s) => s.id);
-    const fromIdx = ids.indexOf(dragSessionId);
-    let toIdx = ids.indexOf(targetSessionId);
-    if (fromIdx === -1 || toIdx === -1) { handleDragEnd(); return; }
-
-    // Remove dragged item
-    ids.splice(fromIdx, 1);
-    // Re-find target index after removal
-    toIdx = ids.indexOf(targetSessionId);
-    // Insert at correct position
-    if (dragOverPosition === "below") toIdx += 1;
-    ids.splice(toIdx, 0, dragSessionId);
-
+    // A drag cannot change project or pin status.
+    const source = groupSessions.find((s) => s.id === dragSessionId);
+    const target = groupSessions.find((s) => s.id === targetSessionId);
+    if (!source || !target || !!source.is_pinned !== !!target.is_pinned) {
+      handleDragEnd();
+      return;
+    }
+    const ids = moveItem(groupSessions.map((s) => s.id), dragSessionId, targetSessionId, dragOverPosition === "below");
     handleDragEnd();
 
     // Optimistic update
@@ -78,6 +90,7 @@ export function useSessionReorder(loadSessions: () => void) {
     // Persist to server
     sessionsApi.reorder(ids).catch((err) => {
       console.error("Failed to reorder sessions:", err);
+      toast.error("Failed to save session order");
       loadSessions();
     });
   };

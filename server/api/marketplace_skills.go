@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/esonic/nexbox/store"
+	"github.com/go-chi/chi/v5"
 )
 
 // ---------------------------------------------------------------------------
@@ -113,14 +113,47 @@ func (s *Server) UninstallSkill(w http.ResponseWriter, r *http.Request) {
 	}
 	name := chi.URLParam(r, "name")
 	projectID := r.URL.Query().Get("project_id")
+	// An explicit empty project_id targets only the global installation.
+	all := projectID == "" && !r.URL.Query().Has("project_id")
+	if err := s.uninstallSkillScopes(name, projectID, all); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
 
+// uninstallSkill removes an installed skill; an empty projectID removes every scope.
+func (s *Server) uninstallSkill(name, projectID string) error {
+	return s.uninstallSkillScopes(name, projectID, projectID == "")
+}
+
+func (s *Server) uninstallSkillScopes(name, projectID string, all bool) error {
 	// Collect install paths to clean up from disk.
 	var pathsToRemove []string
+	entries, err := s.Store.ListInstalledSkills("*")
+	if err != nil {
+		return err
+	}
+	retainedPaths := make(map[string]bool)
+	var globalPath string
+	for _, entry := range entries {
+		if entry.Name != name {
+			continue
+		}
+		if entry.ProjectID == "" {
+			globalPath = entry.InstallPath
+		} else if !all && projectID == "" {
+			retainedPaths[entry.InstallPath] = true
+		}
+	}
 	if projectID == "" {
 		// Global uninstall: remove the per-project symlinks propagated to each project.
 		// The global DB entry's InstallPath is the marketplace source — don't delete it.
 		for _, repoPath := range s.allGitRepoPaths() {
-			pathsToRemove = append(pathsToRemove, filepath.Join(repoPath, ".claude", "skills", name))
+			path := filepath.Join(repoPath, ".claude", "skills", name)
+			if !retainedPaths[path] {
+				pathsToRemove = append(pathsToRemove, path)
+			}
 		}
 	} else {
 		// Per-project uninstall: remove the installed directory/symlink.
@@ -130,14 +163,13 @@ func (s *Server) UninstallSkill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var delErr error
-	if projectID == "" {
+	if all {
 		delErr = s.Store.DeleteInstalledSkillByName(name)
 	} else {
 		delErr = s.Store.DeleteInstalledSkill(name, projectID)
 	}
 	if delErr != nil {
-		writeError(w, http.StatusInternalServerError, delErr.Error())
-		return
+		return delErr
 	}
 
 	// Remove installed directories / symlinks from disk.
@@ -147,13 +179,19 @@ func (s *Server) UninstallSkill(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[p] = true
+		if !all && projectID != "" && globalPath != "" {
+			if err := symlinkDir(globalPath, p); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := removeInstallDir(p); err != nil {
 			log.Printf("[marketplace] warning: failed to remove skill dir %s: %v", p, err)
 		}
 	}
 
 	log.Printf("[marketplace] uninstalled skill: %s (project=%q)", name, projectID)
-	w.WriteHeader(http.StatusNoContent)
+	return nil
 }
 
 // ---------------------------------------------------------------------------

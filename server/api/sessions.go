@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/gitrepo"
 	chromemcp "github.com/esonic/nexbox/mcp/chrome"
 	"github.com/go-chi/chi/v5"
 )
@@ -296,7 +296,7 @@ func (s *Server) resolveUtilityBackend(ctx context.Context) (agent.Agent, string
 	}
 
 	switch agentName {
-	case "pi":
+	case "pi", "kimi":
 		// An unscoped Pi catalog can contain unrelated providers and does not
 		// necessarily include the user's default; let Pi choose its own model.
 		return a, agentName, "", "", nil
@@ -441,6 +441,10 @@ func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "cannot fork a trashed session; restore it first")
 		return
 	}
+	if parent.WorktreeMode == "worktree" && parent.WorktreePath == "" {
+		writeError(w, http.StatusConflict, "parent session worktree is not ready")
+		return
+	}
 
 	// A named-but-unregistered agent must not silently fall through to the
 	// default backend (ResolveAgent's fallback): the parent's checkpoints
@@ -492,15 +496,6 @@ func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Eagerly create a worktree for the fork when the parent uses one. We
-	// branch from the parent's current branch tip, leaving the parent's
-	// worktree untouched. Errors here are logged but don't fail the fork
-	// (the user can still send messages — we'll fall back to the project
-	// root, matching what ensureWorktree does on add-failure).
-	if parent.WorktreeMode == "worktree" && parent.WorktreePath != "" {
-		s.cloneWorktreeForFork(newSess, parent)
-	}
-
 	log.Printf("[sessions] Forked %s session %s from %s at message %s",
 		resolvedAgent, newSess.ID, parentID, atMsg.ID)
 
@@ -509,90 +504,6 @@ func (s *Server) ForkSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, newSess)
-}
-
-// cloneWorktreeForFork creates a new git worktree for `newSess` branched
-// from `parent`'s current branch tip. parent.WorktreePath may be either the
-// linked worktree root (legacy rows) or the project's effective subdirectory.
-// Updates the new session's worktree fields on success.
-//
-// On failure (parent missing, detached HEAD, git error), this function logs
-// and returns without updating the session — the new session is left in
-// worktree mode with an empty path. ensureWorktree on the first chat turn
-// will then create a worktree branched from the project root's HEAD instead
-// of the parent's branch, which is a different starting point. We accept
-// that drift over failing the whole fork: the user is more likely to want
-// "the fork still works, just from project HEAD" than "the fork is dead".
-func (s *Server) cloneWorktreeForFork(newSess *Session, parent *Session) {
-	projectPrefix, err := gitRepositoryPrefix(parent.WorktreePath)
-	if err != nil {
-		log.Printf("[fork-worktree] failed to resolve project prefix (session=%s, path=%s): %v",
-			parent.ID, parent.WorktreePath, err)
-		return
-	}
-	// Legacy sessions stored only the worktree root, so their live prefix can be
-	// empty even when the configured project is an ancestor-repository
-	// subdirectory. Prefer the configured prefix when it is still available.
-	if project, projectErr := s.getProjectWithLocalPath(parent.ProjectID); projectErr == nil && project != nil && project.GitRepoPath != "" {
-		if configuredPrefix, prefixErr := gitRepositoryPrefix(project.GitRepoPath); prefixErr == nil {
-			projectPrefix = configuredPrefix
-		}
-	}
-	parentBranch, err := exec.Command("git", "-C", parent.WorktreePath, "rev-parse", "--abbrev-ref", "HEAD").Output()
-	if err != nil {
-		log.Printf("[fork-worktree] failed to read parent branch (session=%s, path=%s): %v",
-			parent.ID, parent.WorktreePath, err)
-		return
-	}
-	parentBranchName := strings.TrimSpace(string(parentBranch))
-	if parentBranchName == "" || parentBranchName == "HEAD" {
-		log.Printf("[fork-worktree] parent worktree is detached (session=%s); skipping worktree clone", parent.ID)
-		return
-	}
-
-	shortID := newSess.ID
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
-	}
-	newWorktreeDir := filepath.Join(s.DataDir, "worktrees", shortID)
-	newBranchName := "fork-" + shortID
-
-	if err := os.MkdirAll(filepath.Join(s.DataDir, "worktrees"), 0755); err != nil {
-		log.Printf("[fork-worktree] mkdir failed: %v", err)
-		return
-	}
-
-	// `git worktree add -b <newBranch> <dir> <startPoint>` creates a new
-	// branch starting at the parent's branch tip (a committed ref) and
-	// checks it out in a fresh worktree directory. Run from inside the
-	// parent worktree so git can locate the repo regardless of where we
-	// are in the filesystem.
-	cmd := exec.Command("git", "worktree", "add", "-b", newBranchName, newWorktreeDir, parentBranchName)
-	cmd.Dir = parent.WorktreePath
-	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("[fork-worktree] git worktree add failed (parent=%s, branch=%s): %v\n%s",
-			parent.ID, parentBranchName, err, out)
-		return
-	}
-
-	effectiveWorkDir, err := effectiveWorktreePath(newWorktreeDir, projectPrefix)
-	if err != nil {
-		log.Printf("[fork-worktree] failed to prepare project directory (session=%s): %v", newSess.ID, err)
-		if removeErr := RemoveWorktree(newWorktreeDir); removeErr != nil {
-			log.Printf("[fork-worktree] failed to roll back worktree %s: %v", newWorktreeDir, removeErr)
-		}
-		return
-	}
-
-	if err := s.Store.UpdateSessionWorktree(newSess.ID, "worktree", effectiveWorkDir); err != nil {
-		log.Printf("[fork-worktree] failed to record worktree path: %v", err)
-		// Fall through: we still created the worktree on disk; ensureWorktree
-		// would now fail because the dir already exists, but this is rare.
-		return
-	}
-	newSess.WorktreePath = effectiveWorkDir
-	log.Printf("[fork-worktree] created worktree %s (working directory %s, branch %s) for forked session %s",
-		newWorktreeDir, effectiveWorkDir, newBranchName, newSess.ID)
 }
 
 // DeleteSession soft-deletes a session (moves to trash).
@@ -645,7 +556,10 @@ func (s *Server) RestoreSession(w http.ResponseWriter, r *http.Request) {
 // data (session dirs + worktrees), and runs VACUUM to reclaim space.
 // Used by both the periodic 7-day cleanup goroutine and the EmptyTrash handler.
 func (s *Server) PurgeTrash(cutoff time.Time) (int, error) {
-	worktreePaths, _ := s.Store.GetExpiredSessionWorktrees(cutoff)
+	worktreePaths, err := s.Store.GetExpiredSessionWorktrees(cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("list expired session worktrees: %w", err)
+	}
 
 	ids, err := s.Store.PurgeExpiredSessions(cutoff)
 	if err != nil {
@@ -658,9 +572,52 @@ func (s *Server) PurgeTrash(cutoff time.Time) (int, error) {
 			log.Printf("[trash] Failed to remove session dir %s: %v", dir, err)
 		}
 	}
-	for _, wtPath := range worktreePaths {
-		if err := RemoveWorktree(wtPath); err != nil {
-			log.Printf("[trash] Failed to remove worktree %s: %v", wtPath, err)
+	if len(worktreePaths) > 0 {
+		// Read references after purging so active sessions, sessions still in
+		// trash, and running workflows keep their shared working directory.
+		references, err := s.Store.GetReferencedWorktreePaths()
+		if err != nil {
+			return len(ids), fmt.Errorf("check remaining worktree references: %w", err)
+		}
+		for i, path := range references {
+			canonical, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				canonical = filepath.Clean(path)
+			}
+			references[i] = canonical
+		}
+		removed := make(map[string]bool)
+		for _, wtPath := range worktreePaths {
+			root, err := gitWorktreeRoot(wtPath)
+			if err != nil {
+				log.Printf("[trash] Failed to resolve worktree %s: %v", wtPath, err)
+				continue
+			}
+			canonicalRoot, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				log.Printf("[trash] Failed to resolve worktree root %s: %v", root, err)
+				continue
+			}
+			if removed[canonicalRoot] {
+				continue
+			}
+			inUse := false
+			for _, reference := range references {
+				// Sessions can store either the worktree root or an effective
+				// project subdirectory, including paths through symlinks.
+				if gitrepo.PathWithin(canonicalRoot, reference) {
+					inUse = true
+					break
+				}
+			}
+			if inUse {
+				continue
+			}
+			if err := RemoveWorktree(root); err != nil {
+				log.Printf("[trash] Failed to remove worktree %s: %v", root, err)
+			} else {
+				removed[canonicalRoot] = true
+			}
 		}
 	}
 	if len(ids) > 0 {

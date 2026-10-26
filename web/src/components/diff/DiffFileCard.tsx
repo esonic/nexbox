@@ -23,6 +23,25 @@ import { computeDiffOps } from "@/lib/vscode-diff";
 import { useAppStore, type InlineComment } from "@/stores/app";
 
 const LARGE_DIFF_THRESHOLD = 100;
+const MAX_DIFF_BYTES = 512 * 1024;
+const MAX_DIFF_LINES = 5000;
+const MAX_DIFF_LINE_LENGTH = 10000;
+
+// Scan before parsing, realignment, highlighting, or mounting thousands of rows.
+function exceedsPreviewLimit(text: string): boolean {
+  if (text.length > MAX_DIFF_BYTES || new TextEncoder().encode(text).length > MAX_DIFF_BYTES) return true;
+  let lines = 1;
+  let lineLength = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) {
+      if (++lines > MAX_DIFF_LINES) return true;
+      lineLength = 0;
+    } else if (++lineLength > MAX_DIFF_LINE_LENGTH) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // memo: the git panel lives inside SessionWorkspace, which re-renders for
 // reasons that have nothing to do with the diff (session list refreshes, chat
@@ -71,7 +90,7 @@ export const DiffFileCard = memo(function DiffFileCard({
   const isLarge = totalChanges > LARGE_DIFF_THRESHOLD;
   const displayPath = getFilePath(file);
   const [expanded, setExpanded] = useState(defaultExpanded ?? !isLarge);
-  const [lazyDiff, setLazyDiff] = useState<{ key: string; text: string } | null>(null);
+  const [lazyDiff, setLazyDiff] = useState<{ key: string; text: string; tooLarge: boolean } | null>(null);
   const [loadingDiff, setLoadingDiff] = useState(false);
   const diffRequestGeneration = useRef(0);
   const repositoryId = repository?.id;
@@ -80,10 +99,24 @@ export const DiffFileCard = memo(function DiffFileCard({
     sessionId,
     repositoryId,
   }) : null, [projectId, sessionId, repositoryId]);
-  const lazyRequestKey = `${repositoryId ?? ""}:${displayPath}:${fullFile ? 1 : 0}:${staged ? 1 : 0}:${refreshKey ?? 0}`;
+  // Refreshes of the same preview keep its last result mounted. A different
+  // file, repository, session or staged mode must never reuse that content.
+  const lazyContentKey = JSON.stringify([projectId, sessionId, repositoryId, displayPath, !!fullFile, !!staged]);
+  const lazyRequestKey = `${lazyContentKey}:${refreshKey ?? 0}`;
+  const hasCachedDiff = lazyLoad && lazyDiff?.key === lazyContentKey;
+  const showInitialLoading = loadingDiff && !hasCachedDiff;
   const effectiveDiffText = lazyLoad
-    ? (lazyDiff?.key === lazyRequestKey ? lazyDiff.text : null)
+    ? (hasCachedDiff ? lazyDiff.text : null)
     : file.diffText;
+
+  const previewTooLarge = useMemo(() =>
+    (hasCachedDiff && lazyDiff.tooLarge) ||
+    (!!effectiveDiffText && exceedsPreviewLimit(effectiveDiffText)),
+    [hasCachedDiff, lazyDiff, effectiveDiffText]);
+
+  useEffect(() => {
+    if (previewTooLarge) onChangeCount?.(0);
+  }, [previewTooLarge, onChangeCount]);
 
   useEffect(() => {
     if (!lazyLoad || !gitScope || !expanded || file.isBinary) return;
@@ -95,7 +128,7 @@ export const DiffFileCard = memo(function DiffFileCard({
       try {
         const result = await diffApi.fileDiff(gitScope, displayPath, fullFile, staged);
         if (cancelled || generation !== diffRequestGeneration.current) return;
-        setLazyDiff({ key: lazyRequestKey, text: result.diff });
+        setLazyDiff({ key: lazyContentKey, text: result.diff, tooLarge: !!result.too_large });
       } catch (error) {
         if (cancelled || generation !== diffRequestGeneration.current) return;
         console.error("Failed to auto-load file diff:", error);
@@ -104,7 +137,7 @@ export const DiffFileCard = memo(function DiffFileCard({
       }
     });
     return () => { cancelled = true; };
-  }, [lazyLoad, gitScope, expanded, file.isBinary, displayPath, fullFile, staged, lazyRequestKey]);
+  }, [lazyLoad, gitScope, expanded, file.isBinary, file.additions, file.deletions, file.isNewFile, file.isDeletedFile, displayPath, fullFile, staged, lazyContentKey, lazyRequestKey]);
 
   const handleExpand = () => {
     setExpanded((value) => !value);
@@ -229,20 +262,26 @@ export const DiffFileCard = memo(function DiffFileCard({
         </button>
       )}
 
-      {expanded && loadingDiff && (
+      {expanded && showInitialLoading && (
         <div className="flex items-center justify-center py-6">
           <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
           <span className="ml-2 text-xs text-muted-foreground">Loading diff...</span>
         </div>
       )}
 
-      {expanded && !loadingDiff && !file.isBinary && effectiveDiffText && (
+      {expanded && !showInitialLoading && !file.isBinary && previewTooLarge && (
+        <div className="px-4 py-6 text-xs text-muted-foreground space-y-2">
+          <p>⚠️ Diff preview is unavailable because this file exceeds the preview limits (512 KiB, 5,000 lines, or 10,000 characters per line).</p>
+          <p>Use a local editor to review this file. Git actions remain available.</p>
+        </div>
+      )}
+      {expanded && !showInitialLoading && !file.isBinary && !previewTooLarge && effectiveDiffText && (
         <div className="overflow-x-auto">
           <DiffLines diffText={effectiveDiffText} filename={displayPath} hideHeaders={fullFile} repository={repository} workspacePath={effectiveWorkspacePath} allowLegacyComments={allowLegacyComments}
             onChangeCount={onChangeCount} />
         </div>
       )}
-      {expanded && !loadingDiff && !file.isBinary && !effectiveDiffText && lazyLoad && (
+      {expanded && !showInitialLoading && !file.isBinary && !previewTooLarge && !effectiveDiffText && lazyLoad && (
         <div className="px-4 py-3 text-xs text-muted-foreground italic text-center">
           Failed to load diff content
         </div>

@@ -170,7 +170,7 @@ export const sessionsApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  update: (id: string, data: Partial<{ name: string; project_id: string; agent: string; model: string; effort: string; chrome_browser_url: string }>) =>
+  update: (id: string, data: Partial<{ name: string; project_id: string; agent: string; model: string; effort: string; chrome_browser_url: string; is_pinned: boolean }>) =>
     request<Session>(`/sessions/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
@@ -606,7 +606,7 @@ export const diffApi = {
   stats: (scope: GitScope) =>
     repositoryScoped(scope, request<DiffResponse>(`/projects/${scope.projectId}/diff-stats${gitQuery(scope)}`)),
   fileDiff: (scope: GitScope, path: string, full?: boolean, staged?: boolean) =>
-    repositoryScoped(scope, request<{ repository_id?: string; diff: string }>(`/projects/${scope.projectId}/file-diff${gitQuery(scope, { path, full, staged })}`)),
+    repositoryScoped(scope, request<{ repository_id?: string; diff: string; too_large?: boolean; max_bytes?: number }>(`/projects/${scope.projectId}/file-diff${gitQuery(scope, { path, full, staged })}`)),
 };
 
 // Labels (project-scoped)
@@ -863,14 +863,14 @@ export const marketplaceApi = {
     return request<InstalledMCP[]>(`/marketplace/installed-mcps${qs}`);
   },
 
-  installMCP: (body: { name: string; package_id?: string; version?: string; mcp_key: string; manifest: object; env?: Record<string, string>; project_id?: string; auth_type?: string }) =>
+  installMCP: (body: { name: string; package_id?: string; version?: string; mcp_key?: string; manifest: object; env?: Record<string, string>; project_id?: string; auth_type?: string }) =>
     request<InstalledMCP>("/marketplace/installed-mcps", {
       method: "POST",
       body: JSON.stringify(body),
     }),
 
   uninstallMCP: (name: string, projectId?: string) => {
-    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    const qs = projectId !== undefined ? `?project_id=${encodeURIComponent(projectId)}` : "";
     return request<void>(`/marketplace/installed-mcps/${encodeURIComponent(name)}${qs}`, {
       method: "DELETE",
     });
@@ -889,7 +889,7 @@ export const marketplaceApi = {
     }),
 
   uninstallSkill: (name: string, projectId?: string) => {
-    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    const qs = projectId !== undefined ? `?project_id=${encodeURIComponent(projectId)}` : "";
     return request<void>(
       `/marketplace/installed-skills/${encodeURIComponent(name)}${qs}`,
       { method: "DELETE" }
@@ -909,7 +909,7 @@ export const marketplaceApi = {
     }),
 
   uninstallPlugin: (name: string, projectId?: string) => {
-    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    const qs = projectId !== undefined ? `?project_id=${encodeURIComponent(projectId)}` : "";
     return request<void>(
       `/marketplace/installed-plugins/${encodeURIComponent(name)}${qs}`,
       { method: "DELETE" }
@@ -929,6 +929,6 @@ export const marketplaceApi = {
   // WebSocket so the frontend's existing "Authorize" toast is shown automatically.
   probeMCP: (name: string, projectId?: string) => {
     const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
-    return request<void>(`/connectors/${encodeURIComponent(name)}/probe${qs}`, { method: "POST" });
+    return request<{ name: string; key: string; state: "ready" | "needs_auth" | "auth_rejected" | "unavailable" | "runtime_managed"; tool_count?: number; message?: string }>(`/connectors/${encodeURIComponent(name)}/probe${qs}`, { method: "POST" });
   },
 };

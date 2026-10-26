@@ -61,7 +61,8 @@ async function request(connection: Connection, method: string, params: unknown, 
 async function connect(spec: ServerSpec) {
 	const connection: Connection = { spec, protocolVersion: "2025-03-26" };
 	const initialized = await request(connection, "initialize", { protocolVersion: connection.protocolVersion, capabilities: {}, clientInfo: { name: "nexbox-pi", version: "1.0.0" } }, "init") as { protocolVersion?: string };
-	if (initialized.protocolVersion !== connection.protocolVersion) throw new Error(`${spec.key}: unsupported MCP protocol version ${initialized.protocolVersion || "unknown"}`);
+	if (!initialized.protocolVersion || !["2024-11-05", "2025-03-26", "2025-06-18"].includes(initialized.protocolVersion)) throw new Error(`${spec.key}: unsupported MCP protocol version ${initialized.protocolVersion || "unknown"}`);
+	connection.protocolVersion = initialized.protocolVersion;
 	await request(connection, "notifications/initialized", {});
 	return connection;
 }

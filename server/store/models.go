@@ -175,6 +175,7 @@ type Session struct {
 	AgentSessionID   string `json:"agent_session_id"`
 	StreamID         string `json:"stream_id"`
 	SortOrder        int    `json:"sort_order"`
+	IsPinned         bool   `json:"is_pinned"`
 	Features         string `json:"features"`
 	ChromeBrowserURL string `json:"chrome_browser_url"` // empty = NexBox-managed Chrome
 	WorktreeMode     string `json:"worktree_mode"`      // "local" | "worktree"
@@ -189,6 +190,7 @@ type Session struct {
 	CreatedBy               string     `json:"created_by"`
 	CreatedAt               time.Time  `json:"created_at"`
 	UpdatedAt               time.Time  `json:"updated_at"`
+	LastActiveAt            time.Time  `json:"last_active_at"`
 	DeletedAt               *time.Time `json:"deleted_at,omitempty"`
 }
 
@@ -201,6 +203,7 @@ type CreateSessionRequest struct {
 }
 
 type UpdateSessionRequest struct {
+	IsPinned         *bool   `json:"is_pinned,omitempty"`
 	ChromeBrowserURL *string `json:"chrome_browser_url,omitempty"`
 	Name             *string `json:"name,omitempty"`
 	ProjectID        *string `json:"project_id,omitempty"`

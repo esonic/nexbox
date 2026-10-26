@@ -10,15 +10,17 @@ import (
 	cdp "github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/runtime"
+	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 	"github.com/go-json-experiment/json/jsontext"
 )
 
 // SnapshotManager takes accessibility tree snapshots and maps UIDs to DOM nodes.
 type SnapshotManager struct {
-	mu          sync.Mutex
-	snapshotSeq int
-	uidToNode   map[string]cdp.BackendNodeID
+	mu           sync.Mutex
+	snapshotSeq  int
+	uidToNode    map[string]cdp.BackendNodeID
+	pageTargetID target.ID
 }
 
 func NewSnapshotManager() *SnapshotManager {
@@ -34,6 +36,7 @@ func (sm *SnapshotManager) Reset() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.uidToNode = make(map[string]cdp.BackendNodeID)
+	sm.pageTargetID = ""
 }
 
 // axTreeResult receives the raw CDP response for Accessibility.getFullAXTree.
@@ -74,6 +77,8 @@ func (sm *SnapshotManager) TakeSnapshot(ctx context.Context) (string, error) {
 	// connection cannot repopulate the mapping after it was invalidated.
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	// Objects are only needed between snapshots; release the previous group.
+	_ = chromedp.Run(ctx, runtime.ReleaseObjectGroup("beehub-snapshot"))
 	var raw axTreeResult
 	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		return cdp.Execute(ctx, "Accessibility.getFullAXTree", nil, &raw)
@@ -86,6 +91,7 @@ func (sm *SnapshotManager) TakeSnapshot(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("parse accessibility nodes: %w", err)
 	}
 
+	sm.pageTargetID = chromedp.FromContext(ctx).Target.TargetID
 	sm.snapshotSeq++
 	sm.uidToNode = make(map[string]cdp.BackendNodeID, len(nodes))
 
@@ -148,9 +154,7 @@ func (sm *SnapshotManager) TakeSnapshot(ctx context.Context) (string, error) {
 		sb.WriteString(role)
 		sb.WriteString("]")
 		if name != "" {
-			sb.WriteString(` "`)
-			sb.WriteString(name)
-			sb.WriteString(`"`)
+			fmt.Fprintf(&sb, " %q", name)
 		}
 
 		for _, prop := range node.Properties {
@@ -171,8 +175,8 @@ func (sm *SnapshotManager) TakeSnapshot(ctx context.Context) (string, error) {
 
 		if v := rawAxVal(node.Value); v != "" && role != "StaticText" {
 			sb.WriteString(` value="`)
-			if len(v) > 80 {
-				v = v[:80] + "..."
+			if runes := []rune(v); len(runes) > 80 {
+				v = string(runes[:80]) + "..."
 			}
 			sb.WriteString(v)
 			sb.WriteString(`"`)
@@ -207,6 +211,12 @@ func (sm *SnapshotManager) ResolveUID(uid string) (cdp.BackendNodeID, error) {
 
 // ResolveNodeObject converts a UID to a CDP RemoteObject for JS interaction.
 func (sm *SnapshotManager) ResolveNodeObject(ctx context.Context, uid string) (runtime.RemoteObjectID, error) {
+	sm.mu.Lock()
+	pageTargetID := sm.pageTargetID
+	sm.mu.Unlock()
+	if pageTargetID != chromedp.FromContext(ctx).Target.TargetID {
+		return "", fmt.Errorf("snapshot belongs to another tab; call take_snapshot for fresh UIDs")
+	}
 	backendID, err := sm.ResolveUID(uid)
 	if err != nil {
 		return "", err
@@ -214,7 +224,7 @@ func (sm *SnapshotManager) ResolveNodeObject(ctx context.Context, uid string) (r
 
 	var objID runtime.RemoteObjectID
 	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		obj, err := dom.ResolveNode().WithBackendNodeID(backendID).Do(ctx)
+		obj, err := dom.ResolveNode().WithBackendNodeID(backendID).WithObjectGroup("beehub-snapshot").Do(ctx)
 		if err != nil {
 			return fmt.Errorf("resolve node for uid %s: %w", uid, err)
 		}
@@ -227,7 +237,7 @@ func (sm *SnapshotManager) ResolveNodeObject(ctx context.Context, uid string) (r
 }
 
 // ElementCenter scrolls the element into view and returns its center coordinates.
-func (sm *SnapshotManager) ElementCenter(ctx context.Context, uid string) (x, y float64, err error) {
+func (sm *SnapshotManager) ElementCenter(ctx context.Context, uid string, allowDisabled ...bool) (x, y float64, err error) {
 	objID, err := sm.ResolveNodeObject(ctx, uid)
 	if err != nil {
 		return 0, 0, err
@@ -235,17 +245,21 @@ func (sm *SnapshotManager) ElementCenter(ctx context.Context, uid string) (x, y 
 
 	type pos struct{ X, Y float64 }
 	var p pos
-	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		res, _, err := runtime.CallFunctionOn(`function(){
-			this.scrollIntoView({block:"center",inline:"center"});
-			var r=this.getBoundingClientRect();
-			return {x:r.x+r.width/2,y:r.y+r.height/2};
-		}`).WithObjectID(objID).WithReturnByValue(true).Do(ctx)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal([]byte(res.Value), &p)
-	})); err != nil {
+	if err := chromedp.Run(ctx, chromedp.CallFunctionOn(toolScriptComment+`function(allowDisabled){
+        if(!this.isConnected) throw new Error('Element is detached; take_snapshot again');
+        if(!allowDisabled && this.matches(':disabled')) throw new Error('Element is disabled');
+        this.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
+        const r=this.getBoundingClientRect();
+        const win=this.ownerDocument.defaultView;
+        const left=Math.max(0,r.left),right=Math.min(win.innerWidth,r.right);
+        const top=Math.max(0,r.top),bottom=Math.min(win.innerHeight,r.bottom);
+        if(right<=left||bottom<=top) throw new Error('Element has no visible bounds');
+        const x=(left+right)/2,y=(top+bottom)/2;
+        const hit=this.getRootNode().elementFromPoint(x,y);
+        if(!hit || (hit!==this&&!this.contains(hit))) throw new Error('Element is covered by another element');
+        if(win!==win.top) throw new Error('Frame coordinates are unsupported for pointer actions; use evaluate_script with element args');
+        return {x,y};
+    }`, &p, func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams { return p.WithObjectID(objID) }, len(allowDisabled) > 0 && allowDisabled[0])); err != nil {
 		return 0, 0, err
 	}
 	return p.X, p.Y, nil

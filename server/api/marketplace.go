@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
 	agentpkg "github.com/esonic/nexbox/agent"
+	"github.com/esonic/nexbox/mcpidentity"
 	"github.com/esonic/nexbox/store"
+	"github.com/go-chi/chi/v5"
 )
 
 // ---------------------------------------------------------------------------
@@ -28,62 +31,38 @@ func (s *Server) resolveInstalledMCPsAndMap(projectID string) ([]agentpkg.MCPSer
 		return nil, nil
 	}
 	keyToPkg := make(map[string]string, len(mcps))
-	for _, mcp := range mcps {
-		keyToPkg[mcp.MCPKey] = mcp.Name
-	}
 	byName := make(map[string]store.InstalledMCP, len(mcps))
 	for _, mcp := range mcps {
+		if existing, ok := byName[mcp.Name]; ok && existing.ProjectID == projectID && projectID != "" {
+			continue
+		}
 		byName[mcp.Name] = mcp
 	}
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	var entries []agentpkg.MCPServerEntry
-	for _, mcp := range byName {
-		manifestJSON := mcp.Manifest
-		if len(manifestJSON) >= 2 && manifestJSON[0] == '"' {
-			var inner string
-			if json.Unmarshal([]byte(manifestJSON), &inner) == nil {
-				manifestJSON = inner
-			}
-		}
-		var mcpWrap struct {
-			MCPServers map[string]struct {
-				URL     string            `json:"url"`
-				Command string            `json:"command"`
-				Args    []string          `json:"args"`
-				Env     map[string]string `json:"env"`
-				Headers map[string]string `json:"headers"`
-				OAuth   json.RawMessage   `json:"oauth"`
-			} `json:"mcpServers"`
-		}
-		if json.Unmarshal([]byte(manifestJSON), &mcpWrap) == nil && len(mcpWrap.MCPServers) > 0 {
-			for k, cfg := range mcpWrap.MCPServers {
-				entry := agentpkg.MCPServerEntry{Key: k}
-				if cfg.URL != "" {
-					entry.Type = "http"
-					entry.URL = cfg.URL
-					entry.Headers = cfg.Headers
-					entry.OAuth = cfg.OAuth
-				} else {
-					entry.Type = "stdio"
-					entry.Cmd = cfg.Command
-					entry.Args = cfg.Args
-					entry.Env = cfg.Env
-				}
-				manifestJSON, _ = func() (string, error) {
-					b, err := json.Marshal(entry)
-					return string(b), err
-				}()
-				break
-			}
-		}
-		var entry agentpkg.MCPServerEntry
-		if err := json.Unmarshal([]byte(manifestJSON), &entry); err != nil {
-			log.Printf("[marketplace] skip MCP %s: invalid manifest: %v", mcp.Name, err)
+	for _, name := range names {
+		mcp := byName[name]
+		entry, err := parseInstalledMCPManifest(mcp.Manifest)
+		if err != nil || (entry.URL == "" && entry.Cmd == "") {
+			// Keep invalid installations visible to the shared availability
+			// check instead of silently making them disappear from every CLI.
+			entries = append(entries, agentpkg.MCPServerEntry{Key: mcpidentity.ServerKey(mcp.Name), Type: "http", PackageName: mcp.Name, ProjectID: mcp.ProjectID})
 			continue
 		}
 		if entry.Key == "" {
-			log.Printf("[marketplace] skip MCP %s: manifest has empty key", mcp.Name)
-			continue
+			entry.Key = mcp.MCPKey
 		}
+		if entry.Key == "" {
+			entry.Key = mcp.Name
+		}
+		entry.Key = mcpidentity.ServerKey(entry.Key)
+		entry.PackageName = mcp.Name
+		entry.ProjectID = mcp.ProjectID
+		keyToPkg[entry.Key] = mcp.Name
 
 		// Always route HTTP MCPs through the local proxy so we can:
 		//  - inject auth headers (apikey / OAuth Bearer)
@@ -91,7 +70,7 @@ func (s *Server) resolveInstalledMCPsAndMap(projectID string) ([]agentpkg.MCPSer
 		//  - enforce access control via ?session= parameter
 		// AppendSessionURL=true tells claude_agent.go to append ?session=<conversationID> at runtime.
 		if entry.Type == "http" && s.ListenPort > 0 {
-			entry.URL = fmt.Sprintf("http://127.0.0.1:%d/mcp-proxy/%s", s.ListenPort, mcp.Name)
+			entry.URL = fmt.Sprintf("http://127.0.0.1:%d/mcp-proxy/%s", s.ListenPort, url.PathEscape(mcp.Name))
 			entry.Headers = nil
 			entry.AppendSessionURL = true
 		} else if mcp.EnvValues != "" && mcp.EnvValues != "{}" {

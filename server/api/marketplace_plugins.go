@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/esonic/nexbox/store"
+	"github.com/go-chi/chi/v5"
 )
 
 // ---------------------------------------------------------------------------
@@ -169,55 +169,96 @@ func (s *Server) UninstallPluginEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	name := chi.URLParam(r, "name")
 	projectID := r.URL.Query().Get("project_id")
+	// An explicit empty project_id targets only the global installation.
+	all := projectID == "" && !r.URL.Query().Has("project_id")
+	if err := s.uninstallPluginEntryScopes(name, projectID, all); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
 
+// uninstallPluginEntry removes an installed plugin; an empty projectID removes every scope.
+func (s *Server) uninstallPluginEntry(name, projectID string) error {
+	return s.uninstallPluginEntryScopes(name, projectID, projectID == "")
+}
+
+func (s *Server) uninstallPluginEntryScopes(name, projectID string, all bool) error {
 	// Collect install paths before deleting DB records so we can clean up the filesystem.
 	globalPluginsPrefix := filepath.Join(s.DataDir, "global-plugins") + string(filepath.Separator)
 	var pathsToRemove []string
-	if entries, err := s.Store.ListInstalledPluginEntries("*"); err == nil {
-		for _, e := range entries {
-			if e.Name != name {
-				continue
+	entries, err := s.Store.ListInstalledPluginEntries("*")
+	if err != nil {
+		return err
+	}
+	retainedPaths := make(map[string]bool)
+	var globalPath string
+	for _, e := range entries {
+		if e.Name == name {
+			if e.ProjectID == "" {
+				globalPath = e.InstallPath
+			} else if !all && projectID == "" {
+				retainedPaths[e.InstallPath] = true
 			}
-			if projectID != "" && e.ProjectID != projectID {
-				continue
-			}
-			if e.InstallPath == "" {
-				continue
-			}
-			if e.ProjectID == "" && !strings.HasPrefix(e.InstallPath, globalPluginsPrefix) {
-				// Regular global plugin: InstallPath is the marketplace source — don't delete it.
-				continue
-			}
-			pathsToRemove = append(pathsToRemove, e.InstallPath)
 		}
+	}
+	for _, e := range entries {
+		if e.Name != name {
+			continue
+		}
+		if !all && e.ProjectID != projectID {
+			continue
+		}
+		if e.InstallPath == "" {
+			continue
+		}
+		if e.ProjectID == "" && !strings.HasPrefix(e.InstallPath, globalPluginsPrefix) {
+			// Regular global plugin: InstallPath is the marketplace source — don't delete it.
+			continue
+		}
+		pathsToRemove = append(pathsToRemove, e.InstallPath)
 	}
 	// For global uninstall, also remove the per-project symlinks/dirs propagated to each project.
 	if projectID == "" {
 		for _, repoPath := range s.allGitRepoPaths() {
-			pathsToRemove = append(pathsToRemove, filepath.Join(repoPath, ".claude", "plugins", name))
+			path := filepath.Join(repoPath, ".claude", "plugins", name)
+			if !retainedPaths[path] {
+				pathsToRemove = append(pathsToRemove, path)
+			}
 		}
 	}
 
 	var delErr error
-	if projectID == "" {
+	if all {
 		delErr = s.Store.DeleteInstalledPluginEntryByName(name)
 	} else {
 		delErr = s.Store.DeleteInstalledPluginEntry(name, projectID)
 	}
 	if delErr != nil {
-		writeError(w, http.StatusInternalServerError, delErr.Error())
-		return
+		return delErr
 	}
 
 	// Remove installed directories / symlinks from disk.
 	for _, p := range pathsToRemove {
+		if !all && projectID != "" && globalPath != "" {
+			project, err := s.getProjectWithLocalPath(projectID)
+			if err != nil {
+				return err
+			}
+			if project != nil && project.GitRepoPath != "" {
+				if err := s.propagatePluginToProject(name, globalPath, project.GitRepoPath); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		if err := removeInstallDir(p); err != nil {
 			log.Printf("[marketplace] warning: failed to remove plugin dir %s: %v", p, err)
 		}
 	}
 
 	log.Printf("[marketplace] uninstalled plugin: %s (project=%q)", name, projectID)
-	w.WriteHeader(http.StatusNoContent)
+	return nil
 }
 
 // propagatePluginToProject writes a globally-installed plugin into a specific project's

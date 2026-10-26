@@ -73,6 +73,8 @@ type ForkContext struct {
 // MCPServerEntry describes an extra MCP server to inject into the agent runtime.
 // These come from locally installed MCP packages (stored in SQLite installed_mcps).
 type MCPServerEntry struct {
+	PackageName      string            `json:"-"`                            // display identity, kept separate from the runtime key
+	ProjectID        string            `json:"-"`                            // resolved installation scope (OAuth identity)
 	Key              string            `json:"key"`                          // server name in mcpServers config (e.g. "github")
 	Type             string            `json:"type"`                         // "http" or "stdio"
 	URL              string            `json:"url,omitempty"`                // for http transport

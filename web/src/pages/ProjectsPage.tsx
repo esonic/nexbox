@@ -3,105 +3,15 @@ import { toast } from "sonner";
 import {
   Plus,
   FolderOpen,
-  X,
   Loader2,
   Trash2,
 } from "lucide-react";
 import { projectsApi } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { ProjectDialog } from "@/components/project/ProjectDialog";
 import { DeleteProjectDialog } from "@/components/project/DeleteProjectDialog";
 import type { Project } from "@/types";
-
-const PROJECT_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
-const PROJECT_NAME_ERROR = "Project name must be 1-64 chars from A-Z, a-z, 0-9, _, -";
-
-// ── New Project dialog ────────────────────────────────────────────────────────
-
-function NewProjectDialog({
-  onClose,
-  onCreate,
-}: {
-  onClose: () => void;
-  onCreate: (p: Project) => void;
-}) {
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-  const [nameError, setNameError] = useState<string | null>(null);
-
-  const handleNameChange = (val: string) => {
-    setName(val);
-    if (val.trim() === "") {
-      setNameError(null);
-    } else if (!PROJECT_NAME_RE.test(val.trim())) {
-      setNameError(PROJECT_NAME_ERROR);
-    } else {
-      setNameError(null);
-    }
-  };
-
-  const handleSubmit = async () => {
-    if (!name.trim()) return;
-    if (!PROJECT_NAME_RE.test(name.trim())) {
-      setNameError(PROJECT_NAME_ERROR);
-      return;
-    }
-    setSubmitting(true);
-    setError("");
-    try {
-      const p = await projectsApi.create({
-        name: name.trim(),
-        description: description.trim(),
-      });
-      onCreate(p);
-      onClose();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create project");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-background border rounded-lg shadow-xl w-[420px] flex flex-col">
-        <div className="flex items-center justify-between px-4 py-3 border-b">
-          <h3 className="text-sm font-semibold">New Project</h3>
-          <button onClick={onClose} className="p-1 hover:bg-muted rounded"><X className="h-4 w-4" /></button>
-        </div>
-        <div className="p-4 space-y-4">
-          <div className="space-y-1.5">
-            <label className="text-xs text-muted-foreground">Name <span className="text-destructive">*</span></label>
-            <Input
-              value={name}
-              onChange={(e) => handleNameChange(e.target.value)}
-              placeholder="my-project"
-              className={`h-8 text-sm font-mono${nameError ? " border-destructive" : ""}`}
-              autoFocus
-            />
-            {nameError && <p className="text-xs text-destructive">{nameError}</p>}
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-xs text-muted-foreground">Description</label>
-            <Textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional…" className="text-sm min-h-[56px] resize-none" />
-          </div>
-          {error && <p className="text-xs text-destructive">{error}</p>}
-        </div>
-        <div className="flex justify-end gap-2 px-4 pb-4">
-          <Button variant="ghost" size="sm" onClick={onClose} className="h-7 text-xs">Cancel</Button>
-          <Button size="sm" onClick={handleSubmit} disabled={!name.trim() || !!nameError || submitting} className="h-7 text-xs">
-            {submitting && <Loader2 className="h-3 w-3 animate-spin mr-1" />}
-            Create
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ── ProjectsPage ──────────────────────────────────────────────────────────────
 
@@ -232,7 +142,7 @@ export function ProjectsPage() {
       </div>
 
       {/* Dialogs */}
-      {showNew && <NewProjectDialog onClose={() => setShowNew(false)} onCreate={handleCreated} />}
+      {showNew && <ProjectDialog open={showNew} onOpenChange={setShowNew} onSuccess={handleCreated} />}
       {deleteTarget && (
         <DeleteProjectDialog
           project={deleteTarget}

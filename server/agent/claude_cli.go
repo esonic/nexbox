@@ -141,10 +141,10 @@ type StreamMessage struct {
 	ParentToolUseID string `json:"parent_tool_use_id,omitempty"`
 
 	// ToolUseResult carries Claude Code's structured per-tool-call result data
-	// on "user" (tool_result) JSONL lines, sitting alongside `message`. For the
+	// on SDK "user" (tool_result) lines, sitting alongside `message`. For the
 	// Edit/Write/MultiEdit family it includes filePath/oldString/newString and
 	// (for Edit) a `structuredPatch` array of ready-made diff hunks.
-	ToolUseResult json.RawMessage `json:"toolUseResult,omitempty"`
+	ToolUseResult json.RawMessage `json:"tool_use_result,omitempty"`
 
 	// For result messages
 	Result        string                           `json:"result,omitempty"`
@@ -225,6 +225,24 @@ type StreamMessage struct {
 
 	// For control_response messages
 	Response json.RawMessage `json:"response,omitempty"`
+}
+
+// SDK stream-json uses snake_case; saved Claude transcripts use camelCase.
+// Accept both so transcript fixtures and older integrations remain readable.
+func (m *StreamMessage) UnmarshalJSON(data []byte) error {
+	type streamMessage StreamMessage
+	var decoded struct {
+		*streamMessage
+		LegacyToolUseResult json.RawMessage `json:"toolUseResult"`
+	}
+	decoded.streamMessage = (*streamMessage)(m)
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if len(m.ToolUseResult) == 0 {
+		m.ToolUseResult = decoded.LegacyToolUseResult
+	}
+	return nil
 }
 
 // ClaudeModelUsageEntry is the per-model usage block from result messages.

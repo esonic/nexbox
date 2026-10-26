@@ -12,6 +12,7 @@ import (
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/gorilla/websocket"
+	gomcp "github.com/mark3labs/mcp-go/mcp"
 )
 
 // mockCDP supplies tab discovery and optionally stalls/disconnects a command.
@@ -176,5 +177,60 @@ func TestConcurrentBrowserInitializationPreservesUIDs(t *testing.T) {
 	}
 	if _, err := srv.snapshot.ResolveUID("uid-0"); err == nil {
 		t.Fatal("old UID survived a connection release")
+	}
+}
+
+// Request cancellation must interrupt target setup without assigning the target
+// event loop to that request. In external mode only the connection is released.
+func TestBrowserSetupHonorsRequestCancellation(t *testing.T) {
+	for _, operation := range []string{"new_page", "get_page_info"} {
+		for _, interruption := range []string{"timeout", "cancel"} {
+			t.Run(operation+"/"+interruption, func(t *testing.T) {
+				method := "Target.createTarget"
+				if operation == "get_page_info" {
+					method = "Target.attachToTarget"
+				}
+				reached := make(chan struct{})
+				endpoint := mockCDP(t, method, false, reached)
+				srv := NewServer("127.0.0.1:0", t.TempDir(), BrowserOptions{BrowserURL: endpoint})
+				if err := srv.EnsureStarted(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				defer srv.Shutdown(context.Background())
+				if err := srv.ensureBrowser(); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				args := map[string]any{}
+				if interruption == "timeout" {
+					args["timeout"] = 100
+				}
+				done := make(chan error, 1)
+				go func() {
+					result, err := srv.mcpServer.ListTools()[operation].Handler(ctx, gomcp.CallToolRequest{Params: gomcp.CallToolParams{Name: operation, Arguments: args}})
+					if err == nil && (result == nil || !result.IsError) {
+						err = fmt.Errorf("interrupted tool succeeded: %+v", result)
+					}
+					done <- err
+				}()
+				select {
+				case <-reached:
+				case <-time.After(time.Second):
+					t.Fatal("target setup was not reached")
+				}
+				if interruption == "cancel" {
+					cancel()
+				}
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("request cancellation did not interrupt target setup")
+				}
+			})
+		}
 	}
 }

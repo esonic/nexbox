@@ -1011,3 +1011,63 @@ func (s *storeInstalledMCPShim) toStoreMCP() *store.InstalledMCP {
 
 // Ensure json import is used
 var _ = json.Marshal
+
+func TestRemoveMarketplaceSourceUninstallsItsItems(t *testing.T) {
+	dataDir := testTempDir(t)
+	db, err := store.New(dataDir)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	ls := store.NewSQLiteStore(db)
+
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mp := filepath.Join(dataDir, "marketplace")
+	pluginJSON := func(name string) string { return `{"name":"` + name + `","description":"d"}` }
+	// Source A: an MCP and a skill. Source B: provides a same-named MCP too.
+	a := filepath.Join(mp, "src-a")
+	write(filepath.Join(a, "plugins", "mcp-a", ".claude-plugin", "plugin.json"), pluginJSON("Shared"))
+	write(filepath.Join(a, "plugins", "mcp-a", ".mcp.json"), `{"mcpServers":{"Shared":{"url":"https://a.example/mcp"}}}`)
+	write(filepath.Join(a, "plugins", "mcp-only-a", ".claude-plugin", "plugin.json"), pluginJSON("OnlyA"))
+	write(filepath.Join(a, "plugins", "mcp-only-a", ".mcp.json"), `{"mcpServers":{"OnlyA":{"url":"https://a.example/only"}}}`)
+	write(filepath.Join(a, "skills", "my-skill", "SKILL.md"), "---\nname: my-skill\ndescription: d\n---\nbody\n")
+	b := filepath.Join(mp, "src-b")
+	write(filepath.Join(b, "plugins", "mcp-b", ".claude-plugin", "plugin.json"), pluginJSON("Shared"))
+	write(filepath.Join(b, "plugins", "mcp-b", ".mcp.json"), `{"mcpServers":{"Shared":{"url":"https://b.example/mcp"}}}`)
+
+	srcA := store.MarketplaceSource{ID: "a", Type: "local", Path: a, Name: "src-a"}
+	srcB := store.MarketplaceSource{ID: "b", Type: "local", Path: b, Name: "src-b"}
+	for _, src := range []store.MarketplaceSource{srcA, srcB} {
+		if err := ls.UpsertMarketplaceSource(src); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, n := range []string{"Shared", "OnlyA"} {
+		if err := ls.UpsertInstalledMCP(store.InstalledMCP{Name: n, MCPKey: n, Manifest: "{}"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ls.UpsertInstalledSkill(store.InstalledSkill{Name: "my-skill", InstallPath: filepath.Join(a, "skills", "my-skill")}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{Store: ls, DataDir: dataDir}
+	srv.uninstallSourceItems(srcA)
+
+	mcps, _ := ls.ListInstalledMCPs("*")
+	if len(mcps) != 1 || mcps[0].Name != "Shared" {
+		t.Fatalf("want only Shared (still provided by source B) left, got %+v", mcps)
+	}
+	skills, _ := ls.ListInstalledSkills("*")
+	if len(skills) != 0 {
+		t.Fatalf("skill from removed source should be uninstalled, got %+v", skills)
+	}
+}

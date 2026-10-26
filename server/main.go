@@ -235,6 +235,14 @@ func main() {
 		log.Printf("  Crush CLI %q not found; skipping agent", crushAgent.CLIPath)
 	}
 
+	kimiAgent := agent.NewKimiAgent()
+	kimiAgent.MCPServerURL = mcpServer.URL()
+	if agentCLIAvailable(kimiAgent.CLIPath) {
+		allAgents["kimi"] = kimiAgent
+	} else {
+		log.Printf("  Kimi CLI %q not found; skipping agent", kimiAgent.CLIPath)
+	}
+
 	defaultAgentName := cfgMgr.Get().DefaultAgent
 	if defaultAgentName == "" {
 		defaultAgentName = "claude"
@@ -294,7 +302,7 @@ func main() {
 		ChromeManager:     chromeManager,
 		ListenPort:        *port,
 		MarketplaceStats:  api.NewMarketplaceStatsBuffer(),
-		GitRepositories:  gitrepo.NewResolver(gitrepo.DefaultOptions()),
+		GitRepositories:   gitrepo.NewResolver(gitrepo.DefaultOptions()),
 		OnMCPToolsChanged: mcpServer.NotifyToolListChanged,
 		WeChat:            api.NewWeChatJSSDK(os.Getenv("WECHAT_APPID"), os.Getenv("WECHAT_APPSECRET")),
 	}

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { toast } from "sonner";
 import {
   GitBranch,
@@ -17,8 +17,9 @@ import {
 import { cn } from "@/lib/utils";
 import { gitApi, type GitBranchResponse, type GitScope } from "@/lib/api";
 
-export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, onNavigate, sidebarCollapsed, onToggleSidebar }: {
+export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, onNavigate, sidebarCollapsed, onToggleSidebar, branchData }: {
   scope: GitScope;
+  branchData?: GitBranchResponse;
   onBranchChanged?: () => void;
   aheadCount?: number;
   navLabel?: string;
@@ -26,7 +27,6 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
   sidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
 }) {
-  const [branchData, setBranchData] = useState<GitBranchResponse | null>(null);
   const [showDropdown, setShowDropdown] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newBranchName, setNewBranchName] = useState("");
@@ -35,20 +35,6 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
   const [pulling, setPulling] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const branchRequestGeneration = useRef(0);
-
-  const loadBranches = useCallback(async () => {
-    const generation = ++branchRequestGeneration.current;
-    try {
-      const data = await gitApi.branches(scope);
-      if (generation === branchRequestGeneration.current) setBranchData(data);
-    } catch (e) {
-      if (generation !== branchRequestGeneration.current) return;
-      console.error("Failed to load branches:", e);
-    }
-  }, [scope]);
-
-  useEffect(() => { loadBranches(); }, [loadBranches]);
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -72,7 +58,6 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
       await gitApi.checkout(scope, { branch });
       toast.success(`Switched to ${branch}`);
       setShowDropdown(false);
-      await loadBranches();
       onBranchChanged?.();
     } catch (e) {
       toast.error("Checkout failed", { description: String(e) });
@@ -89,7 +74,6 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
       await gitApi.checkout(scope, { branch: localName, create: true, start_point: remoteBranch });
       toast.success(`Switched to ${localName}`, { description: `Tracking ${remoteBranch}` });
       setShowDropdown(false);
-      await loadBranches();
       onBranchChanged?.();
     } catch (e) {
       toast.error("Checkout failed", { description: String(e) });
@@ -108,7 +92,6 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
       setCreating(false);
       setNewBranchName("");
       setShowDropdown(false);
-      await loadBranches();
       onBranchChanged?.();
     } catch (e) {
       toast.error("Create branch failed", { description: String(e) });
@@ -122,7 +105,6 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
     try {
       await gitApi.push(scope);
       toast.success("Pushed to remote");
-      await loadBranches();
       onBranchChanged?.();
     } catch (e) {
       toast.error("Push failed", { description: String(e) });
@@ -136,7 +118,6 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
     try {
       await gitApi.pull(scope);
       toast.success("Pulled from remote");
-      await loadBranches();
       onBranchChanged?.();
     } catch (e) {
       toast.error("Pull failed", { description: String(e) });
@@ -271,7 +252,7 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
             </button>
           </>
         )}
-        <button onClick={() => { loadBranches(); onBranchChanged?.(); }} className="p-1.5 rounded hover:bg-muted transition-colors" title="Refresh">
+        <button onClick={onBranchChanged} className="p-1.5 rounded hover:bg-muted transition-colors" title="Refresh">
           <RefreshCw className="h-3.5 w-3.5" />
         </button>
       </div>

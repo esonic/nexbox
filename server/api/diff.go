@@ -18,6 +18,28 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// Bound previews before they reach the browser's diff engine and DOM renderer.
+const maxFileDiffBytes = 512 * 1024
+
+var errFileDiffTooLarge = errors.New("file diff exceeds preview limit")
+
+type fileDiffBuffer struct {
+	buffer   bytes.Buffer
+	exceeded bool
+}
+
+func (b *fileDiffBuffer) Write(p []byte) (int, error) {
+	if b.buffer.Len()+len(p) > maxFileDiffBytes {
+		b.exceeded = true
+		return 0, errFileDiffTooLarge
+	}
+	return b.buffer.Write(p)
+}
+
+func (b *fileDiffBuffer) Len() int { return b.buffer.Len() }
+
+func (b *fileDiffBuffer) String() string { return b.buffer.String() }
+
 // GitDiffFile represents a single changed file with stats
 type GitDiffFile struct {
 	Path          string `json:"path"`
@@ -158,6 +180,15 @@ func (s *Server) GetProjectFileDiff(w http.ResponseWriter, r *http.Request) {
 	fullContext := r.URL.Query().Get("full") == "true"
 	staged := r.URL.Query().Get("staged") == "true"
 	diff, err := getFileDiff(r.Context(), workDir, filePath, fullContext, staged)
+	if errors.Is(err, errFileDiffTooLarge) {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"repository_id": repositoryContext.Repository.ID,
+			"diff":          "",
+			"too_large":     true,
+			"max_bytes":     maxFileDiffBytes,
+		})
+		return
+	}
 	if err != nil {
 		if gitrepo.ErrorCode(err) != "" {
 			writeRepositoryError(w, err)
@@ -234,11 +265,16 @@ func getFileDiff(ctx context.Context, dir string, filePath string, fullContext b
 	args = append(args, diffPaths...)
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	var stdout, stderr bytes.Buffer
+	var stdout fileDiffBuffer
+	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
+	runErr := cmd.Run()
+	if stdout.exceeded {
+		return "", errFileDiffTooLarge
+	}
+	if err := runErr; err != nil {
 		return "", fmt.Errorf("git diff for %s: %w: %s", filePath, err, strings.TrimSpace(stderr.String()))
 	}
 
@@ -259,7 +295,7 @@ func getFileDiff(ctx context.Context, dir string, filePath string, fullContext b
 		return "", nil
 	}
 
-	return generateNoIndexDiff(ctx, dir, filePath)
+	return generateNoIndexDiffWithLimit(ctx, dir, filePath, true)
 }
 
 func isUntrackedFile(ctx context.Context, dir, filePath string) (bool, error) {
@@ -557,6 +593,10 @@ func generateUntrackedDiff(ctx context.Context, dir string) string {
 }
 
 func generateNoIndexDiff(ctx context.Context, dir, filePath string) (string, error) {
+	return generateNoIndexDiffWithLimit(ctx, dir, filePath, false)
+}
+
+func generateNoIndexDiffWithLimit(ctx context.Context, dir, filePath string, limitPreview bool) (string, error) {
 	cleanPath, err := gitrepo.ValidateRelativePath(filePath)
 	if err != nil {
 		return "", err
@@ -577,14 +617,26 @@ func generateNoIndexDiff(ctx context.Context, dir, filePath string) (string, err
 	}
 	cmd := exec.CommandContext(ctx, "git", "-c", "core.quotePath=false", "--literal-pathspecs", "diff", "--no-index", "--", "/dev/null", cleanPath)
 	cmd.Dir = dir
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	var limitedOutput fileDiffBuffer
+	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
+	if limitPreview {
+		cmd.Stdout = &limitedOutput
+	}
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	runErr := cmd.Run()
+	if limitedOutput.exceeded {
+		return "", errFileDiffTooLarge
+	}
+	if err := runErr; err != nil {
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 			return "", fmt.Errorf("git diff --no-index: %w: %s", err, stderr.String())
 		}
+	}
+	if limitPreview {
+		return limitedOutput.String(), nil
 	}
 	return stdout.String(), nil
 }

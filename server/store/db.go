@@ -586,6 +586,14 @@ func (db *DB) migrate() error {
 	type colMigration struct{ check, alter string }
 	colMigrations := []colMigration{
 		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='last_active_at'`,
+			alter: `ALTER TABLE sessions ADD COLUMN last_active_at DATETIME`,
+		},
+		{
+			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='is_pinned'`,
+			alter: `ALTER TABLE sessions ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0`,
+		},
+		{
 			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='chrome_browser_url'`,
 			alter: `ALTER TABLE sessions ADD COLUMN chrome_browser_url TEXT NOT NULL DEFAULT ''`,
 		},
@@ -670,6 +678,16 @@ func (db *DB) migrate() error {
 				return fmt.Errorf("column migration failed: %w\nSQL: %s", err, cm.alter)
 			}
 		}
+	}
+
+	// Reconstruct historical activity from conversation timestamps, never from
+	// metadata's updated_at. Old replies have no completion timestamp, so their
+	// creation time is the best available approximation. New rows stamp activity
+	// explicitly and are not touched by this backfill.
+	if _, err := db.Exec(`UPDATE sessions SET last_active_at = MAX(created_at, COALESCE(
+		(SELECT MAX(created_at) FROM chat_messages WHERE session_id = sessions.id AND role IN ('user', 'assistant')),
+		created_at)) WHERE last_active_at IS NULL`); err != nil {
+		return fmt.Errorf("session activity backfill failed: %w", err)
 	}
 
 	// At most one live scratch session per project. Partial unique index ensures

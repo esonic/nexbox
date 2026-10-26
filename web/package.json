@@ -4,6 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "test:marketplace": "node --test scripts/marketplace-scopes.test.cjs",
+    "test:sessions": "node --test scripts/session-order.test.cjs",
+    "test:git-review": "node --test scripts/git-review.test.cjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",

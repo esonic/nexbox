@@ -335,6 +335,7 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 	// Notify browsers about new user message (needed for Lark-injected messages;
 	// harmless for UI-sent messages since the frontend already has them locally)
 	s.Hub.Emit(sessionID, ChatEvent{Type: "user_message", Content: message})
+	s.Hub.NotifyChange("session", sessionID, "activity")
 
 	imagePaths := s.resolveImagePaths(sessionID, imageFilenames)
 
@@ -471,6 +472,11 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 		// Collect installed MCP servers and key→package map in a single store query.
 		// Pass session.ProjectID so project-specific MCPs take precedence over global ones.
 		extraMCPs, mcpKeyToPkg := s.resolveInstalledMCPsAndMap(session.ProjectID)
+		extraMCPs, mcpStatuses := s.prepareInstalledMCPs(ctx, extraMCPs)
+		dynamicContext += mcpStatusContext(mcpStatuses)
+		if summary := mcpStatusSummary(mcpStatuses); summary != "" {
+			s.Hub.Emit(sessionID, ChatEvent{Type: "system", Content: summary})
+		}
 		pluginDirs := s.resolveInstalledPluginDirs(session.ProjectID)
 		// toolIDToName maps tool_id → tool_name for EventToolStart events so that
 		// EventToolResult (which carries only tool_id) can look up the name.
@@ -1057,6 +1063,10 @@ func (s *Server) dispatchUserMessage(sessionID, message string, parts []MessageP
 			s.MarketplaceStats.RecordMessage()
 		}
 
+		if err := s.Store.TouchSessionActivity(sessionID); err != nil {
+			log.Printf("[chat] Failed to update session activity: %v", err)
+		}
+
 		stats := &ExecutionStats{
 			DurationMs:               durationMs,
 			ToolCalls:                toolCallCount,
@@ -1152,6 +1162,7 @@ func (s *Server) handleInterject(sessionID, message string, parts []MessagePart,
 			log.Printf("[interject] Failed to persist unknown-outcome message: %v", perr)
 		}
 		s.Hub.Emit(sessionID, ChatEvent{Type: "user_message", Content: message})
+		s.Hub.NotifyChange("session", sessionID, "activity")
 		s.Hub.Emit(sessionID, ChatEvent{
 			Type:    "error",
 			Message: "Interjection may not have reached the running turn. If the agent doesn't pick it up, send it again.",
@@ -1177,6 +1188,7 @@ func (s *Server) handleInterject(sessionID, message string, parts []MessagePart,
 		log.Printf("[interject] Failed to persist user message: %v", err)
 	}
 	s.Hub.Emit(sessionID, ChatEvent{Type: "user_message", Content: message})
+	s.Hub.NotifyChange("session", sessionID, "activity")
 	log.Printf("[interject] Delivered queue-jump message into live turn: session=%s", sessionID)
 }
 

@@ -360,10 +360,10 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Limit file size to 2MB
+	// Limit file size to 2 MiB
 	const maxSize = 2 * 1024 * 1024
 	if info.Size() > maxSize {
-		writeError(w, http.StatusBadRequest, "file too large (max 2MB)")
+		writeError(w, http.StatusBadRequest, "File too large to preview (limit: 2 MiB). Open this file in a local editor.")
 		return
 	}
 

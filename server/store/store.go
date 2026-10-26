@@ -107,13 +107,16 @@ type SessionStore interface {
 	// checkpoint is opaque to the store and interpreted only by the agent.
 	// agent is the caller-resolved backend name stamped on the new row (the
 	// fork was capability-gated against it); empty inherits the parent's.
+	// The fork shares its parent's worktree mode and working directory.
 	ForkSession(parentID, name, atMessageID, checkpoint, agent string) (*Session, error)
 	GetExpiredSessionWorktrees(olderThan time.Time) ([]string, error) // returns worktree_paths for soon-to-be-purged sessions
-	DeleteSession(id string) error   // soft delete (move to trash)
-	RestoreSession(id string) error  // restore from trash
-	PurgeExpiredSessions(olderThan time.Time) ([]string, error) // hard delete, returns session IDs
-	Vacuum() error                                             // reclaim disk space
+	GetReferencedWorktreePaths() ([]string, error)                    // all remaining sessions (including trash/hidden) and active workflow runs
+	DeleteSession(id string) error                                    // soft delete (move to trash)
+	RestoreSession(id string) error                                   // restore from trash
+	PurgeExpiredSessions(olderThan time.Time) ([]string, error)       // hard delete, returns session IDs
+	Vacuum() error                                                    // reclaim disk space
 	ReorderSessions(sessionIDs []string) error
+	TouchSessionActivity(id string) error
 }
 
 type AssetStore interface {

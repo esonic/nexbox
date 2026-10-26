@@ -690,6 +690,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   // style markers. Null until first load or when the project isn't a git repo.
   const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(null);
   const [loadingFile, setLoadingFile] = useState(false);
+  const [fileLoadError, setFileLoadError] = useState<string | null>(null);
   const [markdownMode, setMarkdownMode] = useState<"source" | "rendered">("source");
 
   // Edit/save state (only meaningful when enableFileEdit is true)
@@ -1085,6 +1086,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     setSelectedPath(path);
     setHighlightedPath(path);
     setLoadingFile(true);
+    setFileLoadError(null);
     setFileBaseline(undefined);
     loadFileBaseline(path);
     try {
@@ -1093,6 +1095,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
       setEditorValue(data?.binary ? "" : (data?.content ?? ""));
     } catch (e) {
       console.error("Failed to load file:", e);
+      setFileLoadError(e instanceof Error ? e.message : "An unexpected error occurred. Please try again.");
       setFileContent(null);
       setEditorValue("");
     } finally {
@@ -1116,6 +1119,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     setSelectedPath(path);
     setHighlightedPath(path);
     setLoadingFile(true);
+    setFileLoadError(null);
     setFileBaseline(undefined);
     loadFileBaseline(path);
     try {
@@ -1124,6 +1128,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
       setEditorValue(data?.binary ? "" : (data?.content ?? ""));
     } catch (e) {
       console.error("Failed to load file:", e);
+      setFileLoadError(e instanceof Error ? e.message : "An unexpected error occurred. Please try again.");
       setFileContent(null);
       setEditorValue("");
     } finally {
@@ -1863,8 +1868,9 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                 )}
               </div>
             ) : (
-              <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-                Failed to load file
+              <div role="alert" className="flex-1 flex flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
+                <p>⚠️ Failed to load file</p>
+                {fileLoadError && <p className="text-xs break-words max-w-full">{fileLoadError}</p>}
               </div>
             )
         ) : (

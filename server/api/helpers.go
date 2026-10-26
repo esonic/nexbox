@@ -64,6 +64,7 @@ var agentDisplayOrder = map[string]int{
 	"pi":       3,
 	"crush":    4,
 	"zeroclaw": 5,
+	"kimi":     6,
 }
 
 func sortAgentNames(names []string) {

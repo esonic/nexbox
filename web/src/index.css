@@ -103,7 +103,8 @@
   height: 4px;
 }
 
-::-webkit-scrollbar-track {
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 
@@ -141,9 +142,10 @@
 .markdown-content pre { @apply bg-muted p-3.5 rounded-lg mb-3 overflow-x-auto text-[0.92em]; }
 .markdown-content pre code { @apply bg-transparent p-0; }
 .markdown-content blockquote { @apply border-l-2 border-border pl-3 text-muted-foreground mb-2.5; }
-.markdown-content table { @apply w-full border-collapse mb-3; }
-.markdown-content th { @apply border border-border px-3 py-1.5 bg-muted text-left text-sm font-medium; }
-.markdown-content td { @apply border border-border px-3 py-1.5 text-sm; }
+.markdown-content table { @apply mb-3 border-t border-l border-border; border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; }
+.markdown-content th { @apply border-b border-r border-border px-4 py-2.5 bg-muted text-left text-sm font-medium; min-width: 5rem; max-width: 24rem; }
+.markdown-content td { @apply border-b border-r border-border px-4 py-2.5 text-sm align-top; min-width: 5rem; max-width: 24rem; }
+.md-table-scroll th { @apply sticky top-0 z-[1]; }
 
 /* Syntax highlighting: dark mode overrides (github-dark theme colors) */
 .dark .hljs { color: #c9d1d9 }

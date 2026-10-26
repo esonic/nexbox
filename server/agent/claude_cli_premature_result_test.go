@@ -11,9 +11,9 @@ import (
 )
 
 // writeFakeCLI writes an executable shell script that emits the given stdout
-// lines (one JSON stream-json message per line) and exits. It ignores stdin,
-// which is fine: ClaudeClient.Query writes a small initialize + user message
-// that fits in the pipe buffer. Returns the script path.
+// lines (one JSON stream-json message per line) and exits. Read the initial
+// initialize and user messages first, so a fast fixture cannot close stdin
+// before Query has written its request. Returns the script path.
 func writeFakeCLI(t *testing.T, lines []string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -22,7 +22,7 @@ func writeFakeCLI(t *testing.T, lines []string) string {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fake-claude.sh")
 	var b strings.Builder
-	b.WriteString("#!/bin/sh\n")
+	b.WriteString("#!/bin/sh\nIFS= read -r init_request\nIFS= read -r user_request\n")
 	for _, ln := range lines {
 		// Single-quote the JSON payload; our fixtures contain no single quotes.
 		b.WriteString("printf '%s\\n' '")

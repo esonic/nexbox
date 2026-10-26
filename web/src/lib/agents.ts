@@ -6,6 +6,7 @@ export const AGENT_LABELS: Record<string, string> = {
   zeroclaw: "ZeroClaw",
   crush: "Crush",
   pi: "Pi",
+  kimi: "Kimi Code",
 };
 
 export function agentLabel(agent: string): string {

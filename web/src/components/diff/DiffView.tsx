@@ -16,7 +16,6 @@ import { cn } from "@/lib/utils";
 import { getFilePath, splitUnifiedDiffByFile, type ParsedDiffFile } from "@/lib/diff-parser";
 import {
   gitApi,
-  type GitStatusResponse,
   type DiffFileInfo,
   type GitScope,
   type GitRepository,
@@ -28,6 +27,7 @@ import { DiffMinimap } from "./DiffMinimap";
 import { HistoryTab } from "./HistoryTab";
 import { BranchToolbar } from "./BranchToolbar";
 import { useAppStore } from "@/stores/app";
+import type { GitReviewSnapshot } from "@/hooks/useGitReview";
 
 interface DiffViewProps {
   diffText?: string;
@@ -37,6 +37,7 @@ interface DiffViewProps {
   repository?: GitRepository;
   isDefaultRepository?: boolean;
   onCommitted?: () => void;
+  review?: GitReviewSnapshot;
 }
 
 type FileCategory = "staged" | "unstaged" | "untracked";
@@ -45,7 +46,7 @@ const CATEGORY_ORDER: FileCategory[] = ["staged", "unstaged", "untracked"];
 const LEFT_WIDTH_MIN = 200;
 const LEFT_WIDTH_MAX = 600;
 
-export function DiffView({ diffText, fileStats, projectId, sessionId, repository, isDefaultRepository, onCommitted }: DiffViewProps) {
+export function DiffView({ diffText, fileStats, projectId, sessionId, repository, isDefaultRepository, onCommitted, review }: DiffViewProps) {
   const isLazyMode = !diffText && !!fileStats;
   const repositoryId = repository?.id;
   const gitScope = useMemo<GitScope | null>(() => projectId && repositoryId ? ({
@@ -94,7 +95,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
   const [discardingFile, setDiscardingFile] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"changes" | "history">("changes");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(null);
+  const gitStatus = review?.status;
   const fileRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   // Resizable left list. Width persisted to localStorage, clamped to a sane range.
@@ -121,49 +122,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
     document.addEventListener("mouseup", onUp);
   }, [leftWidth]);
 
-  const [statusTick, setStatusTick] = useState(0);
-  // fileRefreshKey is separate from statusTick: only increments on explicit user actions
-  // (commit, discard, stage/unstage, manual refresh), NOT on the auto-poll timer.
-  // This prevents DiffFileCard from reloading and losing scroll position every 5s.
-  const [fileRefreshKey, setFileRefreshKey] = useState(0);
-
-  // Apply a fetched git status but keep the previous reference when it's
-  // byte-for-byte identical, so the 5s auto-poll doesn't trigger a needless
-  // re-render (and full diff-list reconciliation) when nothing changed on disk.
-  const applyGitStatus = useCallback((data: GitStatusResponse | null) => {
-    setGitStatus((prev) =>
-      prev && data && JSON.stringify(prev) === JSON.stringify(data) ? prev : data,
-    );
-  }, []);
-
-  // Auto-refresh git status every 5s when the git panel is open — but skip the
-  // poll while the tab is hidden (a background tab shouldn't burn CPU), and
-  // refresh once as soon as it becomes visible again.
-  useEffect(() => {
-    if (!gitScope) return;
-    const poll = () => { if (!document.hidden) setStatusTick((t) => t + 1); };
-    const interval = setInterval(poll, 5_000);
-    document.addEventListener("visibilitychange", poll);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", poll);
-    };
-  }, [gitScope]);
-
-  const statusRequestGeneration = useRef(0);
-  useEffect(() => {
-    if (!gitScope) return;
-    const generation = ++statusRequestGeneration.current;
-    let cancelled = false;
-    gitApi.status(gitScope)
-      .then((data) => {
-        if (!cancelled && generation === statusRequestGeneration.current) applyGitStatus(data);
-      })
-      .catch(() => {
-        if (!cancelled && generation === statusRequestGeneration.current) applyGitStatus(null);
-      });
-    return () => { cancelled = true; };
-  }, [gitScope, diffText, statusTick, applyGitStatus]);
+  const fileRefreshKey = review?.fileRevision ?? 0;
 
   const filteredFiles = useMemo(() => {
     if (!fileFilter.trim()) return files;
@@ -246,8 +205,6 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
     try {
       await gitApi.commit(gitScope, { file_paths: commitFilePaths, message: commitMsg.trim() });
       setCommitMsg("");
-      setStatusTick((t) => t + 1);
-      setFileRefreshKey((t) => t + 1);
       onCommitted?.();
     } catch (e) { console.error("Failed to commit:", e); toast.error("Commit failed", { description: String(e) }); }
     finally { setCommitting(false); }
@@ -262,8 +219,6 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
   };
 
   const handleRefreshAll = useCallback(() => {
-    setStatusTick((t) => t + 1);
-    setFileRefreshKey((t) => t + 1);
     onCommitted?.();
   }, [onCommitted]);
 
@@ -289,8 +244,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
     if (!gitScope || paths.length === 0) return;
     try {
       await gitApi.stage(gitScope, { file_paths: paths });
-      setStatusTick((t) => t + 1);
-      setFileRefreshKey((t) => t + 1);
+      onCommitted?.();
     } catch (e) {
       toast.error("Stage failed", { description: String(e) });
     }
@@ -300,8 +254,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
     if (!gitScope || paths.length === 0) return;
     try {
       await gitApi.unstage(gitScope, { file_paths: paths });
-      setStatusTick((t) => t + 1);
-      setFileRefreshKey((t) => t + 1);
+      onCommitted?.();
     } catch (e) {
       toast.error("Unstage failed", { description: String(e) });
     }
@@ -382,7 +335,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
   }, [viewMode, filteredFiles, activeFileIdx, changeCount, currentChangeIdx]);
 
   // Always called to satisfy hooks rules; state is self-contained
-  const history = HistoryTab({ scope: gitScope, repository, allowLegacyComments: isDefaultRepository, autoLoad: activeTab === "history" && !!gitScope });
+  const history = HistoryTab({ scope: gitScope, repository, allowLegacyComments: isDefaultRepository, commitsSnapshot: review?.commits });
 
   const renderFileRow = (file: ParsedDiffFile, category: FileCategory) => {
     const path = getFilePath(file);
@@ -440,6 +393,7 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
     <div className="flex flex-col h-full">
       {gitScope && (
         <BranchToolbar scope={gitScope} onBranchChanged={handleRefreshAll}
+          branchData={review?.branches}
           aheadCount={gitStatus?.ahead}
           navLabel={activeTab === "changes" && activeFile ? navLabel : undefined}
           onNavigate={activeTab === "changes" && activeFile && filteredFiles.length > 0 ? handleNavigate : undefined}

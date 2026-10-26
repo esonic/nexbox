@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 // This file centralizes unified-diff (git-style ---/+++/@@) production and
@@ -160,6 +162,92 @@ func unifiedDiffForFullContent(path, content string, isDelete bool) string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "--- %s\n+++ %s\n@@ -1,%d +1,%d @@\n%s", oldHeader, newHeader, oldCount, newCount, body.String())
 	return out.String()
+}
+
+// unifiedDiffFromTexts line-diffs a before/after pair into a unified diff
+// with three context lines. Callers that only have the replaced snippet (not
+// the whole file) get hunk headers numbered from the snippet's first line —
+// sufficient for a visual preview, not for `git apply`.
+func unifiedDiffFromTexts(path, oldText, newText string) string {
+	if oldText == newText {
+		return ""
+	}
+	if oldText == "" {
+		return unifiedDiffForFullContent(path, newText, false)
+	}
+	dmp := diffmatchpatch.New()
+	oldChars, newChars, lineArray := dmp.DiffLinesToChars(oldText, newText)
+	diffs := dmp.DiffCharsToLines(dmp.DiffMain(oldChars, newChars, false), lineArray)
+
+	type diffLine struct {
+		sign byte
+		text string
+	}
+	var lines []diffLine
+	for _, d := range diffs {
+		sign := byte(' ')
+		switch d.Type {
+		case diffmatchpatch.DiffDelete:
+			sign = '-'
+		case diffmatchpatch.DiffInsert:
+			sign = '+'
+		}
+		for _, text := range strings.SplitAfter(d.Text, "\n") {
+			if text != "" {
+				lines = append(lines, diffLine{sign, strings.TrimSuffix(text, "\n")})
+			}
+		}
+	}
+	// oldBefore[i]/newBefore[i] count the old/new lines preceding lines[i].
+	oldBefore := make([]int, len(lines)+1)
+	newBefore := make([]int, len(lines)+1)
+	for i, l := range lines {
+		oldBefore[i+1], newBefore[i+1] = oldBefore[i], newBefore[i]
+		if l.sign != '+' {
+			oldBefore[i+1]++
+		}
+		if l.sign != '-' {
+			newBefore[i+1]++
+		}
+	}
+
+	const context = 3
+	var hunks []string
+	for i := 0; i < len(lines); {
+		for i < len(lines) && lines[i].sign == ' ' {
+			i++
+		}
+		if i == len(lines) {
+			break
+		}
+		start := max(0, i-context)
+		lastChange := i
+		for j := i; j < len(lines) && j-lastChange <= 2*context; j++ {
+			if lines[j].sign != ' ' {
+				lastChange = j
+			}
+		}
+		end := min(len(lines), lastChange+context+1)
+		oldCount := oldBefore[end] - oldBefore[start]
+		newCount := newBefore[end] - newBefore[start]
+		oldStart, newStart := oldBefore[start]+1, newBefore[start]+1
+		if oldCount == 0 {
+			oldStart--
+		}
+		if newCount == 0 {
+			newStart--
+		}
+		var body strings.Builder
+		fmt.Fprintf(&body, "@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, newStart, newCount)
+		for _, l := range lines[start:end] {
+			body.WriteByte(l.sign)
+			body.WriteString(l.text)
+			body.WriteByte('\n')
+		}
+		hunks = append(hunks, body.String())
+		i = end
+	}
+	return unifiedDiffFromHunks(path, hunks)
 }
 
 // normalizeApplyPatchDiff converts codex's compat-mode apply_patch textual

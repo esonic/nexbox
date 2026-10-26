@@ -891,6 +891,7 @@ func ReadStatus(ctx context.Context, root string) (*Status, error) {
 		return nil, fmt.Errorf("git status: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	result := &Status{Staged: []FileStatus{}, Unstaged: []FileStatus{}, Untracked: []FileStatus{}}
+	hasTrackingCounts, unborn := false, false
 	records := bytes.Split(stdout.Bytes(), []byte{0})
 	for i := 0; i < len(records); i++ {
 		record := records[i]
@@ -898,7 +899,10 @@ func ReadStatus(ctx context.Context, root string) (*Status, error) {
 			continue
 		}
 		if bytes.HasPrefix(record, []byte("# ")) {
-			parseV2BranchHeader(result, string(record[2:]))
+			header := string(record[2:])
+			hasTrackingCounts = hasTrackingCounts || strings.HasPrefix(header, "branch.ab ")
+			unborn = unborn || header == "branch.oid (initial)"
+			parseV2BranchHeader(result, header)
 			continue
 		}
 
@@ -930,7 +934,31 @@ func ReadStatus(ctx context.Context, root string) (*Status, error) {
 			}
 		}
 	}
+	if !hasTrackingCounts && !unborn {
+		// A new branch has no upstream yet. Count commits absent from every
+		// known remote branch instead of treating missing tracking as clean.
+		count, err := CountUnpublishedCommits(ctx, root)
+		if err != nil {
+			return nil, err
+		}
+		result.Ahead = count
+	}
 	return result, nil
+}
+
+// CountUnpublishedCommits counts HEAD commits not reachable from any locally
+// known remote-tracking ref. It does not fetch or configure an upstream.
+func CountUnpublishedCommits(ctx context.Context, root string) (int, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "rev-list", "--count", "HEAD", "--not", "--remotes")
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("count unpublished commits: %w", err)
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil {
+		return 0, fmt.Errorf("parse unpublished commit count: %w", err)
+	}
+	return count, nil
 }
 
 // Porcelain v2 uses several XY pairs for unmerged entries (DD, AU, UD, UA,

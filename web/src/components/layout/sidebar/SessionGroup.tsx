@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ChevronRight, ChevronDown, FolderOpen, MoreHorizontal, Plus, Pencil, Trash2,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { UNASSIGNED_PROJECT } from "@/lib/constants";
 import type { Project, Session } from "@/types";
 import type { SessionGroupData } from "@/hooks/useGroupedSessions";
@@ -28,9 +29,15 @@ interface SessionGroupProps {
   dragOverSessionId: string | null;
   dragOverPosition: "above" | "below" | null;
   onDragStart: (e: React.DragEvent, id: string) => void;
-  onDragOver: (e: React.DragEvent, id: string) => void;
+  onDragOver: (e: React.DragEvent, id: string, group: Session[]) => void;
   onDragEnd: () => void;
   onDrop: (e: React.DragEvent, id: string, group: Session[]) => void;
+  dragDisabled: boolean;
+  onTogglePin: (session: Session) => void;
+  pinPendingIds: Set<string>;
+  projectDragProps: React.HTMLAttributes<HTMLDivElement>;
+  isProjectDragging: boolean;
+  projectDropPosition: "above" | "below" | null;
   // Delete
   confirmDeleteSessionId: string | null;
   onConfirmDelete: (id: string) => void;
@@ -47,7 +54,9 @@ export function SessionGroup({
   onRenameChange, onRenameCommit, onRenameCancel, onRenameStart,
   dragSessionId, dragOverSessionId, dragOverPosition,
   onDragStart, onDragOver, onDragEnd, onDrop,
-  confirmDeleteSessionId, onConfirmDelete, onCancelDelete, onDelete,
+  confirmDeleteSessionId, onConfirmDelete, onCancelDelete,
+  onDelete, dragDisabled, onTogglePin, pinPendingIds,
+  projectDragProps, isProjectDragging, projectDropPosition,
   onSelectSession,
 }: SessionGroupProps) {
   const groupKey = group.projectId || "__unbound__";
@@ -67,14 +76,23 @@ export function SessionGroup({
   }, [menuOpen]);
 
   return (
-    <div className="mb-1">
+    <div className={cn("mb-1", isProjectDragging && "opacity-40")}>
       {/* Project group header. The chevron and the rest of the row
           are separate click targets: chevron toggles expand/collapse,
           the row body opens the project's scratch session so the
           user can start a new chat (and use Files/Terminal/Workflow
           in the meantime) without committing to a real session
           until they send the first message. */}
-      <div className="group flex items-center rounded-lg hover:bg-accent/30 transition-colors">
+      <div
+        {...projectDragProps}
+        title={group.projectId ? "Drag to reorder project" : undefined}
+        className={cn(
+          "group flex items-center rounded-lg hover:bg-accent/30 transition-colors relative",
+          group.projectId && "cursor-grab active:cursor-grabbing",
+          projectDropPosition === "above" && "before:absolute before:left-0 before:right-0 before:top-0 before:h-0.5 before:bg-primary",
+          projectDropPosition === "below" && "after:absolute after:left-0 after:right-0 after:bottom-0 after:h-0.5 after:bg-primary",
+        )}
+      >
         <button
           onClick={(e) => { e.stopPropagation(); onToggleCollapsed(groupKey); }}
           className="flex items-center justify-center pl-2 py-1.5 shrink-0"
@@ -173,6 +191,9 @@ export function SessionGroup({
           isConfirmingDelete={confirmDeleteSessionId === s.id}
           onConfirmDelete={onConfirmDelete}
           onCancelDelete={onCancelDelete}
+          dragDisabled={dragDisabled}
+          onTogglePin={onTogglePin}
+          pinPending={pinPendingIds.has(s.id)}
           onDelete={onDelete}
           onSelect={onSelectSession}
         />

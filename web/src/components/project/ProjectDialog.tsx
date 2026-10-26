@@ -6,6 +6,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { DirPicker } from "@/components/project/DirPicker";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Loader2, Trash2 } from "lucide-react";
@@ -159,7 +160,7 @@ export function ProjectDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="sm:max-w-[420px] overflow-hidden"
+        className="sm:max-w-[640px] overflow-hidden"
         onPointerDownOutside={(e) => e.preventDefault()}
         onInteractOutside={(e) => e.preventDefault()}
       >
@@ -212,12 +213,7 @@ export function ProjectDialog({
               </label>
               {!autoCreateDir && (
                 <>
-                  <Input
-                    value={customDir}
-                    onChange={(e) => setCustomDir(e.target.value)}
-                    placeholder="/absolute/path/to/existing/directory"
-                    className="h-8 text-sm font-mono"
-                  />
+                  <DirPicker value={customDir} onChange={setCustomDir} />
                   <p className="text-[11px] text-muted-foreground/70">
                     Must be an existing absolute path. The directory will be adopted as-is and never renamed or deleted by the platform.
                   </p>

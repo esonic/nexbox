@@ -2,7 +2,8 @@ import { useMemo, useState, useCallback, useRef, useEffect, memo, type ReactNode
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { resolveLang, ensureLangRegistered, highlightCode } from "@/lib/highlight";
-import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, ChevronUp, FileEdit, Sparkles, ArrowRight, CornerDownRight } from "lucide-react";
+import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, ChevronUp, FileEdit, Sparkles, ArrowRight, CornerDownRight, Maximize2 } from "lucide-react";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { ThinkingIndicator } from "@/components/chat/ThinkingIndicator";
 import { cn } from "@/lib/utils";
@@ -532,18 +533,39 @@ function MdCode({ className, children }: { className?: string; children?: ReactN
   return <ChatCodeBlock code={text} lang={lang} />;
 }
 
+// Tables scroll horizontally inside the message column (the chat panel clips
+// overflow-x) and can be expanded into a dialog for comfortable reading.
+function MdTable({ children, ...props }: React.ComponentPropsWithoutRef<"table">) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="group/table relative my-2">
+      <div className="md-table-scroll overflow-auto max-h-[36rem] -mx-1">
+        <table {...props}>{children}</table>
+      </div>
+      <button
+        onClick={() => setOpen(true)}
+        className="absolute right-3 top-2 z-10 p-1 rounded-md bg-background/80 backdrop-blur-sm border text-muted-foreground hover:text-foreground opacity-60 group-hover/table:opacity-100 transition-opacity"
+        title="Expand table"
+      >
+        <Maximize2 className="h-3.5 w-3.5" />
+      </button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="w-max max-w-[95vw] max-h-[90vh] overflow-hidden p-4 pt-10 gap-0">
+          <DialogTitle className="sr-only">Table</DialogTitle>
+          <div className="markdown-content md-table-scroll overflow-auto max-h-[calc(90vh-3.5rem)]">
+            <table {...props}>{children}</table>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 const MD_COMPONENTS: Components = {
   // pre is unwrapped — MdCode (rendered from `code`) owns the <pre>.
   pre: ({ children }) => <>{children}</>,
   code: MdCode,
-  // Wide tables overflow narrow viewports — give every rendered table its own
-  // horizontal scroll container so it stays in the message column on phones
-  // instead of pushing the chat wider than the screen.
-  table: ({ children, ...props }) => (
-    <div className="overflow-x-auto -mx-1 my-2">
-      <table {...props}>{children}</table>
-    </div>
-  ),
+  table: ({ children }) => <MdTable>{children}</MdTable>,
   a: ({ href, children }) => (
     <a
       href={href}
@@ -1045,9 +1067,18 @@ function FileChangeRow({ file, projectRoot }: { file: FileChangeEntry; projectRo
           <span className="w-3 shrink-0" />
         )}
         <span className={cn("w-3 text-center shrink-0", kindClass[file.kind])}>{kindIcon[file.kind]}</span>
-        <span className="break-all text-muted-foreground flex-1 min-w-0" title={file.path}>
-          {toRelativePath(file.path, projectRoot)}
-        </span>
+        {(() => {
+          const rel = toRelativePath(file.path, projectRoot);
+          const idx = rel.lastIndexOf("/");
+          const dir = idx >= 0 ? rel.slice(0, idx + 1) : "";
+          const base = idx >= 0 ? rel.slice(idx + 1) : rel;
+          return (
+            <span className="flex flex-1 min-w-0 whitespace-nowrap text-muted-foreground" title={file.path}>
+              {dir && <span className="truncate min-w-0">{dir}</span>}
+              <span className={dir ? "shrink-0" : "truncate min-w-0"}>{base}</span>
+            </span>
+          );
+        })()}
         {combinedDiff && <DiffStats diff={combinedDiff} />}
       </CollapsibleTrigger>
       {hasDiff && (

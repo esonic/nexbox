@@ -15,8 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/esonic/nexbox/mcpidentity"
 	"github.com/esonic/nexbox/store"
+	"github.com/go-chi/chi/v5"
 )
 
 // ---------------------------------------------------------------------------
@@ -161,7 +162,7 @@ func (s *Server) AddManualMCPSource(w http.ResponseWriter, r *http.Request) {
 	}
 	mcpData, err := json.MarshalIndent(map[string]any{
 		"mcpServers": map[string]any{
-			name: map[string]any{
+			mcpidentity.ServerKey(name): map[string]any{
 				"url":     rawURL,
 				"headers": headers,
 			},
@@ -401,6 +402,11 @@ func (s *Server) RemoveMarketplaceSource(w http.ResponseWriter, r *http.Request)
 	// Look up source before deleting so we can clean up the filesystem.
 	src, _ := s.Store.GetMarketplaceSource(id)
 
+	// Uninstall everything this source provided before its files disappear.
+	if src != nil {
+		s.uninstallSourceItems(*src)
+	}
+
 	if err := s.Store.DeleteMarketplaceSource(id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -422,6 +428,80 @@ func (s *Server) RemoveMarketplaceSource(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// uninstallSourceItems uninstalls every MCP, skill and plugin offered by src,
+// skipping names that another directory in the marketplace dir still provides.
+func (s *Server) uninstallSourceItems(src store.MarketplaceSource) {
+	type key struct{ kind, name string }
+	kindOf := func(p MarketplacePlugin) string {
+		switch p.Type {
+		case "mcp", "skill":
+			return p.Type
+		default:
+			return "plugin"
+		}
+	}
+	scan := func(path string) (map[key]bool, error) {
+		plugins, err := loadMarketplacePlugins(path, nil)
+		if err != nil {
+			return nil, err
+		}
+		keys := map[key]bool{}
+		for _, p := range plugins {
+			keys[key{kindOf(p), p.Name}] = true
+		}
+		return keys, nil
+	}
+
+	owned, err := scan(src.Path)
+	if err != nil {
+		log.Printf("[marketplace] list plugins of source %s: %v", src.Name, err)
+		return
+	}
+	// Protect names that any other directory under the marketplace dir still
+	// provides (registered or not). On any error, uninstall nothing.
+	mpDir := s.marketplaceDir()
+	entries, err := os.ReadDir(mpDir)
+	if err != nil {
+		log.Printf("[marketplace] read marketplace dir while removing source %s: %v", src.Name, err)
+		return
+	}
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return p
+	}
+	self := resolve(src.Path)
+	for _, e := range entries {
+		other := filepath.Join(mpDir, e.Name())
+		if strings.HasPrefix(e.Name(), ".") || resolve(other) == self {
+			continue
+		}
+		keys, err := scan(other)
+		if err != nil {
+			log.Printf("[marketplace] scan %s while removing source %s: %v", other, src.Name, err)
+			return
+		}
+		for k := range keys {
+			delete(owned, k)
+		}
+	}
+	for k := range owned {
+		var err error
+		switch k.kind {
+		case "mcp":
+			err = s.uninstallMCP(k.name, "")
+		case "skill":
+			err = s.uninstallSkill(k.name, "")
+		default:
+			err = s.uninstallPluginEntry(k.name, "")
+		}
+		if err != nil {
+			log.Printf("[marketplace] uninstall %s %q for removed source %s: %v", k.kind, k.name, src.Name, err)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

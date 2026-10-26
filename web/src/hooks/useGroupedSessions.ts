@@ -1,4 +1,6 @@
 import { useMemo } from "react";
+import { useLayoutStore } from "@/stores/layout";
+import { sortSessions } from "@/lib/session-order";
 import { UNASSIGNED_PROJECT } from "@/lib/constants";
 import type { Project, Session } from "@/types";
 
@@ -10,12 +12,14 @@ export interface SessionGroupData {
 
 /**
  * Groups sessions by project into the ordered list the sidebar renders:
- * one group per "working" project (those with a local dir), newest project
- * first, with unassigned sessions appended last. Hidden ("scratch") sessions
- * are excluded. Within a group, sessions sort by `sort_order` (manual
- * drag-reorder) then newest-created first.
+ * one group per "working" project (those with a local dir), in saved project
+ * order (newest first initially), with unassigned sessions appended last.
+ * Hidden ("scratch") sessions are excluded. Pinned sessions lead each group;
+ * other sessions follow manual order or conversation activity.
  */
 export function useGroupedSessions(sessions: Session[], projects: Project[]): SessionGroupData[] {
+  const autoSort = useLayoutStore((s) => s.autoSortSessions);
+  const projectOrder = useLayoutStore((s) => s.projectOrder);
   const projectMap = useMemo(() => {
     const map = new Map<string, Project>();
     for (const p of projects) map.set(p.id, p);
@@ -48,29 +52,20 @@ export function useGroupedSessions(sessions: Session[], projects: Project[]): Se
 
     const result: SessionGroupData[] = [];
 
-    const sortSessions = (list: Session[]) =>
-      [...list].sort((a, b) => {
-        // 1. 优先按 sort_order 排序（升序）
-        if (a.sort_order !== b.sort_order) {
-          return a.sort_order - b.sort_order;
-        }
-        // 2. sort_order 相同时，按 created_at 倒序（新创建的在前）
-        const ta = new Date(a.created_at).getTime();
-        const tb = new Date(b.created_at).getTime();
-        return tb - ta;
-      });
-
     // Only show "Working Projects" (those with a local dir mapping) in the sidebar
     for (const p of projects.filter((p) => p.name !== UNASSIGNED_PROJECT && p.git_repo_path)) {
       result.push({
         projectId: p.id,
         project: p,
-        sessions: sortSessions(sessionsByProject.get(p.id) || []),
+        sessions: sortSessions(sessionsByProject.get(p.id) || [], autoSort ? "activity" : "manual"),
       });
     }
 
-    // Sort project groups by created_at (newest first)
+    // Keep saved project order; newly linked projects appear first.
+    const ranks = new Map(projectOrder.map((id, i) => [id, i]));
     result.sort((a, b) => {
+      const order = (ranks.get(a.projectId!) ?? -1) - (ranks.get(b.projectId!) ?? -1);
+      if (order) return order;
       const aTime = new Date(a.project?.created_at || 0).getTime();
       const bTime = new Date(b.project?.created_at || 0).getTime();
       return bTime - aTime;
@@ -78,9 +73,9 @@ export function useGroupedSessions(sessions: Session[], projects: Project[]): Se
 
     // Add unbound sessions at the end (Unassigned group)
     if (unbound.length > 0) {
-      result.push({ projectId: null, project: null, sessions: sortSessions(unbound) });
+      result.push({ projectId: null, project: null, sessions: sortSessions(unbound, autoSort ? "activity" : "manual") });
     }
 
     return result;
-  }, [sessions, projects, projectMap]);
+  }, [sessions, projects, projectMap, autoSort, projectOrder]);
 }

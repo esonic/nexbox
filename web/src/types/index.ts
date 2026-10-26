@@ -58,6 +58,8 @@ export interface Session {
   stream_id: string;
   sort_order: number;
   chrome_browser_url?: string; // empty = NexBox-managed Chrome
+  is_pinned?: boolean;
+  last_active_at?: string;
   worktree_mode: "local" | "worktree";
   worktree_path: string; // empty until created on first message
   // Fork lineage. Set when this session was created via POST /sessions/:id/fork.

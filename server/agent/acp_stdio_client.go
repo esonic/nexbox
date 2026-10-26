@@ -63,6 +63,8 @@ type acpStdioClient struct {
 	command string
 	args    []string
 	verbose bool
+	// env is the subprocess environment; nil inherits BeeHub's own.
+	env []string
 
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
@@ -110,7 +112,10 @@ func (c *acpStdioClient) start(workDir string) error {
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
-	cmd.Env = os.Environ()
+	cmd.Env = c.env
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdin, err := cmd.StdinPipe()

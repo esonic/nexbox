@@ -5,11 +5,10 @@ import { getFilePath, splitUnifiedDiffByFile } from "@/lib/diff-parser";
 import { gitApi, type GitCommitInfo, type GitCommitFileEntry, type GitRepository, type GitScope } from "@/lib/api";
 import { DiffFileCard } from "./DiffFileCard";
 
-export function HistoryTab({ scope, repository, allowLegacyComments, autoLoad }: { scope: GitScope | null; repository?: GitRepository; allowLegacyComments?: boolean; autoLoad: boolean }) {
-  const PAGE_SIZE = 20;
+export function HistoryTab({ scope, repository, allowLegacyComments, commitsSnapshot }: { scope: GitScope | null; repository?: GitRepository; allowLegacyComments?: boolean; commitsSnapshot?: GitCommitInfo[] }) {
   const LOAD_MORE_SIZE = 10;
   const [commits, setCommits] = useState<GitCommitInfo[]>([]);
-  const [loading, setLoading] = useState(false);
+  const loading = !commitsSnapshot;
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [selectedCommit, setSelectedCommit] = useState<string | null>(null);
@@ -25,35 +24,28 @@ export function HistoryTab({ scope, repository, allowLegacyComments, autoLoad }:
     [commitDiffText],
   );
 
-  const loadHistory = useCallback(async () => {
-    if (!scope) return;
-    setLoading(true);
-    try {
-      const data = await gitApi.log(scope, PAGE_SIZE);
-      setCommits(data);
-      setHasMore(data.length >= PAGE_SIZE);
-    } catch (e) { console.error("Failed to load history:", e); }
-    finally { setLoading(false); }
-  }, [scope]);
+  const historyGeneration = useRef(0);
+  useEffect(() => {
+    historyGeneration.current++;
+    setCommits(commitsSnapshot ?? []);
+    setHasMore((commitsSnapshot?.length ?? 0) >= 20);
+    setLoadingMore(false);
+    // A selected immutable commit can remain open while the branch advances.
+  }, [commitsSnapshot]);
 
   const loadMore = useCallback(async () => {
     if (!scope || loadingMore) return;
     setLoadingMore(true);
+    const generation = historyGeneration.current;
     try {
       const data = await gitApi.log(scope, LOAD_MORE_SIZE, commits.length);
+      if (generation !== historyGeneration.current) return;
       setCommits((prev) => [...prev, ...data]);
       setHasMore(data.length >= LOAD_MORE_SIZE);
     } catch (e) { console.error("Failed to load more:", e); }
-    finally { setLoadingMore(false); }
+    finally { if (generation === historyGeneration.current) setLoadingMore(false); }
   }, [scope, commits.length, loadingMore]);
 
-  const loadedRef = useRef(false);
-  useEffect(() => {
-    if (autoLoad && !loadedRef.current && commits.length === 0) {
-      loadedRef.current = true;
-      loadHistory();
-    }
-  }, [autoLoad, loadHistory, commits.length]);
 
   const handleSelectCommit = async (hash: string) => {
     if (!scope) return;

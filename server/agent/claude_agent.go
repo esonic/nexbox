@@ -1383,6 +1383,7 @@ func toInt(v interface{}) (int, bool) {
 // the Edit tool: a file path plus ready-made unified-diff hunks (each without
 // its own file header, just "@@ -a,b +c,d @@" followed by " "/"+"/"-" lines).
 type claudeToolUseResultPatch struct {
+	Type            string `json:"type"`
 	FilePath        string `json:"filePath"`
 	StructuredPatch []struct {
 		OldStart int      `json:"oldStart"`
@@ -1391,22 +1392,26 @@ type claudeToolUseResultPatch struct {
 		NewLines int      `json:"newLines"`
 		Lines    []string `json:"lines"`
 	} `json:"structuredPatch"`
-	// Write tool: full file content, no diff of its own to derive from.
+	// Write create: content is authoritative because the file did not exist.
 	Content string `json:"content"`
 }
 
 // claudeToolResultDiff extracts a unified diff from Claude Code's
-// `toolUseResult` field on a tool_result message, when present. Only the
-// Edit/MultiEdit family carries `structuredPatch`; Write/other tools have no
-// diff data in this field (Content is the full new file, with no "before" to
-// compare against), so they fall back to no diff rather than a fabricated
-// all-green view.
+// structured tool result. Edits and overwrites use structuredPatch; a Write
+// explicitly marked create can render its full content as a new-file diff.
+// An overwrite without a patch has no before-image, so it produces no diff.
 func claudeToolResultDiff(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
 	var patch claudeToolUseResultPatch
-	if json.Unmarshal(raw, &patch) != nil || patch.FilePath == "" || len(patch.StructuredPatch) == 0 {
+	if json.Unmarshal(raw, &patch) != nil || patch.FilePath == "" {
+		return ""
+	}
+	if len(patch.StructuredPatch) == 0 {
+		if patch.Type == "create" {
+			return unifiedDiffForFullContent(patch.FilePath, patch.Content, false)
+		}
 		return ""
 	}
 	hunks := make([]string, 0, len(patch.StructuredPatch))

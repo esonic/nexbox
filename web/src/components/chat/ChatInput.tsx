@@ -950,7 +950,7 @@ export function ChatInput({
 
   return (
     <div className="shrink-0">
-      <div className="max-w-4xl mx-auto px-2 sm:px-4 pb-2 sm:pb-3">
+      <div className="max-w-4xl mx-auto px-0 sm:px-4 pb-2 sm:pb-3">
         {pendingTodo && (
           <TodoPanel todos={pendingTodo.todos} title={pendingTodo.title} />
         )}
@@ -983,7 +983,7 @@ export function ChatInput({
 
         {/* Unified input box */}
         <div
-          className="relative rounded-xl border border-input bg-background shadow-sm focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background transition-shadow"
+          className="relative rounded-none border-x-0 sm:rounded-xl sm:border-x border border-input bg-background shadow-sm focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background transition-shadow"
           onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
           onDrop={(e) => {
             e.preventDefault();
@@ -1329,16 +1329,18 @@ export function ChatInput({
                     <button
                       onClick={() => canChangeModel && setShowModelMenu((v) => !v)}
                       className={cn(
-                        "max-w-[180px] text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 transition-colors bg-violet-500/15 text-violet-400",
+                        "text-[10px] font-medium px-1.5 py-0.5 rounded-sm flex items-center gap-1 text-left transition-colors bg-violet-500/15 text-violet-400",
                         canChangeModel ? "hover:bg-violet-500/25 cursor-pointer" : "opacity-60 cursor-not-allowed"
                       )}
                       title={canChangeModel ? "Click to change model" : "This agent only allows choosing a model before the conversation starts"}
                     >
-                      <span className="min-w-0 truncate">{currentModelLabel}</span>
-                      {effortLabel && (
-                        <span className="text-violet-400/60 font-normal">· {effortLabel}</span>
-                      )}
-                      <ChevronDown className="h-2.5 w-2.5" />
+                      <span className="min-w-0 break-words">
+                        {currentModelLabel}
+                        {effortLabel && (
+                          <span className="text-violet-400/60 font-normal"> · {effortLabel}</span>
+                        )}
+                      </span>
+                      <ChevronDown className="h-2.5 w-2.5 shrink-0" />
                     </button>
 
                     {showModelMenu && canChangeModel && (

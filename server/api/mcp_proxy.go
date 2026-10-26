@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -14,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/esonic/nexbox/store"
+	"github.com/go-chi/chi/v5"
 )
 
 var oauthDiscoveryHTTPClient = &http.Client{Timeout: 10 * time.Second}
@@ -68,6 +69,25 @@ func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "auth error for MCP "+name+": "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	var rpcRequest mcpProxyRequest
+	if r.Method == http.MethodPost && r.Body != nil {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 32<<20))
+		_ = r.Body.Close()
+		if err != nil {
+			http.Error(w, "MCP request body is too large or unreadable", http.StatusRequestEntityTooLarge)
+			return
+		}
+		_ = json.Unmarshal(body, &rpcRequest)
+		if rpcRequest.Method == "tools/call" {
+			body, err = s.translateMCPToolCall(mcp, body, rpcRequest)
+			if err != nil {
+				http.Error(w, "invalid MCP tool call", http.StatusBadRequest)
+				return
+			}
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+	}
 
 	// Build the forwarding URL: targetURL + the tail path after /mcp-proxy/{name}.
 	// Strip internal "session" query parameter before forwarding.
@@ -93,6 +113,11 @@ func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 			// SSE is preferred, which breaks strict Streamable-HTTP clients like
 			// Codex's rmcp.
 			req.Header.Set("Accept", "application/json, text/event-stream")
+			if rpcRequest.Method == "tools/list" {
+				// This reply is parsed and rewritten below. Do not forward a
+				// client's gzip negotiation and then try to parse compressed JSON.
+				req.Header.Set("Accept-Encoding", "identity")
+			}
 			// Remove hop-by-hop headers that shouldn't be forwarded.
 			req.Header.Del("X-Forwarded-For")
 		},
@@ -101,6 +126,7 @@ func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 		// Detect upstream 401. Prompt only for known OAuth MCPs or after successful
 		// discovery; an API-key failure must not be mislabeled as OAuth.
 		ModifyResponse: func(resp *http.Response) error {
+			normalizeMCPNotificationResponse(rpcRequest, resp)
 			if resp.StatusCode == http.StatusUnauthorized {
 				log.Printf("[mcp-proxy] %s: upstream returned 401", name)
 				shouldPromptOAuth := mcp.AuthType == "oauth" || mcp.AuthType == "oauth_discovery"
@@ -114,20 +140,11 @@ func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 				if shouldPromptOAuth {
 					s.broadcastNeedsAuth(name, mcp.ProjectID)
 				}
-				// Replace the 401 with a JSON-RPC error so Claude CLI can relay
-				// a useful message to the user instead of silently dropping tools.
-				message := fmt.Sprintf("MCP %q rejected the configured headers.", name)
-				if shouldPromptOAuth {
-					message = fmt.Sprintf("MCP %q requires OAuth authorization. Please click Authorize in the UI notification, then start a new conversation.", name)
-				}
-				msgBytes, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32603, "message": message}})
-				msg := string(msgBytes)
-				body := io.NopCloser(strings.NewReader(msg))
-				resp.Body = body
-				resp.ContentLength = int64(len(msg))
-				resp.StatusCode = http.StatusOK
-				resp.Status = "200 OK"
-				resp.Header.Set("Content-Type", "application/json")
+				// Preserve 401, WWW-Authenticate and the upstream body. Turning
+				// this into HTTP 200 with id:null breaks strict JSON-RPC clients.
+			}
+			if rpcRequest.Method == "tools/list" && resp.StatusCode == http.StatusOK {
+				return s.rewriteMCPToolList(resp, mcp, rpcRequest.ID)
 			}
 			return nil
 		},
@@ -161,10 +178,8 @@ func (s *Server) resolveMCPForProxy(name, projectID string) (*store.InstalledMCP
 
 // mcpTargetURL extracts the upstream URL from a stored manifest JSON.
 func mcpTargetURL(manifestJSON string) (*url.URL, error) {
-	var entry struct {
-		URL string `json:"url"`
-	}
-	if err := json.Unmarshal([]byte(manifestJSON), &entry); err != nil || entry.URL == "" {
+	entry, err := parseInstalledMCPManifest(manifestJSON)
+	if err != nil || entry.URL == "" {
 		return nil, fmt.Errorf("no url in manifest")
 	}
 	return url.Parse(entry.URL)
@@ -176,7 +191,15 @@ func buildForwardURL(base *url.URL, tail, rawQuery string) (*url.URL, error) {
 	if tail != "" {
 		fwd.Path = strings.TrimRight(fwd.Path, "/") + "/" + strings.TrimLeft(tail, "/")
 	}
-	fwd.RawQuery = rawQuery
+	query := base.Query()
+	forwarded, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return nil, err
+	}
+	for key, values := range forwarded {
+		query[key] = values
+	}
+	fwd.RawQuery = query.Encode()
 	return &fwd, nil
 }
 
@@ -184,10 +207,8 @@ func buildForwardURL(base *url.URL, tail, rawQuery string) (*url.URL, error) {
 // replacement here keeps MCPs installed by older BeeHub versions working; new
 // installs are already fully resolved before they are stored.
 func (s *Server) mcpRequestHeaders(mcp *store.InstalledMCP) (map[string]string, error) {
-	var manifest struct {
-		Headers map[string]string `json:"headers"`
-	}
-	if err := json.Unmarshal([]byte(mcp.Manifest), &manifest); err != nil {
+	manifest, err := parseInstalledMCPManifest(mcp.Manifest)
+	if err != nil {
 		return nil, fmt.Errorf("parse MCP manifest: %w", err)
 	}
 
@@ -441,9 +462,7 @@ func (s *Server) startOAuthFlow(mcp *store.InstalledMCP) (string, error) {
 // MCP Probe: detect auth requirement after install
 // ---------------------------------------------------------------------------
 
-// HandleMCPProbe sends an MCP initialize request with the configured headers to
-// detect whether OAuth is required. A 401 prompts authorization only for known
-// OAuth MCPs or after successful discovery.
+// HandleMCPProbe uses the same discovery and authorization checks as chat.
 func (s *Server) HandleMCPProbe(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	projectID := r.URL.Query().Get("project_id")
@@ -458,43 +477,13 @@ func (s *Server) HandleMCPProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only HTTP MCPs can require OAuth.
-	targetURL, err := mcpTargetURL(mcp.Manifest)
-	if err != nil {
-		// Stdio/command MCP — no auth needed.
-		w.WriteHeader(http.StatusNoContent)
+	key := installedMCPRuntimeKey(mcp)
+	entry, err := parseInstalledMCPManifest(mcp.Manifest)
+	if err == nil && entry.Type == "stdio" && entry.Cmd != "" {
+		writeJSON(w, http.StatusOK, mcpRuntimeStatus{Name: name, Key: key, State: "runtime_managed", Message: "Local stdio connector; availability is determined by the agent runtime."})
 		return
 	}
-
-	requestHeaders, err := s.mcpRequestHeaders(mcp)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// Send MCP initialize with the configured static headers. OAuth MCPs without
-	// a token still receive no Authorization header and naturally return 401.
-	needs401, err := probeMCPNeedsAuth(targetURL.String(), requestHeaders)
-	if err != nil {
-		// Connection failure or non-standard response — don't block the install.
-		log.Printf("[mcp-probe] %s: probe failed (ignoring): %v", name, err)
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	if needs401 {
-		if mcp.AuthType == "oauth" || mcp.AuthType == "oauth_discovery" {
-			// Reuse the same WebSocket event as the chat-time 401 path.
-			// The frontend's existing connector:needs_auth handler shows the "Authorize" toast.
-			s.broadcastNeedsAuth(name, mcp.ProjectID)
-		} else if mcp.AuthType == "none" {
-			if s.discoverAndMarkMCPOAuth(mcp, targetURL.String()) {
-				s.broadcastNeedsAuth(name, mcp.ProjectID)
-			}
-		}
-	}
-
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, s.probeInstalledMCP(r.Context(), mcp, key))
 }
 
 // probeMCPNeedsAuth sends an MCP initialize request to url and returns true if
@@ -580,7 +569,7 @@ func (s *Server) HandleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Notify frontend via WebSocket.
 	if s.Hub != nil {
-		if data, err := json.Marshal(map[string]any{"type": "connector:connected", "name": pending.MCPName}); err == nil {
+		if data, err := json.Marshal(map[string]any{"type": "connector:connected", "name": pending.MCPName, "project_id": pending.ProjectID}); err == nil {
 			s.Hub.BroadcastRaw(data)
 		}
 	}

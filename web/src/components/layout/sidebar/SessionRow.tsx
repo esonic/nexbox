@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { X, Circle } from "lucide-react";
+import { X, Circle, Pin } from "lucide-react";
 import { cn, formatRelativeDate } from "@/lib/utils";
+import { sessionActivity } from "@/lib/session-order";
 import { useAppStore } from "@/stores/app";
 import type { Session } from "@/types";
 
@@ -21,9 +22,12 @@ interface SessionRowProps {
   isDropTarget: boolean;
   dropPosition: "above" | "below" | null;
   onDragStart: (e: React.DragEvent, id: string) => void;
-  onDragOver: (e: React.DragEvent, id: string) => void;
+  onDragOver: (e: React.DragEvent, id: string, group: Session[]) => void;
   onDragEnd: () => void;
   onDrop: (e: React.DragEvent, id: string, group: Session[]) => void;
+  dragDisabled: boolean;
+  onTogglePin: (session: Session) => void;
+  pinPending: boolean;
   // Delete
   isConfirmingDelete: boolean;
   onConfirmDelete: (id: string) => void;
@@ -39,7 +43,8 @@ export function SessionRow({
   onRenameChange, onRenameCommit, onRenameCancel, onRenameStart,
   isDragging, isDropTarget, dropPosition,
   onDragStart, onDragOver, onDragEnd, onDrop,
-  isConfirmingDelete, onConfirmDelete, onCancelDelete, onDelete,
+  isConfirmingDelete, onConfirmDelete, onCancelDelete,
+  onDelete, dragDisabled, onTogglePin, pinPending,
   onSelect,
 }: SessionRowProps) {
   const { pathname } = useLocation();
@@ -70,9 +75,10 @@ export function SessionRow({
 
   return (
     <div
-      draggable={!isRenaming}
+      title={dragDisabled ? "Turn off auto-sort to drag sessions" : undefined}
+      draggable={!isRenaming && !dragDisabled}
       onDragStart={(e) => onDragStart(e, sess.id)}
-      onDragOver={(e) => onDragOver(e, sess.id)}
+      onDragOver={(e) => onDragOver(e, sess.id, groupSessions)}
       onDragEnd={onDragEnd}
       onDrop={(e) => onDrop(e, sess.id, groupSessions)}
       onContextMenu={(e) => {
@@ -137,9 +143,22 @@ export function SessionRow({
           <span className="truncate">{sess.name || "New Session"}</span>
         </button>
       )}
-      <div className="relative shrink-0 w-5 h-5 mr-1.5 flex items-center justify-center">
+      <button
+        onClick={(e) => { e.stopPropagation(); onTogglePin(sess); }}
+        disabled={pinPending}
+        aria-label={sess.is_pinned ? "Unpin session" : "Pin session"}
+        aria-pressed={!!sess.is_pinned}
+        title={sess.is_pinned ? "Unpin session" : "Pin to top of project"}
+        className={cn(
+          "shrink-0 p-1 rounded hover:bg-accent transition-all focus-visible:opacity-100 disabled:opacity-40",
+          sess.is_pinned ? "text-muted-foreground/60 opacity-100 hover:text-muted-foreground" : "text-muted-foreground/40 opacity-0 group-hover:opacity-100 hover:text-muted-foreground",
+        )}
+      >
+        <Pin className="h-3 w-3" />
+      </button>
+      <div title={`Last activity: ${new Date(sessionActivity(sess)).toLocaleString()}`} className="relative shrink-0 w-5 h-5 mr-1.5 flex items-center justify-center">
         <span className="text-[11px] text-muted-foreground/40 tabular-nums group-hover:opacity-0 transition-opacity">
-          {formatRelativeDate(sess.updated_at || sess.created_at)}
+          {formatRelativeDate(sessionActivity(sess))}
         </span>
         <button
           onClick={(e) => { e.stopPropagation(); onConfirmDelete(sess.id); }}

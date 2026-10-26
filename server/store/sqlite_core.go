@@ -250,22 +250,23 @@ func (s *SQLiteStore) DeleteProject(id string) error {
 func (s *SQLiteStore) CreateSession(req CreateSessionRequest) (*Session, error) {
 	now := time.Now()
 	sess := &Session{
-		ID:          uuid.New().String(),
-		NamespaceID: "local",
-		Name:        req.Name,
-		ProjectID:   req.ProjectID,
-		Agent:       req.Agent,
-		Model:       req.Model,
-		Effort:      req.Effort,
-		CreatedBy:   "local",
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:           uuid.New().String(),
+		NamespaceID:  "local",
+		Name:         req.Name,
+		ProjectID:    req.ProjectID,
+		Agent:        req.Agent,
+		Model:        req.Model,
+		Effort:       req.Effort,
+		CreatedBy:    "local",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		LastActiveAt: now,
 	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO sessions (id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, features, created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, ?)`,
-		sess.ID, sess.NamespaceID, sess.Name, sess.ProjectID, sess.Agent, sess.Model, sess.Effort, sess.CreatedBy, sess.CreatedAt, sess.UpdatedAt,
+		`INSERT INTO sessions (id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, features, created_by, created_at, updated_at, last_active_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, ?, ?)`,
+		sess.ID, sess.NamespaceID, sess.Name, sess.ProjectID, sess.Agent, sess.Model, sess.Effort, sess.CreatedBy, sess.CreatedAt, sess.UpdatedAt, sess.LastActiveAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
@@ -306,17 +307,18 @@ func (s *SQLiteStore) GetOrCreateScratchSession(projectID string) (*Session, err
 		// frontend autoRenameSession helper, so the LLM-generated title
 		// kicks in on first send just like for sessions created via the
 		// "+" button.
-		Name:      "New Session",
-		ProjectID: projectID,
-		CreatedBy: "local",
-		IsHidden:  true,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Name:         "New Session",
+		ProjectID:    projectID,
+		CreatedBy:    "local",
+		IsHidden:     true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		LastActiveAt: now,
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO sessions (id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, features, is_hidden, created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, '', '', '', '', '', '', 1, ?, ?, ?)`,
-		sess.ID, sess.NamespaceID, sess.Name, sess.ProjectID, sess.CreatedBy, sess.CreatedAt, sess.UpdatedAt,
+		`INSERT INTO sessions (id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, features, is_hidden, created_by, created_at, updated_at, last_active_at)
+		 VALUES (?, ?, ?, ?, '', '', '', '', '', '', 1, ?, ?, ?, ?)`,
+		sess.ID, sess.NamespaceID, sess.Name, sess.ProjectID, sess.CreatedBy, sess.CreatedAt, sess.UpdatedAt, sess.LastActiveAt,
 	)
 	if err != nil {
 		// Race: another caller created one between our SELECT and INSERT.
@@ -355,22 +357,26 @@ func (s *SQLiteStore) UnhideSession(id string) (bool, error) {
 
 // sessionColumns is the canonical column list for SELECTing a Session row.
 // Keep this in sync with scanSession.
-const sessionColumns = `id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, sort_order, features, chrome_browser_url, worktree_mode, worktree_path, forked_from_session_id, forked_from_message_id, forked_at_agent_checkpoint, is_hidden, created_by, created_at, updated_at, deleted_at`
+const sessionColumns = `id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, sort_order, features, chrome_browser_url, worktree_mode, worktree_path, forked_from_session_id, forked_from_message_id, forked_at_agent_checkpoint, is_hidden, created_by, created_at, updated_at, deleted_at, last_active_at, is_pinned`
 
 func scanSession(row interface{ Scan(...interface{}) error }) (*Session, error) {
 	var sess Session
-	var deletedAt sql.NullTime
+	var deletedAt, lastActiveAt sql.NullTime
 	var isHidden int
 	if err := row.Scan(&sess.ID, &sess.NamespaceID, &sess.Name, &sess.ProjectID, &sess.Agent,
 		&sess.Model, &sess.Effort, &sess.AgentSessionID, &sess.StreamID, &sess.SortOrder, &sess.Features, &sess.ChromeBrowserURL,
 		&sess.WorktreeMode, &sess.WorktreePath,
 		&sess.ForkedFromSessionID, &sess.ForkedFromMessageID, &sess.ForkedAtAgentCheckpoint,
 		&isHidden,
-		&sess.CreatedBy, &sess.CreatedAt, &sess.UpdatedAt, &deletedAt); err != nil {
+		&sess.CreatedBy, &sess.CreatedAt, &sess.UpdatedAt, &deletedAt, &lastActiveAt, &sess.IsPinned); err != nil {
 		return nil, err
 	}
 	if sess.WorktreeMode == "" {
 		sess.WorktreeMode = "local"
+	}
+	sess.LastActiveAt = sess.CreatedAt
+	if lastActiveAt.Valid {
+		sess.LastActiveAt = lastActiveAt.Time
 	}
 	sess.IsHidden = isHidden != 0
 	if deletedAt.Valid {
@@ -440,44 +446,45 @@ func (s *SQLiteStore) GetSession(id string) (*Session, error) {
 }
 
 func (s *SQLiteStore) UpdateSession(id string, req UpdateSessionRequest) (*Session, error) {
-	sess, err := s.GetSession(id)
-	if err != nil || sess == nil {
-		return nil, err
+	// Apply only requested fields. Reading a snapshot and writing every field
+	// back can undo an unrelated concurrent edit (for example, rename vs pin).
+	fields := []string{"updated_at = ?"}
+	args := []any{time.Now()}
+	add := func(column string, value any) {
+		fields = append(fields, column+" = ?")
+		args = append(args, value)
 	}
-
 	if req.Name != nil {
-		sess.Name = *req.Name
+		add("name", *req.Name)
 	}
 	if req.ProjectID != nil {
-		sess.ProjectID = *req.ProjectID
+		add("project_id", *req.ProjectID)
 	}
 	if req.Agent != nil {
-		sess.Agent = *req.Agent
+		add("agent", *req.Agent)
 	}
 	if req.Model != nil {
-		sess.Model = *req.Model
+		add("model", *req.Model)
 	}
 	if req.Effort != nil {
-		sess.Effort = *req.Effort
+		add("effort", *req.Effort)
 	}
 	if req.ChromeBrowserURL != nil {
-		sess.ChromeBrowserURL = *req.ChromeBrowserURL
+		add("chrome_browser_url", *req.ChromeBrowserURL)
 	}
-	sess.UpdatedAt = time.Now()
-
-	_, err = s.db.Exec(
-		`UPDATE sessions SET name = ?, project_id = ?, agent = ?, model = ?, effort = ?, chrome_browser_url = ?, updated_at = ? WHERE id = ?`,
-		sess.Name, sess.ProjectID, sess.Agent, sess.Model, sess.Effort, sess.ChromeBrowserURL, sess.UpdatedAt, sess.ID,
-	)
-	if err != nil {
+	if req.IsPinned != nil {
+		add("is_pinned", *req.IsPinned)
+	}
+	args = append(args, id)
+	if _, err := s.db.Exec("UPDATE sessions SET "+strings.Join(fields, ", ")+" WHERE id = ?", args...); err != nil {
 		return nil, fmt.Errorf("update session: %w", err)
 	}
-	return sess, nil
+	return s.GetSession(id)
 }
 
 // ForkSession creates a new session whose history is a prefix of an existing
 // (parent) session ending with the message identified by atMessageID. The new
-// session inherits agent/model/effort/project/namespace/worktree_mode/features
+// session inherits agent/model/effort/project/namespace/worktree_mode/worktree_path/features
 // from its parent, has its own ID, and starts with `agent_session_id` empty
 // so the next chat turn triggers the backend fork. The new session also
 // records its lineage and opaque agent checkpoint.
@@ -500,18 +507,9 @@ func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint, agent
 	defer func() { _ = tx.Rollback() }()
 
 	// Load parent session.
-	var parent Session
-	var deletedAt sql.NullTime
-	var parentIsHidden int
-	err = tx.QueryRow(
+	parent, err := scanSession(tx.QueryRow(
 		`SELECT `+sessionColumns+` FROM sessions WHERE id = ?`, parentID,
-	).Scan(&parent.ID, &parent.NamespaceID, &parent.Name, &parent.ProjectID, &parent.Agent,
-		&parent.Model, &parent.Effort, &parent.AgentSessionID, &parent.StreamID, &parent.SortOrder, &parent.Features, &parent.ChromeBrowserURL,
-		&parent.WorktreeMode, &parent.WorktreePath,
-		&parent.ForkedFromSessionID, &parent.ForkedFromMessageID, &parent.ForkedAtAgentCheckpoint,
-		&parentIsHidden,
-		&parent.CreatedBy, &parent.CreatedAt, &parent.UpdatedAt, &deletedAt)
-	_ = parentIsHidden // forks always produce a visible session, parent's hidden flag is irrelevant
+	))
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("parent session not found: %s", parentID)
 	}
@@ -551,12 +549,14 @@ func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint, agent
 		ChromeBrowserURL:        parent.ChromeBrowserURL,
 		Features:                parent.Features, // inherit per-session UI features (e.g. chrome_devtools)
 		WorktreeMode:            parent.WorktreeMode,
+		WorktreePath:            parent.WorktreePath,
 		ForkedFromSessionID:     parent.ID,
 		ForkedFromMessageID:     atMessageID,
 		ForkedAtAgentCheckpoint: checkpoint,
 		CreatedBy:               parent.CreatedBy,
 		CreatedAt:               now,
 		UpdatedAt:               now,
+		LastActiveAt:            now,
 	}
 	if newSess.Name == "" {
 		base := parent.Name
@@ -572,14 +572,14 @@ func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint, agent
 			 agent_session_id, stream_id, sort_order, features, chrome_browser_url,
 			 worktree_mode, worktree_path,
 			 forked_from_session_id, forked_from_message_id, forked_at_agent_checkpoint,
-			 created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)`,
+			 created_by, created_at, updated_at, last_active_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		newSess.ID, newSess.NamespaceID, newSess.Name, newSess.ProjectID, newSess.Agent,
 		newSess.Model, newSess.Effort,
 		newSess.Features, newSess.ChromeBrowserURL,
-		newSess.WorktreeMode,
+		newSess.WorktreeMode, newSess.WorktreePath,
 		newSess.ForkedFromSessionID, newSess.ForkedFromMessageID, newSess.ForkedAtAgentCheckpoint,
-		newSess.CreatedBy, newSess.CreatedAt, newSess.UpdatedAt,
+		newSess.CreatedBy, newSess.CreatedAt, newSess.UpdatedAt, newSess.LastActiveAt,
 	); err != nil {
 		return nil, fmt.Errorf("insert forked session: %w", err)
 	}
@@ -647,6 +647,14 @@ func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint, agent
 	return newSess, nil
 }
 
+// TouchSessionActivity is called at conversational boundaries, never for
+// metadata edits or progressive assistant flushes.
+func (s *SQLiteStore) TouchSessionActivity(id string) error {
+	now := time.Now()
+	_, err := s.db.Exec(`UPDATE sessions SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id)
+	return err
+}
+
 func (s *SQLiteStore) UpdateSessionAgentID(id, agentSessionID string) error {
 	_, err := s.db.Exec(
 		`UPDATE sessions SET agent_session_id = ?, updated_at = ? WHERE id = ?`,
@@ -682,7 +690,7 @@ func (s *SQLiteStore) UpdateSessionWorktree(id, mode, path string) error {
 // GetExpiredSessionWorktrees returns worktree_paths for sessions that are about to be purged.
 func (s *SQLiteStore) GetExpiredSessionWorktrees(olderThan time.Time) ([]string, error) {
 	rows, err := s.db.Query(
-		`SELECT worktree_path FROM sessions WHERE deleted_at IS NOT NULL AND deleted_at < ? AND worktree_path != ''`,
+		`SELECT DISTINCT worktree_path FROM sessions WHERE deleted_at IS NOT NULL AND deleted_at < ? AND worktree_path != ''`,
 		olderThan,
 	)
 	if err != nil {
@@ -696,6 +704,31 @@ func (s *SQLiteStore) GetExpiredSessionWorktrees(olderThan time.Time) ([]string,
 			return nil, err
 		}
 		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
+// GetReferencedWorktreePaths includes trashed and hidden sessions: their work
+// must remain available for restoration. Active runs also own their worktree
+// between nodes, even when no session currently references it.
+func (s *SQLiteStore) GetReferencedWorktreePaths() ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT worktree_path FROM sessions WHERE worktree_path != ''
+		UNION
+		SELECT worktree_path FROM wf_executions
+		WHERE worktree_path != '' AND status IN ('pending', 'running')
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
 	}
 	return paths, rows.Err()
 }
@@ -833,8 +866,11 @@ func (s *SQLiteStore) CreateMessage(sessionID, role string, parts []MessagePart,
 		return nil, fmt.Errorf("insert message: %w", err)
 	}
 
-	if _, err := s.db.Exec(`UPDATE sessions SET updated_at = ? WHERE id = ?`, time.Now(), sessionID); err != nil {
-		log.Printf("[sqlite] failed to update session updated_at (id=%s): %v", sessionID, err)
+	// Empty assistant placeholders and progressive saves are not activity.
+	if role == "user" || (role == "assistant" && len(parts) > 0) {
+		if err := s.TouchSessionActivity(sessionID); err != nil {
+			log.Printf("[sqlite] failed to update session activity (id=%s): %v", sessionID, err)
+		}
 	}
 
 	return m, nil

@@ -134,7 +134,7 @@ func (a *ZeroClawAgent) SendMessage(ctx context.Context, req Request, cb EventCa
 	if req.Fork != nil {
 		return Result{}, fmt.Errorf("zeroclaw ACP does not support fork")
 	}
-	if err := validateZeroClawWorkDir(req.WorkDir); err != nil {
+	if err := validateACPWorkDir(req.WorkDir); err != nil {
 		return Result{}, err
 	}
 
@@ -171,7 +171,7 @@ func (a *ZeroClawAgent) SendMessage(ctx context.Context, req Request, cb EventCa
 
 	var initialize zeroClawInitializeResult
 	if err := client.request(ctx, "initialize", nil, &initialize); err != nil {
-		return Result{}, withZeroClawStderr(err, client.stderr())
+		return Result{}, withACPStderr(err, client.stderr())
 	}
 	if initialize.ProtocolVersion != zeroClawACPProtocolVersion {
 		return Result{}, fmt.Errorf("unsupported zeroclaw ACP protocol version %d (want %d)", initialize.ProtocolVersion, zeroClawACPProtocolVersion)
@@ -201,7 +201,7 @@ func (a *ZeroClawAgent) SendMessage(ctx context.Context, req Request, cb EventCa
 		}
 		var created zeroClawSessionNewResult
 		if err := client.request(ctx, "session/new", params, &created); err != nil {
-			return Result{}, withZeroClawStderr(err, client.stderr())
+			return Result{}, withACPStderr(err, client.stderr())
 		}
 		if strings.TrimSpace(created.SessionID) == "" {
 			return Result{}, fmt.Errorf("zeroclaw ACP session/new returned an empty sessionId")
@@ -214,7 +214,7 @@ func (a *ZeroClawAgent) SendMessage(ctx context.Context, req Request, cb EventCa
 			if errors.As(err, &rpcErr) && rpcErr.Code == -32000 {
 				return Result{}, fmt.Errorf("%w: %s", ErrSessionExpired, rpcErr.Message)
 			}
-			return Result{}, withZeroClawStderr(err, client.stderr())
+			return Result{}, withACPStderr(err, client.stderr())
 		}
 	}
 
@@ -254,7 +254,7 @@ func (a *ZeroClawAgent) SendMessage(ctx context.Context, req Request, cb EventCa
 	}
 
 	if outcome.err != nil {
-		return Result{SessionID: sessionID}, withZeroClawStderr(outcome.err, client.stderr())
+		return Result{SessionID: sessionID}, withACPStderr(outcome.err, client.stderr())
 	}
 	if outcome.result.SessionID != "" {
 		sessionID = outcome.result.SessionID
@@ -270,7 +270,7 @@ func (a *ZeroClawAgent) SendMessage(ctx context.Context, req Request, cb EventCa
 	return Result{SessionID: sessionID, Metadata: metadata}, nil
 }
 
-func validateZeroClawWorkDir(workDir string) error {
+func validateACPWorkDir(workDir string) error {
 	if workDir == "" {
 		return nil
 	}
@@ -492,7 +492,7 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func withZeroClawStderr(err error, stderr string) error {
+func withACPStderr(err error, stderr string) error {
 	stderr = strings.TrimSpace(stderr)
 	if stderr == "" {
 		return err

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/esonic/nexbox/gitrepo"
 )
 
 // ensureWorktree creates the git worktree for a session on first message.
@@ -230,7 +232,11 @@ func (s *Server) SetWorktreeMode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if session.AgentSessionID != "" {
+	if session.ForkedFromSessionID != "" {
+		writeError(w, http.StatusConflict, "forked sessions inherit their parent's worktree mode and cannot change it")
+		return
+	}
+	if session.AgentSessionID != "" || session.WorktreePath != "" {
 		writeError(w, http.StatusConflict, "cannot change worktree mode after first message")
 		return
 	}
@@ -306,19 +312,20 @@ func (s *Server) GetWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 
 // isWorktreeDirty returns true if the worktree has uncommitted changes or unpushed commits.
 func isWorktreeDirty(worktreePath string) bool {
-	// Check for uncommitted changes
-	statusOut, err := exec.Command("git", "-C", worktreePath, "status", "--porcelain").Output()
-	if err == nil && len(strings.TrimSpace(string(statusOut))) > 0 {
+	// Keep the raw status check: nested repositories are intentionally hidden
+	// from the Git panel's file list, but must still protect a worktree's data.
+	output, err := exec.Command("git", "-C", worktreePath, "status", "--porcelain").Output()
+	if err != nil {
+		return false
+	}
+	if len(strings.TrimSpace(string(output))) > 0 {
 		return true
 	}
-
-	// Check for unpushed commits
-	logOut, err := exec.Command("git", "-C", worktreePath, "log", "@{u}..HEAD", "--oneline").Output()
-	if err == nil && len(strings.TrimSpace(string(logOut))) > 0 {
-		return true
+	status, err := gitrepo.ReadStatus(context.Background(), worktreePath)
+	if err != nil {
+		return false
 	}
-
-	return false
+	return status.Ahead > 0
 }
 
 // RemoveWorktree removes and unregisters the linked worktree containing the

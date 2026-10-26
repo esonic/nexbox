@@ -482,7 +482,7 @@ func (s *Server) registerTools() {
 		gomcp.WithDescription(
 			"Enable Chrome browser control for the current session. "+
 				"Call this tool only when browser control is needed and mcp__chrome__ tools are absent from your current tool list. "+
-				"Newly enabled tools become available in the next message if they are absent from the current turn."),
+				"If the Chrome tools are already available, use them directly. Newly enabled tools become available in the next message if they are absent from the current turn."),
 	)
 
 	// --- Cross-session messaging ---

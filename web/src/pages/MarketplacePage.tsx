@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   Search,
   Plus,
@@ -8,7 +8,6 @@ import {
   RefreshCw,
   Eye,
   EyeOff,
-  ChevronDown,
   Trash2,
   FolderPlus,
 } from "lucide-react";
@@ -24,6 +23,7 @@ import {
   type MarketplaceSource,
 } from "@/lib/api";
 import type { Project } from "@/types";
+import { PageHeader } from "@/components/layout/PageHeader";
 
 type TabType = "mcp" | "skill" | "plugin";
 
@@ -49,6 +49,7 @@ export function MarketplacePage() {
   const [installedPlugins, setInstalledPlugins] = useState<InstalledPluginEntry[]>([]);
   const [sources, setSources] = useState<MarketplaceSource[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
   const [installing, setInstalling] = useState<string | null>(null);
   const [dialogPlugin, setDialogPlugin] = useState<LocalPlugin | null>(null);
   const [showAddMarketplace, setShowAddMarketplace] = useState(false);
@@ -71,6 +72,7 @@ export function MarketplacePage() {
       setInstalledPlugins(pluginEntries || []);
       setProjects(projs || []);
       setSources(srcs || []);
+      setLoaded(true);
     } catch (error: unknown) {
       toast.error("Failed to load marketplace", { description: errorMessage(error) });
     } finally {
@@ -138,7 +140,6 @@ export function MarketplacePage() {
         name: plugin.name,
         package_id: plugin.id,
         version: plugin.version || "0.0.0",
-        mcp_key: plugin.name,
         manifest,
         env: envValues,
         project_id: projectId || undefined,
@@ -147,8 +148,12 @@ export function MarketplacePage() {
       // Probe the MCP server to detect OAuth requirement immediately after install.
       // If the upstream returns 401, the server broadcasts connector:needs_auth so
       // the standard "Authorize" toast appears — no custom handling needed here.
-      marketplaceApi.probeMCP(plugin.name, projectId || undefined).catch(() => {
-        // Probe failure is non-fatal — chat-time OAuth flow remains as fallback.
+      marketplaceApi.probeMCP(plugin.name, projectId || undefined).then((status) => {
+        if (status?.state === "unavailable" || status?.state === "auth_rejected") {
+          toast.warning(`Installed ${plugin.name}, but its tools are unavailable`, { description: status.message });
+        }
+      }).catch(() => {
+        toast.warning(`Installed ${plugin.name}, but its connection could not be verified`);
       });
     } else if (plugin.type === "skill") {
       await marketplaceApi.installSkill({
@@ -173,28 +178,44 @@ export function MarketplacePage() {
     projectIds: string[],
     envValues: Record<string, string>,
   ) => {
+    const previousScopes = getInstalledScopes(plugin);
+    const added = projectIds.filter((id) => !previousScopes.includes(id));
+    const removed = previousScopes.filter((id) => !projectIds.includes(id));
     setInstalling(plugin.id);
-    setDialogPlugin(null);
     const scopeName = (id: string) =>
       id === "" ? "All Projects" : projects.find((p) => p.id === id)?.name ?? id.slice(0, 8);
-    const succeeded: string[] = [];
     const failures: string[] = [];
     try {
-      for (const projectId of projectIds) {
+      // Install additions first. If one fails, retain all previous scopes.
+      for (const projectId of added) {
         try {
           await installToScope(plugin, projectId, envValues);
-          succeeded.push(scopeName(projectId));
         } catch (error: unknown) {
           failures.push(`${scopeName(projectId)}: ${errorMessage(error)}`);
         }
       }
-      if (succeeded.length > 0) {
-        toast.success(`Installed ${plugin.name} → ${succeeded.join(", ")}`);
+      if (failures.length === 0) {
+        for (const projectId of removed) {
+          try {
+            if (plugin.type === "mcp") {
+              await marketplaceApi.uninstallMCP(plugin.name, projectId);
+            } else if (plugin.type === "skill") {
+              await marketplaceApi.uninstallSkill(plugin.name, projectId);
+            } else {
+              await marketplaceApi.uninstallPlugin(plugin.name, projectId);
+            }
+          } catch (error: unknown) {
+            failures.push(`${scopeName(projectId)}: ${errorMessage(error)}`);
+          }
+        }
       }
       if (failures.length > 0) {
-        toast.error(`Failed to install ${plugin.name}`, { description: failures.join("\n") });
+        toast.error("Some installation changes could not be saved", { description: failures.join("\n") });
+      } else {
+        toast.success(`Installation settings saved for ${plugin.name}`);
       }
       await loadData();
+      return failures.length === 0;
     } finally {
       setInstalling(null);
     }
@@ -205,34 +226,6 @@ export function MarketplacePage() {
     toast.success("MCP added to Marketplace");
     await loadData();
     setShowAddMCP(false);
-  };
-
-  // Uninstall a plugin. projectId undefined → remove from ALL scopes (delete-by-name);
-  // a specific id (or "" for the global/All scope) → remove just that scope.
-  const handleUninstall = async (plugin: LocalPlugin, projectId?: string) => {
-    setInstalling(plugin.id);
-    const where = projectId === undefined
-      ? ""
-      : projectId === ""
-        ? " (All Projects)"
-        : ` (${projects.find((p) => p.id === projectId)?.name ?? projectId.slice(0, 8)})`;
-    try {
-      if (plugin.type === "mcp") {
-        await marketplaceApi.uninstallMCP(plugin.name, projectId || undefined);
-        toast.success(`Uninstalled MCP: ${plugin.name}${where}`);
-      } else if (plugin.type === "skill") {
-        await marketplaceApi.uninstallSkill(plugin.name, projectId || undefined);
-        toast.success(`Uninstalled skill: ${plugin.name}${where}`);
-      } else if (plugin.type === "plugin" || plugin.type === "lsp") {
-        await marketplaceApi.uninstallPlugin(plugin.name, projectId || undefined);
-        toast.success(`Uninstalled plugin: ${plugin.name}${where}`);
-      }
-      await loadData();
-    } catch (error: unknown) {
-      toast.error(`Failed to uninstall ${plugin.name}`, { description: errorMessage(error) });
-    } finally {
-      setInstalling(null);
-    }
   };
 
   const matchesTab = (p: LocalPlugin, currentTab: TabType) => {
@@ -267,15 +260,49 @@ export function MarketplacePage() {
       return a.name.localeCompare(b.name);
     });
 
+  // Installed items whose name no marketplace source offers anymore (source removed,
+  // renamed, or deleted by hand). They have no card above, so list them here to stay removable.
+  const orphanedInstalls = (() => {
+    if (!loaded) return [];
+    const offered = new Set(plugins.filter((p) => matchesTab(p, tab)).map((p) => p.name));
+    const installed: { name: string; project_id: string }[] =
+      tab === "mcp" ? installedMCPs : tab === "skill" ? installedSkills : installedPlugins;
+    const byName = new Map<string, string[]>();
+    for (const item of installed) {
+      if (offered.has(item.name)) continue;
+      byName.set(item.name, [...(byName.get(item.name) ?? []), item.project_id]);
+    }
+    const q = search.toLowerCase();
+    return [...byName.entries()]
+      .filter(([name]) => !q || name.toLowerCase().includes(q))
+      .map(([name, scopes]) => ({ name, scopes }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  })();
+
+  const handleUninstallOrphan = async (name: string) => {
+    setInstalling(`orphan:${name}`);
+    try {
+      if (tab === "mcp") await marketplaceApi.uninstallMCP(name);
+      else if (tab === "skill") await marketplaceApi.uninstallSkill(name);
+      else await marketplaceApi.uninstallPlugin(name);
+      toast.success(`Uninstalled ${name}`);
+      await loadData();
+    } catch (error: unknown) {
+      toast.error(`Failed to uninstall ${name}`, { description: errorMessage(error) });
+    } finally {
+      setInstalling(null);
+    }
+  };
+
   const tabConfig = {
     mcp: {
       label: "MCP",
-      subtitle: "Browse and install MCP servers",
+      subtitle: "Browse and install MCP servers and agent skills",
       placeholder: "Search MCP servers...",
     },
     skill: {
       label: "Skills",
-      subtitle: "Browse and install agent skills",
+      subtitle: "Browse and install MCP servers and agent skills",
       placeholder: "Search skills...",
     },
     plugin: {
@@ -288,20 +315,13 @@ export function MarketplacePage() {
   return (
     <div className="h-full overflow-y-auto">
       {/* Header */}
-      <div className="bg-card">
-        <div className="max-w-3xl mx-auto px-6 pt-6 pb-5">
-          <h1 className="text-xl font-bold">Marketplace</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            {tabConfig[tab].subtitle}
-          </p>
-        </div>
-      </div>
+      <PageHeader title="Customize" subtitle={tabConfig[tab].subtitle} />
 
       {/* Sticky section: tabs + toolbar */}
       <div className="sticky top-0 z-10 bg-card">
         {/* Tab bar */}
-        <div className="border-b border-t">
-          <div className="max-w-3xl mx-auto px-6 flex items-center justify-between gap-3">
+        <div className="border-b">
+          <div className="max-w-[51rem] mx-auto px-6 flex items-center justify-between gap-3">
             <div className="flex min-w-0">
               {(["mcp", "skill", "plugin"] as TabType[]).map((tabKey) => (
                 <button
@@ -342,7 +362,7 @@ export function MarketplacePage() {
 
         {/* Toolbar */}
         <div className="border-b">
-          <div className="max-w-3xl mx-auto px-6 pt-3 pb-3 flex items-center gap-3">
+          <div className="max-w-[51rem] mx-auto px-6 pt-3 pb-3 flex items-center gap-3">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <input
@@ -369,7 +389,7 @@ export function MarketplacePage() {
 
       {/* Claude Code only notice for Plugins tab */}
       {tab === "plugin" && (
-        <div className="max-w-3xl mx-auto px-6 pt-3">
+        <div className="max-w-[51rem] mx-auto px-6 pt-3">
           <div className="text-xs text-sky-700 bg-sky-500/10 rounded-lg px-3 py-2">
             Plugins are for Claude Code only. They extend Claude Code with custom mcp, skills, commands, and hooks.
           </div>
@@ -392,7 +412,7 @@ export function MarketplacePage() {
             </p>
           </div>
         ) : (
-          <div className="max-w-3xl mx-auto w-full px-6 flex flex-col gap-3">
+          <div className="max-w-[51rem] mx-auto w-full px-6 flex flex-col gap-3">
             {filteredPlugins.map((plugin) => (
               <PluginCard
                 key={plugin.id}
@@ -402,16 +422,45 @@ export function MarketplacePage() {
                 projects={projects}
                 installing={installing === plugin.id}
                 onInstall={() => handleInstallClick(plugin)}
-                onUninstall={(projectId) => handleUninstall(plugin, projectId)}
+                onUninstall={(scope) => handleInstallConfirm(plugin, getInstalledScopes(plugin).filter((id) => id !== scope), {})}
               />
             ))}
           </div>
         )}
       </div>
 
+      {/* Installed items no longer offered by any source */}
+      {!loading && orphanedInstalls.length > 0 && (
+        <div className="max-w-[51rem] mx-auto px-6 pb-6">
+          <h3 className="text-sm font-medium text-muted-foreground mb-2">
+            Installed, but no longer in any marketplace
+          </h3>
+          <div className="flex flex-col gap-1.5">
+            {orphanedInstalls.map(({ name, scopes }) => (
+              <div key={name} className="flex items-center gap-2 text-sm bg-muted/50 rounded-lg px-3 py-2">
+                <span className="font-medium truncate flex-1">{name}</span>
+                <span className="text-[10px] text-muted-foreground">
+                  {scopes.includes(SCOPE_ALL)
+                    ? "All Projects"
+                    : scopes.map((id) => projects.find((p) => p.id === id)?.name ?? id.slice(0, 8)).join(", ")}
+                </span>
+                <button
+                  onClick={() => handleUninstallOrphan(name)}
+                  disabled={installing === `orphan:${name}`}
+                  className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-red-500 transition-colors disabled:opacity-50"
+                  title="Uninstall"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Marketplace Sources section */}
       {sources.length > 0 && (
-        <div className="max-w-3xl mx-auto px-6 pb-6">
+        <div className="max-w-[51rem] mx-auto px-6 pb-6">
           <h3 className="text-sm font-medium text-muted-foreground mb-2">Marketplace Sources</h3>
           <div className="flex flex-col gap-1.5">
             {sources.map((src) => (
@@ -444,6 +493,8 @@ export function MarketplacePage() {
         <InstallDialog
           plugin={dialogPlugin}
           projects={projects}
+          installedScopes={getInstalledScopes(dialogPlugin)}
+          saving={installing === dialogPlugin.id}
           onConfirm={(projectIds, envValues) => handleInstallConfirm(dialogPlugin, projectIds, envValues)}
           onClose={() => setDialogPlugin(null)}
         />
@@ -602,7 +653,7 @@ interface PluginCardProps {
   projects: Project[];
   installing: boolean;
   onInstall: () => void;
-  onUninstall: (projectId?: string) => void;
+  onUninstall: (projectId: string) => void;
 }
 
 const typeStyles: Record<string, { bg: string; text: string; icon: "wrench" | "package" }> = {
@@ -680,13 +731,15 @@ function PluginCard({ plugin, installed, installedScopes, projects, installing, 
                 {installedScopes.map((sid) => (
                   <span
                     key={sid}
-                    className="inline-flex items-center gap-1 text-[10px] font-medium pl-1.5 pr-1 py-0.5 rounded bg-green-500/10 text-green-600"
+                    className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded bg-green-500/10 text-green-600"
                   >
                     {scopeLabel(sid)}
                     <button
+                      type="button"
                       onClick={() => onUninstall(sid)}
                       disabled={installing}
-                      title={`Uninstall from ${scopeLabel(sid)}`}
+                      title={`Uninstall from ${sid === SCOPE_ALL ? "All Projects (global scope)" : scopeLabel(sid)}`}
+                      aria-label={`Uninstall ${plugin.name} from ${sid === SCOPE_ALL ? "All Projects (global scope)" : scopeLabel(sid)}`}
                       className="leading-none text-green-600/70 hover:text-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       ×
@@ -703,18 +756,15 @@ function PluginCard({ plugin, installed, installedScopes, projects, installing, 
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
             <button
-              onClick={installed ? () => onUninstall() : onInstall}
+              onClick={onInstall}
               disabled={installing}
-              title={installed && installedScopes.length > 1 ? "Uninstall from all scopes" : undefined}
               className={cn(
                 "text-xs px-3 py-1 rounded-md font-medium transition-colors",
-                installed
-                  ? "bg-red-500/10 text-red-600 hover:bg-red-500/20"
-                  : "bg-primary/10 text-primary hover:bg-primary/20",
+                "bg-primary/10 text-primary hover:bg-primary/20",
                 installing && "opacity-50 cursor-not-allowed"
               )}
             >
-              {installing ? "..." : installed ? (installedScopes.length > 1 ? "Uninstall all" : "Uninstall") : "Install"}
+              {installing ? "Saving..." : "Install"}
             </button>
           </div>
         </div>
@@ -728,25 +778,28 @@ function PluginCard({ plugin, installed, installedScopes, projects, installing, 
 interface InstallDialogProps {
   plugin: LocalPlugin;
   projects: Project[];
-  onConfirm: (projectIds: string[], envValues: Record<string, string>) => void;
+  installedScopes: string[];
+  saving: boolean;
+  onConfirm: (projectIds: string[], envValues: Record<string, string>) => Promise<boolean>;
   onClose: () => void;
 }
 
-function InstallDialog({ plugin, projects, onConfirm, onClose }: InstallDialogProps) {
+function InstallDialog({ plugin, projects, installedScopes, saving, onConfirm, onClose }: InstallDialogProps) {
   // Selected scopes. SCOPE_ALL ("") means "All Projects" (global) and is mutually
   // exclusive with specific project ids; otherwise any number of projects can be picked.
-  const [scopes, setScopes] = useState<string[]>([]);
+  const [scopes, setScopes] = useState<string[]>(() => [...installedScopes]);
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
-  const [scopeOpen, setScopeOpen] = useState(false);
-  const dropRef = useRef<HTMLDivElement>(null);
 
-  const envVars = plugin.env_vars || [];
+  const addedScopes = scopes.filter((id) => !installedScopes.includes(id));
+  const removedScopes = installedScopes.filter((id) => !scopes.includes(id));
+  const envVars = addedScopes.length > 0 ? plugin.env_vars || [] : [];
   const needsOAuth = plugin.auth_type === "oauth" || plugin.auth_type === "oauth_discovery";
   const envOk = envVars.every((v) => !!envValues[v]?.trim());
-  const canSubmit = envOk && scopes.length > 0;
+  const canSubmit = !saving && envOk && (addedScopes.length > 0 || removedScopes.length > 0);
 
-  const selectableProjects = projects.filter((p) => p.git_repo_path);
+  const selectableProjects = projects.filter((p) => p.git_repo_path || installedScopes.includes(p.id));
+  const missingScopes = installedScopes.filter((id) => id !== SCOPE_ALL && !projects.some((p) => p.id === id));
 
   const toggleScope = (id: string) => {
     setScopes((prev) => {
@@ -762,141 +815,131 @@ function InstallDialog({ plugin, projects, onConfirm, onClose }: InstallDialogPr
     });
   };
 
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (dropRef.current && !dropRef.current.contains(e.target as Node)) {
-        setScopeOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
-  const scopeLabel = scopes.length === 0
-    ? "Select project(s)…"
-    : scopes.includes(SCOPE_ALL)
-      ? "All Projects"
-      : scopes.length === 1
-        ? projects.find((p) => p.id === scopes[0])?.name ?? scopes[0]
-        : `${scopes.length} projects`;
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 flex flex-col gap-5">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={(e) => { if (!saving && e.target === e.currentTarget) onClose(); }}>
+      <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-xl min-h-[min(32rem,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] overflow-y-auto mx-4 p-6 flex flex-col gap-5">
         <div className="flex items-start justify-between gap-2">
           <div>
-            <h2 className="text-base font-semibold">Install {plugin.name}</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">Configure environment variables and install scope</p>
+            <h2 className="text-base font-semibold">Installation settings</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">{plugin.name} — Select projects to install. Uncheck to uninstall.</p>
           </div>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-lg leading-none mt-0.5">&times;</button>
+          <button onClick={onClose} disabled={saving} aria-label="Close" className="text-muted-foreground hover:text-foreground text-lg leading-none mt-0.5 disabled:opacity-50">&times;</button>
         </div>
 
-        {/* Scope selector (multi-select) */}
-        <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium">Install scope</label>
-          <p className="text-[11px] text-muted-foreground">
-            Pick one or more projects, or &quot;All Projects&quot; to install globally for every project.
-          </p>
-          <div ref={dropRef} className="relative">
-            <button
-              type="button"
-              onClick={() => setScopeOpen((v) => !v)}
-              className="w-full flex items-center justify-between border rounded-lg px-3 py-2.5 text-sm bg-background hover:bg-accent transition-colors"
+        <fieldset disabled={saving} className="contents">
+          <div className="flex flex-col gap-1.5">
+            <span id="installation-scopes-label" className="text-sm font-medium">Install scope</span>
+            <div
+              role="group"
+              aria-labelledby="installation-scopes-label"
+              className="max-h-80 overflow-y-auto overscroll-contain rounded-lg border bg-background divide-y"
             >
-              <span className={cn(scopes.length === 0 && "text-muted-foreground")}>{scopeLabel}</span>
-              <ChevronDown className="h-4 w-4 text-muted-foreground" />
-            </button>
-            {scopeOpen && (
-              <div className="absolute top-full left-0 right-0 mt-1 bg-card border rounded-lg shadow-lg z-10 max-h-48 overflow-y-auto">
-                <button
-                  className={cn("w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-accent transition-colors", scopes.includes(SCOPE_ALL) && "font-medium")}
-                  onClick={() => toggleScope(SCOPE_ALL)}
-                >
-                  <span className={cn("flex h-4 w-4 items-center justify-center rounded border", scopes.includes(SCOPE_ALL) ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/40")}>
-                    {scopes.includes(SCOPE_ALL) && <CheckCircle2 className="h-3 w-3" />}
-                  </span>
-                  All Projects
-                </button>
-                {selectableProjects.map((p) => {
-                  const checked = scopes.includes(p.id);
-                  return (
-                    <button
-                      key={p.id}
-                      className={cn("w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-accent transition-colors", checked && "font-medium")}
-                      onClick={() => toggleScope(p.id)}
-                    >
-                      <span className={cn("flex h-4 w-4 items-center justify-center rounded border", checked ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/40")}>
-                        {checked && <CheckCircle2 className="h-3 w-3" />}
-                      </span>
-                      {p.name}
-                    </button>
-                  );
-                })}
-                {selectableProjects.length === 0 && (
-                  <p className="px-3 py-2 text-xs text-muted-foreground">No projects with a local repo path.</p>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Environment variables */}
-        {envVars.length > 0 && (
-          <div className="flex flex-col gap-3">
-            {envVars.map((varName) => (
-              <div key={varName} className="flex flex-col gap-1">
-                <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium">{varName}</label>
-                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600">
-                    Required
-                  </span>
-                </div>
-                <div className="relative">
+              <label className="flex items-center gap-2.5 px-3 py-2.5 text-sm cursor-pointer hover:bg-accent transition-colors">
+                <input
+                  type="checkbox"
+                  checked={scopes.includes(SCOPE_ALL)}
+                  onChange={() => toggleScope(SCOPE_ALL)}
+                  className="h-4 w-4 shrink-0 accent-primary"
+                />
+                <span className="min-w-0">
+                  <span className="block font-medium">All Projects</span>
+                  <span className="block text-xs text-muted-foreground">Includes current and future projects</span>
+                </span>
+              </label>
+              {selectableProjects.map((p) => (
+                <label key={p.id} className="flex items-center gap-2.5 px-3 py-2.5 text-sm cursor-pointer hover:bg-accent transition-colors">
                   <input
-                    type={revealed[varName] ? "text" : "password"}
-                    placeholder="Required"
-                    value={envValues[varName] || ""}
-                    onChange={(e) => setEnvValues((prev) => ({ ...prev, [varName]: e.target.value }))}
-                    className={cn(
-                      "w-full pr-9 pl-3 py-2 text-sm bg-background border rounded-lg outline-none focus:ring-1 focus:ring-primary",
-                      !envValues[varName] && "border-red-400"
-                    )}
+                    type="checkbox"
+                    checked={scopes.includes(p.id)}
+                    onChange={() => toggleScope(p.id)}
+                    className="h-4 w-4 shrink-0 accent-primary"
                   />
-                  <button
-                    type="button"
-                    onClick={() => setRevealed((prev) => ({ ...prev, [varName]: !prev[varName] }))}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  >
-                    {revealed[varName] ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                  </button>
-                </div>
-              </div>
-            ))}
-            <p className="text-[11px] text-muted-foreground">These values are saved locally when the MCP is installed.</p>
+                  <span className="min-w-0 break-words">{p.name}</span>
+                </label>
+              ))}
+              {missingScopes.map((id) => (
+                <label key={id} className="flex items-center gap-2.5 px-3 py-2.5 text-sm cursor-pointer hover:bg-accent transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={scopes.includes(id)}
+                    onChange={() => toggleScope(id)}
+                    className="h-4 w-4 shrink-0 accent-primary"
+                  />
+                  <span>Unavailable project ({id.slice(0, 8)})</span>
+                </label>
+              ))}
+              {selectableProjects.length === 0 && (
+                <p className="px-3 py-2.5 text-xs text-muted-foreground">No projects with a local repo path.</p>
+              )}
+            </div>
           </div>
-        )}
 
-        {/* OAuth notice */}
-        {needsOAuth && envVars.length === 0 && (
-          <p className="text-[12px] bg-orange-500/10 text-orange-700 rounded-lg px-3 py-2">
-            This MCP uses OAuth. After installing you&apos;ll be prompted to authorize.
+          {/* Environment variables */}
+          {envVars.length > 0 && (
+            <div className="flex flex-col gap-3">
+              {envVars.map((varName) => (
+                <div key={varName} className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <label className="text-sm font-medium">{varName}</label>
+                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600">
+                      Required
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <input
+                      type={revealed[varName] ? "text" : "password"}
+                      placeholder="Required"
+                      value={envValues[varName] || ""}
+                      onChange={(e) => setEnvValues((prev) => ({ ...prev, [varName]: e.target.value }))}
+                      className={cn(
+                        "w-full pr-9 pl-3 py-2 text-sm bg-background border rounded-lg outline-none focus:ring-1 focus:ring-primary",
+                        !envValues[varName] && "border-red-400"
+                      )}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setRevealed((prev) => ({ ...prev, [varName]: !prev[varName] }))}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {revealed[varName] ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <p className="text-[11px] text-muted-foreground">These values are saved locally when the MCP is installed.</p>
+            </div>
+          )}
+
+          {/* OAuth notice */}
+          {needsOAuth && addedScopes.length > 0 && envVars.length === 0 && (
+            <p className="text-[12px] bg-orange-500/10 text-orange-700 rounded-lg px-3 py-2">
+              This MCP uses OAuth. After installing you&apos;ll be prompted to authorize.
+            </p>
+          )}
+
+        </fieldset>
+        {(addedScopes.length > 0 || removedScopes.length > 0) && (
+          <p className="text-xs text-muted-foreground" role="status">
+            {addedScopes.length} to install · {removedScopes.length} to uninstall
           </p>
         )}
-
         {/* Actions */}
-        <div className="flex justify-end gap-2 pt-1">
+        <div className="flex justify-end gap-2 pt-1 mt-auto">
           <button
             onClick={onClose}
-            className="px-4 py-2 text-sm rounded-lg border hover:bg-accent transition-colors"
+            disabled={saving}
+            className="px-4 py-2 text-sm rounded-lg border hover:bg-accent transition-colors disabled:opacity-50"
           >
             Cancel
           </button>
           <button
-            onClick={() => onConfirm(scopes, envValues)}
+            onClick={async () => {
+              if (await onConfirm(scopes, envValues)) onClose();
+            }}
             disabled={!canSubmit}
             className="px-4 py-2 text-sm rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Install
+            {saving ? "Saving..." : "Save"}
           </button>
         </div>
       </div>
@@ -931,7 +974,7 @@ function AddMarketplaceDialog({ onClose, onAdded }: AddMarketplaceDialogProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 flex flex-col gap-5">
+      <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-lg mx-4 p-6 flex flex-col gap-5">
         <div className="flex items-start justify-between gap-2">
           <div>
             <h2 className="text-base font-semibold">Add Marketplace</h2>

@@ -133,7 +133,7 @@ export function useSidebarData() {
         const name = event.name as string;
         const projectId = event.project_id as string | undefined;
         toast.warning(`MCP "${name}" requires authorization`, {
-          id: `connector-needs-auth-${name}`, // dedup: only one toast per MCP
+          id: `connector-needs-auth-${projectId || "global"}-${name}`,
           duration: Infinity,
           closeButton: true,
           description: "Authorize to enable this tool, then talk to AI again.",
@@ -154,7 +154,8 @@ export function useSidebarData() {
       }
       if (event.type === "connector:connected") {
         const name = event.name as string;
-        toast.dismiss(`connector-needs-auth-${name}`);
+        const projectId = event.project_id as string | undefined;
+        toast.dismiss(`connector-needs-auth-${projectId || "global"}-${name}`);
         toast.success(`MCP "${name}" connected`);
       }
     });
