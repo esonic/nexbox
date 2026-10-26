@@ -33,6 +33,8 @@ From the source directory, run:
 
 The build script installs frontend dependencies according to the lockfile, builds the frontend, and embeds it in the Go executable. The resulting binary is written to `dist/nexbox`. The Go build automatically downloads any missing modules. If you already have the executable, you can run it directly without using the build script.
 
+Tagged releases provide ready-to-run archives for Linux on AMD64 and ARM64, plus macOS on Apple Silicon. Download the archive matching your platform from GitHub Releases, extract the single `nexbox` executable, and run it. On Windows, use the Linux archive inside WSL2.
+
 Start NexBox:
 
 ```bash

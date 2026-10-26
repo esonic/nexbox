@@ -10,10 +10,13 @@ permissions:
 
 jobs:
   backend:
-    runs-on: ubuntu-latest
+    # Browser integration tests depend on the Chrome installation supplied by
+    # the runner image. Pin it so ubuntu-latest migrations cannot silently
+    # change that environment underneath the test suite.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
@@ -22,10 +25,10 @@ jobs:
         run: go test ./...
 
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -47,9 +50,9 @@ jobs:
         run: npm run build
 
   secrets:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - uses: gitleaks/gitleaks-action@v2

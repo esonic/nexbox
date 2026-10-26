@@ -1,0 +1,159 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (for example, v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - name: Resolve and validate version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          version="$GITHUB_REF_NAME"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="$INPUT_VERSION"
+          fi
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must use the vMAJOR.MINOR.PATCH format, for example v0.1.0" >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+  backend:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Test backend
+        working-directory: server
+        run: go test ./...
+
+  frontend:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build embedded frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm test
+          npm run build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: webdist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  binaries:
+    needs: [prepare, backend, frontend]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            executable: nexbox
+          - goos: linux
+            goarch: arm64
+            executable: nexbox
+          - goos: darwin
+            goarch: arm64
+            executable: nexbox
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - uses: actions/download-artifact@v8
+        with:
+          name: webdist
+          path: server/webdist
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.prepare.outputs.version }}
+        working-directory: server
+        run: |
+          mkdir -p ../package
+          go build -trimpath \
+            -ldflags "-s -w -X main.Version=${VERSION}" \
+            -o "../package/${{ matrix.executable }}" .
+      - name: Package binary
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET_OS: ${{ matrix.goos }}
+          TARGET_ARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p release-assets
+          name="nexbox-${VERSION}-${TARGET_OS}-${TARGET_ARCH}"
+          tar -C package -czf "release-assets/${name}.tar.gz" "${{ matrix.executable }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [prepare, binaries]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create checksums
+        working-directory: release-assets
+        run: sha256sum nexbox-* > SHA256SUMS.txt
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TARGET: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          args=(--title "$RELEASE_VERSION" --generate-notes)
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            args+=(--verify-tag)
+          else
+            args+=(--target "$RELEASE_TARGET")
+          fi
+          gh release create "$RELEASE_VERSION" release-assets/* "${args[@]}"
