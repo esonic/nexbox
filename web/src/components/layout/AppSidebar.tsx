@@ -84,9 +84,6 @@ export function AppSidebar() {
   // Collapsed project groups
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
 
-  // Delete session confirmation
-  const [confirmDeleteSessionId, setConfirmDeleteSessionId] = useState<string | null>(null);
-
   // Project dialog + delete
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
@@ -99,18 +96,6 @@ export function AppSidebar() {
       renameRef.current.select();
     }
   }, [renamingSessionId]);
-
-  // Close delete confirmation on outside click
-  useEffect(() => {
-    if (!confirmDeleteSessionId) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.closest("[data-delete-confirm]")) return;
-      setConfirmDeleteSessionId(null);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [confirmDeleteSessionId]);
 
   // Opens the given project's scratch session and makes it active, without
   // navigating — the shared core of "click a project row" that the delete and
@@ -481,9 +466,6 @@ export function AppSidebar() {
               onDragOver={handleDragOver}
               onDragEnd={handleDragEnd}
               onDrop={handleDrop}
-              confirmDeleteSessionId={confirmDeleteSessionId}
-              onConfirmDelete={setConfirmDeleteSessionId}
-              onCancelDelete={() => setConfirmDeleteSessionId(null)}
               dragDisabled={ordering.autoSort || ordering.saving}
               onTogglePin={handleTogglePin}
               pinPendingIds={pinPendingIds}

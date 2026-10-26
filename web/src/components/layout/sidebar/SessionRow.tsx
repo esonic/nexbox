@@ -29,9 +29,6 @@ interface SessionRowProps {
   onTogglePin: (session: Session) => void;
   pinPending: boolean;
   // Delete
-  isConfirmingDelete: boolean;
-  onConfirmDelete: (id: string) => void;
-  onCancelDelete: () => void;
   onDelete: (id: string) => void;
   // Selection
   onSelect: (id: string) => void;
@@ -43,7 +40,6 @@ export function SessionRow({
   onRenameChange, onRenameCommit, onRenameCancel, onRenameStart,
   isDragging, isDropTarget, dropPosition,
   onDragStart, onDragOver, onDragEnd, onDrop,
-  isConfirmingDelete, onConfirmDelete, onCancelDelete,
   onDelete, dragDisabled, onTogglePin, pinPending,
   onSelect,
 }: SessionRowProps) {
@@ -161,28 +157,12 @@ export function SessionRow({
           {formatRelativeDate(sessionActivity(sess))}
         </span>
         <button
-          onClick={(e) => { e.stopPropagation(); onConfirmDelete(sess.id); }}
+          onClick={(e) => { e.stopPropagation(); onDelete(sess.id); }}
           className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-accent text-muted-foreground/40 hover:text-destructive transition-all"
           title="Move to trash"
         >
           <X className="h-3 w-3" />
         </button>
-        {isConfirmingDelete && (
-          <div data-delete-confirm className="absolute right-0 top-full mt-1 z-50 bg-popover border rounded-md shadow-md p-1.5 flex gap-1 whitespace-nowrap">
-            <button
-              onClick={(e) => { e.stopPropagation(); onDelete(sess.id); onCancelDelete(); }}
-              className="px-2 py-0.5 text-xs bg-destructive text-destructive-foreground rounded hover:bg-destructive/90"
-            >
-              Move to Trash
-            </button>
-            <button
-              onClick={(e) => { e.stopPropagation(); onCancelDelete(); }}
-              className="px-2 py-0.5 text-xs bg-muted text-muted-foreground rounded hover:bg-accent"
-            >
-              Cancel
-            </button>
-          </div>
-        )}
       </div>
     </div>
   );
