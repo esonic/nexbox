@@ -323,7 +323,7 @@ export function MarketplacePage() {
         <div className="border-b">
           <div className="max-w-[51rem] mx-auto px-6 flex items-center justify-between gap-3">
             <div className="flex min-w-0">
-              {(["mcp", "skill", "plugin"] as TabType[]).map((tabKey) => (
+              {(["mcp", "skill"] as TabType[]).map((tabKey) => (
                 <button
                   key={tabKey}
                   onClick={() => setTab(tabKey)}

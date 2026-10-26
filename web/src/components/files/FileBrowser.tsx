@@ -16,8 +16,7 @@ import {
   Save,
   ExternalLink,
   X,
-  FileText,
-  FileCode,
+  CaseSensitive,
   Eye,
   Code2,
   PanelLeftClose,
@@ -46,6 +45,8 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
+
+import { SearchResults } from "./PanelSearch";
 
 const MonacoFileEditor = lazy(() => import("./MonacoFileEditor"));
 // Type-only import: erased at build time, so it does not pull the Monaco chunk eagerly.
@@ -251,110 +252,6 @@ function FileTreeItem({
         ))
       )}
     </>
-  );
-}
-
-// ── Search results ──
-
-function ContentSnippet({ content, query }: { content: string; query: string }) {
-  if (!query || !content) return <>{content}</>;
-  const lower = content.toLowerCase();
-  const lowerQ = query.toLowerCase();
-  const idx = lower.indexOf(lowerQ);
-  if (idx === -1) return <>{content}</>;
-  const prePad = 15;
-  const postPad = 60;
-  const start = Math.max(0, idx - prePad);
-  const end = Math.min(content.length, idx + query.length + postPad);
-  return (
-    <>
-      {start > 0 && "…"}
-      {content.slice(start, idx)}
-      <mark className="bg-yellow-300/50 dark:bg-yellow-600/50 text-foreground rounded-[2px] not-italic">{content.slice(idx, idx + query.length)}</mark>
-      {content.slice(idx + query.length, end)}
-      {end < content.length && "…"}
-    </>
-  );
-}
-
-function SearchResults({
-  results,
-  loading,
-  searchType,
-  query,
-  onSelect,
-}: {
-  results: FileSearchResult[];
-  loading: boolean;
-  searchType: "name" | "content";
-  query: string;
-  onSelect: (path: string, line?: number) => void;
-}) {
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-8">
-        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-  if (results.length === 0) {
-    return (
-      <div className="text-xs text-muted-foreground text-center py-6">
-        No results
-      </div>
-    );
-  }
-
-  if (searchType === "content") {
-    const grouped = new Map<string, FileSearchResult[]>();
-    for (const r of results) {
-      const list = grouped.get(r.path) || [];
-      list.push(r);
-      grouped.set(r.path, list);
-    }
-    return (
-      <div className="text-xs">
-        {[...grouped.entries()].map(([path, matches]) => (
-          <div key={path}>
-            <div
-              className="flex items-center gap-1.5 px-2 py-1.5 bg-muted/30 cursor-pointer hover:bg-accent/50 transition-colors"
-              onClick={() => onSelect(path)}
-            >
-              <FileCode className="h-3 w-3 text-muted-foreground/60 shrink-0" />
-              <span className="font-medium text-foreground/80 truncate">{path}</span>
-              <span className="ml-auto text-muted-foreground/40 shrink-0">{matches.length}</span>
-            </div>
-            {matches.map((m, i) => (
-              <div
-                key={i}
-                className="px-3 py-1 text-[11px] text-muted-foreground hover:bg-accent/30 cursor-pointer font-mono overflow-hidden whitespace-nowrap"
-                onClick={() => onSelect(m.path, m.line)}
-              >
-                <ContentSnippet content={m.content ?? ""} query={query} />
-              </div>
-            ))}
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  return (
-    <div className="text-xs">
-      {results.map((r, i) => (
-        <div
-          key={i}
-          className="flex items-center gap-1.5 px-2 py-1.5 hover:bg-accent/50 cursor-pointer transition-colors"
-          onClick={() => onSelect(r.path)}
-        >
-          <FileText className="h-3 w-3 text-muted-foreground/50 shrink-0" />
-          <span className="truncate">
-            <span className="text-muted-foreground">{r.path.substring(0, r.path.lastIndexOf("/") + 1)}</span>
-            <span className="font-medium text-foreground/80">{r.name || r.path.split("/").pop()}</span>
-          </span>
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -758,16 +655,25 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     setHighlightedPath(null);
   }, [projectId]);
 
-  // Search state
-  const [showSearch, setShowSearch] = useState(false);
+  // Search state (panel search = content search, VSCode Search-view style)
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchType, setSearchType] = useState<"name" | "content">("name");
+  const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
   const [searchResults, setSearchResults] = useState<FileSearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
-  const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
-  const searchSeqRef = useRef(0);
+  const [collapsedSearchGroups, setCollapsedSearchGroups] = useState<Set<string>>(new Set());
+  const [activeResultIndex, setActiveResultIndex] = useState(-1);
+  const [searchHistory, setSearchHistory] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem("nexbox:file-search-history");
+      const items: unknown = raw ? JSON.parse(raw) : [];
+      return Array.isArray(items) ? items.filter((item): item is string => typeof item === "string").slice(0, 8) : [];
+    } catch { return []; }
+  });
+  const [historyOpen, setHistoryOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const searchReqRef = useRef(0);
+  const activeResultRef = useRef<HTMLDivElement>(null);
   const [fileSearchVisible, setFileSearchVisible] = useState(false);
   const [fileSearchQuery, setFileSearchQuery] = useState("");
   const [fileSearchCaseSensitive, setFileSearchCaseSensitive] = useState(false);
@@ -1428,39 +1334,103 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     }
   }, [performMove, uploadSingleFile]);
 
-  // Debounced search
+  // Debounced content search (race-guarded so a slow response can't clobber a
+  // newer query's results).
   useEffect(() => {
+    const req = ++searchReqRef.current;
+    let cancelled = false;
+    clearTimeout(searchTimerRef.current);
     if (!searchQuery.trim()) {
       setSearchResults([]);
       setSearchLoading(false);
       return;
     }
     setSearchLoading(true);
-    clearTimeout(searchTimerRef.current);
     searchTimerRef.current = setTimeout(async () => {
-      // Ignore responses from superseded requests (slow earlier query landing late).
-      const seq = ++searchSeqRef.current;
       try {
-        const results = await filesApi.search(projectId, searchQuery.trim(), searchType, sessionId, searchCaseSensitive);
-        if (seq === searchSeqRef.current) setSearchResults(results || []);
+        const results = await filesApi.search(projectId, searchQuery.trim(), "content", sessionId, searchCaseSensitive);
+        if (cancelled || searchReqRef.current !== req) return;
+        setSearchResults(results || []);
       } catch (e) {
+        if (cancelled || searchReqRef.current !== req) return;
         console.error("Search failed:", e);
-        if (seq === searchSeqRef.current) setSearchResults([]);
+        setSearchResults([]);
       } finally {
-        if (seq === searchSeqRef.current) setSearchLoading(false);
+        if (!cancelled && searchReqRef.current === req) setSearchLoading(false);
       }
     }, 300);
-    return () => clearTimeout(searchTimerRef.current);
-  }, [searchQuery, searchType, searchCaseSensitive, projectId, sessionId]);
+    return () => {
+      clearTimeout(searchTimerRef.current);
+      cancelled = true;
+    };
+  }, [searchQuery, searchCaseSensitive, projectId, sessionId]);
 
-  const handleToggleSearch = useCallback(() => {
-    setShowSearch((prev) => {
-      if (!prev) setTimeout(() => searchRef.current?.focus(), 50);
-      return !prev;
+  // Group content matches by file, preserving first-seen order.
+  const groupedSearch = useMemo(() => {
+    const map = new Map<string, FileSearchResult[]>();
+    for (const r of searchResults) {
+      const list = map.get(r.path);
+      if (list) list.push(r); else map.set(r.path, [r]);
+    }
+    return [...map.entries()];
+  }, [searchResults]);
+
+  // Flat list of keyboard-navigable match rows, in render order and skipping
+  // collapsed groups — the index into this array is `activeResultIndex`.
+  const navRows = useMemo(() => {
+    const rows: { path: string; line?: number }[] = [];
+    for (const [path, matches] of groupedSearch) {
+      if (collapsedSearchGroups.has(path)) continue;
+      for (const m of matches) rows.push({ path, line: m.line });
+    }
+    return rows;
+  }, [groupedSearch, collapsedSearchGroups]);
+
+  // Bound the selected row when results change, then scroll it into view.
+  const activeSearchIndex = Math.min(activeResultIndex, navRows.length - 1);
+  useEffect(() => {
+    if (activeSearchIndex >= 0) activeResultRef.current?.scrollIntoView({ block: "nearest" });
+  }, [activeSearchIndex]);
+
+  const pushSearchHistory = useCallback((q: string) => {
+    const term = q.trim();
+    if (!term) return;
+    setSearchHistory((prev) => {
+      const next = [term, ...prev.filter((h) => h !== term)].slice(0, 8);
+      try { localStorage.setItem("nexbox:file-search-history", JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
     });
-    setSearchQuery("");
-    setSearchResults([]);
   }, []);
+
+  const toggleSearchGroup = useCallback((path: string) => {
+    setCollapsedSearchGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const handleSearchKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      if (searchQuery) { setSearchQuery(""); setActiveResultIndex(-1); }
+      else searchRef.current?.blur();
+      setHistoryOpen(false);
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHistoryOpen(false);
+      setActiveResultIndex(Math.min(navRows.length - 1, activeSearchIndex + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveResultIndex(Math.max(-1, activeSearchIndex - 1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const row = navRows[activeSearchIndex >= 0 ? activeSearchIndex : 0];
+      if (row) { pushSearchHistory(searchQuery); handleSelectSearchResult(row.path, row.line); }
+      setHistoryOpen(false);
+    }
+  }, [navRows, activeSearchIndex, searchQuery, pushSearchHistory, handleSelectSearchResult]);
 
   const handleFileSearchMatchesFound = useCallback((total: number) => {
     setFileSearchTotal(total);
@@ -1491,16 +1461,6 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               <ListFilter className="h-3.5 w-3.5" />
             </button>
             <button
-              onClick={handleToggleSearch}
-              className={cn(
-                "p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors",
-                showSearch && "bg-accent text-foreground"
-              )}
-              title="Search files"
-            >
-              <Search className="h-3.5 w-3.5" />
-            </button>
-            <button
               onClick={handlePickUpload}
               disabled={uploading}
               className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
@@ -1524,64 +1484,54 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
           </div>
         </div>
 
-        {/* Search bar */}
-        {showSearch && (
-          <div className="border-b px-2 py-1.5 space-y-1.5">
-            <div className="flex items-center gap-1 bg-muted/50 rounded px-1.5">
-              <Search className="h-3 w-3 text-muted-foreground/50 shrink-0" />
-              <input
-                ref={searchRef}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Escape") handleToggleSearch(); }}
-                placeholder={searchType === "name" ? "File name..." : "Search in files..."}
-                className="flex-1 bg-transparent text-xs py-1 outline-none placeholder:text-muted-foreground/40"
-              />
-              {searchQuery && (
-                <button onClick={() => setSearchQuery("")} className="text-muted-foreground/40 hover:text-muted-foreground">
-                  <X className="h-3 w-3" />
-                </button>
+        {/* Persistent content-search bar (filename lookup is Cmd/Ctrl+P) */}
+        <div className="border-b px-2 py-1.5 relative">
+          <div className="flex items-center gap-1 bg-muted/50 rounded px-1.5">
+            <Search className="h-3 w-3 text-muted-foreground/50 shrink-0" />
+            <input
+              ref={searchRef}
+              value={searchQuery}
+              onChange={(e) => { setSearchQuery(e.target.value); setActiveResultIndex(-1); }}
+              onKeyDown={handleSearchKeyDown}
+              onFocus={() => { if (!searchQuery) setHistoryOpen(true); }}
+              onBlur={() => setTimeout(() => setHistoryOpen(false), 150)}
+              placeholder="Search text  (⌘/Ctrl+P for files)"
+              className="flex-1 bg-transparent text-xs py-1 outline-none placeholder:text-muted-foreground/40"
+            />
+            <button
+              onClick={() => setSearchCaseSensitive((v) => !v)}
+              className={cn(
+                "shrink-0 p-0.5 rounded transition-colors",
+                searchCaseSensitive
+                  ? "bg-primary/15 text-primary"
+                  : "text-muted-foreground/40 hover:text-muted-foreground"
               )}
-            </div>
-            <div className="flex gap-1">
-              <button
-                onClick={() => setSearchType("name")}
-                className={cn(
-                  "text-[10px] px-1.5 py-0.5 rounded transition-colors",
-                  searchType === "name"
-                    ? "bg-primary/10 text-primary font-medium"
-                    : "text-muted-foreground/60 hover:text-muted-foreground"
-                )}
-              >
-                Name
+              title="Match case"
+            >
+              <CaseSensitive className="h-3.5 w-3.5" />
+            </button>
+            {searchQuery && (
+              <button onClick={() => { setSearchQuery(""); setActiveResultIndex(-1); searchRef.current?.focus(); }} className="shrink-0 text-muted-foreground/40 hover:text-muted-foreground">
+                <X className="h-3 w-3" />
               </button>
-              <button
-                onClick={() => setSearchType("content")}
-                className={cn(
-                  "text-[10px] px-1.5 py-0.5 rounded transition-colors",
-                  searchType === "content"
-                    ? "bg-primary/10 text-primary font-medium"
-                    : "text-muted-foreground/60 hover:text-muted-foreground"
-                )}
-              >
-                Content
-              </button>
-              <button
-                onClick={() => setSearchCaseSensitive((v) => !v)}
-                title="Match case"
-                aria-pressed={searchCaseSensitive}
-                className={cn(
-                  "ml-auto text-[10px] px-1.5 py-0.5 rounded font-mono transition-colors",
-                  searchCaseSensitive
-                    ? "bg-primary/10 text-primary font-medium"
-                    : "text-muted-foreground/60 hover:text-muted-foreground"
-                )}
-              >
-                Aa
-              </button>
-            </div>
+            )}
           </div>
-        )}
+          {historyOpen && !searchQuery && searchHistory.length > 0 && (
+            <div className="absolute left-2 right-2 top-full z-10 mt-0.5 rounded border bg-background shadow-lg py-1">
+              <div className="px-2 pb-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/40">Recent</div>
+              {searchHistory.map((h) => (
+                <button
+                  key={h}
+                  onMouseDown={(e) => { e.preventDefault(); setSearchQuery(h); setHistoryOpen(false); }}
+                  className="flex w-full items-center gap-1.5 px-2 py-1 text-xs text-left hover:bg-accent/50"
+                >
+                  <Search className="h-3 w-3 text-muted-foreground/40 shrink-0" />
+                  <span className="truncate">{h}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* Tree or search results */}
         <div
@@ -1593,13 +1543,17 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
           onDragLeave={handleRootDragLeave}
           onDrop={handleRootDrop}
         >
-          {showSearch && searchQuery ? (
+          {searchQuery.trim() ? (
             <SearchResults
-              results={searchResults}
+              grouped={groupedSearch}
               loading={searchLoading}
-              searchType={searchType}
-              query={searchQuery}
-              onSelect={handleSelectSearchResult}
+              query={searchQuery.trim()}
+              caseSensitive={searchCaseSensitive}
+              collapsed={collapsedSearchGroups}
+              onToggleGroup={toggleSearchGroup}
+              activeIndex={activeSearchIndex}
+              activeRef={activeResultRef}
+              onSelect={(path, line) => { pushSearchHistory(searchQuery); handleSelectSearchResult(path, line); }}
             />
           ) : rootLoading ? (
             <div className="flex items-center justify-center py-8">
