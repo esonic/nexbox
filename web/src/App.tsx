@@ -22,7 +22,7 @@ const queryClient = new QueryClient({
   },
 });
 
-type AuthState = "checking" | "authed" | "unauthed";
+type AuthState = "checking" | "local" | "authed" | "unauthed";
 
 function MainLayout() {
   return (
@@ -49,17 +49,12 @@ function AppRoutes() {
 
   useEffect(() => {
     let cancelled = false;
-    // On every mount (and on route change), verify the JWT cookie still
-    // resolves to a user. The /api/auth/me endpoint is whitelisted from
-    // the redirect interceptor — a 401 here just means "not logged in",
-    // not a session that expired mid-action.
+    // Account-free instances enter the workspace directly. Otherwise check
+    // the existing login cookie; a 401 here means the login page is needed.
     authApi.me()
-      .then(() => { if (!cancelled) setAuth("authed"); })
+      .then((status) => { if (!cancelled) setAuth(status.auth_required ? "authed" : "local"); })
       .catch(() => { if (!cancelled) setAuth("unauthed"); });
     return () => { cancelled = true; };
-    // Re-check whenever we land on a non-login route (covers post-login
-    // navigation that swaps the cookie without a full reload).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (auth === "checking") {
@@ -70,14 +65,13 @@ function AppRoutes() {
     );
   }
 
-  // Always render /login regardless of auth state — it manages its own state.
   return (
     <Routes>
-      <Route path="/login" element={<LoginPage onAuthed={() => setAuth("authed")} />} />
+      <Route path="/login" element={auth === "local" ? <Navigate to="/" replace /> : <LoginPage onAuthed={() => setAuth("authed")} />} />
       <Route
         path="/*"
         element={
-          auth === "authed"
+          auth === "authed" || auth === "local"
             ? <MainLayout />
             : <Navigate to={`/login?from=${encodeURIComponent(location.pathname + location.search)}`} replace />
         }

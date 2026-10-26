@@ -13,7 +13,11 @@ and terminals run under the service's system account.
 ./dist/nexbox               # localhost:9040
 ```
 
-See README.md for prerequisites and first-account creation. NEXBOX_DATA_DIR must
+A fresh instance opens directly without account setup or login. Accounts are
+optional: add-user enables password login and the first account inherits existing
+projects; deleting the last account restores passwordless access. An internal
+passwordless owner preserves the existing project/session ownership model.
+See README.md for prerequisites and account commands. NEXBOX_DATA_DIR must
 be identical for account commands and the server. Its default is the executable's
 directory. Runtime needs neither build tools nor shell wrappers; users can copy
 the executable to another machine with the same operating system and architecture.

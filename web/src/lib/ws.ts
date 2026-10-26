@@ -83,10 +83,14 @@ class GlobalWebSocket {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       if (import.meta.env.DEV) console.log("[ws] Disconnected");
       this._connected = false;
       this.ws = null;
+      if (event.code === 1008 && event.reason === "Authentication mode changed") {
+        window.location.reload();
+        return;
+      }
       this.scheduleDisconnectAnnouncement();
       this.scheduleReconnect();
     };

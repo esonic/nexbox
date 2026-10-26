@@ -11,8 +11,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/esonic/nexbox/store"
+	"github.com/go-chi/chi/v5"
 )
 
 // projectNamePattern enforces a filesystem-friendly slug so we can mount the
@@ -67,10 +67,10 @@ func (s *Server) ListProjects(w http.ResponseWriter, r *http.Request) {
 // from store.CreateProjectRequest so that AutoCreateDir can be a pointer (to
 // detect "field omitted" → default true) without leaking into the storage layer.
 type createProjectBody struct {
-	Name           string `json:"name"`
-	Description    string `json:"description"`
-	AutoCreateDir  *bool  `json:"auto_create_dir,omitempty"`
-	GitRepoPath    string `json:"git_repo_path,omitempty"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	AutoCreateDir *bool  `json:"auto_create_dir,omitempty"`
+	GitRepoPath   string `json:"git_repo_path,omitempty"`
 }
 
 // CreateProject creates a new project owned by the authenticated user. By
@@ -266,6 +266,10 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		}
 		if current.AutoManagedDir {
 			newPath := s.projectWorkDir(a.Username, *req.Name)
+			if err := os.MkdirAll(filepath.Dir(newPath), 0755); err != nil {
+				writeError(w, http.StatusInternalServerError, "prepare project dir: "+err.Error())
+				return
+			}
 			if current.GitRepoPath != "" {
 				if err := os.Rename(current.GitRepoPath, newPath); err != nil {
 					writeError(w, http.StatusInternalServerError, "rename project dir: "+err.Error())
@@ -366,9 +370,11 @@ func (s *Server) CheckProjectByGitDir(w http.ResponseWriter, r *http.Request) {
 }
 
 // ensureDefaultProject creates a "Default" project for the user when they have
-// none. Called on each successful login. If the user has at least one project
-// (even renamed/recreated) we do not seed.
+// none. Used on local workspace startup and successful login. Existing
+// projects, including renamed ones, prevent seeding.
 func (s *Server) ensureDefaultProject(u *store.User) error {
+	s.projectInitMu.Lock()
+	defer s.projectInitMu.Unlock()
 	existing, err := s.Store.ListProjectsByOwner(u.ID)
 	if err != nil {
 		return err

@@ -38,6 +38,7 @@ type Server struct {
 	WeChat            *WeChatJSSDK             // optional WeChat JS-SDK share signer (nil when unconfigured)
 
 	mcpRuntimeTools sync.Map // installation identity -> immutable MCP tool aliases
+	projectInitMu   sync.Mutex
 
 	// humanGates: executionID+":"+nodeID → channel carrying user input for human node continuation
 	humanGatesMu sync.Mutex
@@ -86,7 +87,7 @@ func NewRouter(s *Server) *chi.Mux {
 		r.Post("/logout", s.HandleLogout)
 		r.Get("/auth/me", s.HandleAuthMe)
 
-		// Everything else under /api requires a valid JWT.
+		// Resolve the local owner, or require login when accounts exist.
 		r.Group(func(r chi.Router) {
 			r.Use(s.RequireAuth)
 			registerAuthedAPIRoutes(s, r)

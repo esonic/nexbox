@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/esonic/nexbox/store"
@@ -215,6 +216,37 @@ type authCtxKey struct{}
 type AuthInfo struct {
 	UserID   int64
 	Username string
+	Local    bool // internal passwordless workspace, not a signed-in identity
+}
+
+// localWorkspaceUser returns the internal owner only while no login accounts
+// exist. Query errors never silently disable authentication.
+func (s *Server) localWorkspaceUser() (*store.User, error) {
+	required, err := s.Store.HasLoginUsers()
+	if err != nil || required {
+		return nil, err
+	}
+	return s.Store.EnsureLocalUser()
+}
+
+func (s *Server) serveLocalAuthStatus(w http.ResponseWriter) bool {
+	u, err := s.localWorkspaceUser()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read authentication mode")
+		return true
+	}
+	if u == nil {
+		return false
+	}
+	if err := s.ensureDefaultProject(u); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to initialize local workspace")
+		return true
+	}
+	if s.Hub != nil {
+		s.Hub.ownerCache.Clear()
+	}
+	writeJSON(w, http.StatusOK, loginResponse{AuthRequired: false})
+	return true
 }
 
 // AuthFromContext returns the authenticated user, or nil when none is present
@@ -228,7 +260,7 @@ func AuthFromContext(ctx context.Context) *AuthInfo {
 // request, or "system" when none is present. Use this for fields like
 // comment.author or task.assigner where you want the human's name.
 func (s *Server) currentUser(r *http.Request) string {
-	if a := AuthFromContext(r.Context()); a != nil {
+	if a := AuthFromContext(r.Context()); a != nil && !a.Local {
 		return a.Username
 	}
 	return "system"
@@ -250,12 +282,23 @@ func (s *Server) requireAuthUser(w http.ResponseWriter, r *http.Request) *AuthIn
 // Middleware
 // ---------------------------------------------------------------------------
 
-// RequireAuth blocks requests that don't carry a valid JWT cookie/Authorization
-// header. Login/health endpoints are skipped via the public-paths set.
+// RequireAuth supplies the internal owner in passwordless mode, or requires a
+// valid JWT when login accounts exist. Public endpoints bypass this middleware.
 func (s *Server) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isPublicPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
+			return
+		}
+		u, err := s.localWorkspaceUser()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read authentication mode")
+			return
+		}
+		if u != nil {
+			info := &AuthInfo{UserID: u.ID, Username: u.Username, Local: true}
+			ctx := context.WithValue(r.Context(), authCtxKey{}, info)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 		raw := readAuthToken(r)
@@ -269,8 +312,8 @@ func (s *Server) RequireAuth(next http.Handler) http.Handler {
 			return
 		}
 		// Confirm the user still exists; revoke-by-deletion semantics.
-		u, err := s.Store.GetUserByID(claims.UserID)
-		if err != nil || u == nil {
+		u, err = s.Store.GetUserByID(claims.UserID)
+		if err != nil || u == nil || u.PasswordHash == "" {
 			writeError(w, http.StatusUnauthorized, "user no longer exists")
 			return
 		}
@@ -317,13 +360,17 @@ type loginRequest struct {
 }
 
 type loginResponse struct {
-	Username string `json:"username"`
-	UserID   int64  `json:"user_id"`
+	AuthRequired bool   `json:"auth_required"`
+	Username     string `json:"username,omitempty"`
+	UserID       int64  `json:"user_id,omitempty"`
 }
 
 // HandleLogin verifies the (username, password) pair and sets the auth cookie.
 // POST /api/login
 func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
+	if s.serveLocalAuthStatus(w) {
+		return
+	}
 	// Cap the request body so a malicious caller can't ship a huge JSON blob
 	// just to make the parser allocate.
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
@@ -389,13 +436,15 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	setAuthCookie(w, token)
 
-	// Phase 5: ensure the user has at least the seed Default project on first
-	// login. If they later delete it we don't recreate.
+	// Initialize the default project for accounts with no existing projects.
 	if err := s.ensureDefaultProject(u); err != nil {
 		log.Printf("[auth] ensureDefaultProject for %q: %v", u.Username, err)
 	}
 
-	writeJSON(w, http.StatusOK, loginResponse{Username: u.Username, UserID: u.ID})
+	if s.Hub != nil {
+		s.Hub.ownerCache.Clear()
+	}
+	writeJSON(w, http.StatusOK, loginResponse{AuthRequired: true, Username: u.Username, UserID: u.ID})
 }
 
 // HandleLogout clears the auth cookie. Tokens in flight remain technically
@@ -406,27 +455,67 @@ func (s *Server) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// authorizeWS validates the JWT for a WebSocket upgrade request before the
-// connection is upgraded. On success it returns the authenticated user id and
-// true. On failure it writes a 401 and returns (0, false), so the caller
-// should `return` immediately on a false result.
-func (s *Server) authorizeWS(w http.ResponseWriter, r *http.Request) (int64, bool) {
+// authorizeWS resolves the local workspace owner or validates the login before
+// upgrading. The returned mode is also used to invalidate existing sockets.
+func (s *Server) authorizeWS(w http.ResponseWriter, r *http.Request) (*AuthInfo, bool) {
+	u, err := s.localWorkspaceUser()
+	if err != nil {
+		http.Error(w, "failed to read authentication mode", http.StatusInternalServerError)
+		return nil, false
+	}
+	if s.Hub != nil {
+		s.Hub.ownerCache.Clear()
+	}
+	if u != nil {
+		return &AuthInfo{UserID: u.ID, Username: u.Username, Local: true}, true
+	}
 	raw := readAuthToken(r)
 	if raw == "" {
 		http.Error(w, "not authenticated", http.StatusUnauthorized)
-		return 0, false
+		return nil, false
 	}
 	claims, err := s.Auth.parse(raw)
 	if err != nil {
 		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
-		return 0, false
+		return nil, false
 	}
-	u, err := s.Store.GetUserByID(claims.UserID)
-	if err != nil || u == nil {
+	u, err = s.Store.GetUserByID(claims.UserID)
+	if err != nil || u == nil || u.PasswordHash == "" {
 		http.Error(w, "user no longer exists", http.StatusUnauthorized)
-		return 0, false
+		return nil, false
 	}
-	return u.ID, true
+	return &AuthInfo{UserID: u.ID, Username: u.Username}, true
+}
+
+// Close existing chat and terminal sockets when account commands switch modes.
+// This also covers idle connections, without requiring a server restart.
+func (s *Server) watchWSAuthMode(conn *websocket.Conn, local bool) func() {
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if !s.checkWSAuthMode(conn, local) {
+					return
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+func (s *Server) checkWSAuthMode(conn *websocket.Conn, local bool) bool {
+	required, err := s.Store.HasLoginUsers()
+	if err == nil && required != local {
+		return true
+	}
+	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Authentication mode changed"), time.Now().Add(time.Second))
+	_ = conn.Close()
+	return false
 }
 
 // writeRateLimited responds with 429 + a Retry-After hint (in seconds).
@@ -439,10 +528,14 @@ func writeRateLimited(w http.ResponseWriter, retry time.Duration, message string
 	writeError(w, http.StatusTooManyRequests, fmt.Sprintf("%s (retry in %ds)", message, secs))
 }
 
-// HandleAuthMe returns the current user if authenticated, or 401 when not.
+// HandleAuthMe returns passwordless mode, the signed-in account, or 401 when
+// login is required and no valid credentials are supplied.
 // Used by the frontend on startup to decide whether to show the login page.
 // GET /api/auth/me
 func (s *Server) HandleAuthMe(w http.ResponseWriter, r *http.Request) {
+	if s.serveLocalAuthStatus(w) {
+		return
+	}
 	raw := readAuthToken(r)
 	if raw == "" {
 		writeError(w, http.StatusUnauthorized, "not authenticated")
@@ -454,11 +547,11 @@ func (s *Server) HandleAuthMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := s.Store.GetUserByID(claims.UserID)
-	if err != nil || u == nil {
+	if err != nil || u == nil || u.PasswordHash == "" {
 		writeError(w, http.StatusUnauthorized, "user no longer exists")
 		return
 	}
-	writeJSON(w, http.StatusOK, loginResponse{Username: u.Username, UserID: u.ID})
+	writeJSON(w, http.StatusOK, loginResponse{AuthRequired: true, Username: u.Username, UserID: u.ID})
 }
 
 // ---------------------------------------------------------------------------

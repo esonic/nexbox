@@ -755,17 +755,21 @@ export interface CloudInfo extends ServerInfo {
   user_name?: string;
 }
 
-// Local username/password auth (replaces the old OAuth flow).
+export type AuthStatus =
+  | { auth_required: false }
+  | { auth_required: true; username: string; user_id: number };
+
+// Password authentication is optional; account-free instances return local mode.
 export const authApi = {
   login: (username: string, password: string) =>
-    request<{ username: string; user_id: number }>("/login", {
+    request<AuthStatus>("/login", {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
   logout: () =>
     request<void>("/logout", { method: "POST" }),
   me: () =>
-    request<{ username: string; user_id: number }>("/auth/me"),
+    request<AuthStatus>("/auth/me"),
 };
 
 // ---------------------------------------------------------------------------

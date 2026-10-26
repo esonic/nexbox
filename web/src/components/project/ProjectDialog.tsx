@@ -237,7 +237,7 @@ export function ProjectDialog({
               <p className="text-[11px] text-muted-foreground/70">
                 {project.auto_managed_dir === false
                   ? "User-supplied path. Cannot be modified after creation."
-                  : "Platform-managed. Derived from your username and the project name."}
+                  : "Managed by NexBox inside the application data directory."}
               </p>
             </div>
           )}

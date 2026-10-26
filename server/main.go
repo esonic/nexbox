@@ -135,6 +135,15 @@ func main() {
 	detailCache := store.NewDetailCache(db)
 	dataStore := store.NewSQLiteStore(db)
 	log.Printf("  Store: sqlite")
+	loginRequired, err := dataStore.HasLoginUsers()
+	if err != nil {
+		startupLog.Fatalf("Failed to read authentication mode: %v", err)
+	}
+	if loginRequired {
+		startupLog.Printf("  Access: password login")
+	} else {
+		startupLog.Printf("  Access: passwordless local workspace")
+	}
 
 	// Start MCP server for AI asset tools (auto-assign port with :0)
 	mcpAddr := fmt.Sprintf("%s:%d", *listen, 0)

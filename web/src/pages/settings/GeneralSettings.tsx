@@ -36,7 +36,7 @@ export function GeneralSettings() {
       .catch((e) => console.error("Failed to load settings:", e));
 
     authApi.me()
-      .then((data) => setCurrentUser(data.username))
+      .then((data) => setCurrentUser(data.auth_required ? data.username : ""))
       .catch(() => { /* ignore — boot guard already covered the unauth case */ });
   }, []);
 
@@ -240,7 +240,7 @@ export function GeneralSettings() {
       </div>
 
       {/* Account — signed-in user + sign out */}
-      <div className="flex items-center justify-between pt-4 border-t">
+      {currentUser && <div className="flex items-center justify-between pt-4 border-t">
         <div className="flex items-center gap-2 min-w-0">
           <div className="flex items-center justify-center h-7 w-7 rounded-full bg-muted text-muted-foreground shrink-0">
             <UserIcon className="h-3.5 w-3.5" />
@@ -259,7 +259,7 @@ export function GeneralSettings() {
           {signingOut ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <LogOut className="h-3.5 w-3.5" />}
           Sign out
         </button>
-      </div>
+      </div>}
     </section>
   );
 }

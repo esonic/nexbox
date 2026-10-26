@@ -25,7 +25,8 @@ type terminalResize struct {
 // New code should use HandleTerminalSessionWS (/ws/terminal/sessions/{sessionId}).
 // GET /ws/terminal/{projectId}
 func (s *Server) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authorizeWS(w, r); !ok {
+	user, ok := s.authorizeWS(w, r)
+	if !ok {
 		return
 	}
 	projectID := chi.URLParam(r, "projectId")
@@ -41,14 +42,15 @@ func (s *Server) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	legacyKey := "project:" + projectID
-	serveTerminal(s, w, r, legacyKey, workDir)
+	serveTerminal(s, w, r, legacyKey, workDir, user.Local)
 }
 
 // HandleTerminalSessionWS upgrades to WebSocket and spawns a PTY shell for a session.
 // Working directory follows the session's worktree path when in worktree mode.
 // GET /ws/terminal/sessions/{sessionId}
 func (s *Server) HandleTerminalSessionWS(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authorizeWS(w, r); !ok {
+	user, ok := s.authorizeWS(w, r)
+	if !ok {
 		return
 	}
 	sessionID := chi.URLParam(r, "sessionId")
@@ -63,7 +65,7 @@ func (s *Server) HandleTerminalSessionWS(w http.ResponseWriter, r *http.Request)
 		workDir, _ = os.UserHomeDir()
 	}
 
-	serveTerminal(s, w, r, sessionID, workDir)
+	serveTerminal(s, w, r, sessionID, workDir, user.Local)
 }
 
 // sessionWorkDir returns the effective working directory for a session.
@@ -298,12 +300,13 @@ func (t *termSession) shutdown() {
 // session for terminalID, and pumps WS-side input until the connection
 // drops. On drop the PTY is left running with a grace timer so the client
 // can reattach.
-func serveTerminal(s *Server, w http.ResponseWriter, r *http.Request, terminalID, workDir string) {
+func serveTerminal(s *Server, w http.ResponseWriter, r *http.Request, terminalID, workDir string, local bool) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[terminal] WebSocket upgrade error: %v", err)
 		return
 	}
+	defer s.watchWSAuthMode(conn, local)()
 
 	ts, reattached, err := getOrCreateTermSession(terminalID, workDir)
 	if err != nil {
@@ -337,6 +340,9 @@ func serveTerminal(s *Server, w http.ResponseWriter, r *http.Request, terminalID
 	for {
 		msgType, msg, err := conn.ReadMessage()
 		if err != nil {
+			break
+		}
+		if !s.checkWSAuthMode(conn, local) {
 			break
 		}
 		if msgType == websocket.TextMessage {

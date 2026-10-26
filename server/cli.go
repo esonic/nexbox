@@ -140,7 +140,7 @@ func cmdListUsers(s *store.SQLiteStore) int {
 		return 1
 	}
 	if len(users) == 0 {
-		fmt.Println("no users yet — create one with: nexbox add-user <username> <password>")
+		fmt.Println("no login users — passwordless local access is enabled")
 		return 0
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -200,13 +200,19 @@ Server flags:
 
 Subcommands (all open the data directory and exit):
   add-user <username> <password>     Create a local user account.
+                                     Enables password login; the first user
+                                     inherits the existing local workspace.
                                      Username must match ^[A-Za-z0-9_-]{1,32}$.
   list-users                         List all users.
-  del-user <username|id>             Delete the named user.
+  del-user <username|id>             Delete the named user. Removing the last
+                                     account restores passwordless access.
   reset-password <username> <pw>     Set a new password for the user.
 
 For subcommands, the data directory comes from NEXBOX_DATA_DIR if set,
 otherwise the binary's own directory. (--data-dir is a server-only flag.)
+
+With no login accounts, open the app directly; no setup or login is needed.
+Account commands take effect without restarting the server.
 
 Examples:
   nexbox add-user local "$NEXBOX_PASSWORD"

@@ -556,8 +556,8 @@ func (db *DB) migrate() error {
 			added_at INTEGER NOT NULL DEFAULT 0
 		)`,
 
-		// Local user accounts. Populated only via the `nexbox add-user` CLI;
-		// there is no self-registration endpoint.
+		// Project owners: an internal passwordless user plus optional login
+		// accounts created through the CLI; no self-serve registration.
 		`CREATE TABLE IF NOT EXISTS users (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			username TEXT NOT NULL UNIQUE,
@@ -645,9 +645,8 @@ func (db *DB) migrate() error {
 			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='is_hidden'`,
 			alter: `ALTER TABLE sessions ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0`,
 		},
-		// Phase 5: per-user project ownership. Default '' is used during the
-		// brief window between this column being added and the first user being
-		// created via `nexbox add-user`.
+		// Per-user project ownership. Legacy unowned projects start at 0 and
+		// are adopted when the local workspace or first login account is created.
 		{
 			check: `SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='owner_user_id'`,
 			alter: `ALTER TABLE projects ADD COLUMN owner_user_id INTEGER NOT NULL DEFAULT 0`,

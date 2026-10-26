@@ -30,7 +30,7 @@ var upgrader = websocket.Upgrader{
 // HandleGlobalWS is the single global WebSocket endpoint.
 // All sessions are multiplexed over this one connection via subscribe/unsubscribe.
 func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
-	uid, ok := s.authorizeWS(w, r)
+	user, ok := s.authorizeWS(w, r)
 	if !ok {
 		return
 	}
@@ -40,8 +40,9 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	defer s.watchWSAuthMode(conn, user.Local)()
 
-	s.Hub.AddClient(conn, uid)
+	s.Hub.AddClient(conn, user.UserID)
 	defer s.Hub.RemoveClient(conn)
 
 	for {
@@ -53,6 +54,9 @@ func (s *Server) HandleGlobalWS(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		if !s.checkWSAuthMode(conn, user.Local) {
+			return
+		}
 		var chatReq ChatRequest
 		if err := json.Unmarshal(msg, &chatReq); err != nil {
 			s.Hub.SendDirect(conn, "", ChatEvent{Type: "error", Message: "invalid message format"})
