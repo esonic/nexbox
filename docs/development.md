@@ -66,7 +66,14 @@ cd server
 go test ./...
 ```
 
-服务端全量测试包含真实 Chrome/Chromium 集成测试，需要安装浏览器。依赖已登录 CLI 或真实模型的测试按各测试文件中的环境变量显式启用；普通测试不要求配置模型服务。
+默认服务端测试不启动宿主机浏览器，因此适合本地开发和普通 CI。真实 Chrome/Chromium 端到端测试需要安装浏览器并显式启用：
+
+```bash
+cd server
+NEXBOX_CHROME_E2E=1 go test -v -count=1 -timeout=10m ./mcp/chrome
+```
+
+仓库的 **Browser E2E** workflow 也可从 GitHub Actions 页面手动运行。依赖已登录 CLI 或真实模型的测试仍按各测试文件中的环境变量显式启用；普通测试不要求配置模型服务。
 
 ```bash
 cd web

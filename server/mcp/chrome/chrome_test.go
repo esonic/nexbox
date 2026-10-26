@@ -56,6 +56,7 @@ func startTestHTTP() *httptest.Server {
 
 // TestBrowserLaunchAndNavigate checks that Chrome starts and can load a page.
 func TestBrowserLaunchAndNavigate(t *testing.T) {
+	requireChromeE2E(t)
 	ts := startTestHTTP()
 	defer ts.Close()
 
@@ -94,6 +95,7 @@ func TestBrowserLaunchAndNavigate(t *testing.T) {
 
 // TestSnapshotAndUID verifies accessibility tree capture and UID resolution.
 func TestSnapshotAndUID(t *testing.T) {
+	requireChromeE2E(t)
 	ts := startTestHTTP()
 	defer ts.Close()
 
@@ -165,6 +167,7 @@ func TestSnapshotAndUID(t *testing.T) {
 // TestFullWorkflow tests the complete E2E workflow:
 // navigate → snapshot → fill → click → evaluate → screenshot
 func TestFullWorkflow(t *testing.T) {
+	requireChromeE2E(t)
 	ts := startTestHTTP()
 	defer ts.Close()
 	tmpDir := t.TempDir()
@@ -400,6 +403,7 @@ func TestReaperKeepsMCPForActiveSession(t *testing.T) {
 // call relaunches Chrome, and the released instance's exit watcher does not
 // corrupt the relaunched one (browser.go generation guard).
 func TestReleaseBrowserThenRelaunch(t *testing.T) {
+	requireChromeE2E(t)
 	tmpDir := t.TempDir()
 	srv := NewServer("127.0.0.1:0", tmpDir, BrowserOptions{Headless: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

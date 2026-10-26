@@ -43,6 +43,7 @@ field.addEventListener('keydown',e=>{window.keyEvents.push(e.key);if(e.key==='En
 // These tests intentionally cross Streamable HTTP, tools/list and tools/call,
 // rather than reimplementing tool behaviour with direct CDP calls.
 func TestMCPToolsEndToEnd(t *testing.T) {
+	requireChromeE2E(t)
 	for _, external := range []bool{false, true} {
 		name := "managed"
 		if external {

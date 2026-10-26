@@ -45,6 +45,7 @@ func TestExternalBrowserEndpointDiscovery(t *testing.T) {
 // TestExternalBrowserLifecycle uses an independently owned Chrome. Tool
 // teardown must preserve its process, existing tabs and newly opened tabs.
 func TestExternalBrowserLifecycle(t *testing.T) {
+	requireChromeE2E(t)
 	execPath := os.Getenv("NEX_CHROME_EXEC_PATH")
 	if execPath == "" {
 		for _, name := range []string{"google-chrome", "chromium", "chromium-browser"} {
