@@ -4,94 +4,88 @@ A personal workspace for using coding agents in your browser.
 
 NexBox brings conversations, source files, Git, terminals, and workflows together in a single interface. It runs on your computer or your own server and directly invokes the agent CLIs configured on that machine. The frontend is bundled with the Go service, so only a single executable is needed at runtime—there is no separate frontend to deploy or desktop shell to install.
 
+![NexBox workspace](docs/images/screenshot.jpg)
+
 ## Features
 
 - **Multi-agent conversations**: Claude Code, Codex, Pi, Kimi Code, ZeroClaw, and Crush, with streaming text, reasoning, and tool calls.
 - **Session management**: Resume and fork conversations, pin sessions, sort by activity, and send follow-up messages while an agent is running when supported by the backend.
 - **Code workspace**: File browsing, search, a Monaco editor, tool-call diffs, and a multi-repository Git panel.
 - **Terminal and browser**: An integrated terminal and optional Chrome browser tools.
-- **Reusable capabilities**: Prompt templates, MCP, Skills, and a plugin marketplace, with both project-level and global installation.
+- **Reusable capabilities**: Prompt templates, MCP, Skills, with both project-level and global installation.
 - **Task automation**: Workflows, scheduling, and cross-session collaboration.
-
-![screenshot](docs/images/screenshot.jpg)
-
-## Requirements
-
-| Component | Requirement |
-| --- | --- |
-| Operating system | Linux or macOS; use WSL2 on Windows |
-| Go | 1.25 or later; required only for builds |
-| Node.js / npm | Node.js 22.12+ and npm 9+; required only for builds and frontend development |
-
-For remote deployment instructions, see the [operations guide](docs/ops_manual.md).
 
 ## Quick Start
 
-From the source directory, run:
+> Install Git and make sure at least one [supported agent CLI](docs/agents.md) is configured and can run independently under the same system account that will run NexBox.
+>
+> NexBox itself does not require Go, Node.js, npm, or the source directory to run. Individual agent CLIs may have their own dependencies. For source builds, see the [development guide](docs/development.md#prerequisites).
+
+### 1. Download
+
+Download the archive for your platform from the [latest release](https://github.com/esonic/nexbox/releases/latest): Linux AMD64, Linux ARM64, or macOS Apple Silicon. On Windows, use the Linux archive inside WSL2.
+
+### 2. Start
+
+Extract the archive into a writable directory, open a terminal there, and start NexBox:
 
 ```bash
-./build.sh
+chmod +x nexbox
+./nexbox
 ```
 
-The build script installs frontend dependencies according to the lockfile, builds the frontend, and embeds it in the Go executable. The resulting binary is written to `dist/nexbox`. The Go build automatically downloads any missing modules. If you already have the executable, you can run it directly without using the build script.
+### 3. Open Workspace
 
-Tagged releases provide ready-to-run archives for Linux on AMD64 and ARM64, plus macOS on Apple Silicon. Download the archive matching your platform from GitHub Releases, extract the single `nexbox` executable, and run it. On Windows, use the Linux archive inside WSL2.
-
-Start NexBox:
-
-```bash
-./dist/nexbox
-```
-
-Open <http://127.0.0.1:9040> to get started. No account or sign-in is required. Select a configured agent to start a conversation, or create a project and connect it to an existing source directory. Before using an agent for the first time, make sure its CLI can run independently under the same system account.
+Open <http://127.0.0.1:9040>. Select a configured agent to start a conversation, or create a project and connect it to an existing source directory.
 
 ### Optional: Enable Password Login
 
-For remote access or sharing with trusted users, you can add a local account:
+A new installation allows access without signing in. For remote access or sharing with trusted users, add a local account to enable password login:
 
 ```bash
 read -r -s -p 'Password: ' NEXBOX_PASSWORD
 printf '\n'
-./dist/nexbox add-user local "$NEXBOX_PASSWORD"
+./nexbox add-user local "$NEXBOX_PASSWORD"
 unset NEXBOX_PASSWORD
 ```
 
-Password login is enabled immediately after you add the first account, with no restart required. Existing projects and sessions are assigned to that account, while their files remain in place. Deleting the last account restores passwordless access. Instances that already have accounts will continue to require sign-in after an upgrade.
-
-Accounts are local to this NexBox instance and do not require registration with an external service. For detailed commands, see [Local Accounts](docs/ops_manual.md#本地账号).
-
-## Common Commands
+Run this in another terminal while NexBox is running. If you start the service with a custom data directory, replace the `add-user` line above with the following, using the same directory:
 
 ```bash
-./build.sh                         # Build dist/nexbox from source, including the frontend
-./dist/nexbox --help               # Show server options and account commands
-./dist/nexbox --port 9050          # Use a different port
-./dist/nexbox list-users           # List local accounts
+./nexbox add-user --data-dir /path/to/data local "$NEXBOX_PASSWORD"
 ```
 
-The executable can be placed in any writable directory. By default, the data directory is the directory containing the executable. You can also specify it explicitly:
+Adding the first account enables password login immediately, with no restart required. Existing projects and sessions are assigned to that account, and files stay in place. Deleting the last account restores passwordless access. Instances with existing accounts still require sign-in after an upgrade.
+
+Accounts are local to your NexBox instance and require no external registration. For password resets and other account commands, see [Local Accounts](docs/ops_manual.md#local-accounts).
+
+## Common Settings
 
 ```bash
-export NEXBOX_DATA_DIR="$HOME/nexbox-data"
-./dist/nexbox list-users
-./dist/nexbox
+./nexbox --help        # Show server options and account commands
+./nexbox --port 9050   # Use a different port
 ```
 
-Account commands and the server must use the same data directory. New data directories allow passwordless access by default. The `--data-dir` server option takes precedence over the environment variable.
+By default, NexBox stores its data in the directory containing the executable. To use a separate data directory:
 
-Node.js, npm, Go, and the source directory are not required at runtime, but Git and the CLI for each agent you use must be installed. To deploy NexBox to another machine, copy an executable that matches its operating system and CPU architecture, then configure the agents on the target machine.
+```bash
+./nexbox --data-dir /path/to/data
+```
+
+Account commands and the server must use the same data directory. The `--data-dir` option works for both.
+
+For remote access, server deployment, and upgrades, see the [operations guide](docs/ops_manual.md).
 
 ## Documentation
 
 - [Deployment, Configuration, and Maintenance](docs/ops_manual.md): Local operation, server deployment, data directories, and upgrades.
-- [Development Guide](docs/development.md): Development servers, builds, verification, and code structure.
 - [Agent Support](docs/agents.md): CLIs, protocols, model selection, and capability limitations.
 - [Architecture](docs/architecture.md): Processes, storage, and workspace semantics.
 - [Marketplace and MCP](docs/marketplace.md): Sources, installation scopes, authorization, and availability.
 
 ## Contributing and Security
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development checks and pull request
+See the [development guide](docs/development.md) for build requirements, source builds, development servers, tests, and code structure. See [CONTRIBUTING.md](CONTRIBUTING.md) for development checks and pull request
 guidance. Report vulnerabilities privately according to
 [SECURITY.md](SECURITY.md); do not put credentials or exploit details in a
 public issue. Bundled dependency licenses are listed in

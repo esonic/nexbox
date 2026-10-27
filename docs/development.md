@@ -1,79 +1,96 @@
-# 开发指南
+# Development Guide
 
-## 准备环境
+## Prerequisites
 
-依赖版本见[运行要求](../README.md#运行要求)。直接构建完整程序：
+For regular use, download a release without building from source; see the [README quick start](../README.md#quick-start). Building and developing from source requires:
+
+| Component | Requirement |
+| --- | --- |
+| Operating system | Linux or macOS; use WSL2 on Windows |
+| Go | 1.25 or later |
+| Node.js / npm | Node.js 22.12+ and npm 9+ |
+| Git | Required to obtain the source and use Git features |
+
+Clone the repository and enter the project directory:
+
+```bash
+git clone https://github.com/esonic/nexbox.git
+cd nexbox
+```
+
+Build and start the complete application:
 
 ```bash
 ./build.sh
+./dist/nexbox
 ```
 
-构建脚本包含 `npm ci`。只开发前端时，也可以手动执行 `npm ci --prefix web`；Go 模块由 `go run`、`go build` 和 `go test` 自动下载。
+The build script runs `npm ci`. For frontend-only development, you can also run `npm ci --prefix web` manually. Go modules are downloaded automatically by `go run`, `go build`, and `go test`.
 
-## 开发服务
+## Development Servers
 
-先按[快速开始](../README.md#快速开始)完成构建。开发时使用独立的数据目录，新目录默认免登录；测试账号功能时，账号命令和服务必须指向同一目录：
+Run the following commands from the repository root to use a separate development data directory and complete the initial build. New data directories allow passwordless access by default. When testing accounts, account commands and the service must use the same directory:
 
 ```bash
 export NEXBOX_DATA_DIR="$HOME/nexbox-dev-data"
 ./build.sh
 ```
 
-终端一启动 Go 服务：
+Start the Go service in one terminal:
 
 ```bash
 cd server
 NEXBOX_DATA_DIR="$HOME/nexbox-dev-data" go run .
 ```
 
-终端二启动前端：
+Start the frontend in another terminal:
 
 ```bash
 cd web
 npm run dev
 ```
 
-前端默认地址为 `http://localhost:5173`，Vite 将 `/api` 与 `/ws` 转发到 `localhost:9040`。修改后端端口时，在运行前端的终端同步设置 `PORT`：
+The default frontend address is `http://localhost:5173`. Vite proxies `/api` and `/ws` to `localhost:9040`. If you change the backend port, set `PORT` in the terminal running the frontend:
 
 ```bash
 PORT=9050 npm run dev
 ```
 
-`PORT` 只控制开发代理目标；Go 服务使用 `--port`。实际前端端口以 Vite 输出为准。
+`PORT` controls only the development proxy target; use `--port` for the Go service. Use the actual frontend port printed by Vite.
 
-## 构建
+## Builds
 
 ```bash
 ./build.sh
 ./dist/nexbox --version
 ```
 
-构建先生成前端，再更新 `server/webdist/`，最后通过 Go embed 生成单个可执行文件。`server/webdist/.gitkeep` 保证干净检出时 Go 包也能编译；其余前端构建产物不提交。
+The build generates the frontend, updates `server/webdist/`, and embeds the assets in a single Go executable. `server/webdist/.gitkeep` lets Go packages compile from a clean checkout; generated frontend assets are not committed.
 
-可覆盖产物路径：
+Override the output path if needed:
 
 ```bash
 NEXBOX_OUTPUT=dist/nexbox-preview ./build.sh
 ./dist/nexbox-preview
 ```
 
-相对产物路径始终相对仓库根目录解析。默认版本来自 `git describe --tags --always --dirty`；源码包没有 Git 信息时使用 `dev`。
+Relative output paths are always resolved against the repository root. The default version comes from `git describe --tags --always --dirty`; source archives without Git metadata use `dev`.
 
-## 验证
+## Verification
 
 ```bash
 cd server
 go test ./...
 ```
 
-默认服务端测试不启动宿主机浏览器，因此适合本地开发和普通 CI。真实 Chrome/Chromium 端到端测试需要安装浏览器并显式启用：
+The default backend tests do not launch a host browser and are suitable for local development and regular CI. Real Chrome/Chromium end-to-end tests require an installed browser and explicit opt-in:
 
 ```bash
 cd server
 NEXBOX_CHROME_E2E=1 go test -v -count=1 -timeout=10m ./mcp/chrome
 ```
 
-仓库的 **Browser E2E** workflow 也可从 GitHub Actions 页面手动运行。依赖已登录 CLI 或真实模型的测试仍按各测试文件中的环境变量显式启用；普通测试不要求配置模型服务。
+The repository's **Browser E2E** workflow can also be run manually from GitHub Actions. Tests that require authenticated CLIs or real models remain opt-in through the environment variables documented in their test files. Regular tests do not require a model service.
 
 ```bash
 cd web
@@ -82,26 +99,26 @@ npm run build
 npm run lint
 ```
 
-`npm test` 覆盖免登录路由、账号界面、会话排序、Git 刷新及市场安装作用域。仓库仍有历史 ESLint 问题；提交改动前检查受影响文件，并避免引入新的告警。
+`npm test` covers passwordless routes, account interfaces, session ordering, Git refresh behavior, and marketplace installation scopes. The repository still has existing ESLint issues; check affected files before submitting changes and avoid introducing new warnings.
 
-原生 MCP 联调使用临时配置和本机模型／MCP 测试服务。需要对应 CLI，但不调用真实模型：
+Native MCP integration tests use temporary configuration and local model/MCP test servers. They require the corresponding CLIs but do not call real models:
 
 ```bash
 cd server
 MCP_NATIVE_INTEGRATION=1 go test ./api -run '^TestNative(Codex|Pi|Claude|Kimi)' -v
 ```
 
-## 代码结构
+## Code Structure
 
-| 路径 | 职责 |
+| Path | Responsibility |
 | --- | --- |
-| `web/src/components/` | 对话、文件、Git、终端和通用界面 |
-| `web/src/hooks/`、`web/src/stores/` | 前端状态和交互协调 |
-| `server/api/` | HTTP / WebSocket、项目和会话调度 |
-| `server/agent/` | 各 Agent 的机器协议适配 |
-| `server/store/` | SQLite 与本地数据模型 |
-| `server/gitrepo/` | 仓库发现、范围解析和 Git 工作区 |
-| `server/mcp/` | 内置 MCP 与浏览器工具 |
-| `server/workflow/` | 工作流图与执行引擎 |
+| `web/src/components/` | Conversations, files, Git, terminals, and shared UI |
+| `web/src/hooks/`, `web/src/stores/` | Frontend state and interaction coordination |
+| `server/api/` | HTTP / WebSocket, projects, and session scheduling |
+| `server/agent/` | Machine protocol adapters for each agent |
+| `server/store/` | SQLite and local data models |
+| `server/gitrepo/` | Repository discovery, scope resolution, and Git workspaces |
+| `server/mcp/` | Built-in MCP and browser tools |
+| `server/workflow/` | Workflow graphs and execution engine |
 
-新增能力时保持 Agent 差异位于适配器内部；界面通过能力声明判断 fork、插话、模型切换和浏览器支持，不根据显示名称猜测行为。
+Keep agent differences inside adapters when adding capabilities. The interface uses capability declarations for forking, follow-up messages while running, model switching, and browser support; it must not infer behavior from display names.

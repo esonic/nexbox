@@ -85,8 +85,8 @@ func (c *chromeEnablerImpl) EnableChrome(sessionID string) (string, []string, er
 
 func main() {
 	// CLI subcommands (`nexbox add-user`, `list-users`, etc.) are dispatched
-	// before flag parsing so they can take positional args without colliding
-	// with the server's --flag options. The dispatcher also handles `-h` /
+	// before server flag parsing and parse their own --data-dir option before
+	// positional arguments. The dispatcher also handles `-h` /
 	// `--help` / `help` by printing combined usage.
 	if handled, code := runCLISubcommand(defaultDataDir()); handled {
 		os.Exit(code)

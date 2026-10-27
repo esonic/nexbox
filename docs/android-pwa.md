@@ -1,9 +1,9 @@
-# 移动端浏览器与 PWA
+# Mobile Browsers and PWA
 
-NexBox 的同一套 Web 界面可在桌面和移动端浏览器中使用。服务器部署时，通过该实例的地址访问；本地部署时，`127.0.0.1` 指向当前设备，需要根据访问方式选择监听地址或隧道。
+The same NexBox web interface works in desktop and mobile browsers. For server deployments, open the instance's address. For local deployments, `127.0.0.1` refers to the current device; choose a listening address or tunnel appropriate to how you connect.
 
-前端包含 `manifest.webmanifest`、应用图标和独立窗口显示配置。支持的浏览器可使用“添加到主屏幕”或“安装应用”入口。安装入口是否出现由浏览器和访问环境决定。
+The frontend includes `manifest.webmanifest`, app icons, and standalone window display settings. Supported browsers may offer an "Add to Home Screen" or "Install App" option. Availability depends on the browser and access environment.
 
-当前没有离线执行模式：浏览器仍需连接 NexBox 服务，对话由服务所在机器上的 CLI 执行。PWA 不会把 Agent 安装到手机，也不是 Electron 或原生客户端。
+There is no offline execution mode: the browser must remain connected to the NexBox service, and conversations run through CLIs on the service's machine. Installing the PWA does not install an agent on your phone, and it is not an Electron or native client.
 
-Android TWA 的域名关联取决于具体部署的域名、Android 包名和签名。仓库中的 `web/public/.well-known/assetlinks.json` 是原有 Android 包的关联配置；自行发布 Android 包时需替换为自己的关联信息。NexBox 不提供通用 APK 构建或发布流程。
+Android Trusted Web Activity (TWA) domain association depends on the deployment's domain, Android package name, and signing certificate. Configure your own association through `public_web.android_asset_links` in the instance's `config.json`; see the [operations guide](ops_manual.md#optional-site-verification-and-android-twa). NexBox does not provide a general-purpose APK build or release workflow.

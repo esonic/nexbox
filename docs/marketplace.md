@@ -1,36 +1,36 @@
-# Marketplace 与 MCP
+# Marketplace and MCP
 
-Marketplace 管理可复用的 MCP、Skills 和插件。来源可以是本地目录或 Git 仓库；也可以在界面中添加单个 HTTP MCP。NexBox 不预置私人或公司内部的市场来源。
+The marketplace manages reusable MCP connections, Skills, and plugins. Sources can be local directories or Git repositories; individual HTTP MCP connections can also be added through the interface. NexBox does not include private or company-internal marketplace sources.
 
-## 来源与安装
+## Sources and Installation
 
-添加来源只是把内容加入可浏览列表，不等于安装其中所有项目。安装时选择全局或具体项目作用域，并填写该项目要求的配置。
+Adding a source makes its contents browsable; it does not install every item. When installing, choose the global or project scope and provide the item's required configuration.
 
-- **全局安装**面向当前 NexBox 实例，并可供后续创建的项目使用。
-- **项目安装**只用于对应项目，同名安装优先于全局配置。
-- 已安装项目的 Install 操作可继续调整作用域；保存时只应用发生变化的部分。
-- 移除某个作用域时保留其他安装；移除项目覆盖项后可回退到全局安装。
+- **Global installations** apply to the current NexBox instance and are available to projects created later.
+- **Project installations** apply only to the selected project and take precedence over global installations with the same name.
+- The Install action on an installed item can adjust its scopes. Saving applies only the changes.
+- Removing one scope preserves other installations. Removing a project override allows fallback to the global installation.
 
-删除来源会卸载仅由该来源提供的安装项；其他来源仍提供同名项目时会保留。已安装但已不在任何来源中的项目仍会显示，方便手动卸载。
+Deleting a source uninstalls items provided only by that source. Items with the same name still provided by other sources are retained. Installed items no longer listed in any source remain visible so they can be uninstalled manually.
 
-## MCP 授权
+## MCP Authorization
 
-HTTP MCP 使用安装配置中的 headers；OAuth 在需要时替换 Authorization。凭据或授权失效时，界面会显示相应状态。完成授权后向同一会话再次发送消息即可重新检查，不必删除整个会话。
+HTTP MCP uses headers from installation configuration; OAuth replaces Authorization when needed. The interface reports expired credentials or authorization. After completing authorization, send another message in the same session to retry the checks; deleting the session is unnecessary.
 
-每轮对话前，NexBox 对已安装的 HTTP MCP 执行初始化和工具发现，只有通过检查的连接器才传给 Agent。状态包括：
+Before each turn, NexBox initializes installed HTTP MCP connections and discovers their tools. Only connectors that pass these checks are passed to the agent. Status values include:
 
-| 状态 | 含义 |
+| Status | Meaning |
 | --- | --- |
-| `ready` | HTTP 初始化与工具发现成功 |
-| `needs_auth` | 需要完成 OAuth 授权 |
-| `auth_rejected` | 服务端拒绝了当前配置的授权信息 |
-| `unavailable` | 配置、连接、协议或工具发现失败 |
-| `runtime_managed` | stdio 连接器，由 Agent CLI 决定是否可用 |
+| `ready` | HTTP initialization and tool discovery succeeded |
+| `needs_auth` | OAuth authorization is required |
+| `auth_rejected` | The server rejected the configured authorization |
+| `unavailable` | Configuration, connection, protocol, or tool discovery failed |
+| `runtime_managed` | A stdio connector whose availability is managed by the agent CLI |
 
-工具名称会按运行时限制规范化，调用时再映射回上游名称；显示名称、安装作用域和 OAuth 身份保持独立。代理保留上游 401 响应，兼容通知的空响应以及支持的旧版 MCP 协议协商。
+Tool names are normalized to runtime constraints and mapped back to upstream names when called. Display names, installation scopes, and OAuth identities remain independent. The proxy preserves upstream 401 responses, accepts empty notification responses, and negotiates supported older MCP protocol versions.
 
-## 各 Agent 的差异
+## Agent Differences
 
-MCP、Skills 和插件是否能执行，取决于对应 Agent 的原生接口。Pi 的 NexBox extension 当前只支持 HTTP MCP；stdio 的 `runtime_managed` 状态不代表已经通过 HTTP 检查。Claude Code 插件目录和组件不会自动变成所有后端都支持的原生插件。
+Whether MCP connections, Skills, and plugins can run depends on the agent's native interface. Pi's NexBox extension currently supports only HTTP MCP. A stdio connector's `runtime_managed` status does not mean it has passed HTTP checks. Claude Code plugin directories and components do not automatically become native plugins supported by every backend.
 
-内置任务管理工具默认关闭，可在设置中启用。Chrome 工具按会话启用，其适用 Agent 见 [Agent 支持](agents.md)。
+Built-in task management tools are disabled by default and can be enabled in settings. Chrome tools are enabled per session; see [Agent Support](agents.md) for compatible agents.

@@ -2,7 +2,9 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,10 +34,28 @@ func validUsername(name string) error {
 // It returns (handled, exitCode). When handled is false the regular server
 // startup path takes over.
 func runCLISubcommand(dataDir string) (bool, int) {
-	if len(os.Args) < 2 {
+	return runCLISubcommandArgs(os.Args[1:], dataDir)
+}
+
+func runCLISubcommandArgs(args []string, dataDir string) (bool, int) {
+	// Locate the command after any leading data-dir option. Other leading
+	// flags belong to the server and are left to its flag parser.
+	commandIndex := 0
+	for commandIndex < len(args) {
+		arg := args[commandIndex]
+		if arg == "--data-dir" || arg == "-data-dir" {
+			commandIndex += 2
+		} else if strings.HasPrefix(arg, "--data-dir=") || strings.HasPrefix(arg, "-data-dir=") {
+			commandIndex++
+		} else {
+			break
+		}
+	}
+	if commandIndex >= len(args) {
 		return false, 0
 	}
-	switch os.Args[1] {
+	command := args[commandIndex]
+	switch command {
 	case "help", "-h", "-help", "--help":
 		printUsage()
 		return true, 0
@@ -43,6 +63,31 @@ func runCLISubcommand(dataDir string) (bool, int) {
 		// fallthrough; handled below
 	default:
 		return false, 0
+	}
+
+	// Parse global options and command options before opening a database.
+	// Like the server parser, options precede positional arguments.
+	options := append([]string{}, args[:commandIndex]...)
+	options = append(options, args[commandIndex+1:]...)
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.StringVar(&dataDir, "data-dir", dataDir, "Data directory")
+	if err := flags.Parse(options); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printUsage()
+			return true, 0
+		}
+		fmt.Fprintf(os.Stderr, "invalid account command options: %v\n", err)
+		return true, 2
+	}
+	if strings.TrimSpace(dataDir) == "" {
+		fmt.Fprintln(os.Stderr, "data-dir must not be empty")
+		return true, 2
+	}
+	args = flags.Args()
+	if command == "list-users" && len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "Usage: nexbox list-users [--data-dir <path>]")
+		return true, 2
 	}
 
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
@@ -57,8 +102,7 @@ func runCLISubcommand(dataDir string) (bool, int) {
 	defer db.Close()
 	s := store.NewSQLiteStore(db)
 
-	args := os.Args[2:]
-	switch os.Args[1] {
+	switch command {
 	case "add-user":
 		return true, cmdAddUser(s, args)
 	case "del-user":
@@ -188,7 +232,8 @@ func printUsage() {
 
 Usage:
   nexbox [flags]                 start the HTTP server
-  nexbox <subcommand> [args...]  run an admin subcommand and exit
+  nexbox [--data-dir <path>] <subcommand> [options] [args...]
+                                run an admin subcommand and exit
 
 Server flags:
   -listen <addr>     Listen address (default 127.0.0.1)
@@ -208,8 +253,9 @@ Subcommands (all open the data directory and exit):
                                      account restores passwordless access.
   reset-password <username> <pw>     Set a new password for the user.
 
-For subcommands, the data directory comes from NEXBOX_DATA_DIR if set,
-otherwise the binary's own directory. (--data-dir is a server-only flag.)
+For both the server and subcommands, --data-dir overrides NEXBOX_DATA_DIR,
+which otherwise defaults to the binary's directory. Place --data-dir before
+the subcommand or immediately after it, before positional arguments.
 
 With no login accounts, open the app directly; no setup or login is needed.
 Account commands take effect without restarting the server.
@@ -217,7 +263,8 @@ Account commands take effect without restarting the server.
 Examples:
   nexbox add-user local "$NEXBOX_PASSWORD"
   nexbox list-users
-  NEXBOX_DATA_DIR=/var/lib/nexbox nexbox list-users
+  nexbox --data-dir /var/lib/nexbox list-users
+  nexbox add-user --data-dir /var/lib/nexbox local "$NEXBOX_PASSWORD"
   nexbox --port 9040 --listen 0.0.0.0
 
 `)

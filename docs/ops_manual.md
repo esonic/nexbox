@@ -1,102 +1,103 @@
-# 部署、配置与维护
+# Deployment, Configuration, and Maintenance
 
-NexBox 是运行在你自己的电脑或服务器上的工具。一个 Go 进程提供 API、WebSocket 和内嵌前端，SQLite 保存本地数据；Agent CLI 与终端在同一系统账号下执行。
+NexBox runs on your own computer or server. A single Go process serves the API, WebSocket, and embedded frontend, while SQLite stores local data. Agent CLIs and terminals run under the same system account.
 
-## 本地运行
+## Local Usage
 
-从源码构建：
-
-```bash
-./build.sh
-```
-
-启动：
+Download the archive matching your platform from the [latest release](https://github.com/esonic/nexbox/releases/latest), extract it into a writable directory, and run:
 
 ```bash
-./dist/nexbox
+chmod +x nexbox
+./nexbox
 ```
 
-默认监听 `127.0.0.1:9040`，打开即可使用，无需创建账号或登录。前端已嵌入可执行文件，不需要另起 Node.js 服务。默认数据目录是可执行文件所在目录；构建产物位于 `dist/`，因此上述命令默认将数据写入 `dist/`。
+To build from source instead, see the [development guide](development.md#prerequisites).
 
-## 使用已有可执行文件
+By default, NexBox listens on `127.0.0.1:9040`. A new installation requires no account or sign-in. The frontend is embedded in the executable, so a separate Node.js service is unnecessary. The default data directory is the executable's directory. For source builds, the default executable is `dist/nexbox`, so its data is stored in `dist/` unless overridden.
 
-把匹配目标平台的 `nexbox` 文件放到任意可写目录，直接运行即可，不需要安装器、启动脚本或源码。如果文件没有执行权限，先执行 `chmod +x nexbox`。
+## Using an Existing Executable
 
-例如，将文件放在 `/opt/nexbox/nexbox` 后：
+Place a `nexbox` executable matching the target platform in any writable directory and run it directly. No installer, startup script, or source code is required. If it lacks execute permission, run `chmod +x nexbox` first.
+
+For example, after placing it at `/opt/nexbox/nexbox`:
 
 ```bash
 /opt/nexbox/nexbox --help
 /opt/nexbox/nexbox
 ```
 
-也可以把程序与数据分开存放：
+You can also store the executable and data separately:
 
 ```bash
-export NEXBOX_DATA_DIR="$HOME/nexbox-data"
-/opt/nexbox/nexbox list-users
-/opt/nexbox/nexbox
+/opt/nexbox/nexbox list-users --data-dir /path/to/data
+/opt/nexbox/nexbox --data-dir /path/to/data
 ```
 
-默认免登录。需要密码登录时再添加账号；账号命令与服务启动使用同一数据目录即可。
+New installations allow passwordless access. Add an account if you need password login, using the same data directory for account commands and the service.
 
-## 服务器部署
+## Server Deployment
 
-目标机器需要 Git，以及所用 Agent 的 CLI、登录或 provider 配置。Chrome/Chromium 仅在使用托管浏览器时需要。只运行已构建的 NexBox 文件不需要 Go、Node.js 或 npm；构建产物必须匹配目标操作系统和 CPU 架构。
+The target machine needs Git and the CLIs, authentication, or provider configuration for the agents you use. Chrome/Chromium is required only for the managed browser. Running a prebuilt NexBox executable does not require Go, Node.js, or npm. The executable must match the target operating system and CPU architecture.
 
-用运行服务的同一系统账号验证 Agent CLI。服务管理器通常不会读取交互式 shell 配置，因此需要显式设置 CLI 所需的 `PATH` 和环境变量。
+Verify each agent CLI under the same system account that runs the service. Service managers usually do not read interactive shell configuration, so explicitly set the required `PATH` and environment variables.
 
-公开域名访问或与受信的人共用时，可先按下文[本地账号](#本地账号)添加账号并启用密码登录。访问模式只由是否存在登录账号决定，不会根据监听地址或域名自动切换。
+For public domain access or sharing with trusted users, add an account as described under [Local Accounts](#local-accounts) to enable password login. The access mode depends only on whether login accounts exist; it does not change automatically based on the listening address or domain.
 
-直接监听远程地址：
+Listen on a remote address directly:
 
 ```bash
 NEXBOX_DATA_DIR=/var/lib/nexbox /opt/nexbox/nexbox --listen 0.0.0.0 --port 9040
 ```
 
-也可以保持默认回环监听，通过现有的 SSH 隧道或 HTTPS 反向代理访问。反向代理需要转发 WebSocket，并允许长时间流式响应；不要为对话连接启用响应缓冲或过短的空闲超时。
+Alternatively, keep the default loopback address and use an existing SSH tunnel or HTTPS reverse proxy. The proxy must forward WebSocket connections and allow long-running streamed responses. Disable response buffering for conversation connections and avoid short idle timeouts.
 
-NexBox 服务本身提供 HTTP。公开网络的 TLS 在反向代理层配置。运行环境用于个人或受信用户，所有 Agent 和终端共享运行服务的系统账号权限。
+The NexBox service provides HTTP. Configure TLS for public access at the reverse proxy. The runtime is intended for personal or trusted-user use; all agents and terminals share the service account's system permissions.
 
-需要开机启动或进程守护时，可自行使用惯用的服务管理器。NexBox 不要求特定的启动脚本。
+Use your preferred service manager for startup at boot or process supervision. NexBox does not require a particular startup script.
 
-## 运行参数
+## Runtime Options
 
-| 参数 | 默认值 | 含义 |
+| Option | Default | Meaning |
 | --- | --- | --- |
-| `--listen` | `127.0.0.1` | HTTP 监听地址 |
-| `--port` | `9040` | HTTP 端口 |
-| `--data-dir` | 见下文 | 服务数据目录 |
-| `--version` | — | 显示构建版本后退出 |
-| `--help` | — | 显示服务和账号命令 |
+| `--listen` | `127.0.0.1` | HTTP listening address |
+| `--port` | `9040` | HTTP port |
+| `--data-dir` | See below | Service data directory |
+| `--version` | — | Print the build version and exit |
+| `--help` | — | Show service options and account commands |
 
-服务数据目录的优先级为：
+Data directory precedence:
 
-1. 显式 `--data-dir` 参数。
-2. `NEXBOX_DATA_DIR` 环境变量。
-3. 可执行文件所在目录。
+1. Explicit `--data-dir` option.
+2. `NEXBOX_DATA_DIR` environment variable.
+3. Directory containing the executable.
 
-账号子命令在启动服务前执行，使用环境变量或可执行文件所在目录；`--data-dir` 仅用于服务启动。
-
-## 本地账号
-
-账号是可选功能。没有登录账号时，所有访问直接进入同一个本地工作区，界面不显示账号和退出登录入口。
+The same precedence applies to account subcommands. Place `--data-dir` before the subcommand or immediately after it, before positional arguments:
 
 ```bash
-./dist/nexbox list-users
-./dist/nexbox add-user local "$NEXBOX_PASSWORD"
-./dist/nexbox reset-password local "$NEXBOX_PASSWORD"
-./dist/nexbox del-user local
+./nexbox --data-dir /path/to/data list-users
+./nexbox add-user --data-dir /path/to/data local "$NEXBOX_PASSWORD"
 ```
 
-创建和重设密码前，在终端以隐藏输入方式设置 `NEXBOX_PASSWORD`，完成后 `unset NEXBOX_PASSWORD`。账号名由 1–32 个英文字母、数字、下划线或连字符组成。
+## Local Accounts
 
-添加第一个账号会立即启用密码登录，已有项目和会话归入该账号，文件路径不变。后续添加的账号各自创建项目；删除最后一个账号后，全部项目恢复为免登录工作区。账号增删无需重启；切换模式时，已打开的对话和终端连接会断开，页面重新检查登录状态。
+Accounts are optional. Without login accounts, all visitors enter the same local workspace directly, and the interface hides account and sign-out controls.
 
-账号通过本机命令管理，没有外部注册、邮件服务或管理员角色配置。已有账号的实例升级后仍需登录。启用密码登录时，服务重启会让已有登录失效，需要重新登录。
+```bash
+./nexbox list-users
+./nexbox add-user local "$NEXBOX_PASSWORD"
+./nexbox reset-password local "$NEXBOX_PASSWORD"
+./nexbox del-user local
+```
 
-## 应用配置
+Before creating or resetting a password, set `NEXBOX_PASSWORD` through hidden terminal input, then run `unset NEXBOX_PASSWORD` afterward. Account names must contain 1–32 ASCII letters, digits, underscores, or hyphens.
 
-首次启动会创建 `<data-dir>/config.json`。常用选项可在界面设置中修改。下列为配置格式示例：
+Adding the first account immediately enables password login and assigns existing projects and sessions to that account without changing file paths. Additional accounts create their own projects. Deleting the last account returns all projects to the passwordless workspace. Adding or deleting accounts requires no restart. Mode changes disconnect open conversation and terminal connections, and the page rechecks login status.
+
+Accounts are managed through local commands, with no external registration, email service, or administrator role configuration. Instances with existing accounts still require login after upgrades. When password login is enabled, restarting the service invalidates existing logins and requires users to sign in again.
+
+## Application Configuration
+
+The first startup creates `<data-dir>/config.json`. Common options can be changed in the interface. Example configuration:
 
 ```json
 {
@@ -110,22 +111,21 @@ NexBox 服务本身提供 HTTP。公开网络的 TLS 在反向代理层配置。
 }
 ```
 
-| 配置 | 含义 |
+| Setting | Meaning |
 | --- | --- |
-| `default_agent` | 新会话和轻量辅助任务使用的默认 Agent |
-| `chrome_headless` | 新建托管 Chrome 时使用无头模式 |
-| `mcp_tools.task_management` | 是否向 Agent 暴露内置任务管理工具，默认关闭 |
-| `suggest_next_actions` | 是否请求回复末尾给出可点击的后续建议，默认开启 |
-| `prompt_templates` | 全局提示词模板，单项包含 `name` 和 `content` |
-模型服务、登录信息和 Agent 原生配置由对应 CLI 管理，不写入这个配置文件。手动编辑 `config.json` 后重启服务；在界面修改的设置按各功能直接生效。当前存储后端为 SQLite。
+| `default_agent` | Default agent for new sessions and lightweight helper tasks |
+| `chrome_headless` | Use headless mode for newly created managed Chrome instances |
+| `mcp_tools.task_management` | Expose built-in task management tools to agents; disabled by default |
+| `suggest_next_actions` | Request clickable follow-up suggestions at the end of replies; enabled by default |
+| `prompt_templates` | Global prompt templates; each entry contains `name` and `content` |
 
-如需为 Claude CLI 指定独立临时目录，可设置 `NEXBOX_CLAUDE_TMPDIR`。该值会原样传给 Claude CLI 的 `CLAUDE_CODE_TMPDIR`。
+Model services, authentication, and native agent configuration are managed by the corresponding CLI rather than this file. Restart the service after editing `config.json` manually. Settings changed in the interface take effect according to each feature's behavior. The current storage backend is SQLite.
 
-### 可选的站点验证与 Android TWA
+To give Claude CLI a separate temporary directory, set `NEXBOX_CLAUDE_TMPDIR`. Its value is passed unchanged to the CLI's `CLAUDE_CODE_TMPDIR`.
 
-只有需要域名所有权验证或 Android Trusted Web Activity 的公开部署才需要
-`public_web`。普通本地和服务器部署无需添加这些字段。配置后，NexBox 会提供
-对应的根目录验证文件及 `/.well-known/assetlinks.json`：
+### Optional Site Verification and Android TWA
+
+Only public deployments that need domain ownership verification or Android Trusted Web Activity require `public_web`. Regular local and server deployments do not need these fields. When configured, NexBox serves the corresponding root-level verification files and `/.well-known/assetlinks.json`:
 
 ```json
 {
@@ -141,44 +141,43 @@ NexBox 服务本身提供 HTTP。公开网络的 TLS 在反向代理层配置。
 }
 ```
 
-这些部署值放在实例现有的 `config.json` 中，不需要额外配置文件。没有配置时，
-相关 URL 不会发布验证内容。
+Store these deployment values in the instance's existing `config.json`; no extra configuration file is needed. Without configuration, the corresponding URLs do not publish verification content.
 
-## 数据与工作目录
+## Data and Working Directories
 
-| 路径 | 内容 |
+| Path | Contents |
 | --- | --- |
-| `nexbox.db` | 账号、项目、会话、消息、工作流、市场安装记录等 |
-| `config.json` | 应用设置 |
-| `logs/` | 运行日志，按大小轮转 |
-| `users/` | 由 NexBox 自动创建的项目工作目录 |
-| `sessions/` | 会话附件等文件 |
-| `worktrees/` | 会话或工作流创建的 Git worktree |
-| `marketplace/` | 市场来源及其本地副本 |
-| `global-plugins/` | 按需创建的全局插件安装目录 |
-| `chrome/` | 托管 Chrome 的用户数据 |
-| `crush/` | 使用 Crush 时的适配器运行数据 |
+| `nexbox.db` | Accounts, projects, sessions, messages, workflows, marketplace installations, and other records |
+| `config.json` | Application settings |
+| `logs/` | Runtime logs, rotated by size |
+| `users/` | Project working directories created automatically by NexBox |
+| `sessions/` | Session attachments and related files |
+| `worktrees/` | Git worktrees created by sessions or workflows |
+| `marketplace/` | Marketplace sources and local copies |
+| `global-plugins/` | Global plugin installation directory, created on demand |
+| `chrome/` | Managed Chrome user data |
+| `crush/` | Adapter runtime data when using Crush |
 
-以上路径均相对数据目录。用户自行指定的项目路径可以位于数据目录之外；Agent 原生的会话和登录数据也可能存放在其自己的主目录中。只保存 `nexbox.db` 不包含这些外部文件。
+All paths above are relative to the data directory. User-selected project paths can be outside it. Native agent session and login data may also be stored in the agent's own home directory. Saving only `nexbox.db` does not include those external files.
 
-项目可自动创建目录，也可接入现有目录；接入现有路径不会把文件复制进数据目录。
+Projects can create directories automatically or connect to existing directories. Connecting an existing path does not copy its files into the data directory.
 
-## 升级与停止
+## Upgrades and Shutdown
 
-1. 停止 NexBox，保留原有数据目录。
-2. 更新源码后执行 `./build.sh`，或直接替换为匹配目标平台的新可执行文件。
-3. 使用原数据目录启动。SQLite 迁移会在启动时执行。
+1. Stop NexBox and retain the existing data directory.
+2. Replace the executable with the new version matching the target platform, or update the source and run `./build.sh`.
+3. Start NexBox with the same data directory. SQLite migrations run at startup.
 
-替换文件前停止原有进程，更新完成后重新启动。命令行运行时使用 `Ctrl+C`，服务管理器使用正常的停止命令；服务处理 SIGINT/SIGTERM 并关闭浏览器和 MCP 资源。数据迁移不承诺支持旧版本回退。
+Stop the existing process before replacing the executable, then restart after the update. Use `Ctrl+C` for a foreground process or the normal stop command for your service manager. NexBox handles SIGINT/SIGTERM and closes browser and MCP resources. Data migrations do not guarantee downgrade compatibility.
 
-## 常见问题
+## Troubleshooting
 
-**找不到构建产物**：默认产物是 `dist/nexbox`。设置过 `NEXBOX_OUTPUT` 时，运行该变量指定位置的文件。
+**Cannot find the build output**: The default output is `dist/nexbox`. If `NEXBOX_OUTPUT` was set, run the executable at that location.
 
-**账号创建后无法登录，或者看不到已有数据**：确认账号命令与服务使用相同的程序和数据目录；尤其注意服务的 `--data-dir` 是否覆盖了 `NEXBOX_DATA_DIR`。
+**Cannot log in after creating an account, or existing data is missing**: Confirm that account commands and the service use the same executable and data directory. In particular, check whether the service's `--data-dir` overrides `NEXBOX_DATA_DIR`.
 
-**Agent 找不到或无法使用模型**：确认 CLI 在运行服务的账号和 `PATH` 下可用，并能独立完成一次请求。部分 CLI 仅在启动时检测是否注册；安装后重启 NexBox。
+**Agent not found or unable to use a model**: Confirm that the CLI is available under the service account and `PATH`, and can complete a request independently. Some CLIs are registered only at startup; restart NexBox after installation.
 
-**浏览器工具无法启动**：确认已安装 Chrome/Chromium；服务器一般保留 `chrome_headless: true`。连接外部 Chrome 时，填写 NexBox 服务进程可访问的 DevTools 地址。
+**Browser tools fail to start**: Confirm Chrome/Chromium is installed. Servers should generally keep `chrome_headless: true`. For external Chrome, provide a DevTools address reachable by the NexBox service process.
 
-**远程访问时对话或终端中断**：检查反向代理的 WebSocket 转发、响应缓冲和连接超时。先直接访问 NexBox 监听端口，以区分服务与代理问题。
+**Remote conversations or terminals disconnect**: Check the reverse proxy's WebSocket forwarding, response buffering, and connection timeouts. Access the NexBox listening port directly first to distinguish service issues from proxy issues.

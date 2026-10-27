@@ -1,64 +1,64 @@
-# Claude Code 协议排查
+# Claude Code Protocol Troubleshooting
 
-本文面向适配器维护者。Claude Code CLI 升级后，如果出现空回复、对话长时间处理中、后台任务提前结束或工具 diff 丢失，先检查协议事件与回合边界。
+This guide is for adapter maintainers. After a Claude Code CLI upgrade, investigate protocol events and turn boundaries if responses are empty, conversations remain in progress, background tasks end early, or tool diffs disappear.
 
-## 适配方式
+## Adapter Design
 
-NexBox 每轮启动一个 Claude CLI 子进程，续聊时传入原生 session ID。`server/agent/claude_cli.go` 通过 stream-json 与双向 control 协议读取事件、响应交互请求并管理子进程；`claude_agent.go` 再把它们映射为界面事件。
+NexBox starts a Claude CLI subprocess for each turn and passes the native session ID when resuming. `server/agent/claude_cli.go` reads events, responds to interactive requests, and manages the subprocess through stream-json and the bidirectional control protocol. `claude_agent.go` maps these to interface events.
 
-一个前台 `result` 不一定代表所有工作已经结束。适配器会识别提前到达的空结果，跟踪后台任务，并在确认回合结束后关闭输入、等待进程退出。
+A foreground `result` does not necessarily mean all work has finished. The adapter recognizes premature empty results, tracks background tasks, and closes input and waits for process exit only after confirming that the turn has ended.
 
-## 收集信息
+## Information to Collect
 
-先记录 NexBox 构建版本、Claude CLI 版本、是否续聊、是否存在后台 Agent，以及问题是否能在普通单轮请求中复现。
+Record the NexBox build version, Claude CLI version, whether the session is resumed, whether background agents are involved, and whether the issue reproduces with a simple single-turn request.
 
 ```bash
 ./dist/nexbox --version
 claude --version
 ```
 
-服务日志位于 `<data-dir>/logs/nexbox.log`。分析时关注事件类型、子类型、原生 session ID、tool ID、parent tool ID 与到达顺序。分享日志前移除对话正文、个人路径和授权信息。
+Service logs are stored in `<data-dir>/logs/nexbox.log`. Focus on event types, subtypes, native session IDs, tool IDs, parent tool IDs, and arrival order. Remove conversation content, personal paths, and authorization information before sharing logs.
 
-区分两个会话标识：
+Distinguish the two session identifiers:
 
-- NexBox 的会话 ID 对应 SQLite `chat_messages.session_id`，用于界面、API 和项目关联。
-- CLI 的原生 session ID 用于续聊，不等于 NexBox 会话 ID。
+- The NexBox session ID corresponds to SQLite `chat_messages.session_id` and links the interface, API, and project.
+- The CLI's native session ID is used for continuation and differs from the NexBox session ID.
 
-## 关键边界
+## Key Boundaries
 
-### 提前到达的 result
+### Premature Results
 
-续聊并处理遗留后台通知时，CLI 可能先输出没有实际回合内容的结果。适配器结合 `num_turns`、费用和已经收到的内容判断是否忽略，而不是见到第一个 `result` 就结束。
+When resuming and processing pending background notifications, the CLI may emit a result before any actual turn content. The adapter uses `num_turns`, cost, and content already received to decide whether to ignore it, rather than ending at the first `result`.
 
-### 后台任务
+### Background Tasks
 
-支持的 CLI 会通过 `background_tasks_changed` 提供运行中任务快照。适配器用快照替换本地任务集合，避免增量通知遗漏或重复。旧协议仍通过 `task_started`、终态通知和 user 消息中的 `<task-notification>` 更新集合。
+Supported CLI versions provide snapshots of running tasks through `background_tasks_changed`. The adapter replaces its local task set with each snapshot to avoid missing or duplicating incremental notifications. Older protocols still update the set through `task_started`, terminal-state notifications, and `<task-notification>` in user messages.
 
-任务集合非空时，前台结果不会立即结束读取。新增任务类型时需要明确其生命周期，不能仅根据工具卡片已返回就判断后台任务结束。
+A foreground result does not immediately end reading while the task set is nonempty. When adding task types, define their lifecycle explicitly. A returned tool card alone does not establish that background work has finished.
 
-### 工具结果与 diff
+### Tool Results and Diffs
 
-SDK stream-json 使用 `tool_use_result`，保存的 transcript 可能使用 `toolUseResult`；两种拼写都需要接受。Edit 的 `structuredPatch` 可生成 diff；Write 明确标记为 create 时可呈现新增文件。覆盖写入没有旧内容或补丁时，不应凭空构造全绿 diff。
+SDK stream-json uses `tool_use_result`, while saved transcripts may use `toolUseResult`; accept both spellings. An Edit result's `structuredPatch` can produce a diff. A Write result explicitly marked as create can be shown as a new file. Do not fabricate an all-added diff for an overwrite when neither previous content nor a patch is available.
 
-### 子进程收尾
+### Subprocess Cleanup
 
-正常回合结束后，适配器给进程有限的退出宽限期；超过 `postTurnExitGrace` 时终止残留进程组。用户停止通过 context 取消中断运行。要区分“仍有工作，继续读取”和“工作结束，进程未退出”两种情况。
+After a normal turn ends, the adapter gives the process a bounded exit grace period. If it exceeds `postTurnExitGrace`, the remaining process group is terminated. A user stop interrupts execution through context cancellation. Distinguish ongoing work that requires continued reading from completed work whose process has not exited.
 
-## 症状与检查方向
+## Symptoms and Checks
 
-| 症状 | 优先检查 |
+| Symptom | Check first |
 | --- | --- |
-| CLI 原生记录有回答，界面却为空 | 是否在真实内容到达前处理了提前 result；是否遗漏 assistant 内容事件 |
-| 一直显示处理中 | 后台任务集合是否正确清空；读取循环是否已退出但在等待子进程 |
-| 子 Agent 尚未完成，主回合就结束 | 任务类型、parent tool ID 和完成通知是否正确映射 |
-| 工具调用完成但没有 diff | 结果字段拼写、structuredPatch，以及新建／覆盖写入的区别 |
-| 消息重复或分裂 | 同一回合是否重复派发；流式增量与最终快照是否被重复追加 |
+| Native CLI records contain a response, but the interface is empty | Premature results handled before actual content; missing assistant content events |
+| Conversation stays in progress | Background task set not cleared; read loop exited but waiting for the subprocess |
+| Main turn ends before a subagent finishes | Task types, parent tool IDs, and completion notification mapping |
+| Tool call finishes without a diff | Result field spellings, structuredPatch, and create versus overwrite behavior |
+| Messages are duplicated or split | Duplicate dispatch of a turn; appending both streamed deltas and final snapshots |
 
-## 回归与协议探针
+## Regression Tests and Protocol Probes
 
 ```bash
 cd server
 go test ./agent -run 'TestQuery|TestClaude'
 ```
 
-对应测试集中在 `claude_cli_premature_result_test.go`、`claude_subagent_test.go` 和 `claude_diff_test.go`。需要验证新 CLI 行为时，在临时工作目录中使用最小请求记录原始事件，再把相关事件序列转成可重复的测试夹具。不要让协议回归测试依赖个人项目、生产模型或开发机中的固定目录。
+Relevant tests are in `claude_cli_premature_result_test.go`, `claude_subagent_test.go`, and `claude_diff_test.go`. To verify a new CLI's behavior, capture raw events from a minimal request in a temporary working directory, then turn the relevant event sequence into repeatable test fixtures. Protocol regression tests must not depend on personal projects, production models, or fixed directories on a developer's machine.
