@@ -13,7 +13,7 @@ NexBox brings conversations, source files, Git, terminals, and workflows togethe
 - **Reusable capabilities**: Prompt templates, MCP, Skills, and a plugin marketplace, with both project-level and global installation.
 - **Task automation**: Workflows, scheduling, and cross-session collaboration.
 
-![screenshot](docs/images/screenshot.png)
+![screenshot](docs/images/screenshot.jpg)
 
 ## Requirements
 
