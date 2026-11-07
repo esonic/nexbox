@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useLayoutStore } from "@/stores/layout";
+import { compareProjectsByName } from "@/lib/project-order";
 import { sortSessions } from "@/lib/session-order";
 import { UNASSIGNED_PROJECT } from "@/lib/constants";
 import type { Project, Session } from "@/types";
@@ -13,7 +14,7 @@ export interface SessionGroupData {
 /**
  * Groups sessions by project into the ordered list the sidebar renders:
  * one group per "working" project (those with a local dir), in saved project
- * order (newest first initially), with unassigned sessions appended last.
+ * order (by name initially), with unassigned sessions appended last.
  * Hidden ("scratch") sessions are excluded. Pinned sessions lead each group;
  * other sessions follow manual order or conversation activity.
  */
@@ -61,14 +62,12 @@ export function useGroupedSessions(sessions: Session[], projects: Project[]): Se
       });
     }
 
-    // Keep saved project order; newly linked projects appear first.
+    // Keep manual project order; projects without a saved rank lead by name.
     const ranks = new Map(projectOrder.map((id, i) => [id, i]));
     result.sort((a, b) => {
       const order = (ranks.get(a.projectId!) ?? -1) - (ranks.get(b.projectId!) ?? -1);
       if (order) return order;
-      const aTime = new Date(a.project?.created_at || 0).getTime();
-      const bTime = new Date(b.project?.created_at || 0).getTime();
-      return bTime - aTime;
+      return compareProjectsByName(a.project!, b.project!);
     });
 
     // Add unbound sessions at the end (Unassigned group)

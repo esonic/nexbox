@@ -1,5 +1,5 @@
-import { useRef, useEffect, useState, useCallback, memo, useMemo } from "react";
-import { Circle, Clock, Wrench, MessageSquare, Loader2, ArrowDown } from "lucide-react";
+import { useRef, useEffect, useLayoutEffect, useState, useCallback, memo, useMemo } from "react";
+import { Circle, Clock, Wrench, MessageSquare, Loader2, ArrowDown, ChevronUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatMessage, CopyButton, ForkButton, extractPlainText, stripAllNextActions } from "@/components/chat/ChatMessage";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -11,13 +11,14 @@ import { useAppStore } from "@/stores/app";
 import { UNASSIGNED_PROJECT } from "@/lib/constants";
 import { formatDuration, formatMessageTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { isSystemNotice } from "@/lib/systemNotice";
 import type { Session, Project, ChatMessage as ChatMessageType } from "@/types";
 
 const MessageFooter = memo(function MessageFooter({ message, canFork }: { message: ChatMessageType; canFork: boolean }) {
   // Suggestions are rendered as chips and should not be included when copying.
   const plainText = useMemo(() => stripAllNextActions(extractPlainText(message.parts)), [message.parts]);
 
-  if (message.isStreaming || message.role === "system") return null;
+  if (message.isStreaming || isSystemNotice(message)) return null;
 
   const isUser = message.role === "user";
   const { metadata, parts } = message;
@@ -96,6 +97,7 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
     isConnected,
     loadingHistory,
     loadingMore,
+    loadMoreError,
     hasMore,
     pendingQuestion,
     pendingTodo,
@@ -137,7 +139,17 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
     messagesEndRef.current?.scrollIntoView({ behavior });
   }, []);
 
-  useEffect(() => {
+  // Reading gestures clear the dot; automatic scrolling as replies arrive
+  // must leave it intact when the user hasn't interacted with the messages.
+  const markViewedSessionRead = useCallback(() => {
+    const store = useAppStore.getState();
+    if (!document.hidden && store.activeSessionId === session.id && store.unreadSessions[session.id]) {
+      store.markSessionRead(session.id);
+    }
+  }, [session.id]);
+
+  useLayoutEffect(() => {
+    prevScrollHeightRef.current = 0;
     shouldFollowRef.current = true;
     setIsAtBottom(true);
   }, [session.id]);
@@ -149,36 +161,24 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
     setIsAtBottom(atBottom);
     shouldFollowRef.current = atBottom;
+  }, []);
 
-    // Load more messages when scrolling near the top
-    if (el.scrollTop < 100 && hasMore && !loadingMore && !loadingHistory) {
-      loadMoreMessages();
-    }
-  }, [hasMore, loadingMore, loadingHistory, loadMoreMessages]);
-
-  // Preserve scroll position when loading more messages
-  useEffect(() => {
+  const handleLoadMore = useCallback(() => {
+    if (loadingMore) return;
+    shouldFollowRef.current = false;
     const el = containerRef.current;
-    if (!el || !loadingMore) return;
+    if (el) prevScrollHeightRef.current = el.scrollHeight;
+    void loadMoreMessages();
+  }, [loadingMore, loadMoreMessages]);
 
-    // Store the scroll height before new messages are loaded
-    prevScrollHeightRef.current = el.scrollHeight;
-  }, [loadingMore]);
-
-  useEffect(() => {
+  // Restore the viewport before paint; browser scroll anchoring is disabled
+  // on this container so it cannot apply the same adjustment a second time.
+  useLayoutEffect(() => {
     const el = containerRef.current;
-    if (!el || loadingMore) return;
-
-    // After messages are loaded, adjust scroll position
-    if (prevScrollHeightRef.current > 0) {
-      const newScrollHeight = el.scrollHeight;
-      const heightDiff = newScrollHeight - prevScrollHeightRef.current;
-      if (heightDiff > 0) {
-        el.scrollTop += heightDiff;
-      }
-      prevScrollHeightRef.current = 0;
-    }
-  }, [messages.length, loadingMore]);
+    if (!el || loadingMore || !prevScrollHeightRef.current) return;
+    el.scrollTop += el.scrollHeight - prevScrollHeightRef.current;
+    prevScrollHeightRef.current = 0;
+  }, [messages, loadingMore, hasMore, loadMoreError]);
 
   // Auto-scroll on new messages or after history loads
   useEffect(() => {
@@ -190,7 +190,9 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
       return;
     }
     if (shouldFollowRef.current) {
-      requestAnimationFrame(() => scrollToBottom());
+      requestAnimationFrame(() => {
+        if (shouldFollowRef.current) scrollToBottom();
+      });
     }
   }, [messages, loadingHistory, scrollToBottom]);
 
@@ -277,9 +279,41 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
       <div
         ref={containerRef}
         onScroll={handleScroll}
+        onWheel={(event) => { if (event.deltaY !== 0) markViewedSessionRead(); }}
+        onTouchMove={markViewedSessionRead}
+        onKeyDown={(event) => {
+          if (event.target === event.currentTarget &&
+              ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+            markViewedSessionRead();
+          }
+        }}
+        onPointerDown={(event) => {
+          const el = event.currentTarget;
+          if (event.target === el && el.scrollHeight > el.clientHeight &&
+              event.clientX >= el.getBoundingClientRect().left + el.clientWidth) {
+            markViewedSessionRead();
+          }
+        }}
+        tabIndex={0}
         className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden"
+        style={{ overflowAnchor: "none" }}
       >
         <div className="flex flex-col min-w-0 gap-6 flex-1 max-w-4xl mx-auto px-4 pt-4 pb-4">
+          {!loadingHistory && hasMore && (
+            <div className="flex flex-col items-center gap-1 py-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleLoadMore}
+                disabled={loadingMore}
+                className="h-8 gap-1.5 text-xs font-normal text-muted-foreground"
+              >
+                {loadingMore ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronUp className="h-3.5 w-3.5" />}
+                {loadingMore ? "Loading earlier messages…" : loadMoreError ? "Retry loading earlier messages" : "Load earlier messages"}
+              </Button>
+              {loadMoreError && <p role="status" className="text-xs text-muted-foreground">Couldn’t load messages. Please try again.</p>}
+            </div>
+          )}
           {loadingHistory ? (
             <div className="flex flex-col items-center justify-center py-20">
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -301,11 +335,6 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
             </div>
           ) : (
             <>
-              {loadingMore && (
-                <div className="flex justify-center py-2">
-                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                </div>
-              )}
               <div data-messages="" className="flex flex-col gap-6">
                 {messages.map((msg) => (
                   <ErrorBoundary key={msg.id}>
@@ -327,7 +356,7 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
             <Button
               variant="outline"
               size="icon-sm"
-              onClick={() => { scrollToBottom("smooth"); shouldFollowRef.current = true; }}
+              onClick={() => { markViewedSessionRead(); scrollToBottom("smooth"); shouldFollowRef.current = true; }}
               className="rounded-full shadow-md text-muted-foreground pointer-events-auto"
             >
               <ArrowDown />

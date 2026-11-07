@@ -1,8 +1,8 @@
 import { useMemo, useState, useCallback, useRef, useEffect, memo, type ReactNode } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { resolveLang, ensureLangRegistered, highlightCode } from "@/lib/highlight";
-import { Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, ChevronUp, FileEdit, Sparkles, ArrowRight, CornerDownRight, Maximize2 } from "lucide-react";
+import { Info, Loader2, X, Copy, Check, FileText, FileCode, FlaskConical, TestTube, ScrollText, GitBranch, GitFork, ChevronDown, ChevronRight, ChevronUp, FileEdit, Sparkles, ArrowRight, CornerDownRight, Maximize2 } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { ThinkingIndicator } from "@/components/chat/ThinkingIndicator";
@@ -12,7 +12,9 @@ import { ThinkingBlock } from "@/components/chat/ThinkingBlock";
 import { WidgetBlock } from "@/components/chat/WidgetBlock";
 import { DiffPreview, DiffStats } from "@/components/chat/DiffPreview";
 import { IssueRow } from "@/plugins/task/IssueRow";
-import { messagesApi, sessionsApi } from "@/lib/api";
+import { filesApi, messagesApi, sessionsApi } from "@/lib/api";
+import { chatFileLineSuffix, parseChatFileLink } from "@/lib/chatFileLinks";
+import { isSystemNotice } from "@/lib/systemNotice";
 import { toast } from "sonner";
 import { useAppStore } from "@/stores/app";
 import { usePreferences, CHAT_FONT_SIZE_PX } from "@/stores/preferences";
@@ -561,21 +563,39 @@ function MdTable({ children, ...props }: React.ComponentPropsWithoutRef<"table">
   );
 }
 
+function ChatLink({ href, children }: { href?: string; children?: ReactNode }) {
+  const file = parseChatFileLink(href);
+  const project = useAppStore((s) => s.currentProject);
+  const session = useAppStore((s) => s.currentSession);
+  if (!file) return <a href={href} target="_blank" rel="noopener noreferrer" className="text-primary underline underline-offset-2 decoration-primary/40 hover:decoration-primary transition-colors">{children}</a>;
+
+  const lineSuffix = chatFileLineSuffix(children, file.line);
+  const open = async () => {
+    if (!project || !session || session.project_id !== project.id) { toast.error("No project is available for this file"); return; }
+    try {
+      const sessionId = session.worktree_mode === "worktree" && session.worktree_path ? session.id : undefined;
+      const result = await filesApi.resolveLink(project.id, file.path, sessionId);
+      const current = useAppStore.getState();
+      if (current.currentProject?.id !== project.id || current.currentSession?.id !== session.id) return;
+      window.dispatchEvent(new CustomEvent("open-file", { detail: { path: result.path, line: file.line, safeLink: true } }));
+    } catch (err) { toast.error(err instanceof Error ? err.message : "Failed to open file"); }
+  };
+  return (
+    <button type="button" onClick={open} title={file.path + (file.line ? `:${file.line}` : "")}
+      className="chat-file-link inline max-w-full break-words align-baseline rounded-sm p-0 text-[1em] font-normal leading-[inherit] text-[#3b82d0] dark:text-[#9ac4e0] hover:text-[#256bb8] dark:hover:text-[#b4d5ec] hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-colors">
+      <FileCode className="mr-1 inline-block h-[0.9em] w-[0.9em] align-[-0.1em]" aria-hidden="true" />
+      <span>{children}</span>
+      {lineSuffix && <span>{lineSuffix}</span>}
+    </button>
+  );
+}
+
 const MD_COMPONENTS: Components = {
   // pre is unwrapped — MdCode (rendered from `code`) owns the <pre>.
   pre: ({ children }) => <>{children}</>,
   code: MdCode,
   table: ({ children }) => <MdTable>{children}</MdTable>,
-  a: ({ href, children }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-primary underline underline-offset-2 decoration-primary/40 hover:decoration-primary transition-colors"
-    >
-      {children}
-    </a>
-  ),
+  a: ({ href, children }) => <ChatLink href={href}>{children}</ChatLink>,
 };
 
 const TextBlock = memo(function TextBlock({ content, isStreaming }: { content: string; isStreaming?: boolean }) {
@@ -588,12 +608,13 @@ const TextBlock = memo(function TextBlock({ content, isStreaming }: { content: s
   return useMemo(() => {
     if (!visible) return null;
     return (
-    <ReactMarkdown
-      remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
-      components={MD_COMPONENTS}
-    >
-      {visible}
-    </ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
+        components={MD_COMPONENTS}
+        urlTransform={(url) => parseChatFileLink(url) ? url : defaultUrlTransform(url)}
+      >
+        {visible}
+      </ReactMarkdown>
     );
   }, [visible]);
 });
@@ -1188,6 +1209,22 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
   const workflowRefs = isUser
     ? message.parts.filter((p) => p.type === "workflow_ref") as Array<{ type: "workflow_ref"; workflowId: string; name: string; nodeCount?: number; edgeCount?: number }>
     : [];
+
+  if (isSystemNotice(message)) {
+    return (
+      <div className="flex w-full justify-center py-1">
+        <div className="flex min-w-0 max-w-full items-start gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <div className="min-w-0 space-y-1">
+            <div className="text-[10px] font-medium uppercase tracking-wide">System notification</div>
+            <div className="break-words [&_a]:underline [&_a]:underline-offset-2">
+              <TextBlock content={plainText} />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

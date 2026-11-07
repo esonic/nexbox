@@ -1,6 +1,9 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import {
+  PanelLeftClose,
+  PanelLeftOpen,
   GitBranch,
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -11,21 +14,24 @@ import {
   X,
   Loader2,
   RefreshCw,
-  PanelLeftClose,
-  PanelLeftOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { gitApi, type GitBranchResponse, type GitScope } from "@/lib/api";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
-export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, onNavigate, sidebarCollapsed, onToggleSidebar, branchData }: {
+export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, onNavigate, sidebarCollapsed, onToggleSidebar, branchData, trailingActions, showRefresh = true, controlsTarget, actionsTarget }: {
   scope: GitScope;
   branchData?: GitBranchResponse;
   onBranchChanged?: () => void;
   aheadCount?: number;
-  navLabel?: string;
-  onNavigate?: (direction: "prev" | "next") => void;
   sidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
+  navLabel?: string;
+  onNavigate?: (direction: "prev" | "next") => void;
+  trailingActions?: ReactNode;
+  showRefresh?: boolean;
+  controlsTarget?: HTMLDivElement | null;
+  actionsTarget?: HTMLDivElement | null;
 }) {
   const [showDropdown, setShowDropdown] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -33,20 +39,7 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
   const [switching, setSwitching] = useState(false);
   const [pushing, setPushing] = useState(false);
   const [pulling, setPulling] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setShowDropdown(false);
-        setCreating(false);
-        setNewBranchName("");
-      }
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, []);
 
   useEffect(() => {
     if (creating && inputRef.current) inputRef.current.focus();
@@ -129,21 +122,21 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
   const localBranches = branchData?.branches.filter((b) => !b.is_remote) ?? [];
   const remoteBranches = branchData?.branches.filter((b) => b.is_remote) ?? [];
 
-  return (
-    <div className="flex items-center gap-1 px-2 py-1.5 border-b text-xs">
-      {onToggleSidebar && (
+  // Undefined preserves standalone use; null waits for the workspace header.
+  const embedded = controlsTarget !== undefined;
+  const controls = (
+    <>
+      {onToggleSidebar && <button type="button" onClick={onToggleSidebar} title={sidebarCollapsed ? "Show file list" : "Hide file list"} className="p-1 rounded hover:bg-accent text-muted-foreground">{sidebarCollapsed ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}</button>}
+      <div className="relative min-w-0">
+        <Popover open={showDropdown} onOpenChange={(open) => {
+          setShowDropdown(open);
+          if (!open) { setCreating(false); setNewBranchName(""); }
+        }}>
+        <PopoverTrigger asChild>
         <button
-          onClick={onToggleSidebar}
-          className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-          title={sidebarCollapsed ? "Show changes panel" : "Hide changes panel"}
-        >
-          {sidebarCollapsed ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}
-        </button>
-      )}
-      <div className="relative" ref={dropdownRef}>
-        <button
-          onClick={() => setShowDropdown(!showDropdown)}
-          className="flex items-center gap-1.5 px-2 py-1 rounded hover:bg-muted transition-colors max-w-[180px]"
+          className={cn("flex items-center gap-1.5 py-1 rounded hover:bg-muted transition-colors", embedded ? "px-1 max-w-[72px] md:max-w-[80px] [@container(min-width:640px)]:max-w-[180px]" : "px-2 max-w-[180px]")}
+          title={branchData?.current ? `Switch branch (${branchData.current})` : "Switch branch"}
+          aria-label="Switch branch"
         >
           <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           <span className="truncate font-medium">{branchData?.current || "..."}</span>
@@ -151,9 +144,8 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
             <span className="text-[10px] text-blue-500">{aheadCount}↑</span>
           )}
         </button>
-
-        {showDropdown && (
-          <div className="absolute top-full left-0 mt-1 w-64 bg-popover border rounded-md shadow-lg z-50 max-h-80 overflow-y-auto">
+        </PopoverTrigger>
+          <PopoverContent align="start" sideOffset={4} className="w-[22rem] max-w-[calc(100vw-2rem)] p-0 max-h-80 overflow-y-auto overflow-x-hidden text-xs">
             {creating ? (
               <div className="p-2 flex items-center gap-1">
                 <input
@@ -190,9 +182,10 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
                     onClick={() => !b.is_current && handleCheckout(b.name)}
                     disabled={switching || b.is_current}
                     className={cn("w-full px-3 py-1.5 text-left hover:bg-muted transition-colors flex items-center gap-2", b.is_current && "bg-muted/50 font-medium")}
+                    title={b.name}
                   >
                     {b.is_current && <Check className="h-3 w-3 text-primary shrink-0" />}
-                    <span className={cn("truncate", !b.is_current && "ml-5")}>{b.name}</span>
+                    <span className={cn("truncate min-w-0", !b.is_current && "ml-5")}>{b.name}</span>
                     {(b.ahead || 0) > 0 && <span className="text-[10px] text-blue-500 ml-auto shrink-0">{b.ahead}↑</span>}
                     {(b.behind || 0) > 0 && <span className="text-[10px] text-orange-500 shrink-0">{b.behind}↓</span>}
                   </button>
@@ -213,48 +206,67 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
                         else if (!local.is_current) handleCheckout(localName);
                       }}
                       disabled={switching || local?.is_current}
-                      className={cn("w-full px-3 py-1.5 text-left hover:bg-muted transition-colors flex items-center gap-2 ml-5", local?.is_current && "opacity-50")}
+                      className={cn("w-full pl-8 pr-3 py-1.5 text-left hover:bg-muted transition-colors flex items-center gap-2", local?.is_current && "opacity-50")}
                       title={local ? (local.is_current ? `Already on ${localName}` : `Switch to local ${localName}`) : `Create ${localName} tracking ${b.name}`}
                     >
-                      <span className="truncate">{b.name}</span>
+                      <span className="truncate min-w-0">{b.name}</span>
                       {local && <span className="text-[10px] text-muted-foreground ml-auto shrink-0">local</span>}
                     </button>
                   );
                 })}
               </>
             )}
-          </div>
-        )}
+          </PopoverContent>
+        </Popover>
       </div>
 
-      <div className="flex items-center gap-0.5">
-        <button onClick={handlePull} disabled={pulling} className="p-1.5 rounded hover:bg-muted transition-colors disabled:opacity-50" title="Pull">
+      <div className={cn("flex items-center shrink-0", embedded ? "gap-1" : "gap-0.5")}>
+        <button onClick={handlePull} disabled={pulling} className={cn("rounded hover:bg-muted transition-colors disabled:opacity-50", embedded ? "p-1" : "p-1.5")} title="Pull">
           {pulling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowDownToLine className="h-3.5 w-3.5" />}
         </button>
-        <button onClick={handlePush} disabled={pushing} className="p-1.5 rounded hover:bg-muted transition-colors disabled:opacity-50" title="Push">
+        <button onClick={handlePush} disabled={pushing} className={cn("rounded hover:bg-muted transition-colors disabled:opacity-50", embedded ? "p-1" : "p-1.5")} title="Push">
           {pushing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUpFromLine className="h-3.5 w-3.5" />}
         </button>
       </div>
-
-      <div className="ml-auto flex items-center gap-0.5">
+    </>
+  );
+  const actions = (
+    <>
         {onNavigate && (
           <>
-            {navLabel && <span className="text-[10px] text-muted-foreground tabular-nums mr-0.5">{navLabel}</span>}
+            {navLabel && <span className={cn("text-[10px] text-muted-foreground tabular-nums mr-0.5", embedded && "hidden [@container(min-width:640px)]:inline")}>{navLabel}</span>}
             <button onClick={() => onNavigate("prev")}
-              className="p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+              className={cn("rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground", embedded ? "p-0.5" : "p-1.5")}
               title="Previous">
               <ChevronUp className="h-3.5 w-3.5" />
             </button>
             <button onClick={() => onNavigate("next")}
-              className="p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+              className={cn("rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground", embedded ? "p-0.5" : "p-1.5")}
               title="Next">
               <ChevronDown className="h-3.5 w-3.5" />
             </button>
           </>
         )}
-        <button onClick={onBranchChanged} className="p-1.5 rounded hover:bg-muted transition-colors" title="Refresh">
-          <RefreshCw className="h-3.5 w-3.5" />
-        </button>
+        {showRefresh && (
+          <button onClick={onBranchChanged} className="p-1.5 rounded hover:bg-muted transition-colors" title="Refresh">
+            <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+        )}
+        {trailingActions}
+    </>
+  );
+
+  if (embedded) {
+    return <>
+      {controlsTarget && createPortal(controls, controlsTarget)}
+      {actionsTarget && createPortal(actions, actionsTarget)}
+    </>;
+  }
+  return (
+    <div className="flex items-center gap-1 px-2 py-1.5 border-b text-xs">
+      {controls}
+      <div className="ml-auto flex items-center gap-0.5">
+        {actions}
       </div>
     </div>
   );

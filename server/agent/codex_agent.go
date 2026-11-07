@@ -1469,6 +1469,9 @@ func (a *CodexAgent) SendMessage(
 			if isCodexSessionExpiredError(err) {
 				return Result{}, ErrSessionExpired
 			}
+			if isCodexActiveWriterError(err) {
+				return Result{}, errCodexThreadBusy
+			}
 			return Result{}, err
 		}
 		threadID = resp.Thread.ID
@@ -2003,4 +2006,16 @@ func compareVersionGE(a, b string) bool {
 		}
 	}
 	return true
+}
+
+// errCodexThreadBusy replaces Codex's terse "already has an active writer"
+// resume failure. It is deliberately not ErrSessionExpired: the thread is fine
+// and must keep its id, so the caller must not start a fresh one.
+var errCodexThreadBusy = errors.New("This session is currently held by another Codex process. " +
+	"Run `codex app-server daemon restart` (or `stop`) to release it, then send the message again")
+
+// isCodexActiveWriterError reports whether thread/resume was refused because
+// another process owns the thread's writer lock.
+func isCodexActiveWriterError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "already has an active writer")
 }

@@ -56,6 +56,61 @@ func (s *Server) resolveFilesRoot(r *http.Request, projectID string) (string, er
 	return repositoryContext.Repository.CanonicalRoot, nil
 }
 
+// ResolveProjectFileLink converts an agent's file path to the current workspace's
+// relative path, which is the identity used by the Files panel.
+func (s *Server) ResolveProjectFileLink(w http.ResponseWriter, r *http.Request) {
+	root, err := s.resolveFilesRoot(r, chi.URLParam(r, "projectId"))
+	if err != nil {
+		writeRepositoryError(w, err)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	if filepath.IsAbs(path) {
+		absoluteRoot, err := filepath.Abs(root)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid workspace")
+			return
+		}
+		rel, err := filepath.Rel(absoluteRoot, filepath.Clean(path))
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			writeError(w, http.StatusBadRequest, "file is outside the current workspace")
+			return
+		}
+		path = rel
+	}
+	path = filepath.Clean(path)
+	if path == "." {
+		writeError(w, http.StatusBadRequest, "path is a directory")
+		return
+	}
+	if _, err := resolveSafePath(root, path); err != nil {
+		writeError(w, http.StatusBadRequest, "file is outside the current workspace")
+		return
+	}
+	// Keep chat links within the workspace even when a path component is a
+	// symlink. os.Root performs this check while opening the target.
+	workspace, err := os.OpenRoot(root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid workspace")
+		return
+	}
+	defer workspace.Close()
+	info, err := workspace.Stat(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "file not found in the current workspace")
+		return
+	}
+	if !info.Mode().IsRegular() {
+		writeError(w, http.StatusBadRequest, "path is not a regular file")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"path": filepath.ToSlash(path)})
+}
+
 func rejectRepositoryDirectoryOperation(w http.ResponseWriter, r *http.Request) bool {
 	if r.URL.Query().Get("repository_id") == "" {
 		return false

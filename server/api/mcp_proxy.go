@@ -86,6 +86,7 @@ func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 		r.ContentLength = int64(len(body))
 	}
 
@@ -101,6 +102,7 @@ func (s *Server) HandleMCPProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proxy := &httputil.ReverseProxy{
+		Transport: &mcpOAuthTransport{server: s, mcp: mcp},
 		Director: func(req *http.Request) {
 			req.URL = fwdURL
 			req.Host = fwdURL.Host
@@ -226,12 +228,23 @@ func (s *Server) mcpRequestHeaders(mcp *store.InstalledMCP) (map[string]string, 
 		resolved = make(map[string]string)
 	}
 
-	if mcp.AuthType == "oauth_discovery" || mcp.AuthType == "oauth" {
+	useOAuth := mcp.AuthType == "oauth_discovery" || mcp.AuthType == "oauth"
+	if mcp.AuthType == "none" && s.Store != nil {
+		_, err := mcpTargetURL(mcp.Manifest)
+		useOAuth = err == nil
+	}
+	if useOAuth {
 		authHeader, err := s.oauthHeader(mcp)
 		if err != nil {
 			return nil, err
 		}
 		if authHeader != "" {
+			if mcp.AuthType == "none" {
+				mcp.AuthType = "oauth_discovery"
+				if err := s.Store.UpdateInstalledMCPAuthType(mcp.Name, mcp.ProjectID, mcp.AuthType); err != nil {
+					return nil, err
+				}
+			}
 			for name := range resolved {
 				if strings.EqualFold(name, "Authorization") {
 					delete(resolved, name)
@@ -244,37 +257,7 @@ func (s *Server) mcpRequestHeaders(mcp *store.InstalledMCP) (map[string]string, 
 }
 
 func (s *Server) oauthHeader(mcp *store.InstalledMCP) (string, error) {
-	tok, err := s.Store.GetMCPOAuthToken(mcp.Name, mcp.ProjectID)
-	if err != nil {
-		return "", fmt.Errorf("get oauth token: %w", err)
-	}
-	if tok == nil || tok.AccessToken == "" {
-		// No token yet — forward the request without auth; upstream will 401
-		// which is caught by ModifyResponse and triggers the auth prompt.
-		return "", nil
-	}
-
-	// Lazy refresh: if token expires within 5 minutes, try to refresh.
-	if !tok.ExpiresAt.IsZero() && time.Until(tok.ExpiresAt) < 5*time.Minute {
-		if tok.RefreshToken != "" && tok.TokenEndpoint != "" {
-			refreshed, err := refreshOAuthToken(tok)
-			if err == nil {
-				refreshed.MCPName = mcp.Name
-				refreshed.ProjectID = mcp.ProjectID
-				_ = s.Store.UpsertMCPOAuthToken(*refreshed)
-				tok = refreshed
-			} else {
-				log.Printf("[mcp-proxy] %s: token refresh failed: %v", mcp.Name, err)
-				// Forward without auth; upstream will 401 and trigger re-auth.
-				return "", nil
-			}
-		} else {
-			// No refresh token; forward without auth so upstream triggers 401.
-			return "", nil
-		}
-	}
-
-	return "Bearer " + tok.AccessToken, nil
+	return s.managedOAuthHeader(mcp, "")
 }
 
 // broadcastNeedsAuth pushes a connector:needs_auth event to all WS clients,
@@ -284,7 +267,15 @@ func (s *Server) broadcastNeedsAuth(mcpName, projectID string) {
 	if s.Hub == nil {
 		return
 	}
-	data, err := json.Marshal(map[string]any{"type": "connector:needs_auth", "name": mcpName, "project_id": projectID})
+	event := map[string]any{"type": "connector:needs_auth", "name": mcpName, "project_id": projectID}
+	if s.Store != nil {
+		if mcp, err := s.Store.GetInstalledMCP(mcpName, projectID); err == nil && mcp != nil {
+			if key, err := mcpOAuthConfigKey(mcp); err == nil {
+				event["config_key"] = key
+			}
+		}
+	}
+	data, err := json.Marshal(event)
 	if err == nil {
 		s.Hub.BroadcastRaw(data)
 	}
@@ -302,50 +293,13 @@ func (s *Server) discoverAndMarkMCPOAuth(mcp *store.InstalledMCP, rawURL string)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return false
 	}
-	if _, err := discoverOAuthEndpoints(u.Scheme + "://" + u.Host); err != nil {
+	if _, err := discoverInstalledMCPOAuth(mcp); err != nil {
 		return false
 	}
 	if s.Store != nil {
 		_ = s.Store.UpdateInstalledMCPAuthType(mcp.Name, mcp.ProjectID, "oauth_discovery")
 	}
 	return true
-}
-
-// refreshOAuthToken uses the refresh_token grant to get a new access token.
-func refreshOAuthToken(tok *store.MCPOAuthToken) (*store.MCPOAuthToken, error) {
-	form := url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {tok.RefreshToken},
-		"client_id":     {tok.ClientID},
-	}
-	resp, err := http.PostForm(tok.TokenEndpoint, form)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("refresh returned %d: %s", resp.StatusCode, body)
-	}
-	var tr tokenResponse
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return nil, fmt.Errorf("parse token response: %w", err)
-	}
-	out := &store.MCPOAuthToken{
-		AccessToken:   tr.AccessToken,
-		TokenEndpoint: tok.TokenEndpoint,
-		ClientID:      tok.ClientID,
-		UpdatedAt:     time.Now(),
-	}
-	if tr.RefreshToken != "" {
-		out.RefreshToken = tr.RefreshToken
-	} else {
-		out.RefreshToken = tok.RefreshToken // keep old refresh token
-	}
-	if tr.ExpiresIn > 0 {
-		out.ExpiresAt = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
-	}
-	return out, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -387,38 +341,100 @@ func (s *Server) startOAuthFlow(mcp *store.InstalledMCP) (string, error) {
 	name := mcp.Name
 
 	// Determine OAuth client ID and authorization server URL.
-	clientID, authServerURL, err := resolveOAuthConfig(mcp)
+	clientID, _, err := resolveOAuthConfig(mcp)
 	if err != nil {
 		return "", err
 	}
 
-	// If no client_id yet, check a previously stored token record (e.g. from a prior DCR).
-	if clientID == "" {
-		if existing, _ := s.Store.GetMCPOAuthToken(name, mcp.ProjectID); existing != nil && existing.ClientID != "" {
-			clientID = existing.ClientID
-		}
+	configKey, err := mcpOAuthConfigKey(mcp)
+	if err != nil {
+		return "", err
 	}
-
-	// Build redirect URI (our callback) — needed for DCR registration.
+	unlock := s.lockMCPOAuth(configKey)
+	defer unlock()
+	active, err := s.activeMCPOAuthInstallation(configKey, mcp.Name, mcp.ProjectID)
+	if err != nil {
+		return "", err
+	}
+	if active == nil {
+		return "", fmt.Errorf("MCP installation no longer exists")
+	}
+	mcp = active
+	name = active.Name
+	connection, err := s.resolveMCPOAuthConnection(mcp, configKey)
+	if err != nil {
+		return "", err
+	}
+	if connection == nil {
+		id := mcpOAuthConnectionID(configKey)
+		generation, err := s.Store.GetMCPOAuthLifecycle(configKey)
+		if err != nil {
+			return "", err
+		}
+		connection = &store.MCPOAuthConnection{ID: id, ConfigKey: configKey, Generation: generation}
+	}
+	configuredClient := clientID != ""
+	if clientID == "" {
+		clientID = connection.Token.ClientID
+	}
+	pendingURL, err := s.Store.GetMCPOAuthPendingURL(configKey, connection.ID)
+	if err != nil {
+		return "", err
+	}
+	if pendingURL != "" {
+		return pendingURL, nil
+	}
 	callbackURL := fmt.Sprintf("http://127.0.0.1:%d/api/connectors/oauth/callback", s.ListenPort)
-
-	// Discover authorization endpoint.
-	disc, err := discoverOAuthEndpoints(authServerURL)
+	disc, err := discoverInstalledMCPOAuth(mcp)
 	if err != nil {
 		return "", fmt.Errorf("OAuth discovery failed: %w", err)
 	}
-
-	// If still no client_id, try Dynamic Client Registration (RFC 7591).
-	if clientID == "" {
-		if disc.RegistrationEndpoint == "" {
-			return "", fmt.Errorf("OAuth client_id not configured for MCP %s and server does not support Dynamic Client Registration", name)
+	var manifest struct {
+		OAuth struct {
+			Scope    string `json:"scope"`
+			Resource string `json:"resource"`
+		} `json:"oauth"`
+	}
+	entry, err := parseInstalledMCPManifest(mcp.Manifest)
+	if err != nil {
+		return "", err
+	}
+	if len(entry.OAuth) > 0 {
+		if err := json.Unmarshal(entry.OAuth, &manifest.OAuth); err != nil {
+			return "", err
 		}
-		clientID, err = dynamicClientRegister(disc.RegistrationEndpoint, callbackURL)
+	}
+	scope, resource := disc.Scope, disc.Resource
+	if manifest.OAuth.Scope != "" {
+		scope = manifest.OAuth.Scope
+	}
+	if manifest.OAuth.Resource != "" {
+		resource = manifest.OAuth.Resource
+	}
+	client := connection.Token
+	client.ClientID = clientID
+	// Older BeeHub DCR clients requested only authorization_code. Reusing their
+	// registration can fail refresh even when a token was issued. Upgrade once
+	// on explicit authorization; never invalidate a working grant in maintenance.
+	if !configuredClient && len(client.RegisteredGrantTypes) == 0 && disc.RegistrationEndpoint != "" {
+		client.ClientID = ""
+	}
+	if client.ClientID == "" {
+		if disc.RegistrationEndpoint == "" {
+			return "", fmt.Errorf("OAuth client_id not configured for MCP %s and dynamic registration is unavailable", name)
+		}
+		registered, err := registerMCPOAuthClient(disc, callbackURL, scope)
 		if err != nil {
 			return "", fmt.Errorf("OAuth client registration failed: %w", err)
 		}
-		log.Printf("[oauth] registered new client via DCR for MCP %s: %s", name, clientID)
+		client = *registered
+	} else {
+		client.AuthMethod, err = chooseMCPOAuthAuthMethod(disc.AuthMethods, client.ClientSecret, client.AuthMethod)
+		if err != nil {
+			return "", err
+		}
 	}
+	client.Scope, client.Resource = scope, resource
 
 	// Generate PKCE verifier + challenge.
 	verifier, challenge, err := generatePKCE()
@@ -432,30 +448,50 @@ func (s *Server) startOAuthFlow(mcp *store.InstalledMCP) (string, error) {
 		return "", fmt.Errorf("state generation failed")
 	}
 
-	// Persist pending OAuth state.
-	pending := store.MCPOAuthToken{
-		MCPName:       name,
-		ProjectID:     mcp.ProjectID,
-		TokenEndpoint: disc.TokenEndpoint,
-		ClientID:      clientID,
-		State:         state,
-		CodeVerifier:  verifier,
-		UpdatedAt:     time.Now(),
-	}
-	if err := s.Store.UpsertMCPOAuthToken(pending); err != nil {
-		return "", fmt.Errorf("store state: %w", err)
-	}
+	// Pending metadata includes the registration's refresh grant, client auth,
+	// resource and scope, so callback and future refreshes use the same contract.
+	pending := client
+	pending.MCPName, pending.ProjectID = name, mcp.ProjectID
+	pending.AccessToken, pending.RefreshToken = "", ""
+	pending.TokenEndpoint = disc.TokenEndpoint
+	pending.State, pending.CodeVerifier = state, verifier
+	pending.UpdatedAt = time.Now()
 
 	// Build authorization URL.
 	params := url.Values{
 		"response_type":         {"code"},
-		"client_id":             {clientID},
+		"client_id":             {client.ClientID},
 		"redirect_uri":          {callbackURL},
 		"state":                 {state},
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
 	}
-	return disc.AuthorizationEndpoint + "?" + params.Encode(), nil
+	if scope != "" {
+		params.Set("scope", scope)
+	}
+	if resource != "" {
+		params.Set("resource", resource)
+	}
+	authorizationURL, err := url.Parse(disc.AuthorizationEndpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid OAuth authorization endpoint")
+	}
+	query := authorizationURL.Query()
+	for key, values := range params {
+		query[key] = values
+	}
+	authorizationURL.RawQuery = query.Encode()
+	pending.Scope, pending.Resource = query.Get("scope"), query.Get("resource")
+	authURL := authorizationURL.String()
+	// Pending state never replaces the live grant, and concurrent starts for
+	// the same connection share one PKCE flow and one DCR client registration.
+	pendingConnection := *connection
+	pendingConnection.Token = pending
+	pendingConnection.PendingAuthURL = authURL
+	if err := s.Store.SaveMCPOAuthPending(pendingConnection); err != nil {
+		return "", fmt.Errorf("store OAuth state: %w", err)
+	}
+	return authURL, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -483,7 +519,17 @@ func (s *Server) HandleMCPProbe(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, mcpRuntimeStatus{Name: name, Key: key, State: "runtime_managed", Message: "Local stdio connector; availability is determined by the agent runtime."})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.probeInstalledMCP(r.Context(), mcp, key))
+	status := s.probeInstalledMCP(r.Context(), mcp, key)
+	if status.State == "ready" && (mcp.AuthType == "oauth" || mcp.AuthType == "oauth_discovery") {
+		if configKey, err := mcpOAuthConfigKey(mcp); err == nil {
+			unlock := s.lockMCPOAuth(configKey)
+			if connection, err := s.resolveMCPOAuthConnection(mcp, configKey); err == nil && connection != nil {
+				s.broadcastMCPOAuthConnected(connection)
+			}
+			unlock()
+		}
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 // probeMCPNeedsAuth sends an MCP initialize request to url and returns true if
@@ -526,7 +572,7 @@ func probeMCPNeedsAuth(mcpURL string, headers map[string]string) (bool, error) {
 func (s *Server) HandleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	state := r.URL.Query().Get("state")
-	if code == "" || state == "" {
+	if state == "" || (code == "" && r.URL.Query().Get("error") == "") {
 		http.Error(w, "missing code or state", http.StatusBadRequest)
 		return
 	}
@@ -535,44 +581,83 @@ func (s *Server) HandleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up pending OAuth flow by state.
-	pending, err := s.Store.GetMCPOAuthTokenByState(state)
-	if err != nil || pending == nil {
+	connection, err := s.Store.GetMCPOAuthPending(state)
+	if err != nil || connection == nil {
 		http.Error(w, "unknown or expired OAuth state", http.StatusBadRequest)
+		return
+	}
+	unlock := s.lockMCPOAuth(connection.ConfigKey)
+	defer unlock()
+	connection, err = s.Store.TakeMCPOAuthPending(state)
+	if err != nil || connection == nil {
+		http.Error(w, "unknown or expired OAuth state", http.StatusBadRequest)
+		return
+	}
+	if r.URL.Query().Get("error") != "" {
+		http.Error(w, "Authorization was declined. You may close this tab and retry in BeeHub.", http.StatusBadRequest)
+		return
+	}
+	pending := &connection.Token
+	generation, err := s.Store.GetMCPOAuthLifecycle(connection.ConfigKey)
+	if err != nil || generation == "" || generation != connection.Generation {
+		http.Error(w, "MCP authorization lifecycle ended; restart authorization", http.StatusBadRequest)
+		return
+	}
+	installed, err := s.activeMCPOAuthInstallation(connection.ConfigKey, pending.MCPName, pending.ProjectID)
+	if err != nil || installed == nil {
+		http.Error(w, "MCP installation no longer exists", http.StatusBadRequest)
 		return
 	}
 
 	callbackURL := fmt.Sprintf("http://127.0.0.1:%d/api/connectors/oauth/callback", s.ListenPort)
 
 	// Exchange code for token.
-	tok, err := exchangeCode(pending.TokenEndpoint, pending.ClientID, code, pending.CodeVerifier, callbackURL)
+	tok, err := exchangeMCPOAuthToken(pending, url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {pending.CodeVerifier}, "redirect_uri": {callbackURL}})
 	if err != nil {
 		http.Error(w, "token exchange failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 
-	// Store token (overwrites pending state).
-	tok.MCPName = pending.MCPName
-	tok.ProjectID = pending.ProjectID
+	// Consent responses may omit a replacement refresh token. Keep the current
+	// one only for exactly the same OAuth client/resource/scope contract.
+	if tok.RefreshToken == "" {
+		current, err := s.Store.ListMCPOAuthConnections(connection.ConfigKey)
+		if err != nil {
+			http.Error(w, "load existing OAuth connection failed", http.StatusInternalServerError)
+			return
+		}
+		for _, existing := range current {
+			old := existing.Token
+			if old.ClientID == tok.ClientID && old.ClientSecret == tok.ClientSecret && old.TokenEndpoint == tok.TokenEndpoint && old.Resource == tok.Resource && sameMCPOAuthScope(old.Scope, tok.Scope) {
+				tok.RefreshToken = old.RefreshToken
+				break
+			}
+		}
+	}
+	// The preferred installation may change during the network exchange;
+	// retain the grant for any installation still in the same lifetime.
+	installed, err = s.activeMCPOAuthInstallation(connection.ConfigKey, pending.MCPName, pending.ProjectID)
+	if err != nil || installed == nil {
+		http.Error(w, "MCP installation no longer exists", http.StatusBadRequest)
+		return
+	}
+	// Commit the shared grant without retaining pending state.
+	tok.MCPName = installed.Name
+	tok.ProjectID = installed.ProjectID
 	tok.TokenEndpoint = pending.TokenEndpoint
 	tok.ClientID = pending.ClientID
+	tok.Resource = pending.Resource
 	tok.State = ""
 	tok.CodeVerifier = ""
 	tok.UpdatedAt = time.Now()
-	if err := s.Store.UpsertMCPOAuthToken(*tok); err != nil {
-		http.Error(w, "store token: "+err.Error(), http.StatusInternalServerError)
+	connection.Token = *tok
+	if err := s.Store.CompleteMCPOAuthConnection(*connection, *installed); err != nil {
+		http.Error(w, "could not save OAuth connection; retry authorization", http.StatusInternalServerError)
 		return
 	}
 
-	// Upgrade the MCP's auth_type so the proxy uses the OAuth token on future calls.
-	_ = s.Store.UpdateInstalledMCPAuthType(pending.MCPName, pending.ProjectID, "oauth_discovery")
-
-	// Notify frontend via WebSocket.
-	if s.Hub != nil {
-		if data, err := json.Marshal(map[string]any{"type": "connector:connected", "name": pending.MCPName, "project_id": pending.ProjectID}); err == nil {
-			s.Hub.BroadcastRaw(data)
-		}
-	}
+	log.Printf("[mcp-oauth] %s authorization saved (refresh_available=%t, expiry_known=%t)", installed.Name, tok.RefreshToken != "", !tok.ExpiresAt.IsZero())
+	s.broadcastMCPOAuthConnected(connection)
 
 	// Return a small HTML page that closes the popup.
 	w.Header().Set("Content-Type", "text/html")
@@ -589,19 +674,29 @@ func (s *Server) HandleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 // resolveOAuthConfig returns (clientID, authServerBaseURL) for an MCP.
 // clientID may be empty when the server supports Dynamic Client Registration (RFC 7591).
 func resolveOAuthConfig(mcp *store.InstalledMCP) (clientID, authServerURL string, err error) {
-	var entry struct {
-		URL   string `json:"url"`
-		OAuth *struct {
-			ClientID string `json:"clientId"`
-		} `json:"oauth"`
-	}
-	if err := json.Unmarshal([]byte(mcp.Manifest), &entry); err != nil {
+	entry, err := parseInstalledMCPManifest(mcp.Manifest)
+	if err != nil {
 		return "", "", fmt.Errorf("parse manifest: %w", err)
 	}
-
-	if entry.OAuth != nil && entry.OAuth.ClientID != "" {
-		clientID = entry.OAuth.ClientID
+	var oauth struct {
+		ClientID string `json:"clientId"`
 	}
+	var values map[string]string
+	if mcp.EnvValues != "" {
+		if err := json.Unmarshal([]byte(mcp.EnvValues), &values); err != nil {
+			return "", "", err
+		}
+	}
+	resolvedOAuth, _, err := resolveMCPOAuthTemplates(entry.OAuth, values)
+	if err != nil {
+		return "", "", err
+	}
+	if len(resolvedOAuth) > 0 {
+		if err := json.Unmarshal(resolvedOAuth, &oauth); err != nil {
+			return "", "", fmt.Errorf("parse OAuth configuration: %w", err)
+		}
+	}
+	clientID = oauth.ClientID
 
 	// oauth_discovery: use env_values for client_id if provided.
 	if clientID == "" && mcp.EnvValues != "" && mcp.EnvValues != "{}" {
@@ -629,104 +724,6 @@ func resolveOAuthConfig(mcp *store.InstalledMCP) (clientID, authServerURL string
 	}
 	// clientID may be empty — HandleOAuthStart will attempt DCR if the server supports it.
 	return clientID, u.Scheme + "://" + u.Host, nil
-}
-
-// oauthDiscoveryDoc holds the fields we care about from RFC 9728 discovery.
-type oauthDiscoveryDoc struct {
-	AuthorizationEndpoint string `json:"authorization_endpoint"`
-	TokenEndpoint         string `json:"token_endpoint"`
-	RegistrationEndpoint  string `json:"registration_endpoint"` // RFC 7591 DCR
-}
-
-// discoverOAuthEndpoints performs RFC 9728 OAuth discovery and returns the full doc.
-func discoverOAuthEndpoints(serverBase string) (*oauthDiscoveryDoc, error) {
-	discoveryURL := strings.TrimRight(serverBase, "/") + "/.well-known/oauth-authorization-server"
-	resp, err := oauthDiscoveryHTTPClient.Get(discoveryURL) //nolint:gosec
-	if err != nil {
-		return nil, fmt.Errorf("discovery request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("discovery returned %d", resp.StatusCode)
-	}
-	var doc oauthDiscoveryDoc
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return nil, fmt.Errorf("parse discovery doc: %w", err)
-	}
-	if doc.AuthorizationEndpoint == "" || doc.TokenEndpoint == "" {
-		return nil, fmt.Errorf("incomplete discovery doc")
-	}
-	return &doc, nil
-}
-
-// dynamicClientRegister performs RFC 7591 Dynamic Client Registration.
-// Returns the client_id assigned by the authorization server.
-func dynamicClientRegister(registrationEndpoint, redirectURI string) (string, error) {
-	body, _ := json.Marshal(map[string]any{
-		"redirect_uris":              []string{redirectURI},
-		"token_endpoint_auth_method": "none", // public client (PKCE)
-		"grant_types":                []string{"authorization_code"},
-		"response_types":             []string{"code"},
-	})
-	resp, err := http.Post(registrationEndpoint, "application/json", strings.NewReader(string(body))) //nolint:gosec
-	if err != nil {
-		return "", fmt.Errorf("registration request: %w", err)
-	}
-	defer resp.Body.Close()
-	rb, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("registration returned %d: %s", resp.StatusCode, rb)
-	}
-	var reg struct {
-		ClientID string `json:"client_id"`
-	}
-	if err := json.Unmarshal(rb, &reg); err != nil || reg.ClientID == "" {
-		return "", fmt.Errorf("no client_id in registration response")
-	}
-	return reg.ClientID, nil
-}
-
-// exchangeCode exchanges an authorization code for tokens using PKCE.
-func exchangeCode(tokenEndpoint, clientID, code, verifier, redirectURI string) (*store.MCPOAuthToken, error) {
-	form := url.Values{
-		"grant_type":    {"authorization_code"},
-		"client_id":     {clientID},
-		"code":          {code},
-		"redirect_uri":  {redirectURI},
-		"code_verifier": {verifier},
-	}
-	resp, err := http.PostForm(tokenEndpoint, form)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, body)
-	}
-	var tr tokenResponse
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return nil, fmt.Errorf("parse token response: %w", err)
-	}
-	if tr.AccessToken == "" {
-		return nil, fmt.Errorf("no access_token in response")
-	}
-	tok := &store.MCPOAuthToken{
-		AccessToken:  tr.AccessToken,
-		RefreshToken: tr.RefreshToken,
-	}
-	if tr.ExpiresIn > 0 {
-		tok.ExpiresAt = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
-	}
-	return tok, nil
-}
-
-// tokenResponse is the standard OAuth token endpoint response shape.
-type tokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int    `json:"expires_in"`
-	TokenType    string `json:"token_type"`
 }
 
 // generatePKCE creates a PKCE code verifier and S256 challenge.

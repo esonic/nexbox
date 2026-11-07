@@ -274,24 +274,28 @@ const MonacoFileEditor = forwardRef<MonacoFileEditorHandle, MonacoFileEditorProp
     // / reload), where value diverges from the model outside composition, apply.
     const valueRef = useRef(value);
     const composingRef = useRef(false);
+    const syncedFilepathRef = useRef(filepath);
 
-    const syncExternalValue = useCallback(() => {
+    const syncExternalValue = useCallback((preserveViewState = true) => {
       const editor = editorRef.current;
       const model = editor?.getModel();
       if (!editor || !model) return;
       if (composingRef.current) return; // never mutate the model mid-IME
       const next = valueRef.current;
       if (model.getValue() === next) return; // echo of the user's own edit / no-op
+      const viewState = preserveViewState ? editor.saveViewState() : null;
       editor.executeEdits("external-value-sync", [
         { range: model.getFullModelRange(), text: next, forceMoveMarkers: true },
       ]);
       editor.pushUndoStop();
+      if (viewState) editor.restoreViewState(viewState);
     }, []);
 
     useEffect(() => {
       valueRef.current = value;
-      syncExternalValue();
-    }, [value, syncExternalValue]);
+      syncExternalValue(syncedFilepathRef.current === filepath);
+      syncedFilepathRef.current = filepath;
+    }, [value, filepath, syncExternalValue]);
 
     // Keep the latest search request in a ref so onMount (first load, fires
     // after the async Monaco chunk resolves) navigates using current values,

@@ -546,6 +546,27 @@ func (db *DB) migrate() error {
 			PRIMARY KEY (mcp_name, project_id)
 		)`,
 
+		// OAuth connections belong to this local BeeHub profile, independently of installations.
+		`CREATE TABLE IF NOT EXISTS mcp_oauth_lifecycles (
+			config_key TEXT PRIMARY KEY,
+			generation TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS mcp_oauth_connections (
+			id TEXT PRIMARY KEY,
+			config_key TEXT NOT NULL,
+			token_json TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS mcp_oauth_connections_config ON mcp_oauth_connections(config_key)`,
+		`CREATE TABLE IF NOT EXISTS mcp_oauth_pending (
+			state TEXT PRIMARY KEY,
+			connection_id TEXT NOT NULL,
+			config_key TEXT NOT NULL,
+			generation TEXT NOT NULL DEFAULT '',
+			auth_url TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			token_json TEXT NOT NULL
+		)`,
+
 		// Marketplace sources (user-added marketplace directories / git repos)
 		`CREATE TABLE IF NOT EXISTS marketplace_sources (
 			id   TEXT PRIMARY KEY,
@@ -585,6 +606,7 @@ func (db *DB) migrate() error {
 	// Additive column migrations (idempotent: skip if column already exists).
 	type colMigration struct{ check, alter string }
 	colMigrations := []colMigration{
+		{check: `SELECT COUNT(*) FROM pragma_table_info('mcp_oauth_pending') WHERE name='generation'`, alter: `ALTER TABLE mcp_oauth_pending ADD COLUMN generation TEXT NOT NULL DEFAULT ''`},
 		{
 			check: `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='last_active_at'`,
 			alter: `ALTER TABLE sessions ADD COLUMN last_active_at DATETIME`,

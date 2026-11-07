@@ -15,7 +15,11 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:files-refresh": "node --test scripts/files-refresh.browser-test.cjs",
+    "test:panel-maximize": "node --test scripts/panel-maximize.browser-test.cjs",
+    "test:markdown": "node --test scripts/markdown-renderer.browser-test.cjs",
+    "test:chat-history": "node --test scripts/chat-history.browser-test.cjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

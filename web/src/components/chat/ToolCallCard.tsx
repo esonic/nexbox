@@ -607,7 +607,16 @@ function ToolIcon({ state, icon: Icon }: { state: ToolUseState; icon: React.Comp
     case "running":
       return <CircleDot className="h-3 w-3 animate-pulse text-blue-500 shrink-0" />;
     case "error":
-      return <XCircle className="h-3 w-3 text-red-500 shrink-0" />;
+      return (
+        <XCircle
+          className="h-3 w-3 text-muted-foreground/70 shrink-0"
+          strokeWidth={1.5}
+          role="img"
+          aria-label="Tool call failed"
+        >
+          <title>Tool call failed</title>
+        </XCircle>
+      );
     case "complete":
       return <Icon className="h-3 w-3 text-muted-foreground shrink-0" />;
   }

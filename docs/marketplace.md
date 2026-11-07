@@ -17,6 +17,12 @@ Deleting a source uninstalls items provided only by that source. Items with the 
 
 HTTP MCP uses headers from installation configuration; OAuth replaces Authorization when needed. The interface reports expired credentials or authorization. After completing authorization, send another message in the same session to retry the checks; deleting the session is unnecessary.
 
+Compatible project and global installations share one OAuth authorization within this NexBox instance. Compatibility includes the full resource URL, client, scopes, and effective configuration; different configurations retain separate grants. Existing installation-specific credentials migrate automatically on use.
+
+While running, NexBox refreshes credentials at startup and every ten minutes, and refreshes again near expiry or after a replayable request receives HTTP 401. Refresh-token rotation is serialized and persisted. Temporary provider failures retain a still-valid access token; missing or permanently rejected grants require authorization. Providers must issue a refresh token for automatic renewal to work.
+
+Removing one compatible installation preserves authorization for the others. Removing the last deletes the local grant and pending authorization; reinstalling requires a fresh authorization flow. Local removal does not revoke consent at the provider. If a browser blocks the authorization tab, the interface offers a ready-to-open link.
+
 Before each turn, NexBox initializes installed HTTP MCP connections and discovers their tools. Only connectors that pass these checks are passed to the agent. Status values include:
 
 | Status | Meaning |

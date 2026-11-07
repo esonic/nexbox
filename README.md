@@ -9,8 +9,8 @@ NexBox brings conversations, source files, Git, terminals, and workflows togethe
 ## Features
 
 - **Multi-agent conversations**: Claude Code, Codex, Pi, Kimi Code, ZeroClaw, and Crush, with streaming text, reasoning, and tool calls.
-- **Session management**: Resume and fork conversations, pin sessions, sort by activity, and send follow-up messages while an agent is running when supported by the backend.
-- **Code workspace**: File browsing, search, a Monaco editor, tool-call diffs, and a multi-repository Git panel.
+- **Session management**: Import existing Claude Code and Codex CLI conversations, resume and fork conversations, pin sessions, sort by activity, and send follow-up messages while an agent is running when supported by the backend.
+- **Code workspace**: File browsing, search, a Monaco editor, tool-call diffs, clickable file references with line navigation, image previews, and a multi-repository Git panel.
 - **Terminal and browser**: An integrated terminal and optional Chrome browser tools.
 - **Reusable capabilities**: Prompt templates, MCP, Skills, with both project-level and global installation.
 - **Task automation**: Workflows, scheduling, and cross-session collaboration.

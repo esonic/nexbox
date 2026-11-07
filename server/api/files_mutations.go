@@ -58,6 +58,16 @@ type requestFile struct {
 }
 
 func openRequestFile(r *http.Request, root, relPath string) (*requestFile, error) {
+	if r.URL.Query().Get("safe_link") == "1" && r.URL.Query().Get("repository_id") == "" {
+		if _, err := resolveSafePath(root, relPath); err != nil {
+			return nil, err
+		}
+		rootHandle, err := os.OpenRoot(root)
+		if err != nil {
+			return nil, err
+		}
+		return &requestFile{fullPath: filepath.Join(root, relPath), relative: filepath.FromSlash(relPath), root: rootHandle, repository: true}, nil
+	}
 	if r.URL.Query().Get("repository_id") == "" {
 		fullPath, err := resolveSafePath(root, relPath)
 		if err != nil {
@@ -189,7 +199,7 @@ func isBinaryRequestFile(file *requestFile) bool {
 }
 
 func (s *Server) invalidateFileGitStatus(r *http.Request, projectID, path, resolvedRoot string, file *requestFile) {
-	if file.repository {
+	if file.repository && r.URL.Query().Get("safe_link") != "1" {
 		s.repositoryResolver().InvalidateStatus(resolvedRoot)
 		return
 	}

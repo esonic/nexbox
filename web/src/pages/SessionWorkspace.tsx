@@ -5,7 +5,6 @@ import {
   GitBranch,
   Check,
   ChevronDown,
-  RefreshCw,
   PanelRightClose,
   PanelBottom,
   PanelRight,
@@ -20,8 +19,12 @@ import {
   Workflow,
   ArrowLeft,
   Pencil,
+  RefreshCw,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { AgentIcon } from "@/components/ui/AgentIcon";
 import {
   sessionsApi, projectsApi, gitApi,
@@ -136,53 +139,39 @@ function ProjectSelector({
 // Shared empty array so the `warnings` prop stays reference-stable and does not
 // defeat GitPanelContent's memo on every render.
 const NO_WARNINGS: string[] = [];
-const NO_REPOSITORIES: GitRepository[] = [];
 
-function GitRepositorySelector({ repositories, selected, loading, onSelect, onRefresh }: {
+function GitRepositorySelector({ repositories, selected, loading, onSelect }: {
   repositories: GitRepository[];
   selected: GitRepository | null;
   loading: boolean;
   onSelect: (repositoryId: string) => void;
-  onRefresh: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
 
   if (!selected) {
     return (
-      <button type="button" onClick={onRefresh} disabled={loading} className="ml-1 h-6 flex items-center gap-1.5 rounded border bg-background px-2 text-xs text-muted-foreground hover:bg-accent disabled:cursor-wait disabled:opacity-60">
+      <span role="status" className="ml-1 h-6 min-w-0 flex items-center gap-1.5 text-xs text-muted-foreground">
         {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <FolderGit2 className="h-3 w-3" />}
-        {loading ? "Scanning…" : "Rescan repositories"}
-      </button>
+        <span className="truncate">{loading ? "Scanning…" : "No repositories"}</span>
+      </span>
     );
   }
 
   return (
-    <div className="ml-1 flex min-w-0 items-center gap-1" ref={ref}>
+    <div className="inline-flex md:ml-1 min-w-[88px] md:min-w-[96px] max-w-[240px] shrink">
       {repositories.length === 1 ? (
         <div
-          className="h-6 min-w-0 max-w-[260px] flex items-center gap-1.5 rounded border bg-background px-2 text-xs"
+          className="h-6 w-full flex items-center gap-1.5 rounded border bg-background px-2 text-xs"
           title={`${selected.name} · ${selected.display_path}`}
         >
           <FolderGit2 className="h-3 w-3 shrink-0 text-muted-foreground" />
           <span className="truncate font-medium">{selected.name}</span>
-          <span className="truncate text-muted-foreground">{selected.display_path}</span>
-          {selected.branch && <span className="truncate text-muted-foreground/70">· {selected.branch}</span>}
         </div>
       ) : (
-        <div className="relative min-w-0 max-w-[260px]">
+        <Popover open={open} onOpenChange={setOpen}>
+          <PopoverTrigger asChild>
           <button
             type="button"
-            onClick={() => setOpen((value) => !value)}
             aria-expanded={open}
             aria-haspopup="listbox"
             className="h-6 min-w-0 w-full flex items-center gap-1.5 rounded px-2 text-xs border bg-background hover:bg-accent"
@@ -190,12 +179,10 @@ function GitRepositorySelector({ repositories, selected, loading, onSelect, onRe
           >
             <FolderGit2 className="h-3 w-3 shrink-0 text-muted-foreground" />
             <span className="truncate font-medium">{selected.name}</span>
-            <span className="truncate text-muted-foreground">{selected.display_path}</span>
-            {selected.branch && <span className="truncate text-muted-foreground/70">· {selected.branch}</span>}
-            <ChevronDown className="h-3 w-3 shrink-0" />
+            <ChevronDown className="h-3 w-3 shrink-0 ml-auto" />
           </button>
-          {open && (
-            <div role="listbox" className="absolute left-0 top-full z-50 mt-1 w-80 max-h-80 overflow-y-auto rounded-md border bg-popover shadow-lg">
+          </PopoverTrigger>
+            <PopoverContent role="listbox" align="start" sideOffset={4} className="w-80 min-w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-1rem)] max-h-80 overflow-y-auto p-0">
               {repositories.map((repository) => (
                 <button
                   key={repository.id}
@@ -214,13 +201,9 @@ function GitRepositorySelector({ repositories, selected, loading, onSelect, onRe
                   <span className={cn("shrink-0 text-[10px]", repository.status.total ? "text-amber-500" : "text-muted-foreground")}>{repository.status.total || "clean"}</span>
                 </button>
               ))}
-            </div>
-          )}
-        </div>
+            </PopoverContent>
+        </Popover>
       )}
-      <button type="button" onClick={() => { setOpen(false); onRefresh(); }} disabled={loading} className="h-6 w-6 shrink-0 inline-flex items-center justify-center rounded border bg-background text-muted-foreground hover:bg-accent disabled:cursor-wait disabled:opacity-60" title="Rescan repositories">
-        <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} />
-      </button>
     </div>
   );
 }
@@ -232,31 +215,27 @@ const GitPanelContent = memo(function GitPanelContent({
   sessionId,
   defaultRepositoryId,
   repository,
-  repositories,
-  loadingRepositories,
-  onSelectRepository,
-  onRescan,
   diffData,
   loadingDiff,
   onRefresh,
   warnings,
   review,
   refreshError,
+  branchControlsTarget,
+  toolbarActionsTarget,
 }: {
   projectId: string;
   sessionId?: string;
   defaultRepositoryId?: string;
   repository: GitRepository | null;
-  repositories: GitRepository[];
-  loadingRepositories: boolean;
-  onSelectRepository: (repositoryId: string) => void;
-  onRescan: () => void;
   diffData: DiffResponse | null;
   loadingDiff: boolean;
   onRefresh: () => void;
   warnings: string[];
   review: GitReviewSnapshot | null;
   refreshError: boolean;
+  branchControlsTarget?: HTMLDivElement | null;
+  toolbarActionsTarget?: HTMLDivElement | null;
 }) {
   const [dismissedWarningKeys, setDismissedWarningKeys] = useState<Set<string>>(() => new Set());
   const warningKey = JSON.stringify([projectId, sessionId ?? null, warnings]);
@@ -264,15 +243,6 @@ const GitPanelContent = memo(function GitPanelContent({
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden">
-      <div className="flex items-center gap-1 px-3 py-1.5 border-b shrink-0">
-        <GitRepositorySelector
-          repositories={repositories}
-          selected={repository}
-          loading={loadingRepositories}
-          onSelect={onSelectRepository}
-          onRefresh={onRescan}
-        />
-      </div>
       {showWarnings && (
         <div className="flex items-start gap-2 border-b bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
           <span className="min-w-0 flex-1 break-words">{warnings.join(" · ")}</span>
@@ -297,13 +267,13 @@ const GitPanelContent = memo(function GitPanelContent({
           <button onClick={onRefresh} className="shrink-0 underline">Retry now</button>
         </div>
       )}
-      {loadingDiff ? (
+      {loadingDiff && !diffData ? (
         <div className="flex items-center justify-center h-full text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin mr-2" />
           Loading changes...
         </div>
       ) : repository && diffData?.files ? (
-        <DiffView key={`${projectId}:${sessionId ?? "local"}:${repository.id}`} fileStats={diffData.files} projectId={projectId} sessionId={sessionId} repository={repository} isDefaultRepository={repository.id === defaultRepositoryId} onCommitted={onRefresh} review={review ?? undefined} />
+        <DiffView key={`${projectId}:${sessionId ?? "local"}:${repository.id}`} fileStats={diffData.files} projectId={projectId} sessionId={sessionId} repository={repository} isDefaultRepository={repository.id === defaultRepositoryId} onCommitted={onRefresh} review={review ?? undefined} showToolbarRefresh={false} branchControlsTarget={branchControlsTarget} toolbarActionsTarget={toolbarActionsTarget} />
       ) : (
         <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
           {repository ? "No changes found" : "No Git repositories found"}
@@ -350,6 +320,34 @@ export function SessionWorkspace() {
   const hasMountedTerminalsInRightMode = terminalPosition === "right" && Object.keys(terminalStates).length > 0;
   const rightSlotMounted = rightSlotVisible || hasMountedTerminalsInRightMode;
 
+  // Maximize the shared slot without changing its saved width or remounting
+  // its contents. Closing the slot, changing sessions or moving the terminal
+  // clears this temporary mode; switching panels within the slot preserves it.
+  const [maximizedRightSlot, setMaximizedRightSlot] = useState<{
+    sessionId: string | null;
+    terminalPosition: typeof terminalPosition;
+  } | null>(null);
+  const rightSlotMaximized = maximizedRightSlot !== null
+    && rightSlotVisible
+    && maximizedRightSlot.sessionId === activeSessionId
+    && maximizedRightSlot.terminalPosition === terminalPosition;
+  if (maximizedRightSlot !== null && !rightSlotMaximized) {
+    setMaximizedRightSlot(null);
+  }
+  const maximizeButton = (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="hidden md:inline-flex h-7 w-7 p-0 shrink-0"
+      title={rightSlotMaximized ? "Restore panel" : "Maximize panel"}
+      aria-label={rightSlotMaximized ? "Restore panel" : "Maximize panel"}
+      aria-pressed={rightSlotMaximized}
+      onClick={() => setMaximizedRightSlot(rightSlotMaximized ? null : { sessionId: activeSessionId, terminalPosition })}
+    >
+      {rightSlotMaximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+    </Button>
+  );
+
   // Workflow editing state — allows WorkflowPanel to replace the panel header title
   const [wfEditing, setWfEditing] = useState(false);
   const [wfName, setWfName] = useState('');
@@ -379,6 +377,9 @@ export function SessionWorkspace() {
 
   const [gitRepositoriesData, setGitRepositoriesData] = useState<GitRepositoriesResponse | null>(null);
   const [loadingGitRepositories, setLoadingGitRepositories] = useState(false);
+  const [fileRefreshTargetEl, setFileRefreshTargetEl] = useState<HTMLDivElement | null>(null);
+  const [gitBranchControlsEl, setGitBranchControlsEl] = useState<HTMLDivElement | null>(null);
+  const [gitToolbarActionsEl, setGitToolbarActionsEl] = useState<HTMLDivElement | null>(null);
   const isResizing = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   // New project dialog
@@ -603,15 +604,20 @@ export function SessionWorkspace() {
   // via its own listener if already mounted).
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ path?: string }>).detail;
-      const path = detail?.path;
-      if (!path || !boundProject) return;
-      useFileBrowserStore.getState().setSelectedPath(boundProject.id, path);
+      const detail = (e as CustomEvent<{ path?: string; line?: number; safeLink?: boolean; file?: import("@/lib/api").RepositoryFileRef }>).detail;
+      if (!repositoryContextKey) return;
+      const browser = useFileBrowserStore.getState();
+      if (detail?.file) {
+        browser.setSelectedRepositoryFile(repositoryContextKey, detail.file);
+      } else if (detail?.path) {
+        browser.navigateToFile(repositoryContextKey, detail.path, detail.line, detail.safeLink);
+        browser.setSelectedPath(repositoryContextKey, detail.path);
+      } else return;
       setRightPanelExclusive("files");
     };
     window.addEventListener("open-file", handler);
     return () => window.removeEventListener("open-file", handler);
-  }, [boundProject, setRightPanelExclusive]);
+  }, [repositoryContextKey, setRightPanelExclusive]);
 
   // Auto-show terminal when the backend requests it (e.g. run_in_terminal MCP tool).
   // entity_id carries the session ID so we open the right session's terminal.
@@ -800,7 +806,7 @@ export function SessionWorkspace() {
               visible. md+ keeps the side-by-side layout. */}
           <div className={cn(
             "flex-1 flex-col overflow-hidden",
-            rightSlotVisible ? "hidden md:flex" : "flex",
+            rightSlotMaximized ? "hidden" : rightSlotVisible ? "hidden md:flex" : "flex",
           )}>
             {!hasProjectId && (
               <ProjectSelector
@@ -841,20 +847,20 @@ export function SessionWorkspace() {
               {/* Resize handle — hidden on touch-sized viewports where drag
                   doesn't make sense and the panel is full-width anyway. */}
               <div
-                className="hidden md:flex w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors items-center justify-center shrink-0"
+                className={cn("hidden w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors items-center justify-center shrink-0", !rightSlotMaximized && "md:flex")}
                 onMouseDown={handleMouseDown}
               >
                 <GripVertical className="h-4 w-4 text-muted-foreground/50" />
               </div>
               <div
-                className="border-l bg-background overflow-hidden shrink-0 flex flex-col w-full md:w-[var(--panel-width)]"
-                style={{ ['--panel-width' as string]: `${panelWidth}px` }}
+                className={cn("border-l bg-background overflow-hidden flex flex-col flex-1 min-w-0", !rightSlotMaximized && "md:flex-none md:shrink-0 md:w-[var(--panel-width)]")}
+                style={{ ["--panel-width" as string]: `${panelWidth}px` }}
               >
                 {/* Header — terminal vs rightPanel based on current mode */}
                 {showingTerminalInRightSlot ? (
                   <div className="flex items-center justify-between px-4 py-2 border-b gap-2 shrink-0">
                     <div className="flex items-center gap-1 flex-1 min-w-0">
-                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => activeSessionId && setTerminalShow(activeSessionId, false)}>
+                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Hide panel" aria-label="Hide panel" onClick={() => activeSessionId && setTerminalShow(activeSessionId, false)}>
                         <PanelRightClose className="h-4 w-4" />
                       </Button>
                       <h3 className="font-medium text-sm">Terminal</h3>
@@ -866,80 +872,100 @@ export function SessionWorkspace() {
                       <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Kill terminal" onClick={() => activeSessionId && killTerminal(activeSessionId)}>
                         <Trash2 className="h-4 w-4" />
                       </Button>
+                      <div className="hidden md:flex border-l ml-1 pl-1">{maximizeButton}</div>
                     </div>
                   </div>
                 ) : rightPanel ? (
                   <>
-                {/* Panel header — workflow only (Files/Task/Git omit it to save space). */}
-                {rightPanel === "workflow" && (
-                  <div className="flex items-center justify-between px-4 py-2 border-b gap-2 shrink-0">
-                    <div className="flex items-center gap-1 flex-1 min-w-0">
-                      {wfEditing ? (
-                        <>
-                          <Button variant="ghost" size="sm" className="h-7 w-7 p-0 shrink-0" onClick={() => { setWfNameEditing(false); wfBackRef.current?.(); }}>
-                            <ArrowLeft className="h-4 w-4" />
-                          </Button>
-                          {wfNameEditing ? (
-                            <div className="flex items-center gap-0.5 flex-1 min-w-0">
-                              <input
-                                type="text"
-                                value={wfNameDraft}
-                                onChange={(e) => setWfNameDraft(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-                                    setWfName(wfNameDraft);
-                                    wfNameChangeRef.current?.(wfNameDraft);
-                                    setWfNameEditing(false);
-                                  } else if (e.key === 'Escape') {
-                                    setWfNameDraft(wfName);
-                                    setWfNameEditing(false);
-                                  }
-                                }}
-                                autoFocus
-                                placeholder="Workflow Name"
-                                className="text-sm font-medium bg-transparent border-b border-border outline-none flex-1 min-w-0"
-                              />
+                {/* Panel header */}
+                <div className={cn("flex items-center justify-between border-b shrink-0", rightPanel === "git" ? "px-1 md:pl-4 md:pr-2 py-2 gap-0.5 md:gap-1 [container-type:inline-size]" : "px-4 py-2 gap-2")}>
+                  <div className={cn("flex items-center flex-1 min-w-0", rightPanel === "git" ? "gap-0.5 md:gap-1" : "gap-1")}>
+                    {rightPanel === "workflow" && wfEditing ? (
+                      <>
+                        <Button variant="ghost" size="sm" className="h-7 w-7 p-0 shrink-0" onClick={() => { setWfNameEditing(false); wfBackRef.current?.(); }}>
+                          <ArrowLeft className="h-4 w-4" />
+                        </Button>
+                        {wfNameEditing ? (
+                          <div className="flex items-center gap-0.5 flex-1 min-w-0">
+                            <input
+                              type="text"
+                              value={wfNameDraft}
+                              onChange={(e) => setWfNameDraft(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                                  setWfName(wfNameDraft);
+                                  wfNameChangeRef.current?.(wfNameDraft);
+                                  setWfNameEditing(false);
+                                } else if (e.key === 'Escape') {
+                                  setWfNameDraft(wfName);
+                                  setWfNameEditing(false);
+                                }
+                              }}
+                              autoFocus
+                              placeholder="Workflow Name"
+                              className="text-sm font-medium bg-transparent border-b border-border outline-none flex-1 min-w-0"
+                            />
+                            <button
+                              onClick={() => { setWfName(wfNameDraft); wfNameChangeRef.current?.(wfNameDraft); setWfNameEditing(false); }}
+                              className="p-1 rounded text-green-500 hover:bg-accent/60 transition-colors shrink-0"
+                              title="Save"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              onClick={() => { setWfNameDraft(wfName); setWfNameEditing(false); }}
+                              className="p-1 rounded text-muted-foreground hover:bg-accent/60 transition-colors shrink-0"
+                              title="Cancel"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="group/wftitle flex items-center gap-1 flex-1 min-w-0">
+                            <span className="text-sm font-medium truncate">{wfName || 'Untitled Workflow'}</span>
+                            {wfNameEditable && (
                               <button
-                                onClick={() => { setWfName(wfNameDraft); wfNameChangeRef.current?.(wfNameDraft); setWfNameEditing(false); }}
-                                className="p-1 rounded text-green-500 hover:bg-accent/60 transition-colors shrink-0"
-                                title="Save"
+                                onClick={() => { setWfNameDraft(wfName); setWfNameEditing(true); }}
+                                className="opacity-0 group-hover/wftitle:opacity-100 p-1 rounded text-muted-foreground/60 hover:text-foreground hover:bg-accent/60 transition-all shrink-0"
+                                title="Edit name"
                               >
-                                <Check className="h-3.5 w-3.5" />
+                                <Pencil className="h-3 w-3" />
                               </button>
-                              <button
-                                onClick={() => { setWfNameDraft(wfName); setWfNameEditing(false); }}
-                                className="p-1 rounded text-muted-foreground hover:bg-accent/60 transition-colors shrink-0"
-                                title="Cancel"
-                              >
-                                <X className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                          ) : (
-                            <div className="group/wftitle flex items-center gap-1 flex-1 min-w-0">
-                              <span className="text-sm font-medium truncate">{wfName || 'Untitled Workflow'}</span>
-                              {wfNameEditable && (
-                                <button
-                                  onClick={() => { setWfNameDraft(wfName); setWfNameEditing(true); }}
-                                  className="opacity-0 group-hover/wftitle:opacity-100 p-1 rounded text-muted-foreground/60 hover:text-foreground hover:bg-accent/60 transition-all shrink-0"
-                                  title="Edit name"
-                                >
-                                  <Pencil className="h-3 w-3" />
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        <>
-                          <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setRightPanel(null)}>
-                            <PanelRightClose className="h-4 w-4" />
-                          </Button>
-                          <h3 className="font-medium text-sm">Workflows</h3>
-                        </>
-                      )}
-                    </div>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <Button variant="ghost" size="sm" className="h-7 w-7 p-0 shrink-0" title="Hide panel" aria-label="Hide panel" onClick={() => setRightPanel(null)}>
+                          <PanelRightClose className="h-4 w-4" />
+                        </Button>
+                        <h3 className={cn("font-medium text-sm shrink-0", rightPanel === "git" && "sr-only [@container(min-width:440px)]:not-sr-only")}>
+                          {rightPanel === "git" ? "Git" : rightPanel === "files" ? "Files" : rightPanel === "task" ? "Tasks" : rightPanel === "asset" ? "Assets" : rightPanel === "workflow" ? "Workflows" : rightPanel === "ralph" ? "RALPH" : rightPanel}
+                        </h3>
+                        {rightPanel === "git" && boundProject && (
+                          <GitRepositorySelector
+                            repositories={gitRepositoriesData?.repositories ?? []}
+                            selected={selectedRepository}
+                            loading={loadingGitRepositories}
+                            onSelect={handleSelectGitRepository}
+                          />
+                        )}
+                        {rightPanel === "git" && <div ref={setGitBranchControlsEl} className="flex items-center gap-1 border-l pl-0.5 ml-0.5 md:pl-1 md:ml-1 text-xs shrink-0 empty:hidden" />}
+                      </>
+                    )}
                   </div>
-                )}
+                  <div className={cn("flex items-center shrink-0", rightPanel === "git" ? "gap-0.5 md:gap-1" : "gap-1")}>
+                    {rightPanel === "git" && <div ref={setGitToolbarActionsEl} className="flex items-center gap-0.5" />}
+                    {rightPanel === "git" && (
+                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Refresh" aria-label="Refresh Git" disabled={loadingGitRepositories || gitReview.loading} onClick={rescanGitRepositories}>
+                        <RefreshCw className={cn("h-3.5 w-3.5", (loadingGitRepositories || gitReview.loading) && "animate-spin")} />
+                      </Button>
+                    )}
+                    {rightPanel === "files" && boundProject && <div ref={setFileRefreshTargetEl} className="flex items-center" />}
+                    {maximizeButton}
+                  </div>
+                </div>
 
                 {/* Panel content */}
                 {rightPanel === "git" && boundProject && (
@@ -948,22 +974,27 @@ export function SessionWorkspace() {
                     sessionId={worktreeSessionId}
                     defaultRepositoryId={gitRepositoriesData?.default_repository_id}
                     repository={selectedRepository}
-                    repositories={gitRepositoriesData?.repositories ?? NO_REPOSITORIES}
-                    loadingRepositories={loadingGitRepositories}
-                    onSelectRepository={handleSelectGitRepository}
-                    onRescan={rescanGitRepositories}
                     diffData={gitReview.snapshot?.diff ?? null}
                     loadingDiff={gitReview.loading || loadingGitRepositories}
                     review={gitReview.snapshot}
                     refreshError={!!gitReview.error}
                     onRefresh={refreshGitReview}
                     warnings={gitRepositoriesData?.warnings ?? NO_WARNINGS}
+                    branchControlsTarget={gitBranchControlsEl}
+                    toolbarActionsTarget={gitToolbarActionsEl}
                   />
                 )}
                 {rightPanel === "files" && boundProject && (
                   <div className="flex-1 overflow-hidden">
                     <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>}>
-                      <FileBrowser key={`${boundProject.id}-${worktreeSessionId ?? "local"}`} projectId={boundProject.id} sessionId={worktreeSessionId} />
+                      <FileBrowser
+                        key={`${boundProject.id}-${worktreeSessionId ?? "local"}`}
+                        projectId={boundProject.id}
+                        projectName={boundProject.name}
+                        sessionId={worktreeSessionId}
+                        onOpenQuickOpen={() => setQuickOpenVisible(true)}
+                        refreshTarget={fileRefreshTargetEl}
+                      />
                     </Suspense>
                   </div>
                 )}
@@ -1038,7 +1069,7 @@ export function SessionWorkspace() {
           const isVisible = isActive && ts.show;
 
           return (
-            <div key={session.id} style={{ display: isVisible ? "contents" : "none" }}>
+            <div key={session.id} style={{ display: isVisible && !rightSlotMaximized ? "contents" : "none" }}>
               <div
                 className="h-1 cursor-row-resize hover:bg-primary/20 active:bg-primary/40 transition-colors flex items-center justify-center shrink-0 border-t"
                 onMouseDown={handleTerminalMouseDown}
@@ -1089,7 +1120,7 @@ export function SessionWorkspace() {
                   <TerminalPanel
                     key={ts.key}
                     sessionId={session.id}
-                    visible={isActive && ts.show}
+                    visible={isActive && ts.show && !rightSlotMaximized}
                     onExited={() => killTerminal(session.id)}
                   />
                 </div>

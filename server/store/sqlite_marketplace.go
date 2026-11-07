@@ -39,25 +39,25 @@ func (t UnixTime) Time() time.Time { return time.Time(t) }
 
 // InstalledMCP holds the runtime config for a locally installed MCP package.
 type InstalledMCP struct {
-	Name        string    `json:"name"`         // human-readable package name (PK component)
-	ProjectID   string    `json:"project_id"`   // project scope: "" = global (all sessions), else project-specific
-	PackageID   string    `json:"package_id"`   // remote marketplace package ID (for update checks)
-	Version     string    `json:"version"`      // installed version string
-	MCPKey      string    `json:"mcp_key"`      // server key used in mcpServers config
-	Manifest    string    `json:"manifest"`     // JSON: MCPServerEntry (key, type, cmd/url, args, env, tool_names)
-	EnvValues   string    `json:"env_values"`   // JSON: user-provided env secrets {"KEY": "value"} merged at runtime
-	AuthType    string   `json:"auth_type"`    // "none", "apikey", "oauth_discovery", "oauth"
+	Name        string   `json:"name"`       // human-readable package name (PK component)
+	ProjectID   string   `json:"project_id"` // project scope: "" = global (all sessions), else project-specific
+	PackageID   string   `json:"package_id"` // remote marketplace package ID (for update checks)
+	Version     string   `json:"version"`    // installed version string
+	MCPKey      string   `json:"mcp_key"`    // server key used in mcpServers config
+	Manifest    string   `json:"manifest"`   // JSON: MCPServerEntry (key, type, cmd/url, args, env, tool_names)
+	EnvValues   string   `json:"env_values"` // JSON: user-provided env secrets {"KEY": "value"} merged at runtime
+	AuthType    string   `json:"auth_type"`  // "none", "apikey", "oauth_discovery", "oauth"
 	InstalledAt UnixTime `json:"installed_at"`
 }
 
 // InstalledSkill holds install info for a locally installed skill package.
 type InstalledSkill struct {
-	Name        string   `json:"name"`         // package name (primary key component)
-	ProjectID   string   `json:"project_id"`   // project ID, or "" for global
+	Name        string   `json:"name"`       // package name (primary key component)
+	ProjectID   string   `json:"project_id"` // project ID, or "" for global
 	Version     string   `json:"version"`
 	InstallPath string   `json:"install_path"` // absolute path to the extracted skill directory
 	InstalledAt UnixTime `json:"installed_at"`
-	Missing     bool     `json:"missing"`      // true if install_path no longer exists on disk
+	Missing     bool     `json:"missing"` // true if install_path no longer exists on disk
 }
 
 // InstalledPluginEntry holds install info for a locally installed plugin directory (Claude --plugin-dir).
@@ -70,16 +70,23 @@ type InstalledPluginEntry struct {
 
 // MCPOAuthToken stores OAuth tokens for MCP connectors using oauth_discovery or oauth auth types.
 type MCPOAuthToken struct {
-	MCPName       string    `json:"mcp_name"`
-	ProjectID     string    `json:"project_id"`
-	AccessToken   string    `json:"access_token"`
-	RefreshToken  string    `json:"refresh_token"`
-	ExpiresAt     time.Time `json:"expires_at"`      // zero = no expiry
-	TokenEndpoint string    `json:"token_endpoint"`  // for refresh
-	ClientID      string    `json:"client_id"`
-	State         string    `json:"state"`           // transient: random state for OAuth flow
-	CodeVerifier  string    `json:"code_verifier"`   // transient: PKCE verifier
-	UpdatedAt     time.Time `json:"updated_at"`
+	MCPName              string    `json:"mcp_name"`
+	ProjectID            string    `json:"project_id"`
+	AccessToken          string    `json:"access_token"`
+	RefreshToken         string    `json:"refresh_token"`
+	ExpiresAt            time.Time `json:"expires_at"`     // zero = no expiry
+	TokenEndpoint        string    `json:"token_endpoint"` // for refresh
+	ClientID             string    `json:"client_id"`
+	ClientSecret         string    `json:"client_secret,omitempty"`
+	AuthMethod           string    `json:"token_endpoint_auth_method,omitempty"`
+	RegisteredGrantTypes []string  `json:"registered_grant_types,omitempty"`
+	Scope                string    `json:"scope,omitempty"`
+	TokenType            string    `json:"token_type,omitempty"`
+	ObtainedAt           time.Time `json:"obtained_at,omitempty"`
+	Resource             string    `json:"resource,omitempty"` // optional resource indicator for token grants
+	State                string    `json:"state"`              // transient: random state for OAuth flow
+	CodeVerifier         string    `json:"code_verifier"`      // transient: PKCE verifier
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // MarketplaceSource records a user-added marketplace directory or git repo.
@@ -142,7 +149,7 @@ func (s *SQLiteStore) GetInstalledMCP(name, projectID string) (*InstalledMCP, er
 
 // ListInstalledMCPs returns installed MCPs.
 //   - projectID = "*"  → all records (global + all project-specific)
-//   - projectID = ""   → global only (project_id='')
+//   - projectID = ""   → global only (project_id=”)
 //   - projectID = "<id>" → global + project-specific for that project
 func (s *SQLiteStore) ListInstalledMCPs(projectID string) ([]InstalledMCP, error) {
 	var (
@@ -154,7 +161,7 @@ func (s *SQLiteStore) ListInstalledMCPs(projectID string) ([]InstalledMCP, error
 	case "*":
 		rows, err = s.db.Query(q + ` ORDER BY name, project_id`)
 	case "":
-		rows, err = s.db.Query(q+` WHERE project_id = '' ORDER BY name`)
+		rows, err = s.db.Query(q + ` WHERE project_id = '' ORDER BY name`)
 	default:
 		rows, err = s.db.Query(q+` WHERE project_id IN ('', ?) ORDER BY name, project_id`, projectID)
 	}

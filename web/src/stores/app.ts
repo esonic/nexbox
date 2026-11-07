@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { sortProjectsByName } from "@/lib/project-order";
 import { persist } from "zustand/middleware";
 import type { DiffResponse } from "@/lib/api";
 import type { Project, Session, ChatMessage, MessagePart, Task, AssetType, ExecutionStats, ContextUsage, WorkflowProgressSnapshot } from "../types";
@@ -54,7 +55,10 @@ interface AppState {
 
   // Chat messages per session (keyed by session ID)
   chatMessages: Record<string, ChatMessage[]>;
+  chatHistoryPages: Record<string, { beforeId?: string; hasMore: boolean }>;
+  setChatHistoryPage: (sessionId: string, messages: ChatMessage[], hasMore: boolean) => void;
   setChatMessages: (sessionId: string, messages: ChatMessage[]) => void;
+  clearChatHistory: (sessionId: string) => void;
   addChatMessage: (sessionId: string, message: ChatMessage) => void;
 
   // Fine-grained streaming updates
@@ -240,9 +244,26 @@ export const useAppStore = create<AppState>()(
     set({ activeSessionId: id });
   },
   setSessions: (sessions) => set((s) => ({ sessions: reconcileById(s.sessions, sessions) })),
-  setProjects: (projects) => set((s) => ({ projects: reconcileById(s.projects, projects) })),
+  setProjects: (projects) => set((s) => ({ projects: reconcileById(s.projects, sortProjectsByName(projects)) })),
 
   chatMessages: {},
+  chatHistoryPages: {},
+  clearChatHistory: (sessionId) =>
+    set((state) => {
+      if (!(sessionId in state.chatMessages) && !(sessionId in state.chatHistoryPages)) return state;
+      const chatMessages = { ...state.chatMessages };
+      const chatHistoryPages = { ...state.chatHistoryPages };
+      delete chatMessages[sessionId];
+      delete chatHistoryPages[sessionId];
+      return { chatMessages, chatHistoryPages };
+    }),
+  setChatHistoryPage: (sessionId, messages, hasMore) =>
+    set((state) => ({
+      chatHistoryPages: {
+        ...state.chatHistoryPages,
+        [sessionId]: { beforeId: messages[0]?.id, hasMore },
+      },
+    })),
   setChatMessages: (sessionId, messages) =>
     set((state) => patchMessages(state, sessionId, () => messages)),
   addChatMessage: (sessionId, message) =>
@@ -552,18 +573,17 @@ export const useAppStore = create<AppState>()(
   streamingStartedAt: {} as Record<string, number>,
   setStreamingSession: (sessionId, active) =>
     set((state) => {
-      // A round just finished (true → false) for a session the user isn't
-      // currently viewing → flag it unread so the sidebar shows a blue dot.
-      const finishedInBackground =
+      // Every completed round gets a blue dot, including the selected session.
+      // Selecting the session or scrolling its messages clears it via markSessionRead.
+      const finished =
         state.streamingSessions[sessionId] === true &&
-        !active &&
-        sessionId !== state.activeSessionId;
+        !active;
       return {
         streamingSessions: { ...state.streamingSessions, [sessionId]: active },
         streamingStartedAt: active
           ? { ...state.streamingStartedAt, [sessionId]: Date.now() }
           : state.streamingStartedAt,
-        unreadSessions: finishedInBackground
+        unreadSessions: finished
           ? { ...state.unreadSessions, [sessionId]: true }
           : state.unreadSessions,
       };
@@ -585,12 +605,11 @@ export const useAppStore = create<AppState>()(
           }
         }
       }
-      // Background sessions that were streaming and are now considered finished
-      // (dropped from the reseeded map) just completed a round out of view →
-      // mark them unread. The one being viewed is never flagged.
+      // Sessions dropped from the reseeded map completed a round. Flag them
+      // unread even when selected, just like the live completion path.
       const unread = { ...state.unreadSessions };
       for (const [id, active] of Object.entries(state.streamingSessions)) {
-        if (active && !map[id] && id !== state.activeSessionId) {
+        if (active && !map[id]) {
           unread[id] = true;
         }
       }

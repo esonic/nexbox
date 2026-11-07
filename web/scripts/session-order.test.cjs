@@ -256,3 +256,59 @@ test('automatic mode blocks session reordering', () => {
   h.render().handleDrop(dragEvent(), 'b', rows);
   assert.equal(h.calls.length, 0);
 });
+
+const projectOrder = load('lib/project-order.ts');
+const project = (id, name, extra = {}) => ({ id, name, git_repo_path: `/src/${id}`, ...extra });
+
+test('project names use natural ordering without mutating input and resolve ties consistently', () => {
+  const rows = [project('z', 'Zulu'), project('10', 'app10'), project('2', 'App2'),
+    project('b', 'same', { namespace_id: 'beta' }), project('a', 'same', { namespace_id: 'alpha' })];
+  assert.deepEqual(ids(projectOrder.sortProjectsByName(rows)), ['2', '10', 'a', 'b', 'z']);
+  assert.deepEqual(ids(rows), ['z', '10', '2', 'b', 'a']);
+  assert.deepEqual(ids(projectOrder.sortProjectsByName([project('b', 'same'), project('a', 'same')])), ['a', 'b']);
+});
+
+test('project store sorts loads, additions and renames and reconciles unchanged rows', () => {
+  let state;
+  const { useAppStore } = load('stores/app.ts', {
+    zustand: { create: () => (initialize) => {
+      state = initialize((update) => { state = { ...state, ...(typeof update === 'function' ? update(state) : update) }; }, () => state);
+      return { getState: () => state };
+    } },
+    'zustand/middleware': { persist: (initialize) => initialize },
+    '@/lib/project-order': projectOrder,
+  });
+  const store = () => useAppStore.getState();
+  store().setProjects([project('z', 'Zulu'), project('b', 'Beta')]);
+  assert.deepEqual(ids(store().projects), ['b', 'z']);
+  const previous = store().projects;
+  store().setProjects([project('z', 'Zulu'), project('b', 'Beta')]);
+  assert.equal(store().projects, previous);
+  store().setProjects([project('c', 'Charlie'), ...store().projects]);
+  assert.deepEqual(ids(store().projects), ['b', 'c', 'z']);
+  store().setProjects(store().projects.map((p) => p.id === 'z' ? { ...p, name: 'Alpha' } : p));
+  assert.deepEqual(ids(store().projects), ['z', 'b', 'c']);
+});
+
+test('sidebar defaults to project names while preserving manual order and Unassigned placement', () => {
+  const layout = { autoSortSessions: false, projectOrder: [] };
+  const { useGroupedSessions } = load('hooks/useGroupedSessions.ts', {
+    react: { useMemo: (compute) => compute() },
+    '@/stores/layout': { useLayoutStore: (selector) => selector(layout) },
+    '@/lib/session-order': order,
+    '@/lib/project-order': projectOrder,
+    '@/lib/constants': { UNASSIGNED_PROJECT: '__unassigned__' },
+  });
+  const projects = [project('z', 'Zulu'), project('a', 'Alpha'), project('b', 'Beta'),
+    project('unlinked', 'Aardvark', { git_repo_path: '' }), project('system', '__unassigned__')];
+  const sessions = [session('unbound', '01', { project_id: '' }),
+    session('hidden', '01', { project_id: 'a', is_hidden: true })];
+  const groups = () => useGroupedSessions(sessions, projects);
+  const groupIds = () => Array.from(groups(), (g) => g.projectId);
+  assert.deepEqual(groupIds(), ['a', 'b', 'z', null]);
+  assert.equal(groups()[0].sessions.length, 0);
+  layout.projectOrder = ['z', 'a', 'b'];
+  assert.deepEqual(groupIds(), ['z', 'a', 'b', null]);
+  projects.push(project('d', 'Delta'), project('c', 'Charlie'));
+  assert.deepEqual(groupIds(), ['c', 'd', 'z', 'a', 'b', null]);
+});

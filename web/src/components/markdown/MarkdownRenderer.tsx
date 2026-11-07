@@ -1,5 +1,6 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import type { Components, ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { cn } from "@/lib/utils";
@@ -125,7 +126,7 @@ async function renderMermaidChart(chart: string, renderID: string, isDark: boole
 function MermaidBlock({ chart }: { chart: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
-  const blockIdRef = useRef(`mermaid-${Math.random().toString(36).slice(2, 10)}`);
+  const blockId = `mermaid-${useId().replace(/:/g, "")}`;
   const renderTokenRef = useRef(0);
   const [isDark, setIsDark] = useState<boolean>(() => isDarkThemeActive());
 
@@ -165,7 +166,7 @@ function MermaidBlock({ chart }: { chart: string }) {
           setError(null);
           return;
         }
-        const svg = await renderMermaidChart(source, `${blockIdRef.current}-${currentToken}`, isDark);
+        const svg = await renderMermaidChart(source, `${blockId}-${currentToken}`, isDark);
         if (cancelled || currentToken !== renderTokenRef.current) return;
         if (containerRef.current) {
           containerRef.current.innerHTML = svg;
@@ -181,7 +182,7 @@ function MermaidBlock({ chart }: { chart: string }) {
     return () => {
       cancelled = true;
     };
-  }, [chart, isDark]);
+  }, [chart, isDark, blockId]);
 
   if (error) {
     return (
@@ -209,44 +210,52 @@ interface MarkdownRendererProps {
   components?: Record<string, React.ElementType>;
 }
 
+// Keep the component type stable across parent updates (e.g. Git status polls)
+// so React preserves the scroll container and its horizontal position.
+const MarkdownTable: Components["table"] = ({ node, ...props }) => {
+  void node; // Markdown AST metadata must not be forwarded to the DOM.
+  return (
+    <div className="overflow-x-auto -mx-1 my-2">
+      <table {...props} className={cn("min-w-full", props.className)} />
+    </div>
+  );
+};
+
 export function MarkdownRenderer({
   content,
   className,
   enableMermaid = true,
   components,
 }: MarkdownRendererProps) {
+  // Component identity must survive unrelated parent updates. In particular,
+  // remounting code also remounts MermaidBlock and reruns its render effect.
+  const renderCode = useCallback(
+    ({ node, className: codeClassName, children, ...props }: React.ComponentProps<"code"> & ExtraProps) => {
+      void node;
+      const lang = codeClassName?.replace("language-", "").toLowerCase() || "";
+      const text = String(children ?? "").replace(/\n$/, "");
+      if (enableMermaid && lang === "mermaid") {
+        return <MermaidBlock chart={text} />;
+      }
+      return (
+        <code className={codeClassName} {...props}>
+          {children}
+        </code>
+      );
+    },
+    [enableMermaid],
+  );
+  const markdownComponents = useMemo(
+    () => ({ table: MarkdownTable, ...components, code: renderCode }),
+    [components, renderCode],
+  );
+
   return (
     <div className={cn(className)}>
       <ReactMarkdown
         remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
         rehypePlugins={[rehypeRaw]}
-        components={{
-          ...components,
-          // Wide tables overflow narrow viewports — give every rendered table
-          // its own horizontal scroll container so it stays in the message
-          // column on phones instead of pushing the page wider.
-          table({ children, ...props }) {
-            return (
-              <div className="overflow-x-auto -mx-1 my-2">
-                <table {...props} className="min-w-full">
-                  {children}
-                </table>
-              </div>
-            );
-          },
-          code({ className: codeClassName, children, ...props }) {
-            const lang = codeClassName?.replace("language-", "").toLowerCase() || "";
-            const text = String(children ?? "").replace(/\n$/, "");
-            if (enableMermaid && lang === "mermaid") {
-              return <MermaidBlock chart={text} />;
-            }
-            return (
-              <code className={codeClassName} {...props}>
-                {children}
-              </code>
-            );
-          },
-        }}
+        components={markdownComponents}
       >
         {content}
       </ReactMarkdown>

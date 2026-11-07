@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import { globalWS } from "@/lib/ws";
 import { messagesApi, serverApi, sessionsApi, tasksApi, queueApi } from "@/lib/api";
+import { insertSystemNotice, isVisibleChatMessage } from "@/lib/systemNotice";
 import type { QueuedMessage } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
 import {
@@ -193,7 +194,10 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   const [isConnected, setIsConnected] = useState(globalWS.connected);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [hasMore, setHasMore] = useState(false);
+  const historyPage = useAppStore((s) => s.chatHistoryPages[session.id]);
+  const hasMore = historyPage?.hasMore ?? false;
+  const [loadMoreError, setLoadMoreError] = useState(false);
+  const loadingMoreRef = useRef(false);
   const [serverAgent, setServerAgent] = useState<string>("");
   const [availableAgents, setAvailableAgents] = useState<string[]>([]);
   const [agentCapabilities, setAgentCapabilities] = useState<Record<string, AgentCapabilities>>({});
@@ -444,7 +448,11 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   // Load persisted chat history (initial load with pagination)
   useEffect(() => {
     if (!sessionId) return;
-    if (useAppStore.getState().chatMessages[sessionId]?.length) return;
+    const cached = useAppStore.getState();
+    if (cached.chatHistoryPages[sessionId] && cached.chatMessages[sessionId]?.length) {
+      setLoadingHistory(false);
+      return;
+    }
 
     let cancelled = false;
     let reconcileTimer: ReturnType<typeof setTimeout> | undefined;
@@ -458,7 +466,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       // splice the persisted history in front instead of discarding the fetch.
       const joinedRunningTurn = liveMessages.length === 1 && liveMessages[0].role === "assistant";
       if (liveMessages.length > 0 && !joinedRunningTurn) {
-        setHasMore(has_more || false);
+        useAppStore.getState().setChatHistoryPage(sessionId, persisted || [], has_more || false);
         return;
       }
 
@@ -474,7 +482,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         });
       }
       const mapped: ChatMessageType[] = (persisted || [])
-        .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))
+        .filter(isVisibleChatMessage)
         .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
 
       // Restore accumulated duration from persisted message metadata
@@ -503,7 +511,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         if (history.length > 0) {
           setChatMessages(sessionId, [...history, liveMessages[0]]);
         }
-        setHasMore(has_more || false);
+        useAppStore.getState().setChatHistoryPage(sessionId, persisted || [], has_more || false);
         return;
       }
 
@@ -512,7 +520,8 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         // rather than creating a second bubble alongside the DB partial content.
         const lastAsstIdx = mapped.reduce((best, m, i) => m.role === "assistant" ? i : best, -1);
         if (lastAsstIdx >= 0) {
-          mapped[lastAsstIdx] = { ...mapped[lastAsstIdx], isStreaming: true };
+          const [assistant] = mapped.splice(lastAsstIdx, 1);
+          mapped.push({ ...assistant, isStreaming: true });
         } else {
           mapped.push({
             id: `reconnecting-${sessionId}`,
@@ -544,12 +553,12 @@ export function useChatSession({ session }: UseChatSessionOptions) {
             const gs = useAppStore.getState();
             if (!gs.streamingSessions[sessionId]) return;
             const refreshed: ChatMessageType[] = (recovered || [])
-              .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))
+              .filter(isVisibleChatMessage)
               .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
             gs.setStreamingSession(sessionId, false);
             if (refreshed.length > 0) {
               gs.setChatMessages(sessionId, refreshed);
-              setHasMore(more || false);
+              gs.setChatHistoryPage(sessionId, recovered || [], more || false);
             } else {
               gs.finishStreaming(sessionId);
             }
@@ -560,7 +569,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       if (mapped.length > 0) {
         setChatMessages(sessionId, mapped);
       }
-      setHasMore(has_more || false);
+      useAppStore.getState().setChatHistoryPage(sessionId, persisted || [], has_more || false);
     }).catch((err) => {
       console.error("Failed to load chat history:", err);
     }).finally(() => {
@@ -610,13 +619,14 @@ export function useChatSession({ session }: UseChatSessionOptions) {
           // Reload DB messages so any content accumulated during the disconnect
           // (via periodic server-side flush) becomes visible without a full page refresh.
           const refreshed: ChatMessageType[] = (persisted || [])
-            .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))
+            .filter(isVisibleChatMessage)
             .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
           if (refreshed.length > 0) {
             if (active) {
               const lastAsstIdx = refreshed.reduce((best, m, i) => m.role === "assistant" ? i : best, -1);
               if (lastAsstIdx >= 0) {
-                refreshed[lastAsstIdx] = { ...refreshed[lastAsstIdx], isStreaming: true };
+                const [assistant] = refreshed.splice(lastAsstIdx, 1);
+                refreshed.push({ ...assistant, isStreaming: true });
               } else {
                 refreshed.push({
                   id: `reconnecting-${sessionId}`,
@@ -630,7 +640,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
               }
             }
             gs.setChatMessages(sessionId, refreshed);
-            if (has_more !== undefined) setHasMore(has_more);
+            gs.setChatHistoryPage(sessionId, persisted || [], has_more || false);
           }
         }).catch(() => {});
       }
@@ -659,6 +669,18 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     };
 
     switch (event.type) {
+      case "system_message":
+        if (event.content) {
+          gs().setChatMessages(sid, insertSystemNotice(gs().chatMessages[sid] || [], {
+            id: event.message_id || uuid(),
+            session_id: sid,
+            role: "system",
+            parts: [{ type: "text", content: event.content }],
+            metadata: {},
+            created_at: new Date().toISOString(),
+          }));
+        }
+        break;
       case "user_message":
         if (event.content && !gs().streamingSessions[sid]) {
           gs().addChatMessage(sid, {
@@ -1085,30 +1107,36 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   }, [sessionId, storeRemovePickedWorkflow]);
 
   const loadMoreMessages = useCallback(async () => {
-    if (loadingMore || !hasMore || messages.length === 0) return;
+    const page = useAppStore.getState().chatHistoryPages[sessionId];
+    if (loadingMoreRef.current || !page?.hasMore || !page.beforeId) return;
 
-    const oldestMessage = messages[0];
-    if (!oldestMessage) return;
-
+    loadingMoreRef.current = true;
     setLoadingMore(true);
+    setLoadMoreError(false);
     try {
-      const { messages: olderMessages, has_more } = await messagesApi.list(sessionId, 20, oldestMessage.id);
-      if (olderMessages && olderMessages.length > 0) {
-        const mapped: ChatMessageType[] = olderMessages
-          .filter((m) => m.role === "user" || (m.role === "assistant" && (m.parts?.length ?? 0) > 0))
-          .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
-
-        // Prepend older messages to existing ones
-        const currentMessages = useAppStore.getState().chatMessages[sessionId] || [];
-        useAppStore.getState().setChatMessages(sessionId, [...mapped, ...currentMessages]);
+      const { messages: olderMessages = [], has_more } = await messagesApi.list(sessionId, 20, page.beforeId);
+      const store = useAppStore.getState();
+      // A reconnect may have replaced the latest page while this request ran.
+      if (store.chatHistoryPages[sessionId] !== page) return;
+      const currentMessages = store.chatMessages[sessionId] || [];
+      const currentIds = new Set(currentMessages.map((m) => m.id));
+      const mapped: ChatMessageType[] = olderMessages
+        .filter((m) => isVisibleChatMessage(m) && !currentIds.has(m.id))
+        .map((m) => ({ ...m, parts: m.parts ?? [], isStreaming: false }));
+      if (mapped.length > 0) {
+        store.setChatMessages(sessionId, [...mapped, ...currentMessages]);
       }
-      setHasMore(has_more || false);
+      // Advance using raw rows, including hidden placeholders, so every page
+      // makes progress even when it contains no visible messages.
+      store.setChatHistoryPage(sessionId, olderMessages, !!has_more && olderMessages.length > 0);
     } catch (err) {
       console.error("Failed to load more messages:", err);
+      if (sessionIdRef.current === sessionId) setLoadMoreError(true);
     } finally {
+      loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [sessionId, loadingMore, hasMore, messages]);
+  }, [sessionId]);
 
   // Listen for reference-asset events from AssetPanel cite buttons
   useEffect(() => {
@@ -1150,6 +1178,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     isConnected,
     loadingHistory,
     loadingMore,
+    loadMoreError,
     hasMore,
     pendingQuestion,
     pendingTodo,

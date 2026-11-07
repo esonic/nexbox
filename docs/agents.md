@@ -43,6 +43,14 @@ NexBox session IDs differ from native agent session IDs. Adapters store native c
 
 Forking copies conversation history up to the selected response, but inherits the parent session's **current** working directory, including uncommitted and untracked files. It does not roll back files or create another branch or worktree. Subsequent conversations are independent, while file changes remain visible to both sessions.
 
+## Import CLI Conversations
+
+Use **Import CLI sessions** in a project's sidebar menu to import Claude Code or Codex conversations recorded for that project's directory. Choose an agent, select conversations, and import them. The list loads in pages and excludes conversations already present, including those in the trash.
+
+NexBox reads the native history under the system account running the service. Imported conversations retain text, available tool activity, usage, and supported fork checkpoints; the next message resumes the native session. Importing does not restore historical files or create a worktree. Other agents do not currently support history import.
+
+If another Codex process holds the native session, NexBox reports that it is busy and preserves its continuation ID. Release that process before retrying.
+
 ## Browser Tools and Background Tasks
 
 The Claude Code, Codex, and Kimi adapters currently declare Chrome tool support. Sessions can use a NexBox-managed browser or connect to an external Chrome instance.

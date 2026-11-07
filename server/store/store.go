@@ -109,6 +109,10 @@ type SessionStore interface {
 	// fork was capability-gated against it); empty inherits the parent's.
 	// The fork shares its parent's worktree mode and working directory.
 	ForkSession(parentID, name, atMessageID, checkpoint, agent string) (*Session, error)
+	// ImportSession creates a session and its full message history in one
+	// transaction. Timestamps come from the request; the session's creation and
+	// last-activity times are the first and last message times.
+	ImportSession(req ImportSessionRequest) (*Session, error)
 	GetExpiredSessionWorktrees(olderThan time.Time) ([]string, error) // returns worktree_paths for soon-to-be-purged sessions
 	GetReferencedWorktreePaths() ([]string, error)                    // all remaining sessions (including trash/hidden) and active workflow runs
 	DeleteSession(id string) error                                    // soft delete (move to trash)
