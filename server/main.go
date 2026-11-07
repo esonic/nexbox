@@ -354,6 +354,7 @@ func main() {
 	queueCtx, queueCancel := context.WithCancel(context.Background())
 	defer queueCancel()
 	go srv.StartQueuePoller(queueCtx)
+	go srv.StartMCPOAuthRefresher(queueCtx)
 
 	// Periodic cleanup of stale message part details (keep recent 50 sessions, every hour)
 	go func() {

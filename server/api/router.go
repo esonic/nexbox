@@ -37,8 +37,9 @@ type Server struct {
 	OnMCPToolsChanged func()                   // called after MCP tool category settings change
 	WeChat            *WeChatJSSDK             // optional WeChat JS-SDK share signer (nil when unconfigured)
 
-	mcpRuntimeTools sync.Map // installation identity -> immutable MCP tool aliases
-	projectInitMu   sync.Mutex
+	oauthRefreshLocks sync.Map
+	mcpRuntimeTools   sync.Map // installation identity -> immutable MCP tool aliases
+	projectInitMu     sync.Mutex
 
 	// humanGates: executionID+":"+nodeID → channel carrying user input for human node continuation
 	humanGatesMu sync.Mutex
@@ -132,6 +133,8 @@ func registerAuthedAPIRoutes(s *Server, r chi.Router) {
 	r.Route("/sessions", func(r chi.Router) {
 		r.Get("/", s.ListSessions)
 		r.Post("/", s.CreateSession)
+		r.Get("/importable", s.ListImportableSessions)
+		r.Post("/import", s.ImportSession)
 		r.Put("/reorder", s.ReorderSessions)
 		r.Get("/trash", s.ListTrashedSessions)
 		r.Delete("/trash", s.EmptyTrash)
@@ -193,6 +196,7 @@ func registerAuthedAPIRoutes(s *Server, r chi.Router) {
 			// File browser
 			r.Get("/files", s.ListProjectFiles)
 			r.Get("/files-flat", s.ListProjectFilesFlat)
+			r.Get("/file-resolve", s.ResolveProjectFileLink)
 			r.Get("/file-content", s.ReadProjectFile)
 			r.Put("/file-content", s.SaveProjectFile)
 			r.Delete("/file-content", s.DeleteProjectFile)

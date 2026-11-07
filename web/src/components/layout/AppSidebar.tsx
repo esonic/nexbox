@@ -10,6 +10,7 @@ import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { ProjectDialog } from "@/components/project/ProjectDialog";
 import { DeleteProjectDialog } from "@/components/project/DeleteProjectDialog";
 import { UNASSIGNED_PROJECT, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX } from "@/lib/constants";
+import { ImportSessionsDialog } from "@/components/project/ImportSessionsDialog";
 import { useSessionNotifications } from "@/hooks/useSessionNotifications";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useSidebarData } from "@/hooks/useSidebarData";
@@ -23,7 +24,7 @@ import { NewSessionButton } from "@/components/layout/sidebar/NewSessionButton";
 import { SessionsHeader } from "@/components/layout/sidebar/SessionsHeader";
 import { SidebarFooterNav } from "@/components/layout/sidebar/SidebarFooterNav";
 import { MobileMenuButton, CollapsedSidebarRail } from "@/components/layout/sidebar/CollapsedSidebar";
-import type { Project } from "@/types";
+import type { Project, Session } from "@/types";
 
 // Tracks whether the first auto-select pass has run in this JS runtime.
 // Module-level so it survives React strict-mode double-mounts but resets
@@ -89,6 +90,7 @@ export function AppSidebar() {
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [deleteTargetProject, setDeleteTargetProject] = useState<Project | null>(null);
   const [deletingProject, setDeletingProject] = useState(false);
+  const [importingProject, setImportingProject] = useState<Project | null>(null);
 
   useEffect(() => {
     if (renamingSessionId && renameRef.current) {
@@ -305,11 +307,21 @@ export function AppSidebar() {
     setProjectDialogOpen(true);
   };
 
+  const handleSessionsImported = (imported: Session[]) => {
+    // `imported` is oldest-first; the sidebar lists newest first.
+    const newestFirst = [...imported].reverse();
+    setSessions([...newestFirst, ...useAppStore.getState().sessions]);
+    setActiveSessionId(newestFirst[0].id);
+    if (location.pathname !== "/") navigate("/");
+    window.dispatchEvent(new CustomEvent("session-updated"));
+  };
+
   const handleProjectSaved = (project: Project) => {
-    if (editingProject) {
-      setProjects(projects.map((p) => (p.id === project.id ? project : p)));
+    const currentProjects = useAppStore.getState().projects;
+    if (currentProjects.some((p) => p.id === project.id)) {
+      setProjects(currentProjects.map((p) => (p.id === project.id ? project : p)));
     } else {
-      setProjects([project, ...projects]);
+      setProjects([project, ...currentProjects]);
     }
   };
 
@@ -452,6 +464,7 @@ export function AppSidebar() {
               onNewSession={handleNewSession}
               onEditProject={handleOpenEditProject}
               onDeleteProject={setDeleteTargetProject}
+              onImportSessions={setImportingProject}
               renamingSessionId={renamingSessionId}
               renameValue={renameValue}
               renameRef={renameRef}
@@ -517,6 +530,13 @@ export function AppSidebar() {
           onClose={() => { if (!deletingProject) setDeleteTargetProject(null); }}
         />
       )}
+
+      <ImportSessionsDialog
+        open={importingProject !== null}
+        onOpenChange={(open) => { if (!open) setImportingProject(null); }}
+        project={importingProject}
+        onImported={handleSessionsImported}
+      />
 
       {/* Resize handle — desktop only; dragging doesn't apply on touch. */}
       {!isMobile && (

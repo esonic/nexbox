@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -104,10 +107,19 @@ func (s *Server) rememberMCPTools(mcp *store.InstalledMCP, key string, tools []g
 
 type mcpProbeTransport struct {
 	unauthorized atomic.Bool
+	httpStatus   atomic.Int64
+	base         http.RoundTripper
 }
 
 func (t *mcpProbeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	resp, err := http.DefaultTransport.RoundTrip(r)
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(r)
+	if r.Method == http.MethodPost && resp != nil {
+		t.httpStatus.Store(int64(resp.StatusCode))
+	}
 	if resp != nil && resp.StatusCode == http.StatusUnauthorized {
 		t.unauthorized.Store(true)
 	}
@@ -127,6 +139,7 @@ func (t *mcpProbeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 // It uses the same NexBox-owned authorization as the runtime proxy and never
 // hands OAuth credentials to an agent process.
 func (s *Server) probeInstalledMCP(ctx context.Context, mcp *store.InstalledMCP, key string) mcpRuntimeStatus {
+	started := time.Now()
 	status := mcpRuntimeStatus{Name: mcp.Name, Key: key, State: "unavailable"}
 	target, err := mcpTargetURL(mcp.Manifest)
 	if err != nil {
@@ -138,7 +151,7 @@ func (s *Server) probeInstalledMCP(ctx context.Context, mcp *store.InstalledMCP,
 		status.Message = "Could not resolve MCP authorization."
 		return status
 	}
-	probeTransport := &mcpProbeTransport{}
+	probeTransport := &mcpProbeTransport{base: &mcpOAuthTransport{server: s, mcp: mcp}}
 	client, err := mcpclient.NewStreamableHttpClient(target.String(),
 		transport.WithHTTPHeaders(headers),
 		transport.WithHTTPBasicClient(&http.Client{Transport: probeTransport, Timeout: 10 * time.Second}))
@@ -182,6 +195,14 @@ func (s *Server) probeInstalledMCP(ctx context.Context, mcp *store.InstalledMCP,
 		}
 	}
 	if err != nil {
+		// SDK errors may append arbitrary upstream bodies. Record the error prefix
+		// and structured transport cause without response bodies or endpoint URLs.
+		detail, _, _ := strings.Cut(err.Error(), ":")
+		var transportError *url.Error
+		if errors.As(err, &transportError) {
+			detail = transportError.Err.Error()
+		}
+		log.Printf("[mcp-discovery] name=%q project=%q phase=%q elapsed=%s http_status=%d error_type=%T error=%q deadline_exceeded=%t cancelled=%t", mcp.Name, mcp.ProjectID, phase, time.Since(started).Round(time.Millisecond), probeTransport.httpStatus.Load(), err, detail, errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled))
 		if probeTransport.unauthorized.Load() {
 			oauth := mcp.AuthType == "oauth" || mcp.AuthType == "oauth_discovery"
 			if mcp.AuthType == "none" {
@@ -189,14 +210,14 @@ func (s *Server) probeInstalledMCP(ctx context.Context, mcp *store.InstalledMCP,
 			}
 			if oauth {
 				status.State = "needs_auth"
-				status.Message = "Installed, but OAuth authorization is required. Click Authorize in NexBox, then send another message in this conversation."
+				status.Message = "Authorization required."
 				s.broadcastNeedsAuth(mcp.Name, mcp.ProjectID)
 			} else {
 				status.State = "auth_rejected"
-				status.Message = "Installed, but the MCP server rejected its configured credentials."
+				status.Message = "MCP server rejected its configured credentials."
 			}
 		} else {
-			status.Message = fmt.Sprintf("Installed, but MCP %s failed. Check the connector endpoint and retry.", phase)
+			status.Message = fmt.Sprintf("MCP %s failed.", phase)
 		}
 		return status
 	}

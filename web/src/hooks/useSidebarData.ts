@@ -3,6 +3,7 @@ import { useLocation } from "react-router-dom";
 import { toast } from "sonner";
 import { sessionsApi, projectsApi, serverApi, marketplaceApi } from "@/lib/api";
 import type { CloudInfo } from "@/lib/api";
+import { openOAuthWindow } from "@/lib/oauthWindow";
 import { globalWS } from "@/lib/ws";
 import { useAppStore } from "@/stores/app";
 
@@ -105,9 +106,8 @@ export function useSidebarData() {
   useEffect(() => {
     return globalWS.subscribeUnrouted((sessionId) => {
       const store = useAppStore.getState();
-      if (store.chatMessages[sessionId]?.length) {
-        store.setChatMessages(sessionId, []);
-      }
+      // The transcript and its pagination cursor are one cache entry.
+      store.clearChatHistory(sessionId);
     });
   }, []);
 
@@ -133,22 +133,16 @@ export function useSidebarData() {
         const name = event.name as string;
         const projectId = event.project_id as string | undefined;
         toast.warning(`MCP "${name}" requires authorization`, {
-          id: `connector-needs-auth-${projectId || "global"}-${name}`,
+          id: `connector-needs-auth-${event.connection_id || event.config_key || `${projectId || "global"}-${name}`}`,
           duration: Infinity,
           closeButton: true,
-          description: "Authorize to enable this tool, then talk to AI again.",
+          description: "Authorize to use this MCP across projects, then talk to AI again.",
           action: {
             label: "Authorize",
-            onClick: async () => {
-              try {
-                const { auth_url } = await marketplaceApi.oauthStart(name, projectId || undefined);
-                window.open(auth_url, "_blank", "noopener,noreferrer");
-              } catch (e) {
-                toast.error(`Cannot start OAuth for "${name}"`, {
-                  description: e instanceof Error ? e.message : String(e),
-                });
-              }
-            },
+            onClick: () => openOAuthWindow(async () => {
+              const { auth_url } = await marketplaceApi.oauthStart(name, projectId || undefined);
+              return auth_url;
+            }, `Cannot start OAuth for "${name}"`),
           },
         });
       }
@@ -156,7 +150,9 @@ export function useSidebarData() {
         const name = event.name as string;
         const projectId = event.project_id as string | undefined;
         toast.dismiss(`connector-needs-auth-${projectId || "global"}-${name}`);
-        toast.success(`MCP "${name}" connected`);
+        if (event.connection_id) toast.dismiss(`connector-needs-auth-${event.connection_id}`);
+        if (event.config_key) toast.dismiss(`connector-needs-auth-${event.config_key}`);
+        toast.success(`MCP "${name}" connected`, { id: `connector-connected-${event.connection_id || name}` });
       }
     });
   }, [loadSessions]);

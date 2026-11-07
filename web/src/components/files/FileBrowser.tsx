@@ -1,11 +1,8 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
+import { createPortal } from "react-dom";
 import {
-  ChevronRight,
-  ChevronDown,
-  ChevronUp,
   File,
-  Folder,
-  FolderOpen,
+  ChevronDown,
   Loader2,
   RefreshCw,
   Search,
@@ -16,20 +13,21 @@ import {
   Save,
   ExternalLink,
   X,
-  CaseSensitive,
   Eye,
   Code2,
+  CaseSensitive,
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { filesApi, serverApi, gitApi, type FileEntry, type FileContentResponse, type FileSearchResult, type GitStatusResponse } from "@/lib/api";
-import { getLangFromPath, ensureLangRegistered, highlightCode } from "@/lib/highlight";
+import { ApiError, filesApi, gitApi, type FileEntry, type FileContentResponse, type FileSearchResult, type GitStatusResponse, type RepositoryFileRef } from "@/lib/api";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
+import { gitContextKey } from "@/stores/git";
 import { useLayoutStore } from "@/stores/layout";
 import { FILE_TREE_WIDTH_MIN, FILE_TREE_WIDTH_MAX } from "@/lib/constants";
 import { MarkdownRenderer, isMarkdownPath } from "@/components/markdown/MarkdownRenderer";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -38,546 +36,41 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-} from "@/components/ui/dropdown-menu";
-
-import { SearchResults } from "./PanelSearch";
 
 const MonacoFileEditor = lazy(() => import("./MonacoFileEditor"));
 // Type-only import: erased at build time, so it does not pull the Monaco chunk eagerly.
 import type { MonacoFileEditorHandle } from "./MonacoFileEditor";
 
-// MIME type detection by extension for the drag-source marker. The exact value
-// is irrelevant; only the presence of this marker distinguishes internal moves
-// from OS file drops.
-const INTERNAL_DRAG_TYPE = "application/x-nexbox-files";
+import { useFileTree } from "./useFileTree";
+import { FileTreeItem } from "./FileTreeItem";
+import { SearchResults } from "./PanelSearch";
+import {
+  INTERNAL_DRAG_TYPE,
+  dirnameOf,
+  joinPath,
+  dropTargetDir,
+  isHtmlPath,
+  formatSize,
+  type GitDeco,
+  type GitChangeKind,
+} from "./fileBrowserShared";
 
-function dirnameOf(p: string): string {
-  if (!p) return "";
-  const idx = p.lastIndexOf("/");
-  return idx === -1 ? "" : p.slice(0, idx);
-}
-
-function joinPath(dir: string, name: string): string {
-  if (!dir) return name;
-  return `${dir}/${name}`;
-}
-
-// The folder a drop on `entry` should target: a directory accepts into itself,
-// a file accepts into its containing folder (so dragging onto any row inside an
-// expanded folder lands in that folder rather than falling through to the root).
-function dropTargetDir(entry: FileEntry): string {
-  return entry.is_dir ? entry.path : dirnameOf(entry.path);
-}
-
-function isHtmlPath(p: string): boolean {
-  const ext = p.split(".").pop()?.toLowerCase() || "";
-  return ext === "html" || ext === "htm";
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-// ── Git status decorations (VSCode-style) ──
-
-// Letter badge + name color for a single git change. `dir` is the aggregate
-// marker shown on folders that contain changes.
-type GitChangeKind = "modified" | "added" | "deleted" | "renamed" | "untracked" | "dir-tracked" | "dir-untracked";
-interface GitDeco {
-  kind: GitChangeKind;
-}
-
-// VSCode's exact git-decoration foreground colors (Light+ / Dark+ themes), which
-// are softer/less saturated than Tailwind's amber-500/green-600. Modified =
-// tan-gold, added/untracked = sage green, deleted = muted red.
-const GIT_DECO_COLOR: Record<GitChangeKind, string> = {
-  modified: "text-[#895503] dark:text-[#e2c08d]",
-  renamed: "text-[#895503] dark:text-[#e2c08d]",
-  added: "text-[#587c0c] dark:text-[#81b88b]",
-  untracked: "text-[#007100] dark:text-[#73c991]",
-  deleted: "text-[#ad0707] dark:text-[#c74e39]",
-  "dir-tracked": "text-[#895503] dark:text-[#e2c08d]",
-  "dir-untracked": "text-[#007100] dark:text-[#73c991]",
-};
-
-// Single-letter badge shown at the right edge of a changed file row.
-const GIT_DECO_LETTER: Partial<Record<GitChangeKind, string>> = {
-  modified: "M",
-  added: "A",
-  deleted: "D",
-  renamed: "R",
-  untracked: "U",
-};
-
-// ── File tree item ──
-
-function FileTreeItem({
-  entry,
-  depth,
-  expanded,
-  onToggle,
-  highlightedPath,
-  onSelect,
-  onHighlight,
-  getChildren,
-  isLoading,
-  getGitDecoration,
-  dragOverPath,
-  onDragStartItem,
-  onDragOverItem,
-  onDropOnItem,
-  onDragEndItem,
-}: {
-  entry: FileEntry;
-  depth: number;
-  expanded: Set<string>;
-  onToggle: (path: string) => void;
-  highlightedPath: string | null;
-  onSelect: (path: string) => void;
-  onHighlight: (path: string) => void;
-  getChildren: (path: string) => FileEntry[] | undefined;
-  isLoading: (path: string) => boolean;
-  getGitDecoration: (path: string, isDir: boolean) => GitDeco | undefined;
-  dragOverPath: string | null;
-  onDragStartItem: (entry: FileEntry, e: React.DragEvent) => void;
-  onDragOverItem: (entry: FileEntry, e: React.DragEvent) => void;
-  onDropOnItem: (entry: FileEntry, e: React.DragEvent) => void;
-  onDragEndItem: () => void;
-}) {
-  const isExpanded = expanded.has(entry.path);
-  const isHighlighted = highlightedPath === entry.path;
-  const isDropTarget = entry.is_dir && dragOverPath === entry.path;
-  const children = isExpanded && entry.is_dir ? getChildren(entry.path) : undefined;
-  const loading = isExpanded && entry.is_dir && children === undefined && isLoading(entry.path);
-  const gitDeco = getGitDecoration(entry.path, entry.is_dir);
-  const gitColor = gitDeco ? GIT_DECO_COLOR[gitDeco.kind] : undefined;
-  const gitLetter = gitDeco ? GIT_DECO_LETTER[gitDeco.kind] : undefined;
-
-  return (
-    <>
-      <div
-        draggable
-        onDragStart={(e) => onDragStartItem(entry, e)}
-        onDragOver={(e) => onDragOverItem(entry, e)}
-        onDrop={(e) => onDropOnItem(entry, e)}
-        onDragEnd={onDragEndItem}
-        className={cn(
-          "flex items-center gap-1 py-[3px] pr-2 cursor-pointer text-xs hover:bg-accent/50 transition-colors",
-          isHighlighted && "bg-accent",
-          isDropTarget && "ring-1 ring-inset ring-primary/60 bg-primary/10"
-        )}
-        style={{ paddingLeft: depth * 16 + 8 }}
-        onClick={() => {
-          onHighlight(entry.path);
-          if (entry.is_dir) {
-            onToggle(entry.path);
-          } else {
-            onSelect(entry.path);
-          }
-        }}
-        title={entry.is_symlink ? `${entry.name} (symlink)` : entry.name}
-      >
-        {entry.is_dir ? (
-          <>
-            {isExpanded ? (
-              <ChevronDown className="h-3 w-3 text-muted-foreground/50 shrink-0" />
-            ) : (
-              <ChevronRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
-            )}
-            {isExpanded ? (
-              <FolderOpen className="h-3.5 w-3.5 text-blue-400/70 shrink-0" />
-            ) : (
-              <Folder className="h-3.5 w-3.5 text-blue-400/70 shrink-0" />
-            )}
-          </>
-        ) : (
-          <>
-            <span className="w-3 shrink-0" />
-            <File className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
-          </>
-        )}
-        {/* Server-compacted folder chains arrive as "a/b/c" (path = innermost folder);
-            render segments with dimmed separators like VSCode compact folders. */}
-        <span className={cn("truncate min-w-0", entry.is_symlink && "italic", gitColor)}>
-          {(entry.is_dir ? entry.name.split("/") : [entry.name]).map((segment, i) => (
-            <span key={i}>
-              {i > 0 && <span className="text-muted-foreground/40 px-px">/</span>}
-              {segment}
-            </span>
-          ))}
-        </span>
-        {/* Git change marker at the right edge: a letter badge for files, a dot
-            for folders that contain changes (VSCode-style). */}
-        {gitLetter ? (
-          <span className={cn("ml-auto pl-1 shrink-0 font-semibold tabular-nums", gitColor)}>{gitLetter}</span>
-        ) : gitDeco && entry.is_dir ? (
-          <span className={cn("ml-auto pl-1 shrink-0 text-base leading-none", gitColor)}>•</span>
-        ) : null}
-      </div>
-      {isExpanded && entry.is_dir && (
-        loading ? (
-          <div
-            className="flex items-center gap-1 py-[3px] text-xs text-muted-foreground/50"
-            style={{ paddingLeft: (depth + 1) * 16 + 8 }}
-          >
-            <Loader2 className="h-3 w-3 animate-spin" />
-          </div>
-        ) : children?.map((child) => (
-          <FileTreeItem
-            key={child.path}
-            entry={child}
-            depth={depth + 1}
-            expanded={expanded}
-            onToggle={onToggle}
-            highlightedPath={highlightedPath}
-            onSelect={onSelect}
-            onHighlight={onHighlight}
-            getChildren={getChildren}
-            isLoading={isLoading}
-            getGitDecoration={getGitDecoration}
-            dragOverPath={dragOverPath}
-            onDragStartItem={onDragStartItem}
-            onDragOverItem={onDragOverItem}
-            onDropOnItem={onDropOnItem}
-            onDragEndItem={onDragEndItem}
-          />
-        ))
-      )}
-    </>
-  );
-}
-
-// ── In-file search ──
-
-interface LineMatch {
-  start: number;
-  end: number;
-  globalIndex: number;
-}
-
-function computeLineMatches(lines: string[], query: string, caseSensitive: boolean): Map<number, LineMatch[]> {
-  const result = new Map<number, LineMatch[]>();
-  if (!query) return result;
-  const needle = caseSensitive ? query : query.toLowerCase();
-  let globalIndex = 0;
-
-  for (let i = 0; i < lines.length; i++) {
-    const haystack = caseSensitive ? lines[i] : lines[i].toLowerCase();
-    let pos = 0;
-    while (pos <= haystack.length - needle.length) {
-      const idx = haystack.indexOf(needle, pos);
-      if (idx === -1) break;
-      const matches = result.get(i) ?? [];
-      matches.push({ start: idx, end: idx + needle.length, globalIndex });
-      result.set(i, matches);
-      globalIndex++;
-      pos = idx + 1;
-    }
-  }
-
-  return result;
-}
-
-function HighlightOverlay({
-  line,
-  matches,
-  currentGlobalIndex,
-}: {
-  line: string;
-  matches: LineMatch[];
-  currentGlobalIndex: number;
-}) {
-  const parts: React.ReactNode[] = [];
-  let pos = 0;
-
-  for (const match of matches) {
-    if (pos < match.start) {
-      parts.push(<span key={`text-${pos}`}>{line.slice(pos, match.start)}</span>);
-    }
-
-    const isCurrent = match.globalIndex === currentGlobalIndex;
-    parts.push(
-      <mark
-        key={`match-${match.start}-${match.globalIndex}`}
-        data-match-idx={match.globalIndex}
-        style={{
-          background: isCurrent ? "rgba(255, 160, 0, 0.65)" : "rgba(255, 220, 0, 0.35)",
-          color: "transparent",
-          borderRadius: "2px",
-        }}
-      >
-        {line.slice(match.start, match.end)}
-      </mark>
-    );
-
-    pos = match.end;
-  }
-
-  if (pos < line.length) {
-    parts.push(<span key={`text-${pos}`}>{line.slice(pos)}</span>);
-  }
-
-  return (
-    <div
-      className="absolute inset-0 pl-2 pr-3 py-0 whitespace-pre-wrap break-all pointer-events-none select-none"
-      style={{ color: "transparent", fontFamily: "inherit", fontSize: "inherit", lineHeight: "inherit" }}
-      aria-hidden
-    >
-      {parts}
-    </div>
-  );
-}
-
-function FileSearchBar({
-  query,
-  caseSensitive,
-  currentIndex,
-  total,
-  onQueryChange,
-  onCaseSensitiveChange,
-  onPrev,
-  onNext,
-  onClose,
-}: {
-  query: string;
-  caseSensitive: boolean;
-  currentIndex: number;
-  total: number;
-  onQueryChange: (query: string) => void;
-  onCaseSensitiveChange: (value: boolean) => void;
-  onPrev: () => void;
-  onNext: () => void;
-  onClose: () => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, []);
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Escape") {
-      onClose();
-      return;
-    }
-    if (e.key === "Enter") {
-      if (e.shiftKey) onPrev();
-      else onNext();
-    }
-  };
-
-  return (
-    <div className="absolute top-2 right-3 z-50 flex items-center gap-1 bg-popover border border-border rounded-md shadow-lg px-2 py-1.5">
-      <div className="flex items-center gap-1 bg-muted/50 rounded px-1.5 border border-transparent focus-within:border-ring/50">
-        <input
-          ref={inputRef}
-          value={query}
-          onChange={(e) => onQueryChange(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Find in file..."
-          className="bg-transparent text-xs py-0.5 outline-none w-36 placeholder:text-muted-foreground/40"
-        />
-        {query && (
-          <button onClick={() => onQueryChange("")} className="text-muted-foreground/40 hover:text-muted-foreground">
-            <X className="h-3 w-3" />
-          </button>
-        )}
-      </div>
-      <button
-        onClick={() => onCaseSensitiveChange(!caseSensitive)}
-        title="Match case"
-        className={cn(
-          "h-5 w-6 rounded text-[11px] font-semibold transition-colors border",
-          caseSensitive
-            ? "bg-primary/10 text-primary border-primary/30"
-            : "text-muted-foreground/50 hover:text-muted-foreground border-transparent hover:border-border"
-        )}
-      >
-        Aa
-      </button>
-      <span
-        className={cn(
-          "text-[11px] min-w-[4.5rem] text-center tabular-nums",
-          query && total === 0 ? "text-destructive/70" : "text-muted-foreground/60"
-        )}
-      >
-        {query ? (total === 0 ? "No results" : `${currentIndex + 1} of ${total}`) : ""}
-      </span>
-      <button
-        onClick={onPrev}
-        disabled={total === 0}
-        className="p-0.5 rounded hover:bg-accent text-muted-foreground/60 hover:text-foreground transition-colors disabled:opacity-30"
-        title="Previous match (Shift+Enter)"
-      >
-        <ChevronUp className="h-3.5 w-3.5" />
-      </button>
-      <button
-        onClick={onNext}
-        disabled={total === 0}
-        className="p-0.5 rounded hover:bg-accent text-muted-foreground/60 hover:text-foreground transition-colors disabled:opacity-30"
-        title="Next match (Enter)"
-      >
-        <ChevronDown className="h-3.5 w-3.5" />
-      </button>
-      <button
-        onClick={onClose}
-        className="p-0.5 rounded hover:bg-accent text-muted-foreground/50 hover:text-foreground transition-colors"
-        title="Close (Escape)"
-      >
-        <X className="h-3.5 w-3.5" />
-      </button>
-    </div>
-  );
-}
-
-// ── Code viewer with highlight.js ──
-
-function CodeViewer({
-  content,
-  filepath,
-  searchQuery = "",
-  caseSensitive = false,
-  currentMatchIndex = -1,
-  onMatchesFound,
-  scrollToLine,
-  onScrollToLineReady,
-}: {
-  content: string;
-  filepath: string;
-  searchQuery?: string;
-  caseSensitive?: boolean;
-  currentMatchIndex?: number;
-  onMatchesFound?: (total: number) => void;
-  scrollToLine?: number;
-  onScrollToLineReady?: (matchIndex: number) => void;
-}) {
-  const lang = useMemo(() => getLangFromPath(filepath), [filepath]);
-  const [langReady, setLangReady] = useState(false);
-
-  useEffect(() => {
-    if (!lang) return;
-    let cancelled = false;
-    ensureLangRegistered(lang).then((ok) => {
-      if (!cancelled) setLangReady(ok);
-    });
-    return () => { cancelled = true; };
-  }, [lang]);
-
-  const lines = useMemo(() => content.split("\n"), [content]);
-
-  const highlightedLines = useMemo(() => {
-    if (!langReady || !lang) return null;
-    return lines.map((line) => highlightCode(line, lang));
-  }, [lines, langReady, lang]);
-
-  const gutterWidth = String(lines.length).length;
-  const lineMatches = useMemo(
-    () => computeLineMatches(lines, searchQuery, caseSensitive),
-    [lines, searchQuery, caseSensitive]
-  );
-  const totalMatches = useMemo(() => {
-    let total = 0;
-    lineMatches.forEach((matches) => {
-      total += matches.length;
-    });
-    return total;
-  }, [lineMatches]);
-
-  useEffect(() => {
-    onMatchesFound?.(totalMatches);
-  }, [totalMatches, onMatchesFound]);
-
-  useEffect(() => {
-    if (currentMatchIndex < 0) return;
-    if (scrollToLine != null) return; // useLayoutEffect handles scroll when navigating from search results
-    const currentMatch = document.querySelector(`[data-match-idx="${currentMatchIndex}"]`);
-    currentMatch?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [currentMatchIndex, scrollToLine]);
-
-  useLayoutEffect(() => {
-    if (scrollToLine == null || scrollToLine <= 0) return;
-    const targetLineIdx = scrollToLine - 1;
-    if (searchQuery && lineMatches.size > 0) {
-      let globalIdx = 0;
-      let found = false;
-      for (const [lineIdx, matches] of lineMatches) {
-        if (lineIdx === targetLineIdx) {
-          document.querySelector(`[data-match-idx="${globalIdx}"]`)?.scrollIntoView({ block: "center", behavior: "instant" });
-          onScrollToLineReady?.(globalIdx);
-          found = true;
-          break;
-        } else if (lineIdx < targetLineIdx) {
-          globalIdx += matches.length;
-        }
-      }
-      if (!found) {
-        document.querySelector(`[data-line-idx="${targetLineIdx}"]`)?.scrollIntoView({ block: "center", behavior: "instant" });
-        onScrollToLineReady?.(-1);
-      }
-    } else if (!searchQuery) {
-      document.querySelector(`[data-line-idx="${targetLineIdx}"]`)?.scrollIntoView({ block: "center", behavior: "instant" });
-    }
-  }, [scrollToLine, lineMatches, searchQuery, onScrollToLineReady]);
-
-  return (
-    <div className="overflow-auto h-full">
-      <table className="w-full text-xs font-mono leading-[1.4]">
-        <tbody>
-          {lines.map((line, i) => {
-            const matches = lineMatches.get(i);
-
-            return (
-              <tr key={i} data-line-idx={i} className="hover:bg-accent/30">
-                <td
-                  className="pl-2 pr-2 py-0 text-right select-none text-muted-foreground/40 border-r border-border/20 align-top whitespace-nowrap"
-                  style={{ width: gutterWidth * 8 + 16 }}
-                >
-                  {i + 1}
-                </td>
-                <td className="pl-2 pr-3 py-0 whitespace-pre-wrap break-all relative w-full">
-                  {highlightedLines?.[i] ? (
-                    <span dangerouslySetInnerHTML={{ __html: highlightedLines[i] }} />
-                  ) : (
-                    <span>{line}</span>
-                  )}
-                  {matches && matches.length > 0 && (
-                    <HighlightOverlay
-                      line={line}
-                      matches={matches}
-                      currentGlobalIndex={currentMatchIndex}
-                    />
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
 
 // ── Main component ──
 
 interface FileBrowserProps {
   projectId: string;
+  projectName?: string;
   sessionId?: string;
+  onOpenQuickOpen: () => void;
+  refreshTarget?: HTMLDivElement | null;
 }
 
-export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
-  // Lazy tree state: childrenMap[""] is the root level; childrenMap[path] is a folder's children.
-  const [childrenMap, setChildrenMap] = useState<Record<string, FileEntry[]>>({});
-  const [loadingPaths, setLoadingPaths] = useState<Set<string>>(() => new Set());
-  const [rootLoading, setRootLoading] = useState(true);
+export function FileBrowser({ projectId, projectName = "Files", sessionId, onOpenQuickOpen, refreshTarget }: FileBrowserProps) {
+  const browserContextKey = gitContextKey(projectId, sessionId);
+  const fileNavigation = useFileBrowserStore((s) => s.navigation[browserContextKey]);
   const [fileContent, setFileContent] = useState<FileContentResponse | null>(null);
   // Committed (HEAD) content of the open file — the dirty-diff baseline for the
   // editor's gutter/scrollbar change markers. undefined while loading or when
@@ -589,11 +82,19 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const [loadingFile, setLoadingFile] = useState(false);
   const [fileLoadError, setFileLoadError] = useState<string | null>(null);
   const [markdownMode, setMarkdownMode] = useState<"source" | "rendered">("source");
+  const [imageSource, setImageSource] = useState(false);
+  const [imageError, setImageError] = useState(false);
 
-  // Edit/save state (only meaningful when enableFileEdit is true)
-  // File editing is always available (the old enable_file_edit gate was removed).
-  const editEnabled = true;
-  const [editorValue, setEditorValue] = useState("");
+  // Edit/save state — file editing (Monaco) is always available now.
+  const [editorValue, setEditorValueState] = useState("");
+  const editorValueRef = useRef("");
+  const setEditorValue = useCallback((value: string) => {
+    editorValueRef.current = value;
+    setEditorValueState(value);
+  }, []);
+  const [refreshing, setRefreshing] = useState(false);
+  const [imageRevision, setImageRevision] = useState(0);
+  const [reloadTarget, setReloadTarget] = useState<{ context: string; request: number } | null>(null);
   const [saving, setSaving] = useState(false);
 
   // Drag-drop state for tree-internal moves and OS file uploads
@@ -606,24 +107,33 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
-  // Persisted state from store — bucketed per-project so switching projects
-  // (and coming back) preserves both tree expansion and selected file.
+  // Persisted state from store — bucketed per project + local/worktree context
+  // so repository IDs and paths from one checkout cannot leak into another.
   const EMPTY_EXPANDED = useMemo(() => new Set<string>(), []);
   const expanded = useFileBrowserStore(
-    (s) => s.projects[projectId]?.expanded ?? EMPTY_EXPANDED
+    (s) => s.projects[browserContextKey]?.expanded ?? EMPTY_EXPANDED
   );
   const selectedPath = useFileBrowserStore(
-    (s) => s.projects[projectId]?.selectedPath ?? null
+    (s) => s.projects[browserContextKey]?.selectedPath ?? null
+  );
+  const selectedRepositoryFile = useFileBrowserStore(
+    (s) => s.projects[browserContextKey]?.selectedRepositoryFile ?? null
   );
   const toggleExpandRaw = useFileBrowserStore((s) => s.toggleExpand);
+  const expandAncestorsRaw = useFileBrowserStore((s) => s.expandAncestors);
   const setSelectedPathRaw = useFileBrowserStore((s) => s.setSelectedPath);
+  const setSelectedRepositoryFileRaw = useFileBrowserStore((s) => s.setSelectedRepositoryFile);
   const toggleExpand = useCallback(
-    (path: string) => toggleExpandRaw(projectId, path),
-    [toggleExpandRaw, projectId]
+    (path: string) => toggleExpandRaw(browserContextKey, path),
+    [toggleExpandRaw, browserContextKey]
   );
   const setSelectedPath = useCallback(
-    (path: string | null) => setSelectedPathRaw(projectId, path),
-    [setSelectedPathRaw, projectId]
+    (path: string | null) => setSelectedPathRaw(browserContextKey, path),
+    [setSelectedPathRaw, browserContextKey]
+  );
+  const setSelectedRepositoryFile = useCallback(
+    (file: RepositoryFileRef | null) => setSelectedRepositoryFileRaw(browserContextKey, file),
+    [setSelectedRepositoryFileRaw, browserContextKey]
   );
   const { fileTreeWidth, setFileTreeWidth } = useLayoutStore();
 
@@ -664,9 +174,8 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const [activeResultIndex, setActiveResultIndex] = useState(-1);
   const [searchHistory, setSearchHistory] = useState<string[]>(() => {
     try {
-      const raw = localStorage.getItem("nexbox:file-search-history");
-      const items: unknown = raw ? JSON.parse(raw) : [];
-      return Array.isArray(items) ? items.filter((item): item is string => typeof item === "string").slice(0, 8) : [];
+      const raw = localStorage.getItem("beehub:file-search-history");
+      return raw ? (JSON.parse(raw) as string[]) : [];
     } catch { return []; }
   });
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -674,83 +183,75 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const searchReqRef = useRef(0);
   const activeResultRef = useRef<HTMLDivElement>(null);
-  const [fileSearchVisible, setFileSearchVisible] = useState(false);
+  // In-file search state shared with Monaco (seeded when a content-search result
+  // is clicked so the editor reveals the match and opens its native find).
   const [fileSearchQuery, setFileSearchQuery] = useState("");
   const [fileSearchCaseSensitive, setFileSearchCaseSensitive] = useState(false);
-  const [fileSearchCurrentIndex, setFileSearchCurrentIndex] = useState(0);
-  const [fileSearchTotal, setFileSearchTotal] = useState(0);
   const [pendingTargetLine, setPendingTargetLine] = useState<number | null>(null);
+  useEffect(() => {
+    if (!fileNavigation) return;
+    setPendingTargetLine(fileNavigation.line ?? null);
+    if (fileNavigation.line) {
+      setMarkdownMode("source");
+      setFileSearchQuery("");
+      setSearchNavSeq((seq) => seq + 1);
+    }
+  }, [fileNavigation]);
   // Bumped on each content-result click so Monaco re-reveals even when the
   // query/line are unchanged (e.g. re-clicking the same result).
   const [searchNavSeq, setSearchNavSeq] = useState(0);
-  const skipIndexResetRef = useRef(false);
   const fileContentSelectableRef = useRef<HTMLDivElement>(null);
-  // Imperative handle to the Monaco editor (when file editing is enabled) so
-  // Cmd+F can open Monaco's own find widget instead of the read-only overlay.
+  // Imperative handle to the Monaco editor so Cmd+F opens its native find widget.
   const monacoEditorRef = useRef<MonacoFileEditorHandle>(null);
 
   // Track if a load is for the current projectId/sessionId; ignore stale results after switch.
-  const loadGenRef = useRef(0);
+  const fileRequestRef = useRef(0);
   const workspaceStatusRequestRef = useRef(0);
 
   // Tree pane collapse — gives the content/editor pane the full width.
   const [treeCollapsed, setTreeCollapsed] = useState(false);
 
-  const loadChildren = useCallback(async (path: string) => {
-    setLoadingPaths((prev) => {
-      if (prev.has(path)) return prev;
-      const next = new Set(prev);
-      next.add(path);
-      return next;
-    });
-    const gen = loadGenRef.current;
-    try {
-      const data = await filesApi.list(projectId, path, sessionId);
-      if (gen !== loadGenRef.current) return;
-      setChildrenMap((prev) => ({ ...prev, [path]: data || [] }));
-    } catch (e) {
-      console.error(`Failed to load directory "${path}":`, e);
-      if (gen === loadGenRef.current) {
-        // Cache an empty result so we don't keep retrying on every render.
-        setChildrenMap((prev) => ({ ...prev, [path]: [] }));
-      }
-    } finally {
-      if (gen === loadGenRef.current) {
-        setLoadingPaths((prev) => {
-          if (!prev.has(path)) return prev;
-          const next = new Set(prev);
-          next.delete(path);
-          return next;
-        });
-      }
-    }
-  }, [projectId, sessionId]);
+  const { childrenMap, setChildrenMap, loadingPaths, rootLoading, loadChildren, refreshDir, refreshTree } =
+    useFileTree(projectId, sessionId, expanded, containerRef);
 
-  const reloadAll = useCallback(async () => {
-    loadGenRef.current++;
-    setChildrenMap({});
-    setLoadingPaths(new Set());
-    setRootLoading(true);
-    const gen = loadGenRef.current;
-    try {
-      const data = await filesApi.list(projectId, "", sessionId);
-      if (gen !== loadGenRef.current) return;
-      setChildrenMap((prev) => ({ ...prev, "": data || [] }));
-    } catch (e) {
-      console.error("Failed to load file tree:", e);
-      if (gen === loadGenRef.current) {
-        setChildrenMap((prev) => ({ ...prev, "": [] }));
-      }
-    } finally {
-      if (gen === loadGenRef.current) {
-        setRootLoading(false);
-      }
-    }
-  }, [projectId, sessionId]);
+  // Mirror childrenMap in a ref so revealPath can check what's already loaded
+  // without depending on childrenMap (which would re-create the callback often).
+  const childrenMapRef = useRef(childrenMap);
+  useEffect(() => { childrenMapRef.current = childrenMap; }, [childrenMap]);
 
+  // Expand every ancestor folder of `path` and load their children so the file
+  // becomes visible/selected in the tree — used when opening a file from panel
+  // search, Quick Open, or the diff viewer.
+  const revealPath = useCallback((path: string) => {
+    if (!path) return;
+    expandAncestorsRaw(browserContextKey, path);
+    const parts = path.split("/");
+    let acc = "";
+    for (let i = 0; i < parts.length - 1; i++) {
+      acc = acc ? `${acc}/${parts[i]}` : parts[i];
+      if (acc && childrenMapRef.current[acc] === undefined) loadChildren(acc);
+    }
+  }, [expandAncestorsRaw, browserContextKey, loadChildren]);
+
+  // Scroll the highlighted tree row into view once the tree renders it (after
+  // reveal expands its ancestors and their children load in).
+  const treeScrollRef = useRef<HTMLDivElement>(null);
+  const lastRevealedPathRef = useRef<string | null>(null);
   useEffect(() => {
-    reloadAll();
-  }, [reloadAll]);
+    if (!highlightedPath) {
+      lastRevealedPathRef.current = null;
+      return;
+    }
+    if (lastRevealedPathRef.current === highlightedPath) return;
+    const id = setTimeout(() => {
+      const el = treeScrollRef.current?.querySelector(`[data-tree-path="${CSS.escape(highlightedPath)}"]`);
+      if (el) {
+        el.scrollIntoView({ block: "nearest" });
+        lastRevealedPathRef.current = highlightedPath;
+      }
+    }, 60);
+    return () => clearTimeout(id);
+  }, [highlightedPath, childrenMap]);
 
   // After the root loads, fetch children for any persisted-expanded folders so
   // the user's previous tree state restores without manual re-clicks.
@@ -781,12 +282,12 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     if (restoredFileRef.current) return;
     restoredFileRef.current = true;
     if (selectedPath) {
-      handleSelectFile(selectedPath);
+      handleSelectFile(selectedPath, selectedRepositoryFile ?? undefined);
     }
     // handleSelectFile intentionally excluded from deps — we only want this
     // restore to fire once per (re)mount/project-switch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rootLoading, selectedPath, projectId]);
+  }, [rootLoading, selectedPath, selectedRepositoryFile, browserContextKey]);
 
   const handleToggleExpand = useCallback((path: string) => {
     const willExpand = !expanded.has(path);
@@ -801,6 +302,12 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const rootEntries = childrenMap[""] ?? [];
 
   const markdownPreviewAvailable = !!selectedPath && !!fileContent && !fileContent.binary && isMarkdownPath(selectedPath);
+  const imagePreviewAvailable = !!selectedPath && !!fileContent && /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i.test(selectedPath);
+  const showingImage = imagePreviewAvailable && (!imageSource || fileContent.binary);
+  useEffect(() => {
+    setImageSource(false);
+    setImageError(false);
+  }, [browserContextKey, selectedPath, selectedRepositoryFile]);
   useEffect(() => {
     if (!markdownPreviewAvailable && markdownMode !== "source") {
       setMarkdownMode("source");
@@ -808,21 +315,11 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   }, [markdownPreviewAvailable, markdownMode]);
 
   useEffect(() => {
-    setFileSearchVisible(false);
     setFileSearchQuery("");
     setFileSearchCaseSensitive(false);
-    setFileSearchCurrentIndex(0);
-    setFileSearchTotal(0);
-    setPendingTargetLine(null);
-  }, [selectedPath]);
-
-  useEffect(() => {
-    if (skipIndexResetRef.current) {
-      skipIndexResetRef.current = false;
-      return;
-    }
-    setFileSearchCurrentIndex(0);
-  }, [fileSearchQuery, fileSearchCaseSensitive]);
+    const navigation = useFileBrowserStore.getState().navigation[browserContextKey];
+    setPendingTargetLine(navigation?.path === selectedPath ? (navigation.line ?? null) : null);
+  }, [browserContextKey, selectedPath]);
 
   const isDirty = !!fileContent && !fileContent.binary && editorValue !== fileContent.content;
 
@@ -854,10 +351,14 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
 
   const handleSave = useCallback(async () => {
     if (!selectedPath || !fileContent || fileContent.binary) return;
+    const request = fileRequestRef.current;
+    const content = editorValue;
     setSaving(true);
     try {
-      await filesApi.save(projectId, selectedPath, editorValue, sessionId);
-      setFileContent({ ...fileContent, content: editorValue, size: new Blob([editorValue]).size });
+      await filesApi.save(projectId, selectedPath, content, sessionId, selectedRepositoryFile?.repository_id, !selectedRepositoryFile && fileNavigation?.path === selectedPath && fileNavigation.safeLink);
+      if (fileRequestRef.current === request) {
+        setFileContent({ ...fileContent, content, size: new Blob([content]).size });
+      }
       toast.success("Saved");
       // Reflect the new change in the tree markers without waiting for the poll.
       refreshGitStatus();
@@ -867,7 +368,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     } finally {
       setSaving(false);
     }
-  }, [projectId, selectedPath, sessionId, fileContent, editorValue, refreshGitStatus]);
+  }, [projectId, selectedPath, sessionId, selectedRepositoryFile, fileNavigation, fileContent, editorValue, refreshGitStatus]);
 
   useEffect(() => {
     if (!selectedPath) return;
@@ -883,22 +384,17 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
       const key = e.key.toLowerCase();
 
       if (key === "f") {
-        // When the Monaco editor is mounted, let it own find (its native widget
-        // already handles Cmd+F while focused; this covers focus being elsewhere).
+        // Monaco owns find when mounted (its native widget handles Cmd+F while
+        // focused; this covers focus being elsewhere). For markdown preview /
+        // binary (no Monaco), defer to the browser's find.
         if (monacoEditorRef.current) {
           e.preventDefault();
           monacoEditorRef.current.openFind();
-          return;
         }
-        // Editing enabled but Monaco not mounted (markdown preview / binary):
-        // there is no in-file search here, so defer to the browser.
-        if (editEnabled) return;
-        e.preventDefault();
-        setFileSearchVisible(true);
         return;
       }
 
-      if (key === "s" && editEnabled && fileContent && !fileContent.binary && isDirty && !saving) {
+      if (key === "s" && fileContent && !fileContent.binary && isDirty && !saving) {
         e.preventDefault();
         handleSave();
         return;
@@ -920,16 +416,16 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedPath, fileContent, editEnabled, isDirty, saving, handleSave]);
+  }, [selectedPath, fileContent, isDirty, saving, handleSave]);
 
   // Fetch the committed (HEAD) baseline for dirty-diff markers. Runs in the
   // background alongside the content load; a monotonic seq guards against a slow
   // response for a previously-selected file clobbering the current one.
   const baselineReqRef = useRef(0);
-  const loadFileBaseline = useCallback(async (path: string) => {
+  const loadFileBaseline = useCallback(async (path: string, repositoryId?: string) => {
     const seq = ++baselineReqRef.current;
     try {
-      const res = await filesApi.head(projectId, path, sessionId);
+      const res = await filesApi.head(projectId, path, sessionId, repositoryId);
       if (baselineReqRef.current !== seq) return;
       // in_repo=false → not a git repo, no markers. Otherwise content is the
       // HEAD blob, or "" for a new/untracked file (renders as fully added).
@@ -988,75 +484,165 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     [gitDecorations],
   );
 
-  const handleSelectFile = useCallback(async (path: string) => {
-    setSelectedPath(path);
-    setHighlightedPath(path);
+  const handleSelectFile = useCallback(async (path: string, repositoryFile?: RepositoryFileRef, safeLink?: boolean) => {
+    if (useFileBrowserStore.getState().navigation[browserContextKey]?.path !== path) {
+      useFileBrowserStore.getState().clearNavigation(browserContextKey);
+      setPendingTargetLine(null);
+    }
+    const request = ++fileRequestRef.current;
+    setImageError(false);
+    if (repositoryFile) setSelectedRepositoryFile(repositoryFile);
+    else setSelectedPath(path);
+    setHighlightedPath(repositoryFile?.workspace_path ?? (repositoryFile ? null : path));
+    if (!repositoryFile) revealPath(path);
     setLoadingFile(true);
     setFileLoadError(null);
     setFileBaseline(undefined);
-    loadFileBaseline(path);
+    loadFileBaseline(path, repositoryFile?.repository_id);
     try {
-      const data = await filesApi.content(projectId, path, sessionId);
+      const navigation = useFileBrowserStore.getState().navigation[browserContextKey];
+      const data = await filesApi.content(projectId, path, sessionId, repositoryFile?.repository_id, safeLink || (!repositoryFile && navigation?.path === path && navigation.safeLink));
+      if (fileRequestRef.current !== request) return;
       setFileContent(data);
       setEditorValue(data?.binary ? "" : (data?.content ?? ""));
     } catch (e) {
+      if (fileRequestRef.current !== request) return;
       console.error("Failed to load file:", e);
       setFileLoadError(e instanceof Error ? e.message : "An unexpected error occurred. Please try again.");
+      if (repositoryFile && e instanceof ApiError && (e.code === "repository_not_found" || e.code === "repository_stale")) {
+        setSelectedRepositoryFile(null);
+        toast.warning("The repository for this file is no longer available");
+      }
       setFileContent(null);
       setEditorValue("");
     } finally {
-      setLoadingFile(false);
+      if (fileRequestRef.current === request) setLoadingFile(false);
     }
-  }, [projectId, sessionId, setSelectedPath, loadFileBaseline]);
+  }, [browserContextKey, projectId, sessionId, setSelectedPath, setSelectedRepositoryFile, loadFileBaseline, revealPath, setEditorValue]);
+
+  // Refresh in place: do not show the initial-load spinner or unmount the
+  // preview/editor, and ignore responses for a file that is no longer selected.
+  const refreshCurrentFile = useCallback(async () => {
+    if (!selectedPath) return;
+    const request = fileRequestRef.current;
+    const localValue = editorValueRef.current;
+    try {
+      const navigation = useFileBrowserStore.getState().navigation[browserContextKey];
+      const data = await filesApi.content(projectId, selectedPath, sessionId, selectedRepositoryFile?.repository_id,
+        !selectedRepositoryFile && navigation?.path === selectedPath && navigation.safeLink);
+      if (request !== fileRequestRef.current) return;
+      // Typing can continue while a reload is in flight. Confirmation only
+      // covers the edits that existed when the reload started.
+      if (editorValueRef.current !== localValue) {
+        toast.warning("Local edits changed during refresh. Refresh again to reload the file.");
+        return;
+      }
+      setFileContent(previous => previous && JSON.stringify(previous) === JSON.stringify(data) ? previous : data);
+      setEditorValue(data.binary ? "" : data.content);
+      setFileLoadError(null);
+      if (/\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i.test(selectedPath)) {
+        setImageError(false);
+        setImageRevision(value => value + 1);
+      }
+      void loadFileBaseline(selectedPath, selectedRepositoryFile?.repository_id);
+    } catch (error) {
+      if (request !== fileRequestRef.current) return;
+      toast.error(error instanceof ApiError && error.status === 404
+        ? "The file no longer exists. The last loaded content is still shown."
+        : "Unable to refresh the current file", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [browserContextKey, projectId, selectedPath, sessionId, selectedRepositoryFile, setEditorValue, loadFileBaseline]);
+
+  const refreshOperationRef = useRef(0);
+  useEffect(() => {
+    setRefreshing(false);
+    setReloadTarget(null);
+    const lifecycle = { fileRequestRef, baselineReqRef, refreshOperationRef };
+    return () => {
+      // Reject content and baseline responses after unmount/context changes.
+      lifecycle.fileRequestRef.current++;
+      lifecycle.baselineReqRef.current++;
+      lifecycle.refreshOperationRef.current++;
+    };
+  }, [browserContextKey]);
+
+  const runRefresh = useCallback(async (reloadFile: boolean) => {
+    const operation = ++refreshOperationRef.current;
+    setRefreshing(true);
+    refreshGitStatus();
+    try {
+      const [treeRefreshed] = await Promise.all([refreshTree(), reloadFile ? refreshCurrentFile() : Promise.resolve()]);
+      if (!treeRefreshed && refreshOperationRef.current === operation) {
+        toast.error("Some folders could not be refreshed. Please try again.");
+      }
+    } finally {
+      if (refreshOperationRef.current === operation) setRefreshing(false);
+    }
+  }, [refreshTree, refreshCurrentFile, refreshGitStatus]);
+
+  const handleRefresh = useCallback(() => {
+    if (refreshing || saving || loadingFile || rootLoading) return;
+    if (selectedPath && isDirty) {
+      setReloadTarget({ context: browserContextKey, request: fileRequestRef.current });
+    }
+    void runRefresh(!isDirty);
+  }, [refreshing, saving, loadingFile, rootLoading, selectedPath, isDirty, browserContextKey, runRefresh]);
+
+  const handleConfirmReload = () => {
+    const target = reloadTarget;
+    setReloadTarget(null);
+    if (!target || target.context !== browserContextKey || target.request !== fileRequestRef.current || saving) return;
+    void runRefresh(true);
+  };
 
   // Open a file when another panel (e.g. the diff viewer) requests it while the
   // Files panel is already mounted. The first-mount case is covered by the
   // restore effect above, which reads the seeded selectedPath from the store.
   useEffect(() => {
     const handler = (e: Event) => {
-      const path = (e as CustomEvent<{ path?: string }>).detail?.path;
-      if (path) handleSelectFile(path);
+      const detail = (e as CustomEvent<{ path?: string; safeLink?: boolean; file?: RepositoryFileRef }>).detail;
+      if (detail?.file) handleSelectFile(detail.file.path, detail.file);
+      else if (detail?.path) handleSelectFile(detail.path, undefined, detail.safeLink);
     };
     window.addEventListener("open-file", handler);
     return () => window.removeEventListener("open-file", handler);
   }, [handleSelectFile]);
 
   const handleSelectSearchResult = useCallback(async (path: string, line?: number) => {
+    const request = ++fileRequestRef.current;
     setSelectedPath(path);
     setHighlightedPath(path);
+    revealPath(path);
     setLoadingFile(true);
     setFileLoadError(null);
     setFileBaseline(undefined);
     loadFileBaseline(path);
     try {
-      const data = await filesApi.content(projectId, path, sessionId);
+      const navigation = useFileBrowserStore.getState().navigation[browserContextKey];
+      const data = await filesApi.content(projectId, path, sessionId, undefined, navigation?.path === path && navigation.safeLink);
+      if (fileRequestRef.current !== request) return;
       setFileContent(data);
       setEditorValue(data?.binary ? "" : (data?.content ?? ""));
     } catch (e) {
+      if (fileRequestRef.current !== request) return;
       console.error("Failed to load file:", e);
       setFileLoadError(e instanceof Error ? e.message : "An unexpected error occurred. Please try again.");
       setFileContent(null);
       setEditorValue("");
     } finally {
-      setLoadingFile(false);
+      if (fileRequestRef.current === request) setLoadingFile(false);
     }
     if (line != null && searchQuery.trim()) {
-      if (editEnabled) {
-        // Monaco reveals the line and opens its own find widget; the overlay
-        // search bar is only for the read-only CodeViewer.
-        setFileSearchQuery(searchQuery.trim());
-        setFileSearchCaseSensitive(searchCaseSensitive);
-        setPendingTargetLine(line);
-        setSearchNavSeq((seq) => seq + 1);
-      } else {
-        skipIndexResetRef.current = true;
-        setFileSearchVisible(true);
-        setFileSearchQuery(searchQuery.trim());
-        setFileSearchCaseSensitive(searchCaseSensitive);
-        setPendingTargetLine(line);
-      }
+      // Mirror the panel's Match Case into the in-file search so Monaco reveals
+      // and highlights exactly what the panel matched.
+      setFileSearchCaseSensitive(searchCaseSensitive);
+      setFileSearchQuery(searchQuery.trim());
+      setPendingTargetLine(line);
+      setSearchNavSeq((seq) => seq + 1);
     }
-  }, [projectId, sessionId, searchQuery, searchCaseSensitive, editEnabled, setSelectedPath, loadFileBaseline]);
+  }, [browserContextKey, projectId, sessionId, searchQuery, searchCaseSensitive, setSelectedPath, loadFileBaseline, revealPath, setEditorValue]);
 
   // Determine the directory where new uploads should land based on highlight.
   // - Highlighted directory → upload into it
@@ -1078,22 +664,6 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     if (entry?.is_dir) return highlightedPath;
     return dirnameOf(highlightedPath);
   }, [highlightedPath, childrenMap]);
-
-  // Reload one directory plus the root (cheap; keeps the tree consistent
-  // without blowing away expanded folders the user opened).
-  const refreshDir = useCallback(async (dir: string) => {
-    // Snapshot the gen but don't increment — incrementing would invalidate any
-    // sibling refresh started in the same tick (e.g. the move handler refreshing
-    // both old and new parent dirs concurrently).
-    const gen = loadGenRef.current;
-    try {
-      const data = await filesApi.list(projectId, dir, sessionId);
-      if (gen !== loadGenRef.current) return;
-      setChildrenMap((prev) => ({ ...prev, [dir]: data || [] }));
-    } catch (e) {
-      console.error(`Failed to reload directory "${dir}":`, e);
-    }
-  }, [projectId, sessionId]);
 
   const uploadSingleFile = useCallback(async (file: File, directory: string, overwrite: boolean) => {
     setUploading(true);
@@ -1133,19 +703,19 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
 
   const handleDownload = useCallback(() => {
     if (!selectedPath) return;
-    const url = filesApi.downloadUrl(projectId, selectedPath, sessionId);
+    const url = filesApi.downloadUrl(projectId, selectedPath, sessionId, selectedRepositoryFile?.repository_id, !selectedRepositoryFile && fileNavigation?.path === selectedPath && fileNavigation.safeLink);
     const a = document.createElement("a");
     a.href = url;
     a.download = selectedPath.split("/").pop() || "download";
     document.body.appendChild(a);
     a.click();
     a.remove();
-  }, [projectId, selectedPath, sessionId]);
+  }, [projectId, selectedPath, sessionId, selectedRepositoryFile, fileNavigation]);
 
   const handleOpenInNewTab = useCallback(() => {
     if (!selectedPath) return;
-    window.open(filesApi.serveUrl(projectId, selectedPath, sessionId), "_blank", "noopener");
-  }, [projectId, selectedPath, sessionId]);
+    window.open(filesApi.serveUrl(projectId, selectedPath, sessionId, selectedRepositoryFile?.repository_id, !selectedRepositoryFile && fileNavigation?.path === selectedPath && fileNavigation.safeLink), "_blank", "noopener");
+  }, [projectId, selectedPath, sessionId, selectedRepositoryFile, fileNavigation]);
 
   const handleOpenShareLink = useCallback(async () => {
     if (!selectedPath) return;
@@ -1174,21 +744,27 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   const handleDelete = useCallback(async () => {
     if (!selectedPath) return;
     const path = selectedPath;
+    const request = fileRequestRef.current;
     setDeleteConfirmOpen(false);
     try {
-      await filesApi.delete(projectId, path, sessionId);
-      const parent = dirnameOf(path);
-      await refreshDir(parent);
-      setSelectedPath(null);
-      setHighlightedPath(null);
-      setFileContent(null);
-      setEditorValue("");
+      await filesApi.delete(projectId, path, sessionId, selectedRepositoryFile?.repository_id, !selectedRepositoryFile && fileNavigation?.path === path && fileNavigation.safeLink);
+      if (!selectedRepositoryFile) {
+        const parent = dirnameOf(path);
+        await refreshDir(parent);
+      }
+      if (fileRequestRef.current === request) {
+        fileRequestRef.current++;
+        setSelectedPath(null);
+        setHighlightedPath(null);
+        setFileContent(null);
+        setEditorValue("");
+      }
       toast.success(`Deleted ${path.split("/").pop()}`);
     } catch (e) {
       console.error("Delete failed:", e);
       toast.error("Delete failed", { description: String(e) });
     }
-  }, [projectId, selectedPath, sessionId, refreshDir, setSelectedPath]);
+  }, [projectId, selectedPath, sessionId, selectedRepositoryFile, fileNavigation, refreshDir, setSelectedPath, setEditorValue]);
 
   // Drag-and-drop handlers
   const handleDragStartItem = useCallback((entry: FileEntry, e: React.DragEvent) => {
@@ -1272,7 +848,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
       console.error("Move failed:", e);
       toast.error("Move failed", { description: String(e) });
     }
-  }, [projectId, sessionId, refreshDir, selectedPath, setSelectedPath]);
+  }, [projectId, sessionId, refreshDir, selectedPath, setSelectedPath, setChildrenMap]);
 
   const handleDropOnItem = useCallback(async (entry: FileEntry, e: React.DragEvent) => {
     e.preventDefault();
@@ -1337,32 +913,28 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
   // Debounced content search (race-guarded so a slow response can't clobber a
   // newer query's results).
   useEffect(() => {
-    const req = ++searchReqRef.current;
-    let cancelled = false;
-    clearTimeout(searchTimerRef.current);
     if (!searchQuery.trim()) {
       setSearchResults([]);
       setSearchLoading(false);
       return;
     }
     setSearchLoading(true);
+    clearTimeout(searchTimerRef.current);
+    const req = ++searchReqRef.current;
     searchTimerRef.current = setTimeout(async () => {
       try {
         const results = await filesApi.search(projectId, searchQuery.trim(), "content", sessionId, searchCaseSensitive);
-        if (cancelled || searchReqRef.current !== req) return;
+        if (searchReqRef.current !== req) return;
         setSearchResults(results || []);
       } catch (e) {
-        if (cancelled || searchReqRef.current !== req) return;
+        if (searchReqRef.current !== req) return;
         console.error("Search failed:", e);
         setSearchResults([]);
       } finally {
-        if (!cancelled && searchReqRef.current === req) setSearchLoading(false);
+        if (searchReqRef.current === req) setSearchLoading(false);
       }
     }, 300);
-    return () => {
-      clearTimeout(searchTimerRef.current);
-      cancelled = true;
-    };
+    return () => clearTimeout(searchTimerRef.current);
   }, [searchQuery, searchCaseSensitive, projectId, sessionId]);
 
   // Group content matches by file, preserving first-seen order.
@@ -1386,18 +958,20 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     return rows;
   }, [groupedSearch, collapsedSearchGroups]);
 
-  // Bound the selected row when results change, then scroll it into view.
-  const activeSearchIndex = Math.min(activeResultIndex, navRows.length - 1);
+  // Keep the active index in range as results/collapse change; scroll into view.
   useEffect(() => {
-    if (activeSearchIndex >= 0) activeResultRef.current?.scrollIntoView({ block: "nearest" });
-  }, [activeSearchIndex]);
+    setActiveResultIndex((i) => (i >= navRows.length ? navRows.length - 1 : i));
+  }, [navRows.length]);
+  useEffect(() => {
+    if (activeResultIndex >= 0) activeResultRef.current?.scrollIntoView({ block: "nearest" });
+  }, [activeResultIndex]);
 
   const pushSearchHistory = useCallback((q: string) => {
     const term = q.trim();
     if (!term) return;
     setSearchHistory((prev) => {
       const next = [term, ...prev.filter((h) => h !== term)].slice(0, 8);
-      try { localStorage.setItem("nexbox:file-search-history", JSON.stringify(next)); } catch { /* ignore */ }
+      try { localStorage.setItem("beehub:file-search-history", JSON.stringify(next)); } catch { /* ignore */ }
       return next;
     });
   }, []);
@@ -1420,66 +994,89 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setHistoryOpen(false);
-      setActiveResultIndex(Math.min(navRows.length - 1, activeSearchIndex + 1));
+      setActiveResultIndex((i) => Math.min(navRows.length - 1, i + 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActiveResultIndex(Math.max(-1, activeSearchIndex - 1));
+      setActiveResultIndex((i) => Math.max(-1, i - 1));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const row = navRows[activeSearchIndex >= 0 ? activeSearchIndex : 0];
+      const row = navRows[activeResultIndex >= 0 ? activeResultIndex : 0];
       if (row) { pushSearchHistory(searchQuery); handleSelectSearchResult(row.path, row.line); }
       setHistoryOpen(false);
     }
-  }, [navRows, activeSearchIndex, searchQuery, pushSearchHistory, handleSelectSearchResult]);
+  }, [navRows, activeResultIndex, searchQuery, pushSearchHistory, handleSelectSearchResult]);
 
-  const handleFileSearchMatchesFound = useCallback((total: number) => {
-    setFileSearchTotal(total);
-  }, []);
+  // Global shortcuts (Cmd/Ctrl+P Quick Open) live in SessionWorkspace so they
+  // work even when the Files panel is closed.
 
-  const handleFileSearchNext = useCallback(() => {
-    setFileSearchCurrentIndex((index) => (fileSearchTotal === 0 ? 0 : (index + 1) % fileSearchTotal));
-  }, [fileSearchTotal]);
-
-  const handleFileSearchPrev = useCallback(() => {
-    setFileSearchCurrentIndex((index) => (fileSearchTotal === 0 ? 0 : (index - 1 + fileSearchTotal) % fileSearchTotal));
-  }, [fileSearchTotal]);
+  const refreshButton = (
+    <Button
+      variant="ghost"
+      size="sm"
+      onClick={handleRefresh}
+      disabled={refreshing || loadingFile || rootLoading || saving}
+      className="h-7 w-7 p-0"
+      title="Refresh files and current file"
+      aria-label="Refresh files and current file"
+    >
+      <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
+    </Button>
+  );
 
   return (
     <div ref={containerRef} className="flex h-full">
+      {refreshTarget && createPortal(refreshButton, refreshTarget)}
+      {/* Collapsed tree strip — a thin vertical bar with one expand button so
+          the file-content/editor side can use the whole panel width. */}
+      {treeCollapsed && (
+        <div className="w-7 shrink-0 border-r flex flex-col items-center py-1.5">
+          <button
+            onClick={() => setTreeCollapsed(false)}
+            className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+            title="Show file tree"
+          >
+            <PanelLeftOpen className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* File tree sidebar */}
       {!treeCollapsed && (
       <div className="shrink-0 border-r flex flex-col" style={{ width: fileTreeWidth }}>
         <div className="flex items-center justify-between px-3 py-1.5 border-b shrink-0">
-          <span className="text-xs text-muted-foreground font-medium">Files</span>
-          <div className="flex items-center gap-0.5">
+          <span className="text-xs text-muted-foreground font-medium truncate min-w-0 mr-2" title={projectName}>{projectName}</span>
+          <div className="flex items-center gap-0.5 shrink-0">
             <button
-              onClick={() => window.dispatchEvent(new CustomEvent("open-quick-open"))}
+              onClick={onOpenQuickOpen}
               className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
               title="Go to file (Cmd/Ctrl+P)"
               aria-label="Go to file"
             >
               <ListFilter className="h-3.5 w-3.5" />
             </button>
-            <button
-              onClick={handlePickUpload}
-              disabled={uploading}
-              className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-              title={uploadTargetDir ? `Upload into ${uploadTargetDir}` : "Upload to project root"}
-            >
-              {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
-            </button>
+            {!selectedRepositoryFile && (
+              <button
+                onClick={handlePickUpload}
+                disabled={uploading}
+                className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                title={uploadTargetDir ? `Upload into ${uploadTargetDir}` : "Upload to project root"}
+              >
+                {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+              </button>
+            )}
             <input
               ref={uploadInputRef}
               type="file"
               className="hidden"
               onChange={handleUploadInputChange}
             />
+            {refreshTarget === undefined && refreshButton}
             <button
-              onClick={reloadAll}
+              onClick={() => setTreeCollapsed(true)}
               className="p-1 rounded hover:bg-accent text-muted-foreground/50 hover:text-muted-foreground transition-colors"
-              title="Refresh"
+              title="Hide file tree"
             >
-              <RefreshCw className="h-3 w-3" />
+              <PanelLeftClose className="h-3.5 w-3.5" />
             </button>
           </div>
         </div>
@@ -1535,6 +1132,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
 
         {/* Tree or search results */}
         <div
+          ref={treeScrollRef}
           className={cn(
             "flex-1 overflow-y-auto",
             rootDragOver && "ring-1 ring-inset ring-primary/60 bg-primary/5"
@@ -1551,7 +1149,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               caseSensitive={searchCaseSensitive}
               collapsed={collapsedSearchGroups}
               onToggleGroup={toggleSearchGroup}
-              activeIndex={activeSearchIndex}
+              activeIndex={activeResultIndex}
               activeRef={activeResultRef}
               onSelect={(path, line) => { pushSearchHistory(searchQuery); handleSelectSearchResult(path, line); }}
             />
@@ -1589,31 +1187,25 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
       </div>
       )}
 
-      {/* Tree/content resize handle (only when the tree is visible) */}
+      {/* Tree/content resize handle */}
       {!treeCollapsed && (
-        <div
-          className="w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors shrink-0"
-          onMouseDown={handleTreeResizeMouseDown}
-        />
+      <div
+        className="w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors shrink-0"
+        onMouseDown={handleTreeResizeMouseDown}
+      />
       )}
 
       {/* File content viewer */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <div className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 text-xs">
-          <button
-            onClick={() => setTreeCollapsed((v) => !v)}
-            className="p-1 -ml-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors shrink-0"
-            title={treeCollapsed ? "Show file tree" : "Hide file tree"}
-          >
-            {treeCollapsed ? (
-              <PanelLeftOpen className="h-3.5 w-3.5" />
-            ) : (
-              <PanelLeftClose className="h-3.5 w-3.5" />
-            )}
-          </button>
-          {selectedPath ? (
-            <>
+        {selectedPath ? (
+          <>
+            <div className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 text-xs">
               <File className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
+              {selectedRepositoryFile && (
+                <span className="shrink-0 rounded border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground" title={`Repository: ${selectedRepositoryFile.repository_display_path}`}>
+                  {selectedRepositoryFile.repository_name}
+                </span>
+              )}
               <span className="font-mono truncate text-muted-foreground">{selectedPath}</span>
               {markdownPreviewAvailable && (
                 <div className="ml-auto flex items-center gap-1">
@@ -1643,7 +1235,12 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                   </button>
                 </div>
               )}
-              {editEnabled && fileContent && !fileContent.binary && (
+              {imagePreviewAvailable && !fileContent.binary && (
+                <button onClick={() => setImageSource((value) => !value)} className="ml-auto h-6 px-2 rounded border text-[11px] hover:bg-accent" title={showingImage ? "View source" : "View image"}>
+                  {showingImage ? <Code2 className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                </button>
+              )}
+              {fileContent && !fileContent.binary && !showingImage && (
                 <button
                   onClick={handleSave}
                   disabled={!isDirty || saving}
@@ -1663,7 +1260,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               {fileContent && !fileContent.binary && (
                 <span className={cn(
                   "text-muted-foreground/40 shrink-0",
-                  !markdownPreviewAvailable && !(editEnabled && fileContent && !fileContent.binary) && "ml-auto",
+                  !markdownPreviewAvailable && !(fileContent && !fileContent.binary) && "ml-auto",
                 )}>
                   {formatSize(fileContent.size)}
                 </span>
@@ -1736,14 +1333,25 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                   </PopoverContent>
                 </Popover>
               )}
-            </>
-          ) : null}
-        </div>
+            </div>
 
-        {selectedPath ? (
-          loadingFile ? (
+            {loadingFile ? (
               <div className="flex-1 flex items-center justify-center">
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : showingImage ? (
+              <div className="flex-1 min-h-0 overflow-auto flex items-center justify-center p-4">
+                {imageError ? (
+                  <p role="alert" className="text-sm text-muted-foreground">Unable to display image</p>
+                ) : (
+                  <img
+                    key={`${browserContextKey}:${selectedPath}:${fileRequestRef.current}:${imageRevision}`}
+                    src={`${filesApi.serveUrl(projectId, selectedPath, sessionId, selectedRepositoryFile?.repository_id, !selectedRepositoryFile && fileNavigation?.path === selectedPath && fileNavigation.safeLink)}&preview_request=${fileRequestRef.current}&refresh=${imageRevision}`}
+                    alt={selectedPath}
+                    onError={() => setImageError(true)}
+                    className="max-w-full max-h-full object-contain"
+                  />
+                )}
               </div>
             ) : fileContent?.binary ? (
               <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
@@ -1751,28 +1359,6 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
               </div>
             ) : fileContent ? (
               <div className="flex-1 min-h-0 relative">
-                {fileSearchVisible && !editEnabled && (
-                  <FileSearchBar
-                    query={fileSearchQuery}
-                    caseSensitive={fileSearchCaseSensitive}
-                    currentIndex={fileSearchCurrentIndex}
-                    total={fileSearchTotal}
-                    onQueryChange={(query) => {
-                      setFileSearchQuery(query);
-                      setFileSearchCurrentIndex(0);
-                    }}
-                    onCaseSensitiveChange={(value) => {
-                      setFileSearchCaseSensitive(value);
-                      setFileSearchCurrentIndex(0);
-                    }}
-                    onPrev={handleFileSearchPrev}
-                    onNext={handleFileSearchNext}
-                    onClose={() => {
-                      setFileSearchVisible(false);
-                      setFileSearchQuery("");
-                    }}
-                  />
-                )}
                 {markdownPreviewAvailable && markdownMode === "rendered" ? (
                   <div ref={fileContentSelectableRef} className="h-full">
                     <MarkdownRenderer
@@ -1780,7 +1366,7 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                       className="h-full overflow-auto px-4 py-3 markdown-content text-sm"
                     />
                   </div>
-                ) : editEnabled ? (
+                ) : (
                   <div className="h-full">
                     <Suspense
                       fallback={
@@ -1803,22 +1389,6 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                       />
                     </Suspense>
                   </div>
-                ) : (
-                  <div ref={fileContentSelectableRef} className="h-full">
-                    <CodeViewer
-                      content={fileContent.content}
-                      filepath={selectedPath}
-                      searchQuery={fileSearchQuery}
-                      caseSensitive={fileSearchCaseSensitive}
-                      currentMatchIndex={fileSearchCurrentIndex}
-                      onMatchesFound={handleFileSearchMatchesFound}
-                      scrollToLine={pendingTargetLine ?? undefined}
-                      onScrollToLineReady={(idx) => {
-                        if (idx >= 0) setFileSearchCurrentIndex(idx);
-                        setPendingTargetLine(null);
-                      }}
-                    />
-                  </div>
                 )}
               </div>
             ) : (
@@ -1826,13 +1396,38 @@ export function FileBrowser({ projectId, sessionId }: FileBrowserProps) {
                 <p>⚠️ Failed to load file</p>
                 {fileLoadError && <p className="text-xs break-words max-w-full">{fileLoadError}</p>}
               </div>
-            )
+            )}
+          </>
         ) : (
           <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
             Select a file to view
           </div>
         )}
       </div>
+
+      <Dialog
+        open={reloadTarget !== null && reloadTarget.context === browserContextKey && reloadTarget.request === fileRequestRef.current}
+        onOpenChange={(open) => { if (!open) setReloadTarget(null); }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Discard unsaved changes?</DialogTitle>
+            <DialogDescription>
+              Reloading this file will discard your unsaved changes and load the latest content from disk.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <button onClick={() => setReloadTarget(null)}
+              className="h-8 px-3 rounded text-xs hover:bg-accent text-muted-foreground hover:text-foreground transition-colors">
+              Keep editing
+            </button>
+            <button onClick={handleConfirmReload} disabled={saving}
+              className="h-8 px-3 rounded text-xs bg-destructive text-destructive-foreground hover:opacity-90 disabled:opacity-50">
+              Discard and reload
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={pendingOverwrite !== null}

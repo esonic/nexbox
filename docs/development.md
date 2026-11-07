@@ -99,6 +99,18 @@ npm run build
 npm run lint
 ```
 
+Browser regressions for workspace interactions require Chrome/Chromium (`CHROMIUM_PATH` can select its executable):
+
+```bash
+cd web
+npm run test:chat-history
+npm run test:markdown
+npm run test:files-refresh
+npm run test:panel-maximize
+```
+
+These check pagination and reading position, Markdown state retention, file polling and unsaved edits, and panel geometry, Git controls, and terminal connections. Screenshots from the panel check are written under the system temporary directory.
+
 `npm test` covers passwordless routes, account interfaces, session ordering, Git refresh behavior, and marketplace installation scopes. The repository still has existing ESLint issues; check affected files before submitting changes and avoid introducing new warnings.
 
 Native MCP integration tests use temporary configuration and local model/MCP test servers. They require the corresponding CLIs but do not call real models:

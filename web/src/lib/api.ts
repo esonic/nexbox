@@ -1,4 +1,5 @@
 import type {
+  ImportableSession,
   Task, Project, Session, Asset, AssetVersion,
   ReviewComment, DiffResult, ChatMessage, MessagePart,
   TaskLabel, ModelInfo, AgentCapabilities,
@@ -177,6 +178,18 @@ export const sessionsApi = {
     }),
   delete: (id: string) =>
     request<void>(`/sessions/${id}`, { method: "DELETE" }),
+  // Sessions created in the agent's own CLI that NexBox doesn't have yet.
+  // Paged newest-first; pass the last item's updated_at as `before` for the next page.
+  listImportable: (projectId: string, agent: string, before?: string) => {
+    const q = new URLSearchParams({ project_id: projectId, agent });
+    if (before) q.set("before", before);
+    return request<{ sessions: ImportableSession[]; has_more: boolean }>(`/sessions/importable?${q}`);
+  },
+  import: (data: { project_id: string; agent: string; agent_session_id: string }) =>
+    request<Session>("/sessions/import", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
   restore: (id: string) =>
     request<Session>(`/sessions/${id}/restore`, { method: "POST" }),
   emptyTrash: () =>
@@ -229,6 +242,7 @@ export const messagesApi = {
 
 // Message queue (per session)
 export interface QueuedMessage {
+  recovered?: boolean;
   id: string;
   session_id: string;
   text: string;
@@ -519,6 +533,11 @@ export interface FileSearchResult {
 }
 
 export const filesApi = {
+  resolveLink: (projectId: string, path: string, sessionId?: string) => {
+    const params = new URLSearchParams({ path });
+    if (sessionId) params.set("session_id", sessionId);
+    return request<{ path: string }>(`/projects/${projectId}/file-resolve?${params}`);
+  },
   // List immediate children of a directory. Pass empty path for the project root.
   list: (projectId: string, path: string, sessionId?: string) => {
     const params = new URLSearchParams();
@@ -530,8 +549,8 @@ export const filesApi = {
   // Flat list of files (not directories) — used by the chat file picker.
   flat: (projectId: string, sessionId?: string) =>
     request<FileEntry[]>(`/projects/${projectId}/files-flat${sessionId ? `?session_id=${sessionId}` : ""}`),
-  content: (projectId: string, path: string, sessionId?: string, repositoryId?: string) => {
-    const promise = request<FileContentResponse>(`/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`);
+  content: (projectId: string, path: string, sessionId?: string, repositoryId?: string, safeLink?: boolean) => {
+    const promise = request<FileContentResponse>(`/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}${safeLink ? "&safe_link=1" : ""}`);
     return repositoryId ? repositoryRequest({ projectId, sessionId, repositoryId }, promise) : promise;
   },
   // Committed (HEAD) version of a file, used as the dirty-diff baseline in the
@@ -544,16 +563,16 @@ export const filesApi = {
   },
   search: (projectId: string, query: string, type: "name" | "content" = "name", sessionId?: string, caseSensitive?: boolean) =>
     request<FileSearchResult[]>(`/projects/${projectId}/file-search?q=${encodeURIComponent(query)}&type=${type}${sessionId ? `&session_id=${sessionId}` : ""}${caseSensitive ? "&case=1" : ""}`),
-  save: (projectId: string, path: string, content: string, sessionId?: string, repositoryId?: string) => {
+  save: (projectId: string, path: string, content: string, sessionId?: string, repositoryId?: string, safeLink?: boolean) => {
     const promise = request<{ path: string; size?: number }>(
-      `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`,
+      `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}${safeLink ? "&safe_link=1" : ""}`,
       { method: "PUT", body: JSON.stringify({ content }) },
     );
     return repositoryId ? repositoryRequest({ projectId, sessionId, repositoryId }, promise) : promise;
   },
-  delete: (projectId: string, path: string, sessionId?: string, repositoryId?: string) => {
+  delete: (projectId: string, path: string, sessionId?: string, repositoryId?: string, safeLink?: boolean) => {
     const promise = request<void>(
-      `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`,
+      `/projects/${projectId}/file-content?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}${safeLink ? "&safe_link=1" : ""}`,
       { method: "DELETE" },
     );
     return repositoryId ? repositoryRequest({ projectId, sessionId, repositoryId }, promise) : promise;
@@ -584,10 +603,10 @@ export const filesApi = {
     }
     return res.json();
   },
-  downloadUrl: (projectId: string, path: string, sessionId?: string, repositoryId?: string) =>
-    `${API_BASE}/projects/${projectId}/file-download?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`,
-  serveUrl: (projectId: string, path: string, sessionId?: string, repositoryId?: string) =>
-    `${API_BASE}/projects/${projectId}/file-serve?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}`,
+  downloadUrl: (projectId: string, path: string, sessionId?: string, repositoryId?: string, safeLink?: boolean) =>
+    `${API_BASE}/projects/${projectId}/file-download?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}${safeLink ? "&safe_link=1" : ""}`,
+  serveUrl: (projectId: string, path: string, sessionId?: string, repositoryId?: string, safeLink?: boolean) =>
+    `${API_BASE}/projects/${projectId}/file-serve?path=${encodeURIComponent(path)}${sessionId ? `&session_id=${sessionId}` : ""}${repositoryId ? `&repository_id=${encodeURIComponent(repositoryId)}` : ""}${safeLink ? "&safe_link=1" : ""}`,
   move: (projectId: string, from: string, to: string, sessionId?: string) =>
     request<{ from: string; to: string }>(
       `/projects/${projectId}/file-move${sessionId ? `?session_id=${sessionId}` : ""}`,

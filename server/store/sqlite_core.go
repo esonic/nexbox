@@ -647,6 +647,84 @@ func (s *SQLiteStore) ForkSession(parentID, name, atMessageID, checkpoint, agent
 	return newSess, nil
 }
 
+func (s *SQLiteStore) ImportSession(req ImportSessionRequest) (*Session, error) {
+	if req.AgentSessionID == "" || len(req.Messages) == 0 {
+		return nil, fmt.Errorf("ImportSession: agent session id and messages required")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now()
+	first, last := req.Messages[0].CreatedAt, req.Messages[0].CreatedAt
+	for _, m := range req.Messages {
+		if m.CreatedAt.Before(first) {
+			first = m.CreatedAt
+		}
+		if m.CreatedAt.After(last) {
+			last = m.CreatedAt
+		}
+	}
+	if first.IsZero() {
+		first, last = now, now
+	}
+	sess := &Session{
+		ID:             uuid.New().String(),
+		NamespaceID:    "local",
+		Name:           req.Name,
+		ProjectID:      req.ProjectID,
+		Agent:          req.Agent,
+		Model:          req.Model,
+		AgentSessionID: req.AgentSessionID,
+		CreatedBy:      "local",
+		CreatedAt:      first,
+		UpdatedAt:      now,
+		LastActiveAt:   last,
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO sessions (id, namespace_id, name, project_id, agent, model, effort, agent_session_id, stream_id, features, created_by, created_at, updated_at, last_active_at)
+		 VALUES (?, ?, ?, ?, ?, ?, '', ?, '', '', ?, ?, ?, ?)`,
+		sess.ID, sess.NamespaceID, sess.Name, sess.ProjectID, sess.Agent, sess.Model,
+		sess.AgentSessionID, sess.CreatedBy, sess.CreatedAt, sess.UpdatedAt, sess.LastActiveAt,
+	); err != nil {
+		return nil, fmt.Errorf("insert imported session: %w", err)
+	}
+
+	// Messages are ordered by (created_at, id) with random ids, so equal
+	// timestamps would reorder; force them strictly increasing.
+	prev := time.Time{}
+	for _, m := range req.Messages {
+		ts := m.CreatedAt
+		if ts.IsZero() {
+			ts = first
+		}
+		if !ts.After(prev) {
+			ts = prev.Add(time.Millisecond)
+		}
+		prev = ts
+		partsJSON, err := json.Marshal(m.Parts)
+		if err != nil {
+			return nil, fmt.Errorf("marshal parts: %w", err)
+		}
+		metaJSON, err := json.Marshal(m.Metadata)
+		if err != nil {
+			return nil, fmt.Errorf("marshal metadata: %w", err)
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO chat_messages (id, session_id, role, parts, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			uuid.New().String(), sess.ID, m.Role, string(partsJSON), string(metaJSON), ts,
+		); err != nil {
+			return nil, fmt.Errorf("insert imported message: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit import tx: %w", err)
+	}
+	return sess, nil
+}
+
 // TouchSessionActivity is called at conversational boundaries, never for
 // metadata edits or progressive assistant flushes.
 func (s *SQLiteStore) TouchSessionActivity(id string) error {
@@ -905,7 +983,7 @@ func (s *SQLiteStore) GetMessage(id string) (*ChatMessage, error) {
 func (s *SQLiteStore) ListMessages(sessionID string) ([]ChatMessage, error) {
 	rows, err := s.db.Query(
 		`SELECT id, session_id, role, parts, metadata, created_at
-		 FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC`, sessionID,
+		 FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`, sessionID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query messages: %w", err)
@@ -953,7 +1031,7 @@ func (s *SQLiteStore) ListMessagesPaginated(sessionID string, limit int, beforeI
 		query = `SELECT id, session_id, role, parts, metadata, created_at
 		         FROM chat_messages
 		         WHERE session_id = ?
-		         ORDER BY created_at DESC
+		         ORDER BY created_at DESC, rowid DESC
 		         LIMIT ?`
 		args = []interface{}{sessionID, limit + 1}
 	} else {
@@ -961,10 +1039,10 @@ func (s *SQLiteStore) ListMessagesPaginated(sessionID string, limit int, beforeI
 		query = `SELECT id, session_id, role, parts, metadata, created_at
 		         FROM chat_messages
 		         WHERE session_id = ?
-		         AND created_at < (SELECT created_at FROM chat_messages WHERE id = ?)
-		         ORDER BY created_at DESC
+		         AND (created_at, rowid) < (SELECT created_at, rowid FROM chat_messages WHERE id = ? AND session_id = ?)
+		         ORDER BY created_at DESC, rowid DESC
 		         LIMIT ?`
-		args = []interface{}{sessionID, beforeID, limit + 1}
+		args = []interface{}{sessionID, beforeID, sessionID, limit + 1}
 	}
 
 	rows, err := s.db.Query(query, args...)

@@ -212,6 +212,26 @@ type UpdateSessionRequest struct {
 	Effort           *string `json:"effort,omitempty"`
 }
 
+// ImportSessionMessage is one pre-built chat message of an imported session.
+type ImportSessionMessage struct {
+	Role      string
+	Parts     []MessagePart
+	Metadata  MessageMetadata
+	CreatedAt time.Time
+}
+
+// ImportSessionRequest registers an agent-native session (one created outside
+// BeeHub, e.g. in the claude/codex CLI) as an ordinary BeeHub session. The
+// session continues to run through AgentSessionID like any other.
+type ImportSessionRequest struct {
+	Name           string
+	ProjectID      string
+	Agent          string
+	Model          string
+	AgentSessionID string
+	Messages       []ImportSessionMessage
+}
+
 type ReorderSessionsRequest struct {
 	SessionIDs []string `json:"session_ids"`
 }

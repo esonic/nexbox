@@ -259,8 +259,32 @@ func (s *Server) InstallMCP(w http.ResponseWriter, r *http.Request) {
 		AuthType:    authType,
 		InstalledAt: store.UnixTime(time.Now()),
 	}
+	unlock := s.lockMCPOAuth("installations")
+	defer unlock()
+	// End authorizations orphaned by an interrupted previous uninstall before
+	// a fresh installation can become eligible to use them again.
+	if err := s.cleanupUnusedMCPOAuthConnections(); err != nil {
+		writeError(w, http.StatusInternalServerError, "clean up unused MCP authorization failed")
+		return
+	}
+	// Migrate the old credential against its original configuration before an
+	// update changes the resource/client/scope used to identify connections.
+	if previous, err := s.Store.GetInstalledMCP(mcp.Name, mcp.ProjectID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	} else if previous != nil {
+		if err := s.preserveMCPOAuthConnection(previous); err != nil {
+			writeError(w, http.StatusInternalServerError, "preserve MCP OAuth connection failed")
+			return
+		}
+	}
 	if err := s.Store.UpsertInstalledMCP(mcp); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if err := s.cleanupUnusedMCPOAuthConnections(); err != nil {
+		writeError(w, http.StatusInternalServerError, "clean up unused MCP authorization failed")
 		return
 	}
 
@@ -293,6 +317,19 @@ func (s *Server) uninstallMCP(name, projectID string) error {
 }
 
 func (s *Server) uninstallMCPScopes(name, projectID string, all bool) error {
+	unlock := s.lockMCPOAuth("installations")
+	defer unlock()
+	installed, err := s.Store.ListInstalledMCPs("*")
+	if err != nil {
+		return err
+	}
+	for _, mcp := range installed {
+		if mcp.Name == name && (all || mcp.ProjectID == projectID) {
+			if err := s.preserveMCPOAuthConnection(&mcp); err != nil {
+				return err
+			}
+		}
+	}
 	if all {
 		if err := s.Store.DeleteInstalledMCPByName(name); err != nil {
 			return err
@@ -303,6 +340,10 @@ func (s *Server) uninstallMCPScopes(name, projectID string, all bool) error {
 			return err
 		}
 		_ = s.Store.DeleteMCPOAuthToken(name, projectID)
+	}
+	// The last compatible installation owns the authorization lifetime.
+	if err := s.cleanupUnusedMCPOAuthConnections(); err != nil {
+		return err
 	}
 	log.Printf("[marketplace] uninstalled MCP: %s (project=%q, all=%v)", name, projectID, all)
 	return nil

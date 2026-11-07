@@ -44,6 +44,14 @@ export interface TaskLabel {
   created_at: string;
 }
 
+// A session created in an agent's own CLI (claude / codex), not yet in NexBox.
+export interface ImportableSession {
+  agent_session_id: string;
+  title: string;
+  updated_at: string;
+  size: number;
+}
+
 export interface Session {
   id: string;
   name: string;
@@ -192,6 +200,7 @@ export interface ChatEvent {
     | "system"
     | "queue_updated"
     | "user_message"
+    | "system_message"
     | "user_input_request"
     | "widget"
     | "context_usage"

@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useCallback, useEffect } from "react";
+import { useState, useMemo, useRef, useCallback, useEffect, type ReactNode } from "react";
 import { toast } from "sonner";
 import {
   Filter,
@@ -38,6 +38,10 @@ interface DiffViewProps {
   isDefaultRepository?: boolean;
   onCommitted?: () => void;
   review?: GitReviewSnapshot;
+  toolbarActions?: ReactNode;
+  showToolbarRefresh?: boolean;
+  branchControlsTarget?: HTMLDivElement | null;
+  toolbarActionsTarget?: HTMLDivElement | null;
 }
 
 type FileCategory = "staged" | "unstaged" | "untracked";
@@ -56,7 +60,7 @@ function scrollWithinContainer(container: HTMLElement, target: HTMLElement, bloc
   });
 }
 
-export function DiffView({ diffText, fileStats, projectId, sessionId, repository, isDefaultRepository, onCommitted, review }: DiffViewProps) {
+export function DiffView({ diffText, fileStats, projectId, sessionId, repository, isDefaultRepository, onCommitted, review, toolbarActions, showToolbarRefresh, branchControlsTarget, toolbarActionsTarget }: DiffViewProps) {
   const isLazyMode = !diffText && !!fileStats;
   const repositoryId = repository?.id;
   const gitScope = useMemo<GitScope | null>(() => projectId && repositoryId ? ({
@@ -403,6 +407,8 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
     <div className="flex flex-col h-full min-h-0 overflow-hidden">
       {gitScope && (
         <BranchToolbar scope={gitScope} onBranchChanged={handleRefreshAll}
+          trailingActions={toolbarActions} showRefresh={showToolbarRefresh}
+          controlsTarget={branchControlsTarget} actionsTarget={toolbarActionsTarget}
           branchData={review?.branches}
           aheadCount={gitStatus?.ahead}
           navLabel={activeTab === "changes" && activeFile ? navLabel : undefined}

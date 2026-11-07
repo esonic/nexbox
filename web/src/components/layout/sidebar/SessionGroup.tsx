@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  ChevronRight, ChevronDown, FolderOpen, MoreHorizontal, Plus, Pencil, Trash2,
+  ChevronRight, ChevronDown, FolderOpen, MoreHorizontal, Plus, Pencil, Trash2, Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { UNASSIGNED_PROJECT } from "@/lib/constants";
@@ -16,6 +16,7 @@ interface SessionGroupProps {
   onNewSession: (projectId?: string) => void;
   onEditProject: (project: Project) => void;
   onDeleteProject: (project: Project) => void;
+  onImportSessions: (project: Project) => void;
   // Rename (forwarded to rows)
   renamingSessionId: string | null;
   renameValue: string;
@@ -46,7 +47,7 @@ interface SessionGroupProps {
 
 export function SessionGroup({
   group, isCollapsed, onToggleCollapsed,
-  onSelectProject, onNewSession, onEditProject, onDeleteProject,
+  onSelectProject, onNewSession, onEditProject, onDeleteProject, onImportSessions,
   renamingSessionId, renameValue, renameRef,
   onRenameChange, onRenameCommit, onRenameCancel, onRenameStart,
   dragSessionId, dragOverSessionId, dragOverPosition,
@@ -148,6 +149,13 @@ export function SessionGroup({
                 >
                   <Pencil className="h-3 w-3 text-muted-foreground" />
                   Edit
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setMenuOpen(false); onImportSessions(group.project!); }}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors"
+                >
+                  <Download className="h-3 w-3 text-muted-foreground" />
+                  Import CLI sessions
                 </button>
                 <button
                   onClick={(e) => { e.stopPropagation(); setMenuOpen(false); onDeleteProject(group.project!); }}
