@@ -4,6 +4,7 @@ import { serverApi, authApi } from "@/lib/api";
 import { ChevronDown, LogOut, Loader2, User as UserIcon } from "lucide-react";
 import { usePreferences, CHAT_FONT_SIZE_LABELS, type ChatFontSize } from "@/stores/preferences";
 import { agentLabel } from "@/lib/agents";
+import { PromptTemplatesSettings } from "./PromptTemplatesSettings";
 
 export function GeneralSettings() {
   const [agents, setAgents] = useState<string[]>([]);
@@ -238,6 +239,8 @@ export function GeneralSettings() {
           </button>
         </div>
       </div>
+
+      <PromptTemplatesSettings />
 
       {/* Account — signed-in user + sign out */}
       {currentUser && <div className="flex items-center justify-between pt-4 border-t">

@@ -1,5 +1,4 @@
 import { GeneralSettings } from "./settings/GeneralSettings";
-import { PromptTemplatesSettings } from "./settings/PromptTemplatesSettings";
 
 export function SettingsPage() {
   return (
@@ -8,7 +7,6 @@ export function SettingsPage() {
         <div className="max-w-2xl mx-auto px-6 py-8">
           <h2 className="text-lg font-semibold mb-6">Settings</h2>
           <GeneralSettings />
-          <PromptTemplatesSettings />
         </div>
       </div>
     </div>

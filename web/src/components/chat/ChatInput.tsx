@@ -936,6 +936,7 @@ export function ChatInput({
   const currentModelInfo = availableModelInfos.find((m) => m.id === selectedModel);
   const displayModelLabel = (info?: ModelInfo, fallback?: string) => {
     const raw = info?.label || fallback || "";
+    if (agentName === "pi") return raw.slice(raw.lastIndexOf("/") + 1) || "Model";
     const hay = `${info?.id || ""} ${raw}`.toLowerCase();
     if (hay.includes("haiku")) return "Haiku";
     if (hay.includes("opus")) return "Opus";
