@@ -11,6 +11,8 @@ import {
   Check,
   LayoutList,
   FileCode2,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getFilePath, splitUnifiedDiffByFile, type ParsedDiffFile } from "@/lib/diff-parser";
@@ -412,11 +414,22 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
           branchData={review?.branches}
           aheadCount={gitStatus?.ahead}
           navLabel={activeTab === "changes" && activeFile ? navLabel : undefined}
-          onNavigate={activeTab === "changes" && activeFile && filteredFiles.length > 0 ? handleNavigate : undefined}
-          sidebarCollapsed={sidebarCollapsed}
-          onToggleSidebar={() => setSidebarCollapsed((v) => !v)} />
+          onNavigate={activeTab === "changes" && activeFile && filteredFiles.length > 0 ? handleNavigate : undefined} />
       )}
       <div className="flex flex-1 min-h-0 overflow-hidden" ref={splitContainerRef}>
+        {sidebarCollapsed && (
+          <div className="w-7 shrink-0 border-r flex flex-col items-center py-1.5">
+            <button
+              type="button"
+              onClick={() => setSidebarCollapsed(false)}
+              className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+              title="Show file list"
+              aria-label="Show file list"
+            >
+              <PanelLeftOpen className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
         {/* Left sidebar (resizable) */}
         {!sidebarCollapsed && (
         <>
@@ -429,6 +442,15 @@ export function DiffView({ diffText, fileStats, projectId, sessionId, repository
                 {tab}
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => setSidebarCollapsed(true)}
+              className="shrink-0 px-2 text-muted-foreground/60 hover:text-foreground transition-colors"
+              title="Hide file list"
+              aria-label="Hide file list"
+            >
+              <PanelLeftClose className="h-3.5 w-3.5" />
+            </button>
           </div>
 
           {activeTab === "changes" ? (

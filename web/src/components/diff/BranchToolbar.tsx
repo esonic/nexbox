@@ -2,8 +2,6 @@ import { useState, useRef, useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import {
-  PanelLeftClose,
-  PanelLeftOpen,
   GitBranch,
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -19,13 +17,11 @@ import { cn } from "@/lib/utils";
 import { gitApi, type GitBranchResponse, type GitScope } from "@/lib/api";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
-export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, onNavigate, sidebarCollapsed, onToggleSidebar, branchData, trailingActions, showRefresh = true, controlsTarget, actionsTarget }: {
+export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, onNavigate, branchData, trailingActions, showRefresh = true, controlsTarget, actionsTarget }: {
   scope: GitScope;
   branchData?: GitBranchResponse;
   onBranchChanged?: () => void;
   aheadCount?: number;
-  sidebarCollapsed?: boolean;
-  onToggleSidebar?: () => void;
   navLabel?: string;
   onNavigate?: (direction: "prev" | "next") => void;
   trailingActions?: ReactNode;
@@ -126,7 +122,6 @@ export function BranchToolbar({ scope, onBranchChanged, aheadCount, navLabel, on
   const embedded = controlsTarget !== undefined;
   const controls = (
     <>
-      {onToggleSidebar && <button type="button" onClick={onToggleSidebar} title={sidebarCollapsed ? "Show file list" : "Hide file list"} className="p-1 rounded hover:bg-accent text-muted-foreground">{sidebarCollapsed ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}</button>}
       <div className="relative min-w-0">
         <Popover open={showDropdown} onOpenChange={(open) => {
           setShowDropdown(open);
