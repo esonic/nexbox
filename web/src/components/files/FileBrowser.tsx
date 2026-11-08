@@ -1023,23 +1023,20 @@ export function FileBrowser({ projectId, projectName = "Files", sessionId, onOpe
     </Button>
   );
 
+  const showTreeButton = (
+    <button
+      onClick={() => setTreeCollapsed(false)}
+      className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors shrink-0"
+      title="Show file tree"
+      aria-label="Show file tree"
+    >
+      <PanelLeftOpen className="h-3.5 w-3.5" />
+    </button>
+  );
+
   return (
     <div ref={containerRef} className="flex h-full">
       {refreshTarget && createPortal(refreshButton, refreshTarget)}
-      {/* Collapsed tree strip — a thin vertical bar with one expand button so
-          the file-content/editor side can use the whole panel width. */}
-      {treeCollapsed && (
-        <div className="w-7 shrink-0 border-r flex flex-col items-center py-1.5">
-          <button
-            onClick={() => setTreeCollapsed(false)}
-            className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-            title="Show file tree"
-          >
-            <PanelLeftOpen className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
-
       {/* File tree sidebar */}
       {!treeCollapsed && (
       <div className="shrink-0 border-r flex flex-col" style={{ width: fileTreeWidth }}>
@@ -1200,6 +1197,7 @@ export function FileBrowser({ projectId, projectName = "Files", sessionId, onOpe
         {selectedPath ? (
           <>
             <div className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 text-xs">
+              {treeCollapsed && showTreeButton}
               <File className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
               {selectedRepositoryFile && (
                 <span className="shrink-0 rounded border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground" title={`Repository: ${selectedRepositoryFile.repository_display_path}`}>
@@ -1256,14 +1254,6 @@ export function FileBrowser({ projectId, projectName = "Files", sessionId, onOpe
                 >
                   {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
                 </button>
-              )}
-              {fileContent && !fileContent.binary && (
-                <span className={cn(
-                  "text-muted-foreground/40 shrink-0",
-                  !markdownPreviewAvailable && !(fileContent && !fileContent.binary) && "ml-auto",
-                )}>
-                  {formatSize(fileContent.size)}
-                </span>
               )}
               {selectedPath && isHtmlPath(selectedPath) && (
                 <div className="flex items-center shrink-0">
@@ -1399,9 +1389,12 @@ export function FileBrowser({ projectId, projectName = "Files", sessionId, onOpe
             )}
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-            Select a file to view
-          </div>
+          <>
+            {treeCollapsed && <div className="px-3 py-1.5 border-b shrink-0">{showTreeButton}</div>}
+            <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+              Select a file to view
+            </div>
+          </>
         )}
       </div>
 
