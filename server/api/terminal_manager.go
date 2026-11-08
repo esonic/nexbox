@@ -27,10 +27,12 @@ func (m *TerminalManager) Register(sessionID string, ptmx *os.File) {
 }
 
 // Unregister removes the PTY for a session ID.
-func (m *TerminalManager) Unregister(sessionID string) {
+func (m *TerminalManager) Unregister(sessionID string, ptmx *os.File) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.ptmxs, sessionID)
+	if m.ptmxs[sessionID] == ptmx {
+		delete(m.ptmxs, sessionID)
+	}
 }
 
 // WriteCommand writes a command string (with trailing newline) to the session's PTY.

@@ -178,6 +178,8 @@ export const sessionsApi = {
     }),
   delete: (id: string) =>
     request<void>(`/sessions/${id}`, { method: "DELETE" }),
+  killTerminal: (id: string) =>
+    request<void>(`/sessions/${id}/terminal`, { method: "DELETE" }),
   // Sessions created in the agent's own CLI that NexBox doesn't have yet.
   // Paged newest-first; pass the last item's updated_at as `before` for the next page.
   listImportable: (projectId: string, agent: string, before?: string) => {

@@ -68,6 +68,27 @@ func (s *Server) HandleTerminalSessionWS(w http.ResponseWriter, r *http.Request)
 	serveTerminal(s, w, r, sessionID, workDir, user.Local)
 }
 
+// HandleKillTerminal explicitly ends a session's shell rather than leaving it
+// alive for WebSocket reconnection.
+func (s *Server) HandleKillTerminal(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "sessionId")
+	session, err := s.Store.GetSession(id)
+	if err != nil || session == nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	termRegistryMu.Lock()
+	ts := termRegistry[id]
+	termRegistryMu.Unlock()
+	if ts != nil {
+		ts.shutdown()
+		if s.TerminalMgr != nil {
+			s.TerminalMgr.Unregister(id, ts.ptmx)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // sessionWorkDir returns the effective working directory for a session.
 // Returns worktree_path when in worktree mode with a created worktree,
 // otherwise falls back to the project's git_repo_path.
@@ -323,7 +344,7 @@ func serveTerminal(s *Server, w http.ResponseWriter, r *http.Request, terminalID
 		go func() {
 			<-ts.exited
 			if s.TerminalMgr != nil {
-				s.TerminalMgr.Unregister(terminalID)
+				s.TerminalMgr.Unregister(terminalID, ts.ptmx)
 			}
 		}()
 	}

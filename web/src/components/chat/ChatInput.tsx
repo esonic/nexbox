@@ -1398,6 +1398,7 @@ export function ChatInput({
                     <ContextUsageIndicator
                       sessionId={sessionId}
                       fallbackContextWindow={currentModelInfo?.context_window || 0}
+                      selectedModel={agentName === "pi" ? selectedModel : undefined}
                     />
                   </div>
                 </>

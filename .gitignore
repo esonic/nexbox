@@ -32,7 +32,7 @@ Thumbs.db
 *.db-shm
 *.db-wal
 
-my_build.sh
+res.sh
 my_run.sh
 .cursor/mcp.json
 server/.cursor/mcp.json

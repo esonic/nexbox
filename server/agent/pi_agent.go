@@ -131,10 +131,75 @@ func (a *PiAgent) ListSupportedModels(ctx context.Context) ([]ModelInfo, string)
 	for _, model := range models {
 		result = append(result, model)
 	}
+	a.enrichPiModels(ctx, result)
 	sort.SliceStable(result, func(i, j int) bool {
 		return piIsDefaultModel(result[i].ID, settings) && !piIsDefaultModel(result[j].ID, settings)
 	})
 	return result, "configured"
+}
+
+// Query Pi itself for model capabilities rather than guessing from the
+// human-readable list (which only reports whether thinking is supported).
+func (a *PiAgent) enrichPiModels(ctx context.Context, models []ModelInfo) {
+	if len(models) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	args := []string{"--mode", "rpc", "--no-session", "--no-approve", "--no-extensions", "--no-mcp"}
+	client := newPiRPCClient(a.CLIPath, args, a.Verbose)
+	if err := client.start(os.TempDir()); err != nil {
+		return
+	}
+	var available struct {
+		Models []struct {
+			Provider      string `json:"provider"`
+			ID            string `json:"id"`
+			ContextWindow int    `json:"contextWindow"`
+			Reasoning     bool   `json:"reasoning"`
+		} `json:"models"`
+	}
+	if err := client.command(ctx, "get_available_models", nil, &available); err != nil {
+		client.close()
+		// Older Pi versions predate built-in MCP and the --no-mcp flag.
+		if ctx.Err() != nil || !strings.Contains(string(client.stderr), "--no-mcp") {
+			return
+		}
+		client = newPiRPCClient(a.CLIPath, args[:len(args)-1], a.Verbose)
+		if client.start(os.TempDir()) != nil {
+			return
+		}
+		if client.command(ctx, "get_available_models", nil, &available) != nil {
+			client.close()
+			return
+		}
+	}
+	defer client.close()
+	lookup := make(map[string]int, len(available.Models))
+	for i, m := range available.Models {
+		lookup[m.Provider+"/"+m.ID] = i
+	}
+	for i := range models {
+		id, _ := piSplitThinkingSuffix(models[i].ID)
+		index, ok := lookup[id]
+		if !ok {
+			continue
+		}
+		m := available.Models[index]
+		models[i].ContextWindow = m.ContextWindow
+		if !m.Reasoning {
+			continue
+		}
+		if client.command(ctx, "set_model", map[string]interface{}{"provider": m.Provider, "modelId": m.ID}, nil) != nil {
+			continue
+		}
+		var levels struct {
+			Levels []string `json:"levels"`
+		}
+		if client.command(ctx, "get_available_thinking_levels", nil, &levels) == nil {
+			models[i].SupportedEfforts = levels.Levels
+		}
+	}
 }
 
 func piModelMatchesPattern(id, pattern string) bool {

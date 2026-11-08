@@ -139,6 +139,7 @@ func registerAuthedAPIRoutes(s *Server, r chi.Router) {
 		r.Get("/trash", s.ListTrashedSessions)
 		r.Delete("/trash", s.EmptyTrash)
 		r.Route("/{sessionId}", func(r chi.Router) {
+			r.Delete("/terminal", s.HandleKillTerminal)
 			r.Get("/", s.GetSession)
 			r.Put("/", s.UpdateSession)
 			r.Delete("/", s.DeleteSession)

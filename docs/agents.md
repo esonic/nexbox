@@ -21,6 +21,8 @@ Kimi, ZeroClaw, and Crush executables are detected at startup and are not regist
 
 - **Claude Code / Codex**: Use native model catalogs; authentication is managed by the CLI.
 - **Pi**: Reads Pi configuration and the selected model catalog. When no catalog is explicitly configured, Pi uses its default model. The NexBox extension supports injecting HTTP MCP connections; stdio MCP is not currently supported through this extension.
+
+For explicitly enabled Pi models, NexBox asks Pi for each model's supported thinking levels and context window. Select the thinking level in the model menu; NexBox initially selects the first available level. Pi continues to manage context compaction. Its model catalog can be refreshed with `pi update --models`.
 - **Kimi Code**: Model aliases come from `kimi provider list --json`. Kimi manages the default model and session persistence. ACP has no historical turn selector, so exact forks are available only from the latest completed turn.
 - **ZeroClaw**: Model selector entries correspond to agent aliases from `zeroclaw agents list`. ZeroClaw determines each alias's model, provider, and execution policy. Aliases are passed unchanged to the native protocol, and multiple aliases can be configured.
 - **Crush**: Reads providers and models from native configuration rather than a full online model catalog. Existing sessions support model switching. NexBox manages the native service process on demand.

@@ -5,6 +5,7 @@ import { useAppStore } from "@/stores/app";
 interface ContextUsageIndicatorProps {
   sessionId: string;
   fallbackContextWindow: number;
+  selectedModel?: string;
 }
 
 function formatTokens(n: number): string {
@@ -22,11 +23,12 @@ function formatTokens(n: number): string {
  * by the backend. When no usage has been reported yet (fresh session), the
  * indicator stays hidden so it doesn't take up space.
  */
-export function ContextUsageIndicator({ sessionId, fallbackContextWindow }: ContextUsageIndicatorProps) {
+export function ContextUsageIndicator({ sessionId, fallbackContextWindow, selectedModel }: ContextUsageIndicatorProps) {
   const usage = useAppStore((s) => s.sessionContextUsage[sessionId]);
   const [hover, setHover] = useState(false);
 
   if (!usage || !usage.used_tokens) return null;
+  if (selectedModel && usage.model && usage.model !== selectedModel) return null;
 
   const total = usage.context_window || fallbackContextWindow || 0;
   const used = usage.used_tokens;

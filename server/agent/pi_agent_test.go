@@ -81,6 +81,35 @@ func TestPiAgentCapabilities(t *testing.T) {
 	}
 }
 
+func TestPiModelCapabilitiesFromRPC(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pi")
+	script := `#!/bin/sh
+while IFS= read -r line; do
+ id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+ case "$line" in
+ *'"type":"get_available_models"'*) printf '{"id":"%s","type":"response","success":true,"data":{"models":[{"provider":"openrouter","id":"vendor/model:free","contextWindow":262144,"reasoning":true},{"provider":"openrouter","id":"plain","contextWindow":8192,"reasoning":false}]}}\n' "$id" ;;
+ *'"type":"set_model"'*) printf '{"id":"%s","type":"response","success":true}\n' "$id" ;;
+ *'"type":"get_available_thinking_levels"'*) printf '{"id":"%s","type":"response","success":true,"data":{"levels":["off","low","high"]}}\n' "$id" ;;
+ esac
+done
+`
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	models := []ModelInfo{{ID: "openrouter/vendor/model:free:high"}, {ID: "openrouter/plain"}, {ID: "openrouter/missing"}}
+	(&PiAgent{CLIPath: path}).enrichPiModels(context.Background(), models)
+	if models[0].ContextWindow != 262144 || strings.Join(models[0].SupportedEfforts, ",") != "off,low,high" {
+		t.Fatalf("reasoning model: %+v", models[0])
+	}
+	if models[1].ContextWindow != 8192 || len(models[1].SupportedEfforts) != 0 {
+		t.Fatalf("non-reasoning model: %+v", models[1])
+	}
+	if models[2].ContextWindow != 0 {
+		t.Fatalf("missing model: %+v", models[2])
+	}
+}
+
 func TestPiAgentListsOnlyEnabledModels(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fake-pi.sh")
@@ -321,11 +350,17 @@ func TestPiAgentRPCIntegration(t *testing.T) {
 
 	workDir := t.TempDir()
 	a := NewPiAgent()
-	model := "poolside/laguna-s-2.1:free"
+	model := "nvidia/nemotron-3.5-lightning:free"
+	var contextWindow int
 	run := func(req Request) (Result, string, error) {
 		var mu sync.Mutex
 		var text string
 		result, err := a.SendMessage(context.Background(), req, func(event StreamEvent) {
+			if value, ok := event.Metadata["contextWindow"].(int); event.Type == EventContextUsage && ok {
+				mu.Lock()
+				contextWindow = value
+				mu.Unlock()
+			}
 			if event.Type == EventTextDelta {
 				mu.Lock()
 				text += event.Content
@@ -348,6 +383,9 @@ func TestPiAgentRPCIntegration(t *testing.T) {
 	}
 	if first.SessionID == "" || first.Checkpoint == "" || !strings.Contains(firstText, "PI_RPC_FIRST") {
 		t.Fatalf("first result=%+v text=%q", first, firstText)
+	}
+	if contextWindow <= 0 {
+		t.Fatal("Pi did not report its context window")
 	}
 
 	second, secondText, err := run(Request{
@@ -382,6 +420,22 @@ func TestPiAgentRPCIntegration(t *testing.T) {
 	}
 }
 
+func TestPiAgentCapabilitiesIntegration(t *testing.T) {
+	if os.Getenv("PI_INTEGRATION") == "" || os.Getenv("OPENROUTER_API_KEY") == "" {
+		t.Skip("Pi integration requires OpenRouter")
+	}
+	dir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", dir)
+	settings := `{"enabledModels":["openrouter/nvidia/nemotron-3.5-lightning:free"]}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(settings), 0600); err != nil {
+		t.Fatal(err)
+	}
+	models, source := NewPiAgent().ListSupportedModels(context.Background())
+	if source != "configured" || len(models) != 1 || models[0].ContextWindow <= 0 || len(models[0].SupportedEfforts) == 0 {
+		t.Fatalf("Pi returned no model capabilities: source=%s models=%+v", source, models)
+	}
+}
+
 func TestPiAgentRPCIntegrationInterject(t *testing.T) {
 	if os.Getenv("PI_INTEGRATION") == "" || os.Getenv("OPENROUTER_API_KEY") == "" {
 		t.Skip("set PI_INTEGRATION=1 with OPENROUTER_API_KEY to run")
@@ -397,7 +451,7 @@ func TestPiAgentRPCIntegrationInterject(t *testing.T) {
 	go func() {
 		result, err := NewPiAgent().SendMessage(ctx, Request{
 			WorkDir: t.TempDir(),
-			Model:   "poolside/laguna-s-2.1:free",
+			Model:   "nvidia/nemotron-3.5-lightning:free",
 			Effort:  "low",
 			Message: "First use the bash tool to run `sleep 3`. Only then reply with exactly: PI_RPC_BASE.",
 			RegisterInterject: func(inject func(string) error) {

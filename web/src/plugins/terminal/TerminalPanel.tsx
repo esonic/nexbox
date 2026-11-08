@@ -13,6 +13,7 @@ interface TerminalPanelProps {
 export function TerminalPanel({ sessionId, visible = true, onExited }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const touchCleanupRef = useRef<(() => void) | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const sessionIdRef = useRef(sessionId);
@@ -149,6 +150,44 @@ export function TerminalPanel({ sessionId, visible = true, onExited }: TerminalP
 
     term.open(containerRef.current);
 
+    // The rendered terminal screen sits above xterm's scroll viewport, so a
+    // touch drag on the text does not reliably scroll the viewport on mobile.
+    const container = containerRef.current;
+    let touchY: number | null = null;
+    let remainingPixels = 0;
+    const onTouchStart = (event: TouchEvent) => {
+      touchY = event.touches.length === 1 ? event.touches[0].clientY : null;
+      remainingPixels = 0;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      if (touchY === null || event.touches.length !== 1) {
+        touchY = null;
+        return;
+      }
+      const y = event.touches[0].clientY;
+      remainingPixels += touchY - y;
+      touchY = y;
+      const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
+      const lineHeight = screen ? screen.clientHeight / term.rows : 0;
+      if (lineHeight <= 0) return;
+      const lines = Math.trunc(remainingPixels / lineHeight);
+      if (lines !== 0) {
+        term.scrollLines(lines);
+        remainingPixels -= lines * lineHeight;
+      }
+    };
+    const onTouchEnd = () => { touchY = null; };
+    container.addEventListener("touchstart", onTouchStart, { passive: true });
+    container.addEventListener("touchmove", onTouchMove, { passive: true });
+    container.addEventListener("touchend", onTouchEnd);
+    container.addEventListener("touchcancel", onTouchEnd);
+    touchCleanupRef.current = () => {
+      container.removeEventListener("touchstart", onTouchStart);
+      container.removeEventListener("touchmove", onTouchMove);
+      container.removeEventListener("touchend", onTouchEnd);
+      container.removeEventListener("touchcancel", onTouchEnd);
+    };
+
     requestAnimationFrame(() => {
       safeFit();
       term.focus();
@@ -210,6 +249,8 @@ export function TerminalPanel({ sessionId, visible = true, onExited }: TerminalP
         wsRef.current = null;
       }
       if (termRef.current) {
+        touchCleanupRef.current?.();
+        touchCleanupRef.current = null;
         termRef.current.dispose();
         termRef.current = null;
       }
@@ -260,7 +301,7 @@ export function TerminalPanel({ sessionId, visible = true, onExited }: TerminalP
     <div
       ref={containerRef}
       className="w-full h-full"
-      style={{ padding: "4px 0 0 4px" }}
+      style={{ padding: "4px 0 0 4px", touchAction: "pan-x pinch-zoom" }}
     />
   );
 }

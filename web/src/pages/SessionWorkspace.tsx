@@ -311,6 +311,19 @@ export function SessionWorkspace() {
   const sessionTerminal = terminalStates[activeSessionId ?? ""] ?? { show: false, key: 0 };
   const showTerminal = sessionTerminal.show;
   const terminalKey = sessionTerminal.key;
+  const killingTerminalsRef = useRef(new Set<string>());
+  const handleKillTerminal = useCallback(async (sessionId: string) => {
+    if (killingTerminalsRef.current.has(sessionId)) return;
+    killingTerminalsRef.current.add(sessionId);
+    try {
+      await sessionsApi.killTerminal(sessionId);
+      killTerminal(sessionId);
+    } catch {
+      toast.error("Could not kill terminal");
+    } finally {
+      killingTerminalsRef.current.delete(sessionId);
+    }
+  }, [killTerminal]);
   // When terminal is moved to "right" and the active session has it visible,
   // it occupies the same right panel slot as Files/Git (mutually exclusive).
   const showingTerminalInRightSlot = terminalPosition === "right" && showTerminal;
@@ -869,7 +882,7 @@ export function SessionWorkspace() {
                       <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Move to bottom" onClick={() => setTerminalPosition("bottom")}>
                         <PanelBottom className="h-4 w-4" />
                       </Button>
-                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Kill terminal" onClick={() => activeSessionId && killTerminal(activeSessionId)}>
+                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Kill terminal" onClick={() => activeSessionId && void handleKillTerminal(activeSessionId)}>
                         <Trash2 className="h-4 w-4" />
                       </Button>
                       <div className="hidden md:flex border-l ml-1 pl-1">{maximizeButton}</div>
@@ -1101,7 +1114,7 @@ export function SessionWorkspace() {
                       size="sm"
                       className="h-5 w-5 p-0"
                       title="Kill terminal"
-                      onClick={() => killTerminal(session.id)}
+                      onClick={() => void handleKillTerminal(session.id)}
                     >
                       <Trash2 className="h-3 w-3" />
                     </Button>
