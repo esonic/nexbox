@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,6 +45,12 @@ type PiAgent struct {
 	AgentDir     string // Empty means Pi's normal user-level agent directory.
 	MCPServerURL string
 	Verbose      bool
+
+	capabilityMu       sync.Mutex
+	capabilityKey      string
+	capabilityCachedAt time.Time
+	capabilityCache    map[string]piModelCapability
+	capabilityProbe    chan struct{}
 }
 
 type piMCPServerSpec struct {
@@ -86,13 +93,28 @@ func (a *PiAgent) ListSupportedModels(ctx context.Context) ([]ModelInfo, string)
 		return nil, "none"
 	}
 
-	models := make(map[string]ModelInfo)
+	// Collected in a slice rather than ranged out of a map so the picker keeps
+	// a stable order across requests.
+	var result []ModelInfo
+	index := make(map[string]int)
+	add := func(model ModelInfo) {
+		model.IsDefault = piIsDefaultModel(model.ID, settings)
+		if i, ok := index[model.ID]; ok {
+			result[i] = model
+			return
+		}
+		index[model.ID] = len(result)
+		result = append(result, model)
+	}
+
 	for _, pattern := range settings.EnabledModels {
 		pattern = strings.TrimSpace(pattern)
 		if pattern == "" {
 			continue
 		}
-		modelPattern, thinking := piSplitThinkingSuffix(pattern)
+		// Older Pi configs encode effort in enabledModels. Treat these as
+		// ordinary model entries; NexBox's effort picker owns the level.
+		modelPattern, _ := piSplitThinkingSuffix(pattern)
 		search := modelPattern
 		if strings.ContainsAny(modelPattern, "*?") {
 			// --list-models only understands fuzzy search. A glob deliberately
@@ -100,6 +122,7 @@ func (a *PiAgent) ListSupportedModels(ctx context.Context) ([]ModelInfo, string)
 			search = ""
 		}
 		cmd := exec.CommandContext(ctx, a.CLIPath, "--list-models", search)
+		cmd.Env = a.nativePiEnv()
 		output, err := cmd.Output()
 		if err != nil {
 			if a.Verbose {
@@ -118,88 +141,19 @@ func (a *PiAgent) ListSupportedModels(ctx context.Context) ([]ModelInfo, string)
 			// models for a literal query. Filter only a literal provider/model;
 			// glob and fuzzy patterns must retain Pi's own matching semantics.
 			if piModelMatchesPattern(model.ID, modelPattern) {
-				if thinking != "" {
-					model.ID += ":" + thinking
-					model.Label += " (" + thinking + ")"
-				}
-				models[model.ID] = model
+				add(model)
 			}
 		}
 	}
 
-	result := make([]ModelInfo, 0, len(models))
-	for _, model := range models {
-		result = append(result, model)
+	if len(result) == 0 {
+		return nil, "none"
 	}
 	a.enrichPiModels(ctx, result)
 	sort.SliceStable(result, func(i, j int) bool {
-		return piIsDefaultModel(result[i].ID, settings) && !piIsDefaultModel(result[j].ID, settings)
+		return result[i].IsDefault && !result[j].IsDefault
 	})
 	return result, "configured"
-}
-
-// Query Pi itself for model capabilities rather than guessing from the
-// human-readable list (which only reports whether thinking is supported).
-func (a *PiAgent) enrichPiModels(ctx context.Context, models []ModelInfo) {
-	if len(models) == 0 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	args := []string{"--mode", "rpc", "--no-session", "--no-approve", "--no-extensions", "--no-mcp"}
-	client := newPiRPCClient(a.CLIPath, args, a.Verbose)
-	if err := client.start(os.TempDir()); err != nil {
-		return
-	}
-	var available struct {
-		Models []struct {
-			Provider      string `json:"provider"`
-			ID            string `json:"id"`
-			ContextWindow int    `json:"contextWindow"`
-			Reasoning     bool   `json:"reasoning"`
-		} `json:"models"`
-	}
-	if err := client.command(ctx, "get_available_models", nil, &available); err != nil {
-		client.close()
-		// Older Pi versions predate built-in MCP and the --no-mcp flag.
-		if ctx.Err() != nil || !strings.Contains(string(client.stderr), "--no-mcp") {
-			return
-		}
-		client = newPiRPCClient(a.CLIPath, args[:len(args)-1], a.Verbose)
-		if client.start(os.TempDir()) != nil {
-			return
-		}
-		if client.command(ctx, "get_available_models", nil, &available) != nil {
-			client.close()
-			return
-		}
-	}
-	defer client.close()
-	lookup := make(map[string]int, len(available.Models))
-	for i, m := range available.Models {
-		lookup[m.Provider+"/"+m.ID] = i
-	}
-	for i := range models {
-		id, _ := piSplitThinkingSuffix(models[i].ID)
-		index, ok := lookup[id]
-		if !ok {
-			continue
-		}
-		m := available.Models[index]
-		models[i].ContextWindow = m.ContextWindow
-		if !m.Reasoning {
-			continue
-		}
-		if client.command(ctx, "set_model", map[string]interface{}{"provider": m.Provider, "modelId": m.ID}, nil) != nil {
-			continue
-		}
-		var levels struct {
-			Levels []string `json:"levels"`
-		}
-		if client.command(ctx, "get_available_thinking_levels", nil, &levels) == nil {
-			models[i].SupportedEfforts = levels.Levels
-		}
-	}
 }
 
 func piModelMatchesPattern(id, pattern string) bool {
@@ -222,13 +176,21 @@ func piGlobMatch(pattern, value string) bool {
 	return err == nil && matched
 }
 
+// piThinkingLevels are the levels Pi's --thinking flag accepts; NexBox maps
+// them onto ModelInfo.SupportedEfforts so the effort picker works for Pi.
+var piThinkingLevels = []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// piDefaultThinkingLevel is Pi's own default thinking level (reported as
+// thinkingLevel by get_state when no --thinking flag is passed).
+const piDefaultThinkingLevel = "medium"
+
 func piSplitThinkingSuffix(pattern string) (string, string) {
 	last := strings.LastIndex(pattern, ":")
 	if last < 0 {
 		return pattern, ""
 	}
 	suffix := pattern[last+1:]
-	for _, level := range []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"} {
+	for _, level := range piThinkingLevels {
 		if suffix == level {
 			return pattern[:last], suffix
 		}
@@ -265,9 +227,35 @@ func parsePiModelList(output []byte) []ModelInfo {
 			continue
 		}
 		provider, modelID := fields[0], fields[1]
-		models = append(models, ModelInfo{ID: provider + "/" + modelID, Label: modelID})
+		model := ModelInfo{ID: provider + "/" + modelID, Label: modelID}
+		if len(fields) > 2 {
+			model.ContextWindow = parsePiTokenCount(fields[2])
+		}
+		if len(fields) > 4 && fields[4] == "yes" {
+			model.SupportedEfforts = piThinkingLevels
+			model.DefaultEffort = piDefaultThinkingLevel
+		}
+		models = append(models, model)
 	}
 	return models
+}
+
+// parsePiTokenCount reads Pi's abbreviated token counts ("262.1K", "1.0M").
+// The value only drives the UI's context-usage percentage, so the rounding
+// implied by Pi's own formatting is acceptable.
+func parsePiTokenCount(value string) int {
+	multiplier := 1.0
+	switch {
+	case strings.HasSuffix(value, "M"):
+		multiplier, value = 1_000_000, strings.TrimSuffix(value, "M")
+	case strings.HasSuffix(value, "K"):
+		multiplier, value = 1_000, strings.TrimSuffix(value, "K")
+	}
+	number, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0
+	}
+	return int(number * multiplier)
 }
 
 func piIsDefaultModel(id string, settings piSettings) bool {
@@ -351,7 +339,8 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 	if sessionID != "" {
 		args = append(args, "--session", sessionID)
 	}
-	model := strings.TrimSpace(req.Model)
+	// Strip legacy effort suffixes so the independent effort picker owns the level.
+	model, _ := piSplitThinkingSuffix(strings.TrimSpace(req.Model))
 	if model != "" {
 		args = append(args, "--model", model)
 	}
@@ -360,6 +349,7 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 	}
 
 	client := newPiRPCClient(a.CLIPath, args, a.Verbose)
+	client.env = a.nativePiEnv()
 	if len(servers) > 0 {
 		encoded, err := json.Marshal(servers)
 		if err != nil {
@@ -385,7 +375,7 @@ func (a *PiAgent) SendMessage(ctx context.Context, req Request, cb EventCallback
 			return Result{}, fmt.Errorf("close Pi MCP configuration: %w", err)
 		}
 		defer os.Remove(configPath)
-		client.env = append(os.Environ(), "NEXBOX_PI_MCP_CONFIG="+configPath)
+		client.env = append(client.env, "NEXBOX_PI_MCP_CONFIG="+configPath)
 	}
 	if err := client.start(req.WorkDir); err != nil {
 		return Result{}, err

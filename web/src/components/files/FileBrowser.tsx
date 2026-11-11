@@ -301,9 +301,36 @@ export function FileBrowser({ projectId, projectName = "Files", sessionId, onOpe
   const isLoadingPath = useCallback((path: string) => loadingPaths.has(path), [loadingPaths]);
   const rootEntries = childrenMap[""] ?? [];
 
+  // Markdown image srcs are relative to the previewed file, not the SPA URL.
+  const resolveMarkdownImageSrc = useCallback(
+    (src: string) => {
+      if (!selectedPath || /^([a-z][a-z0-9+.-]*:|\/\/|#)/i.test(src)) return src;
+      const [pathPart] = src.split(/[?#]/);
+      let decoded = pathPart;
+      try {
+        decoded = decodeURIComponent(pathPart);
+      } catch {
+        // keep the raw path
+      }
+      const parts: string[] = decoded.startsWith("/") ? [] : selectedPath.split("/").slice(0, -1);
+      for (const seg of decoded.split("/")) {
+        if (seg === "" || seg === ".") continue;
+        if (seg === "..") {
+          if (parts.length === 0) return src;
+          parts.pop();
+        } else {
+          parts.push(seg);
+        }
+      }
+      return filesApi.serveUrl(projectId, parts.join("/"), sessionId, selectedRepositoryFile?.repository_id);
+    },
+    [projectId, selectedPath, sessionId, selectedRepositoryFile],
+  );
   const markdownPreviewAvailable = !!selectedPath && !!fileContent && !fileContent.binary && isMarkdownPath(selectedPath);
   const imagePreviewAvailable = !!selectedPath && !!fileContent && /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i.test(selectedPath);
   const showingImage = imagePreviewAvailable && (!imageSource || fileContent.binary);
+  const sourcePreviewAvailable = markdownPreviewAvailable || (imagePreviewAvailable && !fileContent.binary);
+  const showingPreview = showingImage || (markdownPreviewAvailable && markdownMode === "rendered");
   useEffect(() => {
     setImageSource(false);
     setImageError(false);
@@ -1204,47 +1231,45 @@ export function FileBrowser({ projectId, projectName = "Files", sessionId, onOpe
                   {selectedRepositoryFile.repository_name}
                 </span>
               )}
-              <span className="font-mono truncate text-muted-foreground">{selectedPath}</span>
-              {markdownPreviewAvailable && (
-                <div className="ml-auto flex items-center gap-1">
+              <span className="flex-1 min-w-0 font-mono truncate text-muted-foreground" title={selectedPath}>{selectedPath}</span>
+              {sourcePreviewAvailable && (
+                <div className="flex items-center gap-1 shrink-0" role="group" aria-label="File view mode">
                   <button
-                    onClick={() => setMarkdownMode("source")}
+                    onClick={() => markdownPreviewAvailable ? setMarkdownMode("source") : setImageSource(true)}
                     className={cn(
                       "h-6 px-2 rounded border text-[11px] inline-flex items-center gap-1 transition-colors",
-                      markdownMode === "source"
+                      !showingPreview
                         ? "bg-accent text-accent-foreground border-border"
                         : "text-muted-foreground hover:text-foreground hover:bg-accent/50 border-transparent"
                     )}
-                    title="View source markdown"
+                    title={markdownPreviewAvailable ? "View source markdown" : "View source"}
+                    aria-label="View source"
+                    aria-pressed={!showingPreview}
                   >
                     <Code2 className="h-3 w-3" />
                   </button>
                   <button
-                    onClick={() => setMarkdownMode("rendered")}
+                    onClick={() => markdownPreviewAvailable ? setMarkdownMode("rendered") : setImageSource(false)}
                     className={cn(
                       "h-6 px-2 rounded border text-[11px] inline-flex items-center gap-1 transition-colors",
-                      markdownMode === "rendered"
+                      showingPreview
                         ? "bg-accent text-accent-foreground border-border"
                         : "text-muted-foreground hover:text-foreground hover:bg-accent/50 border-transparent"
                     )}
-                    title="View rendered markdown"
+                    title={markdownPreviewAvailable ? "View rendered markdown" : "View image"}
+                    aria-label="View preview"
+                    aria-pressed={showingPreview}
                   >
                     <Eye className="h-3 w-3" />
                   </button>
                 </div>
               )}
-              {imagePreviewAvailable && !fileContent.binary && (
-                <button onClick={() => setImageSource((value) => !value)} className="ml-auto h-6 px-2 rounded border text-[11px] hover:bg-accent" title={showingImage ? "View source" : "View image"}>
-                  {showingImage ? <Code2 className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-                </button>
-              )}
-              {fileContent && !fileContent.binary && !showingImage && (
+              {fileContent && !fileContent.binary && (
                 <button
                   onClick={handleSave}
                   disabled={!isDirty || saving}
                   className={cn(
                     "h-6 px-2 rounded border text-[11px] inline-flex items-center gap-1 transition-colors shrink-0",
-                    !markdownPreviewAvailable && "ml-auto",
                     isDirty
                       ? "bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
                       : "text-muted-foreground/50 border-transparent",
@@ -1353,6 +1378,7 @@ export function FileBrowser({ projectId, projectName = "Files", sessionId, onOpe
                   <div ref={fileContentSelectableRef} className="h-full">
                     <MarkdownRenderer
                       content={fileContent.content}
+                      resolveImageSrc={resolveMarkdownImageSrc}
                       className="h-full overflow-auto px-4 py-3 markdown-content text-sm"
                     />
                   </div>

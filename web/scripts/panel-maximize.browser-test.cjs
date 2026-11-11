@@ -26,7 +26,7 @@ const mocks = {
     export const projectsApi = {list:async()=>[project]};
     export const gitApi = {repositories:async(project,session,refresh)=>{state.scans.push({project,session,refresh});if(state.nextScan){const next=state.nextScan;state.nextScan=null;return await next;}return repositories;},
       ...Object.fromEntries(['checkout','pull','push'].map(name=>[name,async(scope,args)=>state.mutations.push({name,scope,args})]))};
-    export const sessionsApi = {}, gitlabApi = {}, mrWatchApi = {};
+    export const sessionsApi = {killTerminal:async()=>{}}, gitlabApi = {}, mrWatchApi = {};
   `,
   '@/lib/ws': `export const globalWS = {subscribeGlobal:()=>()=>{}};`,
   '@/hooks/useGitReview': `import {snapshot,state} from '@/lib/api';const refresh=()=>state.refreshes++;export const useGitReview = () => ({snapshot,refresh,loading:false});`,

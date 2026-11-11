@@ -15,6 +15,7 @@ func TestPiAgentRPCMapsTurnAndCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fake-pi.sh")
 	script := `#!/bin/sh
+printf '%s\n' "$*" > "$0.args"
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
   case "$line" in
@@ -45,9 +46,13 @@ done
 	var events []StreamEvent
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result, err := a.SendMessage(ctx, Request{WorkDir: dir, Message: "hello"}, func(event StreamEvent) { events = append(events, event) })
+	result, err := a.SendMessage(ctx, Request{WorkDir: dir, Message: "hello", Model: "openrouter/vendor/model:free:high", Effort: "low"}, func(event StreamEvent) { events = append(events, event) })
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
+	}
+	args, err := os.ReadFile(path + ".args")
+	if err != nil || !strings.Contains(string(args), "--model openrouter/vendor/model:free --thinking low") || strings.Contains(string(args), ":high") {
+		t.Fatalf("legacy suffix overrides selected effort: %s, %v", args, err)
 	}
 	if result.SessionID != "pi-session" || result.Checkpoint != piLeafCheckpointPrefix+"assistant-entry-1" {
 		t.Fatalf("result = %+v", result)
@@ -90,6 +95,7 @@ while IFS= read -r line; do
  case "$line" in
  *'"type":"get_available_models"'*) printf '{"id":"%s","type":"response","success":true,"data":{"models":[{"provider":"openrouter","id":"vendor/model:free","contextWindow":262144,"reasoning":true},{"provider":"openrouter","id":"plain","contextWindow":8192,"reasoning":false}]}}\n' "$id" ;;
  *'"type":"set_model"'*) printf '{"id":"%s","type":"response","success":true}\n' "$id" ;;
+ *'"type":"get_state"'*) printf '{"id":"%s","type":"response","success":true,"data":{"thinkingLevel":"low"}}\n' "$id" ;;
  *'"type":"get_available_thinking_levels"'*) printf '{"id":"%s","type":"response","success":true,"data":{"levels":["off","low","high"]}}\n' "$id" ;;
  esac
 done
@@ -97,7 +103,7 @@ done
 	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
-	models := []ModelInfo{{ID: "openrouter/vendor/model:free:high"}, {ID: "openrouter/plain"}, {ID: "openrouter/missing"}}
+	models := []ModelInfo{{ID: "openrouter/vendor/model:free"}, {ID: "openrouter/plain"}, {ID: "openrouter/missing"}}
 	(&PiAgent{CLIPath: path}).enrichPiModels(context.Background(), models)
 	if models[0].ContextWindow != 262144 || strings.Join(models[0].SupportedEfforts, ",") != "off,low,high" {
 		t.Fatalf("reasoning model: %+v", models[0])
@@ -133,6 +139,42 @@ esac
 	}
 	if models[0].ID != "openai/bar" || models[1].ID != "openrouter/foo" {
 		t.Fatalf("unexpected model order: %+v", models)
+	}
+}
+
+// The catalog columns drive NexBox's effort picker and context-usage
+// indicator, so the `--list-models` table must be read past the model id.
+func TestPiAgentCatalogCarriesContextWindowAndEfforts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fake-pi.sh")
+	script := `#!/bin/sh
+printf '%s\n' 'provider    model    context  max-out  thinking  images' \
+  'openrouter  foo      262.1K   32.8K    yes       no' \
+  'openai      bar      1.0M     8K       no        no'
+`
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"enabledModels":["openrouter/foo","openai/bar","openrouter/foo:high"]}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(settings), 0644); err != nil {
+		t.Fatal(err)
+	}
+	models, _ := (&PiAgent{CLIPath: path, AgentDir: dir}).ListSupportedModels(context.Background())
+	byID := map[string]ModelInfo{}
+	for _, model := range models {
+		byID[model.ID] = model
+	}
+	thinking, ok := byID["openrouter/foo"]
+	if !ok || thinking.ContextWindow != 262100 || thinking.DefaultEffort != "medium" || len(thinking.SupportedEfforts) == 0 {
+		t.Fatalf("thinking model = %+v", thinking)
+	}
+	plain, ok := byID["openai/bar"]
+	if !ok || plain.ContextWindow != 1_000_000 || plain.DefaultEffort != "" || len(plain.SupportedEfforts) != 0 {
+		t.Fatalf("non-thinking model = %+v", plain)
+	}
+	// Old suffix entries merge into the ordinary model, retaining the picker.
+	if len(models) != 2 {
+		t.Fatalf("legacy suffix produced duplicate models: %+v", models)
 	}
 }
 

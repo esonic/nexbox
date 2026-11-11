@@ -19,7 +19,9 @@
     "test:files-refresh": "node --test scripts/files-refresh.browser-test.cjs",
     "test:panel-maximize": "node --test scripts/panel-maximize.browser-test.cjs",
     "test:markdown": "node --test scripts/markdown-renderer.browser-test.cjs",
-    "test:chat-history": "node --test scripts/chat-history.browser-test.cjs"
+    "test:chat-history": "node --test scripts/chat-history.browser-test.cjs",
+    "test:pi-models": "node --test scripts/pi-models.test.cjs",
+    "test:terminal-touch": "node --test scripts/terminal-touch.browser-test.cjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

@@ -1,5 +1,4 @@
-/** source: 用户要求将 BeeHub 通用特性 port 到 NexBox，summary: 验证迁移后的浏览器交互与状态保持 **/
-/** source: 用户要求 Files 自动同步目录并复用刷新按钮，summary: 浏览器验证轮询、可见性、滚动、手动重载、未保存保护和竞态 **/
+/** source: 用户要求移植 Markdown 图片和 SVG 工具栏并保留 NexBox 功能，summary: 浏览器验证文件工具栏、模式切换、轮询、重载、未保存保护和竞态 **/
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const {execFile} = require('node:child_process');
@@ -10,7 +9,7 @@ const {build} = require('esbuild');
 const mocks = {
  '@/lib/api': `
  export class ApiError extends Error {constructor(message,status){super(message);this.status=status;}}
- export const state={directories:{},contents:{},lists:[],reads:[],nextContent:null,nextList:null,failContent:false,failList:false};
+ export const state={directories:{},contents:{},binary:[],lists:[],reads:[],nextContent:null,nextList:null,failContent:false,failList:false};
  export const filesApi={
  list:async(project,path,session)=>{
  state.lists.push({project,path,session}); const result=structuredClone(state.directories[path]||[]);
@@ -21,8 +20,8 @@ const mocks = {
  state.reads.push({project,path,session,repository,safeLink});
  if(state.failContent) throw new ApiError('File not found',404);
  if(state.nextContent){const pending=state.nextContent;state.nextContent=null;return await pending;}
- return {path,binary:false,size:state.contents[path].length,content:state.contents[path]};
- },head:async()=>({in_repo:false}),serveUrl:()=>'/image?file=test',
+ return {path,binary:state.binary.includes(path),size:state.contents[path].length,content:state.binary.includes(path)?'':state.contents[path]};
+ },head:async()=>({in_repo:false}),serveUrl:(project,path,session,repository)=>'/image?'+new URLSearchParams({project,path,...session?{session}:{},...repository?{repository}:{}}),
  };
  export const gitApi={workspaceStatus:async()=>({files:[]})};
  `,
@@ -70,13 +69,16 @@ const poll=async()=>{for(const fn of [...polls.values()])fn();await settle();};
 let hidden=false;
 Object.defineProperty(document,'hidden',{configurable:true,get:()=>hidden});
 const entry=(path,is_dir=false)=>({path,name:path.split('/').pop(),is_dir});
+const svgPath='diagram-with-a-very-long-filename-that-must-truncate-in-the-toolbar.SVG';
+const binaryImages=['picture.png','photo.JPG','animation.gif','photo.webp','photo.avif','photo.bmp','icon.ico'];
 state.directories={
- '':[entry('open',true),entry('closed',true),entry('doc.md'),entry('other.txt'),entry('picture.png'),...Array.from({length:60},(_,i)=>entry('f'+i))],
+ '':[entry('open',true),entry('closed',true),entry('doc.md'),entry('other.txt'),entry(svgPath),entry('page.html'),entry('archive.bin'),entry('images.md'),...binaryImages.map(path=>entry(path)),...Array.from({length:60},(_,i)=>entry('f'+i))],
  open:[entry('open/a.txt'),entry('open/nested',true)],'open/nested':[entry('open/nested/deep.txt')],closed:[entry('closed/a.txt')],
 };
 const fence=String.fromCharCode(96).repeat(3);
 const markdown='# Original\n\n'+fence+'mermaid\ngraph LR; A-->B\n'+fence+'\n\n'+'paragraph\n\n'.repeat(80);
-state.contents={'doc.md':markdown,'other.txt':'Other content','picture.png':'binary image'};
+state.contents={'doc.md':markdown,'other.txt':'Other content',[svgPath]:'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"></svg>','images.md':'![relative](./assets/a%20b.svg)\n![root](/root.svg)\n![external](https://example.invalid/img.png)', 'page.html':'<h1>Page</h1>','archive.bin':'binary content',...Object.fromEntries(binaryImages.map(path=>[path,'binary image']))};
+state.binary=[...binaryImages,'archive.bin'];
 let mermaidCalls=0;
 window.mermaid={initialize(){},async render(id){mermaidCalls++;return {svg:'<svg id="'+id+'" width="1200" height="100"></svg>'};}};
 const root=createRoot(document.getElementById('root'));
@@ -85,7 +87,14 @@ const row=path=>document.querySelector('[data-tree-path="'+path+'"]');
 const button=text=>[...document.querySelectorAll('button')].find(node=>node.textContent.trim()===text);
 const refresh=()=>document.querySelector('button[aria-label="Refresh files and current file"]');
 const preview=()=>document.querySelector('.markdown-content');
+const imageSrc=alt=>{const image=document.querySelector('img[alt="'+alt+'"]');check(image,'Missing image: '+alt);return image.src;};
 const contentResult=(path,content)=>({path,content,binary:false,size:content.length});
+const modes=()=>document.querySelector('[role="group"][aria-label="File view mode"]');
+const sourceButton=()=>modes()?.querySelector('[aria-label="View source"]');
+const previewButton=()=>modes()?.querySelector('[aria-label="View preview"]');
+const saveButton=()=>document.querySelector('button[title="No changes"],button[title="Save (Ctrl+S)"]');
+const toolbarPositions=()=>[sourceButton(),previewButton(),saveButton()].map(node=>{const rect=node.getBoundingClientRect();return [rect.x,rect.y,rect.width,rect.height];});
+const samePositions=(before,after)=>before.every((rect,i)=>rect.every((value,j)=>Math.abs(value-after[i][j])<0.5));
 function edit(value){
  const input=document.querySelector('[data-editor]');
  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,value);
@@ -112,6 +121,7 @@ async function run(){
  row('doc.md').click();await until(()=>document.querySelector('[data-editor]'));check(document.querySelector('[data-editor]'),'Editor not mounted');
  document.querySelector('button[title="View rendered markdown"]').click();await settle();
  check(preview()&&mermaidCalls===1,'Markdown preview missing');
+ check(modes()?.children.length===2&&previewButton().getAttribute('aria-pressed')==='true'&&sourceButton().getAttribute('aria-pressed')==='false','Markdown mode buttons missing or incorrect');
  const oldPreview=preview(),svg=document.querySelector('svg'),treeScroll=row('doc.md').parentElement;
  treeScroll.scrollTop=350;oldPreview.scrollTop=250;
  const treeTop=treeScroll.scrollTop,previewTop=oldPreview.scrollTop;
@@ -155,8 +165,59 @@ async function run(){
  check(document.querySelector('[data-editor]').value==='Other content','Old file response overwrote new selection');
  state.failContent=true;refresh().click();await settle();
  check(document.querySelector('[data-editor]').value==='Other content'&&notices.some(text=>text.includes('no longer exists')),'Deleted file erased last loaded content');state.failContent=false;
- row('picture.png').click();await settle();const imageURL=document.querySelector('img[alt="picture.png"]').src;
- refresh().click();await settle();check(document.querySelector('img[alt="picture.png"]').src!==imageURL,'Image reload did not bypass cache');
+ row('picture.png').click();await settle();const imageURL=imageSrc('picture.png');
+ refresh().click();await settle();check(imageSrc('picture.png')!==imageURL,'Image reload did not bypass cache');
+ // SVG uses the same fixed source/preview controls as Markdown, even in a narrow toolbar.
+ row(svgPath).click();await settle();
+ check(document.querySelector('img')&&modes()?.children.length===2&&saveButton()?.disabled,'SVG preview must have two mode buttons and a stable save slot');
+ check(previewButton().getAttribute('aria-pressed')==='true'&&sourceButton().getAttribute('aria-pressed')==='false','SVG should start in preview mode');
+ document.querySelector('[title="Hide file tree"]').click();await settle();
+ const rootElement=document.getElementById('root');rootElement.style.width='480px';await settle();
+ const svgPositions=toolbarPositions();
+ check(svgPositions.every(rect=>rect[0]>=0&&rect[0]+rect[2]<=rootElement.getBoundingClientRect().right),'Long SVG path pushed buttons outside toolbar');
+ sourceButton().click();await until(()=>document.querySelector('[data-editor]'));
+ check(document.querySelector('[data-editor]').value===state.contents[svgPath]&&sourceButton().getAttribute('aria-pressed')==='true','SVG source mode failed');
+ check(samePositions(svgPositions,toolbarPositions()),'SVG buttons moved between preview and source');
+ const svgDraft=state.contents[svgPath].replace('100','200');edit(svgDraft);await settle();
+ previewButton().click();await settle();
+ check(document.querySelector('img')&&saveButton()&&!saveButton().disabled,'SVG preview lost dirty state or save control');
+ check(samePositions(svgPositions,toolbarPositions()),'SVG buttons moved while previewing edits');
+ sourceButton().click();await until(()=>document.querySelector('[data-editor]'));
+ check(document.querySelector('[data-editor]').value===svgDraft,'SVG mode switch discarded edits');
+ rootElement.style.width='900px';
+ document.querySelector('[title="Show file tree"]').click();await settle();
+ for(const path of binaryImages){
+ row(path).click();await settle();
+ check(document.querySelector('img')&&!modes()&&!saveButton()&&!document.querySelector('[data-editor]'),'Binary image exposed source/edit controls: '+path);
+ }
+ row('other.txt').click();await settle();
+ check(document.querySelector('[data-editor]')&&saveButton()&&!modes(),'Plain text toolbar is incorrect');
+ row('page.html').click();await settle();
+ check(document.querySelector('[data-editor]')&&saveButton()&&!modes()&&document.querySelector('[title="Open rendered HTML in new tab (login required)"]'),'HTML toolbar is incorrect');
+ check(document.querySelector('[title="More sharing options"]')&&document.querySelector('[title="Download"]')&&document.querySelector('[title="Delete"]'),'NexBox HTML sharing/download/delete actions were lost');
+ row('archive.bin').click();await settle();
+ check(!modes()&&!saveButton()&&!document.querySelector('img')&&!document.querySelector('[data-editor]')&&rootElement.textContent.includes('Binary file'),'Binary file toolbar is incorrect');
+ // Relative Markdown image URLs follow the document and workspace, not the SPA route.
+ row('images.md').click();await until(()=>document.querySelector('[data-editor]'));
+ document.querySelector('button[title="View rendered markdown"]').click();await settle();
+ const relativeURL=new URL(imageSrc('relative'));
+ check(relativeURL.searchParams.get('path')==='assets/a b.svg'&&relativeURL.searchParams.get('project')==='p','Relative Markdown image path or project scope was lost');
+ check(new URL(imageSrc('root')).searchParams.get('path')==='root.svg','Root image path was resolved relative to document');
+ check(document.querySelector('img[alt="external"]').getAttribute('src')==='https://example.invalid/img.png','External image URL was rewritten');
+ // Worktree previews keep their session scope.
+ state.contents['open/nested/guide.md']='![nested](../img.svg)';
+ useFileBrowserStore.getState().setSelectedPath('p:worktree','open/nested/guide.md');
+ flushSync(()=>root.render(null));render('p','worktree');await until(()=>document.querySelector('[data-editor]'));
+ document.querySelector('button[title="View rendered markdown"]').click();await settle();
+ const nestedURL=new URL(imageSrc('nested'));
+ check(nestedURL.searchParams.get('path')==='open/img.svg'&&nestedURL.searchParams.get('session')==='worktree','Nested worktree image scope was lost');
+ // A file from a secondary repository resolves images inside that repository.
+ state.contents['docs/guide.md']='![repository](../assets/image.svg)';
+ useFileBrowserStore.getState().setSelectedRepositoryFile('p:worktree',{repository_id:'r2',repository_name:'Other',repository_display_path:'packages/other',path:'docs/guide.md'});
+ flushSync(()=>root.render(null));render('p','worktree');await until(()=>document.querySelector('[data-editor]'));
+ document.querySelector('button[title="View rendered markdown"]').click();await settle();
+ const repositoryURL=new URL(imageSrc('repository'));
+ check(repositoryURL.searchParams.get('path')==='assets/image.svg'&&repositoryURL.searchParams.get('session')==='worktree'&&repositoryURL.searchParams.get('repository')==='r2','Secondary repository image scope was lost');
  // Actual hook: identity, request ordering, workspace isolation and failures.
  flushSync(()=>root.render(<Probe/>));await settle();await probe.refreshTree();await settle();
  const fullMap=probe.childrenMap,openEntries=fullMap.open;await probe.refreshTree();await settle();
@@ -174,7 +235,7 @@ async function run(){
  resolveList([entry('wrong-project.txt')]);await oldScope;await settle();
  check(probe.childrenMap===newScopeMap&&state.lists.some(call=>call.project==='other-project'&&call.session==='worktree'),'Old scope changed new workspace');
  flushSync(()=>root.unmount());check(polls.size===0,'Unmount left polling timers');
- document.body.innerHTML='<pre id="result">PASS: visible-folder polling, visibility resume, unchanged identity, scroll/selection, text/image reload, dirty cancel/confirm, editor view state, races and failure recovery</pre>';
+ document.body.innerHTML='<pre id="result">PASS: SVG toolbar layout and mode switches, image/text/HTML/binary controls, visible-folder polling, visibility resume, unchanged identity, scroll/selection, text/image reload, dirty cancel/confirm, editor view state, races and failure recovery</pre>';
 }
 run().catch(error=>{document.body.innerHTML='<pre id="result">FAIL: '+error.message+'</pre>';});
 `;
@@ -187,7 +248,7 @@ test('Files refresh preserves reading and editing state',{timeout:45000},async()
  build.onLoad({filter:/.*/,namespace:'mock'},args=>({contents:mocks[args.path],loader:'tsx',resolveDir:path.join(__dirname,'..')}));
  }}],
  });
- const css='#root{height:450px;width:900px}.flex{display:flex}.flex-col{flex-direction:column}.flex-1{flex:1;min-height:0}.h-full{height:100%}.min-h-0{min-height:0}.shrink-0{flex-shrink:0}.overflow-auto{overflow:auto}.overflow-y-auto{overflow-y:auto}.overflow-hidden{overflow:hidden}.overflow-x-auto{overflow-x:auto}[data-tree-path]{height:24px}[data-editor]{width:100%;height:350px}.markdown-content{box-sizing:border-box}.markdown-content p{margin:20px 0}svg{display:block}';
+ const css='#root{height:450px;width:900px}.flex{display:flex}.inline-flex{display:inline-flex}.flex-col{flex-direction:column}.flex-1{flex:1;min-height:0}.h-full{height:100%}.min-h-0{min-height:0}.min-w-0{min-width:0}.shrink-0{flex-shrink:0}.ml-auto{margin-left:auto}.items-center{align-items:center}.gap-1{gap:4px}.gap-2{gap:8px}.px-2{padding-left:8px;padding-right:8px}.h-6{height:24px}.h-3{height:12px}.w-3{width:12px}.truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.overflow-auto{overflow:auto}.overflow-y-auto{overflow-y:auto}.overflow-hidden{overflow:hidden}.overflow-x-auto{overflow-x:auto}[data-tree-path]{height:24px}[data-editor]{width:100%;height:350px}.markdown-content{box-sizing:border-box}.markdown-content p{margin:20px 0}svg{display:block}';
  const html='<!doctype html><style>'+css+'</style><div id="refresh-actions"></div><div id="root"></div><script>'+bundled.outputFiles[0].text.replaceAll('</script','<\\/script')+'</script>';
  const server=http.createServer((request,response)=>{
  if(request.url.startsWith('/image?')){response.writeHead(200,{'Content-Type':'image/svg+xml'});response.end('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>');return;}

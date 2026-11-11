@@ -208,6 +208,8 @@ interface MarkdownRendererProps {
   className?: string;
   enableMermaid?: boolean;
   components?: Record<string, React.ElementType>;
+  // Rewrites image src values (e.g. file-relative paths) before they reach the DOM.
+  resolveImageSrc?: (src: string) => string;
 }
 
 // Keep the component type stable across parent updates (e.g. Git status polls)
@@ -226,6 +228,7 @@ export function MarkdownRenderer({
   className,
   enableMermaid = true,
   components,
+  resolveImageSrc,
 }: MarkdownRendererProps) {
   // Component identity must survive unrelated parent updates. In particular,
   // remounting code also remounts MermaidBlock and reruns its render effect.
@@ -245,9 +248,21 @@ export function MarkdownRenderer({
     },
     [enableMermaid],
   );
+  const renderImage = useMemo<Components["img"] | undefined>(() => {
+    if (!resolveImageSrc) return undefined;
+    return ({ node, src, ...props }) => {
+      void node;
+      return <img {...props} src={typeof src === "string" ? resolveImageSrc(src) : src} />;
+    };
+  }, [resolveImageSrc]);
   const markdownComponents = useMemo(
-    () => ({ table: MarkdownTable, ...components, code: renderCode }),
-    [components, renderCode],
+    () => ({
+      table: MarkdownTable,
+      ...(renderImage ? { img: renderImage } : {}),
+      ...components,
+      code: renderCode,
+    }),
+    [components, renderCode, renderImage],
   );
 
   return (

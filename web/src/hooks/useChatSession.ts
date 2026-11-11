@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { toast } from "sonner";
+import { modelId } from "@/lib/agents";
 import { globalWS } from "@/lib/ws";
 import { messagesApi, serverApi, sessionsApi, tasksApi, queueApi } from "@/lib/api";
 import { insertSystemNotice, isVisibleChatMessage } from "@/lib/systemNotice";
@@ -212,7 +213,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
 
   const agentName = session.agent || serverAgent;
   const capabilities = agentCapabilities[agentName] || NO_CAPABILITIES;
-  const modelName = session.model || fallbackModelForAgent(agentName, availableModels);
+  const modelName = modelId(agentName, session.model || fallbackModelForAgent(agentName, availableModels));
   const sessionId = session.id;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
@@ -407,7 +408,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     if (availableModels.length === 0 || session.model) return;
     let defaultModel = fallbackModelForAgent(agentName, availableModels);
     try {
-      const stored = localStorage.getItem(LAST_MODEL_KEY_PREFIX + agentName);
+      const stored = modelId(agentName, localStorage.getItem(LAST_MODEL_KEY_PREFIX + agentName) || "");
       if (stored && availableModels.includes(stored)) defaultModel = stored;
     } catch { /* ignore */ }
     sessionsApi.update(session.id, { model: defaultModel }).then((updated) => {
@@ -425,7 +426,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
   useEffect(() => {
     if (!session.model || availableModelInfos.length === 0) return;
     if (modelsAgent !== agentName) return;
-    const info = availableModelInfos.find((m) => m.id === session.model);
+    const info = availableModelInfos.find((m) => m.id === modelId(agentName, session.model));
     if (!info) return;
     const efforts = info.supported_efforts || [];
     let target: string;
@@ -435,7 +436,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       return; // already valid
     } else {
       let stored = "";
-      try { stored = localStorage.getItem(lastEffortKey(agentName, session.model)) || ""; } catch { /* ignore */ }
+      try { stored = localStorage.getItem(lastEffortKey(agentName, modelId(agentName, session.model))) || ""; } catch { /* ignore */ }
       target = (stored && efforts.includes(stored)) ? stored : (info.default_effort || efforts[0] || "");
     }
     if (target === (session.effort || "")) return;
@@ -1072,7 +1073,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     try {
       const updated = await sessionsApi.update(session.id, { effort: newEffort });
       if (session.model && newEffort) {
-        try { localStorage.setItem(lastEffortKey(agentName, session.model), newEffort); } catch { /* ignore */ }
+        try { localStorage.setItem(lastEffortKey(agentName, modelId(agentName, session.model)), newEffort); } catch { /* ignore */ }
       }
       const { sessions, setSessions } = useAppStore.getState();
       setSessions(sessions.map((s) => (s.id === updated.id ? updated : s)));
