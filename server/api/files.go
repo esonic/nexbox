@@ -22,7 +22,8 @@ type FileEntry struct {
 	Children  []FileEntry `json:"children,omitempty"`
 }
 
-// skipDir returns true for directories that should be excluded from the file tree.
+// skipDir returns true for directories excluded from search and quick open.
+// The file tree has its own rule and hides only Git metadata.
 func skipDir(name string) bool {
 	skip := map[string]bool{
 		".git":         true,
@@ -199,7 +200,7 @@ func compactSingleChildDirs(basePath string, entries []FileEntry) {
 	}
 }
 
-// readDirLevel returns the immediate children of currentPath (no recursion).
+// readDirLevel returns all immediate children except .git (no recursion).
 // Symlinks pointing to directories are followed for IsDir detection and recursable expansion.
 func readDirLevel(basePath, currentPath string) ([]FileEntry, error) {
 	dirents, err := os.ReadDir(currentPath)
@@ -211,7 +212,7 @@ func readDirLevel(basePath, currentPath string) ([]FileEntry, error) {
 	for _, e := range dirents {
 		name := e.Name()
 
-		if strings.HasPrefix(name, ".") && name != ".env.example" {
+		if name == ".git" {
 			continue
 		}
 
@@ -237,10 +238,6 @@ func readDirLevel(basePath, currentPath string) ([]FileEntry, error) {
 					size = info.Size()
 				}
 			}
-		}
-
-		if isDir && skipDir(name) {
-			continue
 		}
 
 		relPath, _ := filepath.Rel(basePath, fullPath)

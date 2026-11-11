@@ -32,13 +32,21 @@ func TestListDirLevelCompactsSingleChildDirs(t *testing.T) {
 	// d holds two entries, so it must stay on its own row.
 	compactTestWriteFile(t, filepath.Join(root, "d/f.txt"))
 	compactTestMkdirAll(t, filepath.Join(root, "d/e"))
-	// g/h has a single visible child (i) once node_modules is filtered out.
+	// g/h has both i and node_modules, so compaction must stop at h.
 	compactTestMkdirAll(t, filepath.Join(root, "g/h/i/j1"))
 	compactTestMkdirAll(t, filepath.Join(root, "g/h/i/j2"))
 	compactTestMkdirAll(t, filepath.Join(root, "g/h/node_modules"))
 	// k holds only a file, so there is nothing to compact into.
 	compactTestWriteFile(t, filepath.Join(root, "k/only.txt"))
 	compactTestWriteFile(t, filepath.Join(root, "z.txt"))
+
+	// Dependency/build directories and dot entries are browsable; Git metadata stays hidden.
+	for _, name := range []string{"node_modules", "vendor", "dist", "build", ".agents", ".github", ".venv", ".next", ".idea", ".vscode", "__pycache__"} {
+		compactTestMkdirAll(t, filepath.Join(root, name))
+	}
+	compactTestWriteFile(t, filepath.Join(root, ".gitignore"))
+	compactTestWriteFile(t, filepath.Join(root, ".hidden"))
+	compactTestWriteFile(t, filepath.Join(root, ".git/config"))
 
 	entries, err := listDirLevel(root, root)
 	if err != nil {
@@ -50,11 +58,24 @@ func TestListDirLevelCompactsSingleChildDirs(t *testing.T) {
 		got[e.Name] = e.Path
 	}
 	want := map[string]string{
-		"a/b/c": "a/b/c",
-		"d":     "d",
-		"g/h/i": "g/h/i",
-		"k":     "k",
-		"z.txt": "z.txt",
+		"a/b/c":        "a/b/c",
+		"d":            "d",
+		"g/h":          "g/h",
+		"k":            "k",
+		"z.txt":        "z.txt",
+		"node_modules": "node_modules",
+		"vendor":       "vendor",
+		"dist":         "dist",
+		"build":        "build",
+		".agents":      ".agents",
+		".github":      ".github",
+		".venv":        ".venv",
+		".next":        ".next",
+		".idea":        ".idea",
+		".vscode":      ".vscode",
+		"__pycache__":  "__pycache__",
+		".gitignore":   ".gitignore",
+		".hidden":      ".hidden",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("entries = %v, want %v", got, want)
