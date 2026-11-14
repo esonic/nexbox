@@ -668,6 +668,22 @@ func (s *Server) ListSessionMessages(w http.ResponseWriter, r *http.Request) {
 			messages = []ChatMessage{}
 		}
 		active := s.Hub.IsActive(sessionID)
+		if r.URL.Query().Get("compact") == "1" {
+			activeID := ""
+			if active && beforeID == "" {
+				for i := len(messages) - 1; i >= 0; i-- {
+					if messages[i].Role == "assistant" {
+						activeID = messages[i].ID
+						break
+					}
+				}
+			}
+			for i := range messages {
+				if messages[i].Role == "assistant" && messages[i].ID != activeID {
+					messages[i] = compactChatMessage(messages[i])
+				}
+			}
+		}
 		resp := map[string]interface{}{
 			"messages": messages,
 			"has_more": hasMore,
@@ -699,20 +715,29 @@ func (s *Server) ListSessionMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// GetMessageDetails returns full message parts from the local detail cache.
+// GetMessageDetails returns full message parts from durable storage or a legacy detail cache.
 func (s *Server) GetMessageDetails(w http.ResponseWriter, r *http.Request) {
 	messageID := chi.URLParam(r, "messageId")
-	if s.DetailCache == nil {
-		writeError(w, http.StatusNotFound, "detail cache not available")
-		return
-	}
-	parts, err := s.DetailCache.Get(messageID)
+	message, err := s.Store.GetMessage(messageID)
 	if writeStoreError(w, err, "GetMessageDetails", "failed to load details") {
 		return
 	}
-	if parts == nil {
+	if message == nil {
 		writeError(w, http.StatusNotFound, "details not found")
 		return
+	}
+	parts := message.Parts
+	if s.DetailCache != nil {
+		cached, err := s.DetailCache.Get(messageID)
+		if writeStoreError(w, err, "GetMessageDetails", "failed to load details") {
+			return
+		}
+		if cached != nil {
+			parts = cached
+		}
+	}
+	if r.URL.Query().Get("section") == "files" {
+		parts, _ = fileChangeParts(parts)
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"parts": parts,

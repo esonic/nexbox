@@ -336,10 +336,10 @@ export function ChatPanel({ session, project, worktree, onMessageSent }: ChatPan
           ) : (
             <>
               <div data-messages="" className="flex flex-col gap-6">
-                {messages.map((msg) => (
+                {messages.map((msg, index) => (
                   <ErrorBoundary key={msg.id}>
                     <div className="group/msg">
-                      <ChatMessage message={msg} />
+                      <ChatMessage message={msg} isLatest={index === messages.length - 1} latestMessageId={messages[messages.length - 1]?.id} />
                       <MessageFooter message={msg} canFork={capabilities.fork} />
                     </div>
                   </ErrorBoundary>

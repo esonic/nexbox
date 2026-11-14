@@ -231,6 +231,7 @@ export const messagesApi = {
     const params = new URLSearchParams();
     if (limit !== undefined) params.set('limit', limit.toString());
     if (beforeId) params.set('before', beforeId);
+    params.set('compact', '1');
     if (params.toString()) url += `?${params.toString()}`;
     return request<{
       messages: ChatMessage[];
@@ -239,8 +240,8 @@ export const messagesApi = {
       pending_input?: { toolUseId: string; toolName: string; input: string };
     }>(url);
   },
-  getDetails: (messageId: string) =>
-    request<{ parts: MessagePart[] }>(`/messages/${messageId}/details`),
+  getDetails: (messageId: string, section?: "files") =>
+    request<{ parts: MessagePart[] }>(`/messages/${messageId}/details${section ? "?section=files" : ""}`),
 };
 
 // Message queue (per session)

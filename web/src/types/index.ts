@@ -282,12 +282,13 @@ export interface NestedTool {
   toolName: string;
   input: string;
   state: ToolUseState;
+  lazyDetails?: boolean;
   result?: { output: string; isError?: boolean; diff?: string };
 }
 
 export type MessagePart =
   | { type: "text"; content: string }
-  | { type: "tool_use"; toolCallId: string; toolName: string; input: string; summary?: string; state: ToolUseState; nestedTools?: NestedTool[]; parentToolCallId?: string; workflowProgress?: WorkflowProgressSnapshot }
+  | { type: "tool_use"; toolCallId: string; toolName: string; input: string; summary?: string; state: ToolUseState; nestedTools?: NestedTool[]; parentToolCallId?: string; workflowProgress?: WorkflowProgressSnapshot; lazyDetails?: boolean }
   | { type: "tool_result"; toolCallId: string; output: string; isError?: boolean; diff?: string }
   | { type: "thinking"; content?: string }
   | { type: "tool_group"; count: number }
@@ -331,6 +332,9 @@ export interface ChatMessage {
   parts: MessagePart[];
   metadata: MessageMetadata;
   created_at: string;
+  lazy_work?: boolean;
+  lazy_files?: boolean;
+  file_change_count?: number;
   // Local UI states (not persisted)
   isStreaming?: boolean;
   // Durable server message id learned when a streaming turn finishes. `id`

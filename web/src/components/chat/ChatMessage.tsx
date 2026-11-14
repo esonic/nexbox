@@ -34,6 +34,8 @@ const ASSET_TYPE_CONFIG: Record<string, { label: string; color: string; icon: ty
 
 interface ChatMessageProps {
   message: ChatMessageType;
+  isLatest?: boolean;
+  latestMessageId?: string;
 }
 
 interface ToolsGroup {
@@ -262,7 +264,7 @@ function ImageThumbnails({ parts }: { parts: MessagePart[] }) {
   );
 }
 
-function CollapsibleToolSteps({ parts }: { parts: MessagePart[] }) {
+function CollapsibleToolSteps({ parts, loadDetails }: { parts: MessagePart[]; loadDetails?: () => Promise<boolean> }) {
   const resultMap = useMemo(() => {
     const m: Record<string, { output: string; isError?: boolean; diff?: string }> = {};
     for (const p of parts) {
@@ -291,6 +293,8 @@ function CollapsibleToolSteps({ parts }: { parts: MessagePart[] }) {
           result={resultMap[part.toolCallId]}
           nestedTools={part.nestedTools}
           workflowProgress={part.workflowProgress}
+          onLoadDetails={loadDetails}
+          detailsDeferred={part.lazyDetails}
         />
       ))}
     </div>
@@ -360,7 +364,7 @@ function StepsGroupBlock({
             }
             if (sg.type === "tools") {
               return (
-                <CollapsibleToolSteps key={idx} parts={sg.parts} />
+                <CollapsibleToolSteps key={idx} parts={sg.parts} loadDetails={onLoadDetails} />
               );
             }
             return null;
@@ -427,7 +431,7 @@ function StaticGroup({
         </>
       );
     case "tools":
-      return <CollapsibleToolSteps parts={group.parts} />;
+      return <CollapsibleToolSteps parts={group.parts} loadDetails={loadDetails} />;
     case "steps":
       return <StepsGroupBlock group={group} onLoadDetails={loadDetails} />;
     default:
@@ -442,12 +446,26 @@ function WorkedBlock({
   groups,
   durationMs,
   loadDetails,
+  lazy,
 }: {
   groups: PartGroup[];
   durationMs?: number;
   loadDetails?: () => Promise<boolean>;
+  lazy?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+  const openChange = async (open: boolean) => {
+    setExpanded(open);
+    if (open && lazy && loadDetails && !loading) {
+      setLoading(true);
+      setError(false);
+      const ok = await loadDetails();
+      setLoading(false);
+      setError(!ok);
+    }
+  };
   const label =
     durationMs != null && durationMs > 0
       ? `Worked for ${formatDuration(durationMs)}`
@@ -455,7 +473,7 @@ function WorkedBlock({
 
   return (
     <div className="mb-2.5">
-      <Collapsible open={expanded} onOpenChange={setExpanded}>
+      <Collapsible open={expanded} onOpenChange={openChange}>
         <CollapsibleTrigger className="flex items-center gap-1.5 text-left py-0.5 text-xs text-muted-foreground hover:text-foreground transition-colors outline-none">
           <span className="font-medium">{label}</span>
           {expanded ? (
@@ -466,7 +484,9 @@ function WorkedBlock({
         </CollapsibleTrigger>
         <CollapsibleContent>
           <div className="mt-1 ml-3 pl-2 border-l border-border/30">
-            {groups.map((g, gi) => (
+            {loading ? <span className="text-xs text-muted-foreground">Loading work…</span> : error ? (
+              <button type="button" className="text-xs text-destructive" onClick={() => openChange(true)}>Couldn’t load work. Retry</button>
+            ) : !lazy && groups.map((g, gi) => (
               <StaticGroup key={gi} group={g} loadDetails={loadDetails} />
             ))}
           </div>
@@ -996,7 +1016,7 @@ function nestSubagentTools(parts: MessagePart[]): MessagePart[] {
       const pIdx = topIdx.get(part.parentToolCallId)!;
       const parent = result[pIdx];
       if (parent.type === "tool_use") {
-        const nt: NestedTool = { toolCallId: part.toolCallId, toolName: part.toolName, input: part.input, state: part.state };
+        const nt: NestedTool = { toolCallId: part.toolCallId, toolName: part.toolName, input: part.input, state: part.state, lazyDetails: part.lazyDetails };
         result[pIdx] = { ...parent, nestedTools: [...(parent.nestedTools || []), nt] };
         nestedParent.set(part.toolCallId, pIdx);
         continue;
@@ -1113,11 +1133,27 @@ function FileChangeRow({ file, projectRoot }: { file: FileChangeEntry; projectRo
   );
 }
 
-function FileChangesSummary({ files, projectRoot }: { files: FileChangeEntry[]; projectRoot?: string }) {
-  const [expanded, setExpanded] = useState(true);
-  if (files.length === 0) return null;
+function FileChangesSummary({ files, count, projectRoot, isLatest, latestMessageId, loadFiles }: { files: FileChangeEntry[]; count: number; projectRoot?: string; isLatest: boolean; latestMessageId?: string; loadFiles?: () => Promise<boolean> }) {
+  const [expanded, setExpanded] = useState(isLatest);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+  const fetchFiles = useCallback(async () => {
+    if (!loadFiles) return;
+    setLoading(true);
+    setError(false);
+    const ok = await loadFiles();
+    setLoading(false);
+    setError(!ok);
+  }, [loadFiles]);
+  useEffect(() => {
+    if (expanded && loadFiles) void fetchFiles();
+  }, [expanded, loadFiles, fetchFiles]);
+  useEffect(() => {
+    if (!isLatest) setExpanded(false);
+  }, [isLatest, latestMessageId]);
+  if (count === 0) return null;
 
-  const summary = `${files.length} file${files.length === 1 ? "" : "s"} changed`;
+  const summary = `${count} file${count === 1 ? "" : "s"} changed`;
 
   return (
     <Collapsible open={expanded} onOpenChange={setExpanded} className="mt-2 rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
@@ -1128,7 +1164,9 @@ function FileChangesSummary({ files, projectRoot }: { files: FileChangeEntry[]; 
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="px-3 pb-2 space-y-1 border-t border-border/30 pt-2">
-          {files.map((f, i) => (
+          {loading ? <span className="text-xs text-muted-foreground">Loading files…</span> : error ? (
+            <button type="button" className="text-xs text-destructive" onClick={fetchFiles}>Couldn’t load files. Retry</button>
+          ) : files.map((f, i) => (
             <FileChangeRow key={i} file={f} projectRoot={projectRoot} />
           ))}
         </div>
@@ -1137,10 +1175,12 @@ function FileChangesSummary({ files, projectRoot }: { files: FileChangeEntry[]; 
   );
 }
 
-export const ChatMessage = memo(function ChatMessage({ message }: ChatMessageProps) {
+export const ChatMessage = memo(function ChatMessage({ message, isLatest = true, latestMessageId }: ChatMessageProps) {
   const isUser = message.role === "user";
   const [loadedParts, setLoadedParts] = useState<MessagePart[] | null>(null);
-  const loadingRef = useRef(false);
+  const [fileParts, setFileParts] = useState<MessagePart[] | null>(null);
+  const fileLoadingRef = useRef<Promise<boolean> | null>(null);
+  const loadingRef = useRef<Promise<boolean> | null>(null);
   const projectRoot = useAppStore((s) => s.currentProject?.git_repo_path);
   const chatFontSize = usePreferences((s) => s.chatFontSize);
   const themeMode = useThemeMode();
@@ -1170,27 +1210,35 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
     : -1;
   const plainText = useMemo(() => extractPlainText(effectiveParts), [effectiveParts]);
   const fileChanges = useMemo(
-    () => (isUser ? [] : extractFileChanges(effectiveParts)),
-    [isUser, effectiveParts],
+    () => (isUser ? [] : extractFileChanges(fileParts ?? effectiveParts)),
+    [isUser, effectiveParts, fileParts],
   );
   const nextActions = useMemo(
     () => (isUser ? [] : parseNextActions(plainText)),
     [isUser, plainText],
   );
 
-  const loadDetails = useCallback(async (): Promise<boolean> => {
-    if (loadedParts || loadingRef.current) return !!loadedParts;
-    loadingRef.current = true;
-    try {
-      const { parts } = await messagesApi.getDetails(message.id);
+  const loadDetails = useCallback((): Promise<boolean> => {
+    if (loadedParts) return Promise.resolve(true);
+    if (loadingRef.current) return loadingRef.current;
+    const request = messagesApi.getDetails(message.id).then(({ parts }) => {
       setLoadedParts(parts);
       return true;
-    } catch {
-      return false;
-    } finally {
-      loadingRef.current = false;
-    }
+    }).catch(() => false).finally(() => { loadingRef.current = null; });
+    loadingRef.current = request;
+    return request;
   }, [message.id, loadedParts]);
+
+  const loadFiles = useCallback((): Promise<boolean> => {
+    if (fileParts || loadedParts || !(message.lazy_work || message.lazy_files)) return Promise.resolve(true);
+    if (fileLoadingRef.current) return fileLoadingRef.current;
+    const request = messagesApi.getDetails(message.id, "files").then(({ parts }) => {
+      setFileParts(parts ?? []);
+      return true;
+    }).catch(() => false).finally(() => { fileLoadingRef.current = null; });
+    fileLoadingRef.current = request;
+    return request;
+  }, [message.id, message.lazy_work, message.lazy_files, fileParts, loadedParts]);
 
   const interjected = isUser && !!message.metadata?.interjected;
 
@@ -1390,14 +1438,16 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
                       groups={turn.worked}
                       durationMs={message.metadata?.durationMs}
                       loadDetails={loadDetails}
+                      lazy={!!message.lazy_work && !loadedParts}
                     />
                   )}
                   {(turn?.final ?? groups).map((group, gi) => (
                     <StaticGroup key={gi} group={group} loadDetails={loadDetails} />
                   ))}
                   <NextActions actions={nextActions} sessionId={message.session_id} />
-                  {fileChanges.length > 0 && (
-                    <FileChangesSummary files={fileChanges} projectRoot={projectRoot} />
+                  {(message.file_change_count || fileChanges.length) > 0 && (
+                    <FileChangesSummary files={fileChanges} count={message.file_change_count ?? fileChanges.length} projectRoot={projectRoot} isLatest={isLatest} latestMessageId={latestMessageId}
+                      loadFiles={(message.lazy_work || message.lazy_files) && !fileParts && !loadedParts ? loadFiles : undefined} />
                   )}
                 </>
               )}

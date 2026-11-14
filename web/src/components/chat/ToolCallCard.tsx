@@ -631,6 +631,8 @@ interface ToolCallCardProps {
   result?: { output: string; isError?: boolean; diff?: string };
   nestedTools?: NestedTool[];
   workflowProgress?: WorkflowProgressSnapshot;
+  onLoadDetails?: () => Promise<boolean>;
+  detailsDeferred?: boolean;
 }
 
 export const TODO_TOOLS = new Set([
@@ -661,9 +663,23 @@ export const ToolCallCard = memo(function ToolCallCard({
   result,
   nestedTools,
   workflowProgress,
+  onLoadDetails,
+  detailsDeferred,
 }: ToolCallCardProps) {
   const isAgentTool = toolName === "Agent" || toolName === "Task";
   const [expanded, setExpanded] = useState(isAgentTool && state === "running");
+  const [loadingDetails, setLoadingDetails] = useState(false);
+  const [detailsError, setDetailsError] = useState(false);
+  const openChange = async (open: boolean) => {
+    setExpanded(open);
+    if (open && detailsDeferred && onLoadDetails && !loadingDetails) {
+      setLoadingDetails(true);
+      setDetailsError(false);
+      const ok = await onLoadDetails();
+      setLoadingDetails(false);
+      setDetailsError(!ok);
+    }
+  };
   // displayState lags behind state prop by 1s when transitioning from running→complete/error
   const [displayState, setDisplayState] = useState<ToolUseState>(state);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -716,10 +732,10 @@ export const ToolCallCard = memo(function ToolCallCard({
   const showAgentResult = isAgentTool && !!result &&
     (state === "complete" || state === "error") &&
     (!!result.isError || asText(result.output).trim() !== "");
-  const hasDetails = !!((isAgentTool ? showAgentInput : input) || showAgentResult || (!isAgentTool && result) || (nestedTools && nestedTools.length > 0));
+  const hasDetails = !!(detailsDeferred || (isAgentTool ? showAgentInput : input) || showAgentResult || (!isAgentTool && result) || (nestedTools && nestedTools.length > 0));
 
   return (
-    <Collapsible open={expanded} onOpenChange={hasDetails ? setExpanded : undefined}>
+    <Collapsible open={expanded} onOpenChange={hasDetails ? openChange : undefined}>
       <CollapsibleTrigger
         disabled={!hasDetails}
         className={cn(
@@ -746,6 +762,9 @@ export const ToolCallCard = memo(function ToolCallCard({
 
       <CollapsibleContent>
         <div className="ml-5 pl-3 border-l border-border/40 mt-0.5 mb-1 space-y-1.5">
+          {loadingDetails ? <span className="text-xs text-muted-foreground">Loading details…</span> : detailsError ? (
+            <button type="button" className="text-xs text-destructive" onClick={() => openChange(true)}>Couldn’t load details. Retry</button>
+          ) : detailsDeferred ? null : <>
           {isAgentTool
             ? (showAgentInput && <AgentTaskBlock task={agentTask} />)
             : (!!input && (meta.renderInput ? meta.renderInput(input) : <RawJSON input={input} />))}
@@ -759,6 +778,8 @@ export const ToolCallCard = memo(function ToolCallCard({
                   input={nt.input}
                   state={nt.state}
                   result={nt.result}
+                  onLoadDetails={onLoadDetails}
+                  detailsDeferred={nt.lazyDetails}
                 />
               ))}
             </div>
@@ -776,6 +797,7 @@ export const ToolCallCard = memo(function ToolCallCard({
                 ? meta.renderOutput(result.output ?? "", result.isError)
                 : <RawOutput output={result.output ?? ""} isError={result.isError} />)
           )}
+          </>}
         </div>
       </CollapsibleContent>
     </Collapsible>

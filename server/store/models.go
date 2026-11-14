@@ -302,10 +302,11 @@ type UpdateAssetRequest struct {
 // ---------------------------------------------------------------------------
 
 type MessagePart struct {
-	Type       string `json:"type"`
-	Content    string `json:"content,omitempty"`
-	ToolCallID string `json:"toolCallId,omitempty"`
-	ToolName   string `json:"toolName,omitempty"`
+	Type        string `json:"type"`
+	LazyDetails bool   `json:"lazyDetails,omitempty"`
+	Content     string `json:"content,omitempty"`
+	ToolCallID  string `json:"toolCallId,omitempty"`
+	ToolName    string `json:"toolName,omitempty"`
 	// ParentToolID, on tool_use parts, is the tool_use_id of the Task
 	// tool that launched this sub-agent's call. Empty for top-level
 	// tool calls made directly by the main agent.
@@ -358,12 +359,15 @@ type MessageMetadata struct {
 }
 
 type ChatMessage struct {
-	ID        string          `json:"id"`
-	SessionID string          `json:"session_id"`
-	Role      string          `json:"role"`
-	Parts     []MessagePart   `json:"parts"`
-	Metadata  MessageMetadata `json:"metadata,omitempty"`
-	CreatedAt time.Time       `json:"created_at"`
+	ID              string          `json:"id"`
+	SessionID       string          `json:"session_id"`
+	Role            string          `json:"role"`
+	Parts           []MessagePart   `json:"parts"`
+	Metadata        MessageMetadata `json:"metadata,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	LazyWork        bool            `json:"lazy_work,omitempty"`
+	LazyFiles       bool            `json:"lazy_files,omitempty"`
+	FileChangeCount int             `json:"file_change_count,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
