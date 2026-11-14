@@ -459,7 +459,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     let reconcileTimer: ReturnType<typeof setTimeout> | undefined;
     setLoadingHistory(true);
 
-    messagesApi.list(sessionId, 20).then(({ messages: persisted, active, has_more, pending_input }) => {
+    messagesApi.list(sessionId).then(({ messages: persisted, active, has_more, pending_input }) => {
       if (cancelled) return;
       const liveMessages = useAppStore.getState().chatMessages[sessionId] || [];
       // A WS delta may create the assistant bubble before this initial history
@@ -549,7 +549,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
         reconcileTimer = setTimeout(() => {
           if (cancelled) return;
           if (!useAppStore.getState().streamingSessions[sessionId]) return; // a live `done` resolved it
-          messagesApi.list(sessionId, 20).then(({ messages: recovered, active: stillActive, has_more: more }) => {
+          messagesApi.list(sessionId).then(({ messages: recovered, active: stillActive, has_more: more }) => {
             if (cancelled || stillActive) return; // genuinely still running: live events will arrive
             const gs = useAppStore.getState();
             if (!gs.streamingSessions[sessionId]) return;
@@ -612,7 +612,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
       // This handles the case where the "done" event was lost during a disconnect.
       const gs = useAppStore.getState();
       if (gs.streamingSessions[sessionId]) {
-        messagesApi.list(sessionId, 20).then(({ messages: persisted, active, has_more }) => {
+        messagesApi.list(sessionId).then(({ messages: persisted, active, has_more }) => {
           if (!active) {
             gs.setStreamingSession(sessionId, false);
             gs.finishStreaming(sessionId);
@@ -1115,7 +1115,7 @@ export function useChatSession({ session }: UseChatSessionOptions) {
     setLoadingMore(true);
     setLoadMoreError(false);
     try {
-      const { messages: olderMessages = [], has_more } = await messagesApi.list(sessionId, 20, page.beforeId);
+      const { messages: olderMessages = [], has_more } = await messagesApi.list(sessionId, undefined, page.beforeId);
       const store = useAppStore.getState();
       // A reconnect may have replaced the latest page while this request ran.
       if (store.chatHistoryPages[sessionId] !== page) return;

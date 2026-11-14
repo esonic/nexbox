@@ -58,7 +58,7 @@ const scroll = () => document.querySelector('[tabindex="0"]');
 async function run() {
  responses.push({messages:[message('new1'),message('new2'),message('new3')],has_more:true});
  render(); await settle();
- check(calls.length===1 && calls[0][1]===20,'Initial load must request 20');
+ check(calls.length===1 && calls[0][1]===undefined,'Initial load must use the configured page size');
  scroll().scrollTop=0; scroll().dispatchEvent(new Event('scroll')); await settle();
  check(calls.length===1 && button(),'Scrolling should only expose the button');
  let resolve; responses.push(new Promise(r=>resolve=r));

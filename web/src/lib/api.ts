@@ -225,7 +225,8 @@ export const sessionsApi = {
 
 // Chat Messages (per session)
 export const messagesApi = {
-  list: (sessionId: string, limit?: number, beforeId?: string) => {
+  // A limit of 0 requests pagination using the server's configured page size.
+  list: (sessionId: string, limit = 0, beforeId?: string) => {
     let url = `/sessions/${sessionId}/messages`;
     const params = new URLSearchParams();
     if (limit !== undefined) params.set('limit', limit.toString());

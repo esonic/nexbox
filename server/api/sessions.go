@@ -653,7 +653,7 @@ func (s *Server) ListSessionMessages(w http.ResponseWriter, r *http.Request) {
 
 	if limitStr != "" || beforeID != "" {
 		// Use paginated API
-		limit := 20 // default
+		limit := s.Config.Get().HistoryPageSize()
 		if limitStr != "" {
 			if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
 				limit = parsedLimit

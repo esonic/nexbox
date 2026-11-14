@@ -103,6 +103,7 @@ The first startup creates `<data-dir>/config.json`. Common options can be change
 {
   "default_agent": "claude",
   "chrome_headless": true,
+  "chat_history_page_size": 20,
   "mcp_tools": {
     "task_management": false
   },
@@ -115,6 +116,7 @@ The first startup creates `<data-dir>/config.json`. Common options can be change
 | --- | --- |
 | `default_agent` | Default agent for new sessions and lightweight helper tasks |
 | `chrome_headless` | Use headless mode for newly created managed Chrome instances |
+| `chat_history_page_size` | Number of messages loaded per chat history page; a positive integer, default 20 |
 | `mcp_tools.task_management` | Expose built-in task management tools to agents; disabled by default |
 | `suggest_next_actions` | Request clickable follow-up suggestions at the end of replies; enabled by default |
 | `prompt_templates` | Global prompt templates; each entry contains `name` and `content` |

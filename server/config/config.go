@@ -39,8 +39,9 @@ func (c MCPToolsConfig) TaskManagementEnabled() bool {
 
 // Config holds all configuration persisted to <data-dir>/config.json.
 type Config struct {
-	DefaultAgent   string `json:"default_agent"`
-	ChromeHeadless bool   `json:"chrome_headless"`
+	DefaultAgent        string `json:"default_agent"`
+	ChromeHeadless      bool   `json:"chrome_headless"`
+	ChatHistoryPageSize int    `json:"chat_history_page_size,omitempty"`
 	// MCPTools toggles groups of built-in MCP tools. All are opt-in.
 	MCPTools MCPToolsConfig `json:"mcp_tools"`
 	// SuggestNextActions controls whether new sessions get a system-prompt
@@ -52,6 +53,14 @@ type Config struct {
 	PromptTemplates []PromptTemplate `json:"prompt_templates,omitempty"`
 	// PublicWeb holds optional deployment-specific verification responses.
 	PublicWeb PublicWebConfig `json:"public_web,omitempty"`
+}
+
+// HistoryPageSize returns the configured page size, retaining the historical default.
+func (c Config) HistoryPageSize() int {
+	if c.ChatHistoryPageSize < 1 {
+		return 20
+	}
+	return c.ChatHistoryPageSize
 }
 
 // PromptTemplate is a reusable, user-defined prompt that can be picked in the
