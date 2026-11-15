@@ -26,13 +26,6 @@ import { SidebarFooterNav } from "@/components/layout/sidebar/SidebarFooterNav";
 import { MobileMenuButton, CollapsedSidebarRail } from "@/components/layout/sidebar/CollapsedSidebar";
 import type { Project, Session } from "@/types";
 
-// Tracks whether the first auto-select pass has run in this JS runtime.
-// Module-level so it survives React strict-mode double-mounts but resets
-// on every cold app launch (new browser tab, TWA/PWA cold start). This is
-// what makes "land on Default project scratch on every cold open" work
-// even when localStorage still has a valid persisted activeSessionId.
-let initialAutoSelectDone = false;
-
 export function AppSidebar() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -64,7 +57,7 @@ export function AppSidebar() {
   // ── Data + derived state (see hooks for the heavy lifting) ──
   const panelRef = useRef<HTMLDivElement>(null);
   const { dragX, swiping, panelW } = useMobileDrawerSwipe(panelRef, isMobile, mobileOpen, setMobileOpen);
-  const { loadSessions, projectsLoaded } = useSidebarData();
+  const { loadSessions, projectsLoaded, sessionsLoaded } = useSidebarData();
   const groupedSessions = useGroupedSessions(sessions, projects);
   const {
     dragSessionId, dragOverSessionId, dragOverPosition,
@@ -103,8 +96,9 @@ export function AppSidebar() {
   // navigating — the shared core of "click a project row" that the delete and
   // auto-select fallbacks reuse so they land on the same surface a manual
   // project click would.
-  const selectProjectDefaultSession = useCallback(async (projectId: string) => {
+  const selectProjectDefaultSession = useCallback(async (projectId: string, expectedActiveId?: string | null) => {
     const scratch = await projectsApi.scratchSession(projectId);
+    if (expectedActiveId !== undefined && useAppStore.getState().activeSessionId !== expectedActiveId) return scratch;
     const current = useAppStore.getState().sessions;
     if (!current.some((s) => s.id === scratch.id)) {
       setSessions([scratch, ...current]);
@@ -115,22 +109,14 @@ export function AppSidebar() {
 
   // Auto-select a session.
   //
-  // On the FIRST run after projectsLoaded (cold app launch — new browser tab,
-  // TWA/PWA reopen), always land on the Default project's scratch session,
-  // even if localStorage still has a valid persisted activeSessionId. Without
-  // this, persisted state would silently win on every TWA reopen.
-  //
-  // On SUBSEQUENT runs (session list refetch, project mutation, etc.) we only
-  // step in when the active session is missing or stale, so mid-app refetches
-  // don't yank the user off a real conversation.
-  //
-  // Fallback order in both modes:
+  // Keep the persisted selection when it still exists. Wait for both lists
+  // before deciding it is stale. Fallback order:
   //   1. Default project scratch session
   //   2. First sidebar project's scratch session (same as clicking its row)
   //   3. First visible session in the sidebar
   //   4. Clear the selection
   useEffect(() => {
-    if (!projectsLoaded) return;
+    if (!projectsLoaded || !sessionsLoaded) return;
 
     const visibleSessions = groupedSessions.flatMap((g) => g.sessions);
 
@@ -141,9 +127,7 @@ export function AppSidebar() {
       ? visibleSessions.some((s) => s.id === activeSessionId) || activeIsScratch
       : false;
 
-    const isFirstPass = !initialAutoSelectDone;
-    if (!isFirstPass && activeExists) return;
-    initialAutoSelectDone = true;
+    if (activeExists) return;
 
     const defaultProject = projects.find(
       (p) => p.name === "Default" && !!p.git_repo_path,
@@ -151,10 +135,10 @@ export function AppSidebar() {
     if (defaultProject) {
       (async () => {
         try {
-          await selectProjectDefaultSession(defaultProject.id);
+          await selectProjectDefaultSession(defaultProject.id, activeSessionId);
         } catch (e) {
           console.error("Failed to open Default project scratch session:", e);
-          if (!activeExists && visibleSessions.length > 0) {
+          if (useAppStore.getState().activeSessionId === activeSessionId && visibleSessions.length > 0) {
             setActiveSessionId(visibleSessions[0].id);
           }
         }
@@ -162,8 +146,8 @@ export function AppSidebar() {
       return;
     }
 
-    if (activeExists) return;
     const selectFirstVisible = () => {
+      if (useAppStore.getState().activeSessionId !== activeSessionId) return;
       if (visibleSessions.length > 0) {
         setActiveSessionId(visibleSessions[0].id);
       } else if (activeSessionId && !activeIsScratch) {
@@ -172,14 +156,14 @@ export function AppSidebar() {
     };
     const firstProjectId = groupedSessions[0]?.projectId;
     if (firstProjectId) {
-      selectProjectDefaultSession(firstProjectId).catch((e) => {
+      selectProjectDefaultSession(firstProjectId, activeSessionId).catch((e) => {
         console.error("Failed to select default project session:", e);
         selectFirstVisible();
       });
     } else {
       selectFirstVisible();
     }
-  }, [groupedSessions, sessions, activeSessionId, setActiveSessionId, projects, projectsLoaded, selectProjectDefaultSession]);
+  }, [groupedSessions, sessions, activeSessionId, setActiveSessionId, projects, projectsLoaded, sessionsLoaded, selectProjectDefaultSession]);
 
   // ── Session actions ──
 

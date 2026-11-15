@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { toast } from "sonner";
-import { sessionsApi, projectsApi, serverApi, marketplaceApi } from "@/lib/api";
+import { ApiError, sessionsApi, projectsApi, serverApi, marketplaceApi } from "@/lib/api";
 import type { CloudInfo } from "@/lib/api";
 import { openOAuthWindow } from "@/lib/oauthWindow";
 import { globalWS } from "@/lib/ws";
@@ -38,6 +38,7 @@ export function useSidebarData() {
     setNotificationUnread(false);
   };
 
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const loadSessions = useCallback(async () => {
     try {
       const data = await sessionsApi.list();
@@ -50,8 +51,18 @@ export function useSidebarData() {
       const remoteIds = new Set(list.map((s) => s.id));
       const prev = useAppStore.getState().sessions;
       const preservedScratch = prev.filter((s) => s.is_hidden && !remoteIds.has(s.id));
+      const activeId = useAppStore.getState().activeSessionId;
+      if (activeId && !remoteIds.has(activeId) && !preservedScratch.some((s) => s.id === activeId)) {
+        try {
+          const active = await sessionsApi.get(activeId);
+          if (active.is_hidden && !active.deleted_at) preservedScratch.push(active);
+        } catch (e) {
+          if (!(e instanceof ApiError && e.status === 404)) throw e;
+        }
+      }
       setSessions([...list, ...preservedScratch]);
       initStreamingSessions(data.active_session_ids || []);
+      setSessionsLoaded(true);
     } catch (e) {
       console.error("Failed to load sessions:", e);
     }
@@ -192,5 +203,5 @@ export function useSidebarData() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { loadSessions, loadProjects, projectsLoaded, cloudInfo, notificationUnread };
+  return { loadSessions, loadProjects, projectsLoaded, sessionsLoaded, cloudInfo, notificationUnread };
 }
