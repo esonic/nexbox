@@ -412,7 +412,16 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Limit file size to 2 MiB
+	// PDFs are streamed separately to the browser's reader. Return metadata only,
+	// including for large PDFs and PDFs whose first bytes look like plain text.
+	if strings.EqualFold(filepath.Ext(cleanPath), ".pdf") {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"path": cleanPath, "binary": true, "size": info.Size(), "content": "",
+		})
+		return
+	}
+
+	// Limit text file size to 2 MiB
 	const maxSize = 2 * 1024 * 1024
 	if info.Size() > maxSize {
 		writeError(w, http.StatusBadRequest, "File too large to preview (limit: 2 MiB). Open this file in a local editor.")

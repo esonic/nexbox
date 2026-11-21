@@ -1,4 +1,4 @@
-/** source: 用户要求移植 Markdown 图片和 SVG 工具栏并保留 NexBox 功能，summary: 浏览器验证文件工具栏、模式切换、轮询、重载、未保存保护和竞态 **/
+/** source: 用户要求 Files 面板支持 PDF 预览，summary: 浏览器验证 PDF 加载刷新与清理，以及原有文件预览、工具栏和编辑功能 **/
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const {execFile} = require('node:child_process');
@@ -59,6 +59,18 @@ import {notices} from 'sonner';
 const check=(ok,message)=>{if(!ok)throw new Error(message);};
 const settle=async()=>{await new Promise(resolve=>setTimeout(resolve,100));};
 const errors=[];window.addEventListener('error',event=>errors.push(event.message));
+Object.defineProperty(navigator,'pdfViewerEnabled',{configurable:true,get:()=>true});
+const pdfReads=[],revoked=[];
+let failPdf=false;
+const realFetch=window.fetch.bind(window),realRevoke=URL.revokeObjectURL.bind(URL);
+URL.revokeObjectURL=url=>{revoked.push(url);realRevoke(url);};
+window.fetch=(url,options)=>{
+ if(new URL(url,location.href).searchParams.get('path')?.toLowerCase().endsWith('.pdf')){
+  pdfReads.push(url);
+  return Promise.resolve(new Response('%PDF-1.4\n%%EOF',{status:failPdf?404:200}));
+ }
+ return realFetch(url,options);
+};
 const until=async(test)=>{for(let i=0;i<20;i++){if(test())return;await settle();}throw new Error('Timed out: '+errors.join('; '));};
 const polls=new Map();
 const realInterval=window.setInterval.bind(window),realClear=window.clearInterval.bind(window);
@@ -79,6 +91,8 @@ const fence=String.fromCharCode(96).repeat(3);
 const markdown='# Original\n\n'+fence+'mermaid\ngraph LR; A-->B\n'+fence+'\n\n'+'paragraph\n\n'.repeat(80);
 state.contents={'doc.md':markdown,'other.txt':'Other content',[svgPath]:'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"></svg>','images.md':'![relative](./assets/a%20b.svg)\n![root](/root.svg)\n![external](https://example.invalid/img.png)', 'page.html':'<h1>Page</h1>','archive.bin':'binary content',...Object.fromEntries(binaryImages.map(path=>[path,'binary image']))};
 state.binary=[...binaryImages,'archive.bin'];
+state.directories[''].push(entry('report.PDF'));
+state.contents['report.PDF']='PDF';state.binary.push('report.PDF');
 let mermaidCalls=0;
 window.mermaid={initialize(){},async render(id){mermaidCalls++;return {svg:'<svg id="'+id+'" width="1200" height="100"></svg>'};}};
 const root=createRoot(document.getElementById('root'));
@@ -197,6 +211,15 @@ async function run(){
  check(document.querySelector('[title="More sharing options"]')&&document.querySelector('[title="Download"]')&&document.querySelector('[title="Delete"]'),'NexBox HTML sharing/download/delete actions were lost');
  row('archive.bin').click();await settle();
  check(!modes()&&!saveButton()&&!document.querySelector('img')&&!document.querySelector('[data-editor]')&&rootElement.textContent.includes('Binary file'),'Binary file toolbar is incorrect');
+ row('report.PDF').click();await until(()=>document.querySelector('iframe[title="PDF preview: report.PDF"]'));
+ const pdfFrame=document.querySelector('iframe'),pdfUrl=pdfFrame.src;
+ check(pdfUrl.startsWith('blob:')&&!modes()&&!saveButton()&&!document.querySelector('[data-editor]'),'PDF did not open read-only');
+ check(document.querySelector('[title="Download"]'),'PDF download is missing');
+ await poll();check(document.querySelector('iframe')===pdfFrame,'Tree polling remounted PDF');
+ refresh().click();await until(()=>document.querySelector('iframe')?.src!==pdfUrl&&document.querySelector('iframe'));
+ check(revoked.includes(pdfUrl)&&pdfReads.length===2&&pdfReads[0]!==pdfReads[1],'PDF refresh did not reload or release old blob');
+ failPdf=true;refresh().click();await until(()=>rootElement.textContent.includes('Unable to load PDF'));
+ check(!document.querySelector('iframe'),'Failed PDF retained old preview');failPdf=false;
  // Relative Markdown image URLs follow the document and workspace, not the SPA route.
  row('images.md').click();await until(()=>document.querySelector('[data-editor]'));
  document.querySelector('button[title="View rendered markdown"]').click();await settle();
@@ -235,7 +258,7 @@ async function run(){
  resolveList([entry('wrong-project.txt')]);await oldScope;await settle();
  check(probe.childrenMap===newScopeMap&&state.lists.some(call=>call.project==='other-project'&&call.session==='worktree'),'Old scope changed new workspace');
  flushSync(()=>root.unmount());check(polls.size===0,'Unmount left polling timers');
- document.body.innerHTML='<pre id="result">PASS: SVG toolbar layout and mode switches, image/text/HTML/binary controls, visible-folder polling, visibility resume, unchanged identity, scroll/selection, text/image reload, dirty cancel/confirm, editor view state, races and failure recovery</pre>';
+ document.body.innerHTML='<pre id="result">PASS: PDF preview/reload/error/cleanup, SVG toolbar layout and mode switches, image/text/HTML/binary controls, visible-folder polling, visibility resume, unchanged identity, scroll/selection, text/image reload, dirty cancel/confirm, editor view state, races and failure recovery</pre>';
 }
 run().catch(error=>{document.body.innerHTML='<pre id="result">FAIL: '+error.message+'</pre>';});
 `;

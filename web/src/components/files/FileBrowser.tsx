@@ -45,6 +45,7 @@ import type { MonacoFileEditorHandle } from "./MonacoFileEditor";
 
 import { useFileTree } from "./useFileTree";
 import { FileTreeItem } from "./FileTreeItem";
+import { PdfPreview } from "./PdfPreview";
 import { SearchResults } from "./PanelSearch";
 import {
   INTERNAL_DRAG_TYPE,
@@ -329,6 +330,7 @@ export function FileBrowser({ projectId, projectName = "Files", sessionId, onOpe
   const markdownPreviewAvailable = !!selectedPath && !!fileContent && !fileContent.binary && isMarkdownPath(selectedPath);
   const imagePreviewAvailable = !!selectedPath && !!fileContent && /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i.test(selectedPath);
   const showingImage = imagePreviewAvailable && (!imageSource || fileContent.binary);
+  const pdfPreviewAvailable = !!selectedPath && !!fileContent && !fileContent.symlink && /\.pdf$/i.test(selectedPath);
   const sourcePreviewAvailable = markdownPreviewAvailable || (imagePreviewAvailable && !fileContent.binary);
   const showingPreview = showingImage || (markdownPreviewAvailable && markdownMode === "rendered");
   useEffect(() => {
@@ -567,7 +569,7 @@ export function FileBrowser({ projectId, projectName = "Files", sessionId, onOpe
       setFileContent(previous => previous && JSON.stringify(previous) === JSON.stringify(data) ? previous : data);
       setEditorValue(data.binary ? "" : data.content);
       setFileLoadError(null);
-      if (/\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i.test(selectedPath)) {
+      if (/\.(png|jpe?g|gif|webp|avif|bmp|ico|svg|pdf)$/i.test(selectedPath)) {
         setImageError(false);
         setImageRevision(value => value + 1);
       }
@@ -1354,6 +1356,12 @@ export function FileBrowser({ projectId, projectName = "Files", sessionId, onOpe
               <div className="flex-1 flex items-center justify-center">
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
               </div>
+            ) : pdfPreviewAvailable ? (
+              <PdfPreview
+                key={`${browserContextKey}:${selectedPath}:${fileRequestRef.current}:${imageRevision}`}
+                src={`${filesApi.serveUrl(projectId, selectedPath, sessionId, selectedRepositoryFile?.repository_id, !selectedRepositoryFile && fileNavigation?.path === selectedPath && fileNavigation.safeLink)}&preview_request=${fileRequestRef.current}&refresh=${imageRevision}`}
+                path={selectedPath}
+              />
             ) : showingImage ? (
               <div className="flex-1 min-h-0 overflow-auto flex items-center justify-center p-4">
                 {imageError ? (

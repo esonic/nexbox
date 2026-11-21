@@ -525,6 +525,7 @@ export interface FileEntry {
 export interface FileContentResponse {
   path: string;
   binary: boolean;
+  symlink?: boolean;
   size: number;
   content: string;
 }
